@@ -1,0 +1,25 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - master
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-slim
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+      - name: Compile helpers
+        run: |
+          python3 -m py_compile scripts/codex_personal_sync.py scripts/build_personal_codex_package.py tests/test_private_overlay_package.py
+      - name: Build and verify private overlay
+        run: |
+          python3 -m unittest discover -s tests

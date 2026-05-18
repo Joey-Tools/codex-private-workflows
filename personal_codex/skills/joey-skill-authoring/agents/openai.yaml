@@ -1,0 +1,4 @@
+interface:
+  display_name: "Joey Skill Authoring"
+  short_description: "Create concise Joey-style Codex skills."
+  default_prompt: "Use $joey-skill-authoring to create or update a concise Codex skill for this workflow."

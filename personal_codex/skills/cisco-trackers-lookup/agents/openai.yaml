@@ -1,0 +1,4 @@
+interface:
+  display_name: "Cisco Trackers Lookup"
+  short_description: "Read Cisco Jira and Cisco GHE metadata with narrow helpers."
+  default_prompt: "Use $cisco-trackers-lookup for narrow Cisco Jira or Cisco GHE metadata lookups before broader triage."

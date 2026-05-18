@@ -1,0 +1,4 @@
+interface:
+  display_name: "Apple Notes DB Guardrails"
+  short_description: "Safely inspect or patch Apple Notes sqlite copies."
+  default_prompt: "Use $apple-notes-db-guardrails to probe authorization, copy Apple Notes databases to /tmp, inspect tag metadata safely, and gate any writeback with verified backups and source fingerprint checks."

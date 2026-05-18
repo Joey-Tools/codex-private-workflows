@@ -1,0 +1,95 @@
+{
+  "version": 1,
+  "owner": "private",
+  "links": [
+    {
+      "source": "personal_codex/AGENTS.md",
+      "target": "AGENTS.md",
+      "kind": "file"
+    },
+    {
+      "source": "personal_codex/agents/reviewer.toml",
+      "target": "agents/reviewer.toml",
+      "kind": "file"
+    },
+    {
+      "source": "personal_codex/skills/bug-triage-playbook",
+      "target": "skills/bug-triage-playbook",
+      "kind": "skill"
+    },
+    {
+      "source": "personal_codex/skills/change-delivery-workflow",
+      "target": "skills/change-delivery-workflow",
+      "kind": "skill"
+    },
+    {
+      "source": "personal_codex/skills/cisco-trackers-lookup",
+      "target": "skills/cisco-trackers-lookup",
+      "kind": "skill"
+    },
+    {
+      "source": "personal_codex/skills/codex-rules-hygiene",
+      "target": "skills/codex-rules-hygiene",
+      "kind": "skill"
+    },
+    {
+      "source": "personal_codex/skills/codex-session-mining",
+      "target": "skills/codex-session-mining",
+      "kind": "skill"
+    },
+    {
+      "source": "personal_codex/skills/copilot-review-playbook",
+      "target": "skills/copilot-review-playbook",
+      "kind": "directory"
+    },
+    {
+      "source": "personal_codex/skills/external-review-playbook",
+      "target": "skills/external-review-playbook",
+      "kind": "skill"
+    },
+    {
+      "source": "personal_codex/skills/joey-skill-authoring",
+      "target": "skills/joey-skill-authoring",
+      "kind": "skill"
+    },
+    {
+      "source": "personal_codex/skills/pr-readiness-review-workflow",
+      "target": "skills/pr-readiness-review-workflow",
+      "kind": "skill"
+    },
+    {
+      "source": "personal_codex/skills/project-journal",
+      "target": "skills/project-journal",
+      "kind": "skill"
+    },
+    {
+      "source": "personal_codex/skills/remote-host-context",
+      "target": "skills/remote-host-context",
+      "kind": "skill"
+    },
+    {
+      "source": "personal_codex/skills/review-orchestration-playbook",
+      "target": "skills/review-orchestration-playbook",
+      "kind": "skill"
+    },
+    {
+      "source": "personal_codex/skills/waited-delivery",
+      "target": "skills/waited-delivery",
+      "kind": "skill"
+    },
+    {
+      "source": ".agents/skills/apple-notes-db-guardrails",
+      "target": "skills/apple-notes-db-guardrails",
+      "kind": "skill"
+    },
+    {
+      "source": ".agents/skills/apple-notes-work-report",
+      "target": "skills/apple-notes-work-report",
+      "kind": "skill"
+    }
+  ],
+  "reference_only": [
+    "personal_codex/automations/daily-skill-friction/automation.toml",
+    "personal_codex/automations/daily-work-report-draft/automation.toml"
+  ]
+}

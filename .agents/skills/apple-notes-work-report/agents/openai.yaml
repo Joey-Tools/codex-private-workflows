@@ -1,0 +1,4 @@
+interface:
+  display_name: "Apple Notes Work Report"
+  short_description: "Audit work reports with tag-safe backups."
+  default_prompt: "Use $apple-notes-work-report to review or patch Joey's Apple Notes daily work reports with verified logical or physical backups, preserved note structure, and cautious #tag handling."
