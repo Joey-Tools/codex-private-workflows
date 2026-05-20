@@ -178,6 +178,7 @@ jobs:
               dist / f"personal-codex-{sha}.tar.gz",
               dist / f"personal-codex-{sha}.sha256",
           ]
+          release_tag_prefix = "personal-codex-"
 
           def request_json(url, *, method="GET", payload=None):
               data = None
@@ -208,8 +209,12 @@ jobs:
           release = None
           uploaded_asset_names = set()
           for release in iter_releases():
+              tag_name = release.get("tag_name", "")
               asset_names = {asset["name"] for asset in release.get("assets", [])}
-              if release.get("target_commitish") != sha:
+              if (
+                  release.get("target_commitish") != sha
+                  or not tag_name.startswith(release_tag_prefix)
+              ):
                   continue
               if expected_asset_names <= asset_names:
                   if release.get("draft", False):
@@ -233,7 +238,7 @@ jobs:
               timestamp = __import__("datetime").datetime.now(
                   __import__("datetime").timezone.utc
               ).strftime("%Y%m%d-%H%M%S")
-              tag = f"personal-codex-{timestamp}-{sha[:7]}"
+              tag = f"{release_tag_prefix}{timestamp}-{sha[:7]}"
               release = request_json(
                   f"{api_root}/repos/{repo}/releases",
                   method="POST",
