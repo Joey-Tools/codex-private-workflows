@@ -10,6 +10,7 @@ on:
       - "scripts/**"
       - "tests/**"
   push:
+    # Joey-Tools repositories intentionally use master as the integration branch.
     branches:
       - master
     paths:
@@ -195,11 +196,21 @@ jobs:
               with urlopen(request, timeout=30) as response:
                   return json.loads(response.read().decode("utf-8"))
 
-          releases = request_json(f"{api_root}/repos/{repo}/releases?per_page=100")
+          def iter_releases():
+              page = 1
+              while True:
+                  releases = request_json(
+                      f"{api_root}/repos/{repo}/releases?per_page=100&page={page}"
+                  )
+                  if not releases:
+                      break
+                  yield from releases
+                  page += 1
+
           expected_asset_names = {asset.name for asset in assets}
           release = None
           uploaded_asset_names = set()
-          for release in releases:
+          for release in iter_releases():
               asset_names = {asset["name"] for asset in release.get("assets", [])}
               if release.get("target_commitish") != sha:
                   continue
@@ -271,7 +282,7 @@ jobs:
               print(f"Uploaded {uploaded['name']}")
               uploaded_asset_names.add(uploaded["name"])
 
-          if uploaded_asset_names != expected_asset_names:
+          if not expected_asset_names <= uploaded_asset_names:
               raise SystemExit(f"uploaded asset mismatch: {sorted(uploaded_asset_names)}")
           request_json(
               f"{api_root}/repos/{repo}/releases/{release['id']}",
