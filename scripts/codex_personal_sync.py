@@ -26,9 +26,12 @@ SHA256_RE = re.compile(r"^personal-codex-([0-9a-f]{40})\.sha256$")
 RELEASE_DIR_RE = re.compile(r"^[0-9a-f]{40}$")
 MANIFEST_RELATIVE_PATH = Path("personal_codex/sync-manifest.json")
 DEFAULT_RELEASE_REPO_ENV = "CODEX_PERSONAL_SYNC_DEFAULT_REPO"
+DEFAULT_BASE_RELEASE_REPO_ENV = "CODEX_PERSONAL_SYNC_BASE_REPO"
+DEFAULT_PUBLIC_RELEASE_REPO = "Joey-Tools/codex-toolbox"
 PUBLIC_OWNER = "public"
 OWNER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
 LAUNCHD_LABEL = "io.github.joey-tools.codex-personal-sync"
+LEGACY_LAUNCHD_LABELS = ("com.joeyteng.codex-personal-sync",)
 SYSTEMD_UNIT = "codex-personal-sync"
 DEFAULT_SCHEDULER_INTERVAL_MINUTES = 60
 MACOS_SCHEDULER_PATH = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
@@ -45,6 +48,19 @@ class ReleaseAssets:
     sha: str
     archive_name: str
     checksum_name: str
+
+
+@dataclass(frozen=True)
+class DownloadedRelease:
+    repo: str
+    assets: ReleaseAssets
+    release_root: Path
+
+
+@dataclass(frozen=True)
+class BaseReleaseSpec:
+    repo: str
+    sha: str | None = None
 
 
 @dataclass(frozen=True)
@@ -187,6 +203,27 @@ def load_manifest(release_root: Path) -> list[LinkEntry]:
     return entries
 
 
+def _load_base_release_spec(release_root: Path, fallback_repo: str) -> BaseReleaseSpec:
+    data = _load_json(release_root / MANIFEST_RELATIVE_PATH)
+    raw_spec = data.get("base_release", {})
+    if raw_spec is None:
+        raw_spec = {}
+    if not isinstance(raw_spec, dict):
+        raise SyncError("base_release must be an object when present")
+
+    raw_repo = raw_spec.get("repo", fallback_repo)
+    if not isinstance(raw_repo, str) or "/" not in raw_repo:
+        raise SyncError("base_release.repo must be an owner/repo string")
+
+    raw_sha = raw_spec.get("sha")
+    if raw_sha is not None and (
+        not isinstance(raw_sha, str) or re.fullmatch(r"[0-9a-f]{40}", raw_sha) is None
+    ):
+        raise SyncError("base_release.sha must be a 40-character lowercase hex SHA")
+
+    return BaseReleaseSpec(repo=raw_repo, sha=raw_sha)
+
+
 def select_release_assets(release: dict[str, Any]) -> ReleaseAssets:
     release = _normalize_release(release)
     tag_name = release.get("tagName")
@@ -244,6 +281,25 @@ def select_release_assets(release: dict[str, Any]) -> ReleaseAssets:
         archive_name=archive_name,
         checksum_name=checksum_name,
     )
+
+
+def _release_mentions_asset_sha(release: dict[str, Any], sha: str) -> bool:
+    assets = release.get("assets")
+    if not isinstance(assets, list):
+        return False
+    for asset in assets:
+        if not isinstance(asset, dict):
+            continue
+        name = asset.get("name")
+        if not isinstance(name, str):
+            continue
+        archive_match = ASSET_RE.fullmatch(name)
+        if archive_match and archive_match.group(1) == sha:
+            return True
+        checksum_match = SHA256_RE.fullmatch(name)
+        if checksum_match and checksum_match.group(1) == sha:
+            return True
+    return False
 
 
 def verify_checksum(archive_path: Path, checksum_path: Path) -> None:
@@ -410,13 +466,38 @@ def _link_managed_owner(home: Path, link: Path, owners: set[str] | None = None) 
     return None
 
 
-def plan_link_actions(home: Path, entries: list[LinkEntry]) -> list[LinkAction]:
+def plan_link_actions(
+    home: Path,
+    entries: list[LinkEntry],
+    *,
+    public_entries: list[LinkEntry] | None = None,
+    pending_public_removals: set[Path] | None = None,
+) -> list[LinkAction]:
     actions: list[LinkAction] = []
+    pending_public_removals = pending_public_removals or set()
     entry_owners = {entry.owner for entry in entries}
+    public_by_target = (
+        _entries_by_target(
+            public_entries
+            if public_entries is not None
+            else current_release_entries(home, PUBLIC_OWNER)
+        )
+        if any(owner != PUBLIC_OWNER for owner in entry_owners)
+        else {}
+    )
     for entry in entries:
         target = _entry_target_path(home, entry)
         desired = _desired_link_target(home, entry)
         parent = target.parent
+        public_entry = public_by_target.get(entry.target)
+        if entry.owner != PUBLIC_OWNER:
+            if public_entry is not None and not entry.override:
+                raise SyncError(
+                    f"target {target} exists in public manifest; "
+                    f"manifest owner {entry.owner} must declare override=true"
+                )
+            if public_entry is None and entry.override:
+                raise SyncError(f"override target has no public base target: {target}")
         if _path_exists_or_is_link(parent) and not parent.is_dir():
             raise SyncError(f"link parent exists but is not a directory: {parent}")
         if _path_exists_or_is_link(target):
@@ -430,6 +511,13 @@ def plan_link_actions(home: Path, entries: list[LinkEntry]) -> list[LinkAction]:
                 raise SyncError(f"refusing to replace unmanaged symlink target: {target}")
             if existing_owner != entry.owner:
                 if entry.owner == PUBLIC_OWNER:
+                    continue
+                if (
+                    existing_owner == PUBLIC_OWNER
+                    and public_entry is None
+                    and target in pending_public_removals
+                ):
+                    actions.append(LinkAction("replace", target, desired, entry.kind))
                     continue
                 if existing_owner != PUBLIC_OWNER or not entry.override:
                     raise SyncError(
@@ -483,23 +571,48 @@ def plan_stale_link_removals(
     home: Path,
     previous_entries: list[LinkEntry],
     next_entries: list[LinkEntry],
+    *,
+    public_entries: list[LinkEntry] | None = None,
 ) -> list[LinkAction]:
     next_targets = {entry.target for entry in next_entries}
+    public_by_target = _entries_by_target(
+        public_entries
+        if public_entries is not None
+        else current_release_entries(home, PUBLIC_OWNER)
+    )
     removals: list[LinkAction] = []
     for entry in previous_entries:
         if entry.target in next_targets:
             continue
         target = _entry_target_path(home, entry)
+        public_entry = public_by_target.get(entry.target)
+        if entry.owner != PUBLIC_OWNER and public_entry is not None:
+            if not _path_exists_or_is_link(target) or (
+                target.is_symlink() and os.readlink(target) == _desired_link_target(home, entry)
+            ):
+                removals.append(
+                    LinkAction(
+                        "restore",
+                        target,
+                        _desired_link_target(home, public_entry),
+                        public_entry.kind,
+                    )
+                )
+            continue
         if target.is_symlink() and os.readlink(target) == _desired_link_target(home, entry):
             removals.append(LinkAction("remove", target, "", entry.kind))
     return removals
 
 
-def _known_manifest_target_parents(home: Path, entries: list[LinkEntry]) -> set[Path]:
+def _known_manifest_target_parents(
+    home: Path,
+    entries: list[LinkEntry],
+    owner: str | None = None,
+) -> set[Path]:
     parents = {home, home / "agents", home / "bin", home / "skills"}
     parents.update(_entry_target_path(home, entry).parent for entry in entries)
-    owner = _entries_owner(entries)
-    releases_root = _releases_root(home, owner)
+    manifest_owner = _validate_owner(owner) if owner is not None else _entries_owner(entries)
+    releases_root = _releases_root(home, manifest_owner)
     if not releases_root.is_dir():
         return parents
     for release_dir in releases_root.iterdir():
@@ -612,11 +725,26 @@ def _copy_release_tree(source_root: Path, release_dir: Path) -> None:
         raise
 
 
-def _switch_current(home: Path, sha: str, owner: str = PUBLIC_OWNER, *, dry_run: bool) -> None:
-    sync_root = _owner_sync_root(home, owner)
+def _ensure_install_roots(home: Path, owner: str) -> None:
+    home.mkdir(parents=True, exist_ok=True)
+    sync_root = _personal_sync_root(home)
+    owner_sync_root = _owner_sync_root(home, owner)
+    releases_root = _releases_root(home, owner)
+    sync_root.mkdir(parents=True, exist_ok=True)
+    owner_sync_root.mkdir(parents=True, exist_ok=True)
+    releases_root.mkdir(parents=True, exist_ok=True)
+
+
+def _ensure_current_can_switch(home: Path, owner: str) -> None:
     current = _current_link(home, owner)
     if _path_exists_or_is_link(current) and not current.is_symlink():
         raise SyncError(f"refusing to replace non-symlink current pointer: {current}")
+
+
+def _switch_current(home: Path, sha: str, owner: str = PUBLIC_OWNER, *, dry_run: bool) -> None:
+    sync_root = _owner_sync_root(home, owner)
+    current = _current_link(home, owner)
+    _ensure_current_can_switch(home, owner)
     if dry_run:
         print(f"would switch {current} -> releases/{sha}")
         return
@@ -628,20 +756,43 @@ def _switch_current(home: Path, sha: str, owner: str = PUBLIC_OWNER, *, dry_run:
     print(f"switched {current} -> releases/{sha}")
 
 
-def install_release_tree(source_root: Path, home: Path, sha: str, *, dry_run: bool) -> None:
+def _install_release_tree_unlocked(
+    source_root: Path,
+    home: Path,
+    sha: str,
+    *,
+    dry_run: bool,
+    public_entries: list[LinkEntry] | None = None,
+    pending_public_removals: set[Path] | None = None,
+) -> None:
     home = home.expanduser()
     entries = validate_release_tree(source_root)
     owner = _entries_owner(entries)
-    actions = plan_link_actions(home, entries)
-    sync_root = _personal_sync_root(home)
-    owner_sync_root = _owner_sync_root(home, owner)
-    releases_root = _releases_root(home, owner)
-    release_dir = releases_root / sha
+    actions = plan_link_actions(
+        home,
+        entries,
+        public_entries=public_entries,
+        pending_public_removals=pending_public_removals,
+    )
+    release_dir = _releases_root(home, owner) / sha
 
     if dry_run:
         previous_entries = current_release_entries(home, owner)
-        stale_removals = plan_stale_link_removals(home, previous_entries, entries)
+        stale_removals = plan_stale_link_removals(
+            home,
+            previous_entries,
+            entries,
+            public_entries=public_entries,
+        )
         repair_removals = plan_stale_current_link_removals(home, entries)
+        replaced_targets = {
+            action.target
+            for action in [*actions, *stale_removals]
+            if action.action != "remove"
+        }
+        repair_removals = [
+            action for action in repair_removals if action.target not in replaced_targets
+        ]
         removals = _dedupe_link_actions([*stale_removals, *repair_removals])
         print(f"would install release {sha} into {release_dir}")
         _switch_current(home, sha, owner, dry_run=True)
@@ -651,27 +802,100 @@ def install_release_tree(source_root: Path, home: Path, sha: str, *, dry_run: bo
             print("all managed symlinks already point at current")
         return
 
-    home.mkdir(parents=True, exist_ok=True)
-    sync_root.mkdir(parents=True, exist_ok=True)
-    owner_sync_root.mkdir(parents=True, exist_ok=True)
-    releases_root.mkdir(parents=True, exist_ok=True)
+    _ensure_install_roots(home, owner)
+    previous_entries = current_release_entries(home, owner)
+    actions = plan_link_actions(
+        home,
+        entries,
+        public_entries=public_entries,
+        pending_public_removals=pending_public_removals,
+    )
+    stale_removals = plan_stale_link_removals(
+        home,
+        previous_entries,
+        entries,
+        public_entries=public_entries,
+    )
+    if release_dir.exists():
+        validate_release_tree(release_dir)
+        print(f"release already present: {release_dir}")
+    else:
+        _copy_release_tree(source_root, release_dir)
+        print(f"installed release tree: {release_dir}")
+    _switch_current(home, sha, owner, dry_run=False)
+    apply_link_actions(actions, dry_run=False)
+    apply_link_actions(stale_removals, dry_run=False)
+    repair_removals = plan_stale_current_link_removals(home, entries)
+    apply_link_actions(repair_removals, dry_run=False)
+    if not actions and not stale_removals and not repair_removals:
+        print("all managed symlinks already point at current")
+
+
+def install_release_tree(source_root: Path, home: Path, sha: str, *, dry_run: bool) -> None:
+    if dry_run:
+        _install_release_tree_unlocked(source_root, home, sha, dry_run=True)
+        return
+    home = home.expanduser()
+    entries = validate_release_tree(source_root)
+    plan_link_actions(home, entries)
     with installation_lock(home):
-        previous_entries = current_release_entries(home, owner)
-        actions = plan_link_actions(home, entries)
-        stale_removals = plan_stale_link_removals(home, previous_entries, entries)
-        if release_dir.exists():
-            validate_release_tree(release_dir)
-            print(f"release already present: {release_dir}")
-        else:
-            _copy_release_tree(source_root, release_dir)
-            print(f"installed release tree: {release_dir}")
-        _switch_current(home, sha, owner, dry_run=False)
-        apply_link_actions(actions, dry_run=False)
-        apply_link_actions(stale_removals, dry_run=False)
-        repair_removals = plan_stale_current_link_removals(home, entries)
-        apply_link_actions(repair_removals, dry_run=False)
-        if not actions and not stale_removals and not repair_removals:
-            print("all managed symlinks already point at current")
+        _install_release_tree_unlocked(source_root, home, sha, dry_run=False)
+
+
+def _preflight_release_tree_install(
+    source_root: Path,
+    home: Path,
+    sha: str,
+    *,
+    public_entries: list[LinkEntry] | None = None,
+    pending_public_removals: set[Path] | None = None,
+) -> list[LinkEntry]:
+    home = home.expanduser()
+    entries = validate_release_tree(source_root)
+    owner = _entries_owner(entries)
+    plan_link_actions(
+        home,
+        entries,
+        public_entries=public_entries,
+        pending_public_removals=pending_public_removals,
+    )
+    previous_entries = current_release_entries(home, owner)
+    plan_stale_link_removals(
+        home,
+        previous_entries,
+        entries,
+        public_entries=public_entries,
+    )
+    _ensure_current_can_switch(home, owner)
+    release_dir = _releases_root(home, owner) / sha
+    if release_dir.exists():
+        validate_release_tree(release_dir)
+    return entries
+
+
+def _stage_release_tree_for_install(
+    source_root: Path,
+    home: Path,
+    sha: str,
+    entries: list[LinkEntry],
+) -> None:
+    owner = _entries_owner(entries)
+    _ensure_install_roots(home, owner)
+    release_dir = _releases_root(home, owner) / sha
+    if release_dir.exists():
+        validate_release_tree(release_dir)
+        return
+    _copy_release_tree(source_root, release_dir)
+
+
+def _pending_public_removal_targets(home: Path, base_entries: list[LinkEntry]) -> set[Path]:
+    base_previous_entries = current_release_entries(home, PUBLIC_OWNER)
+    base_stale_removals = plan_stale_link_removals(
+        home,
+        base_previous_entries,
+        base_entries,
+    )
+    return {action.target for action in base_stale_removals if action.action == "remove"}
 
 
 def _run_gh_process(args: list[str]) -> subprocess.CompletedProcess[str]:
@@ -756,6 +980,38 @@ def find_latest_release(repo: str) -> dict[str, Any]:
     raise SyncError(f"no {TAG_PREFIX} release found in {repo}")
 
 
+def find_release_by_asset_sha(repo: str, sha: str) -> dict[str, Any]:
+    if re.fullmatch(r"[0-9a-f]{40}", sha) is None:
+        raise SyncError(f"release SHA must be 40 lowercase hex characters: {sha}")
+    release_pages = _run_gh_json_stream(
+        [
+            "api",
+            f"repos/{repo}/releases?per_page=100",
+            "--paginate",
+        ]
+    )
+    if not isinstance(release_pages, list):
+        raise SyncError("gh api releases returned an unexpected payload")
+    for page in release_pages:
+        if not isinstance(page, list):
+            raise SyncError("gh api releases returned an unexpected payload")
+        for release_data in page:
+            if not isinstance(release_data, dict):
+                continue
+            if release_data.get("draft", False) or release_data.get("prerelease", False):
+                continue
+            tag_name = release_data.get("tag_name") or release_data.get("tagName")
+            if not isinstance(tag_name, str) or not tag_name.startswith(TAG_PREFIX):
+                continue
+            normalized = _normalize_release(release_data)
+            if not _release_mentions_asset_sha(normalized, sha):
+                continue
+            assets = select_release_assets(normalized)
+            if assets.sha == sha:
+                return normalized
+    raise SyncError(f"no {TAG_PREFIX} release with asset SHA {sha} found in {repo}")
+
+
 def download_release_assets(repo: str, assets: ReleaseAssets, destination: Path) -> None:
     destination.mkdir(parents=True, exist_ok=True)
     for asset_name in (assets.archive_name, assets.checksum_name):
@@ -774,18 +1030,127 @@ def download_release_assets(repo: str, assets: ReleaseAssets, destination: Path)
         )
 
 
-def install_from_github(repo: str, home: Path, *, dry_run: bool) -> None:
-    release = find_latest_release(repo)
+def download_and_extract_release(
+    repo: str,
+    destination: Path,
+    *,
+    sha: str | None = None,
+) -> DownloadedRelease:
+    release = find_release_by_asset_sha(repo, sha) if sha is not None else find_latest_release(repo)
     assets = select_release_assets(release)
+    destination.mkdir(parents=True, exist_ok=True)
+    download_release_assets(repo, assets, destination)
+    archive_path = destination / assets.archive_name
+    checksum_path = destination / assets.checksum_name
+    verify_checksum(archive_path, checksum_path)
+    extract_root = destination / "extract"
+    release_root = safe_extract_archive(archive_path, extract_root)
+    return DownloadedRelease(repo=repo, assets=assets, release_root=release_root)
+
+
+def install_from_github(repo: str, home: Path, *, dry_run: bool) -> None:
     with tempfile.TemporaryDirectory(prefix="codex-personal-sync.") as temp_dir_raw:
+        release = download_and_extract_release(repo, Path(temp_dir_raw))
+        install_release_tree(release.release_root, home, release.assets.sha, dry_run=dry_run)
+
+
+def _validate_release_owner(release_root: Path, expected_owner: str) -> list[LinkEntry]:
+    expected_owner = _validate_owner(expected_owner)
+    entries = validate_release_tree(release_root)
+    actual_owner = _entries_owner(entries)
+    if actual_owner != expected_owner:
+        raise SyncError(
+            f"release owner mismatch: expected {expected_owner}, got {actual_owner}"
+        )
+    return entries
+
+
+def install_private_from_github(
+    repo: str,
+    home: Path,
+    *,
+    base_repo: str,
+    owner: str,
+    dry_run: bool,
+) -> None:
+    home = home.expanduser()
+    owner = _validate_owner(owner)
+    if owner == PUBLIC_OWNER:
+        raise SyncError("install-private owner must not be public")
+
+    with tempfile.TemporaryDirectory(prefix="codex-personal-sync-private.") as temp_dir_raw:
         temp_dir = Path(temp_dir_raw)
-        download_release_assets(repo, assets, temp_dir)
-        archive_path = temp_dir / assets.archive_name
-        checksum_path = temp_dir / assets.checksum_name
-        verify_checksum(archive_path, checksum_path)
-        extract_root = temp_dir / "extract"
-        release_root = safe_extract_archive(archive_path, extract_root)
-        install_release_tree(release_root, home, assets.sha, dry_run=dry_run)
+        overlay_release = download_and_extract_release(repo, temp_dir / "overlay")
+        overlay_entries = _validate_release_owner(overlay_release.release_root, owner)
+        base_spec = _load_base_release_spec(overlay_release.release_root, base_repo)
+        base_release = download_and_extract_release(
+            base_spec.repo,
+            temp_dir / "base",
+            sha=base_spec.sha,
+        )
+        base_entries = _validate_release_owner(base_release.release_root, PUBLIC_OWNER)
+
+        if dry_run:
+            pending_public_removals = _pending_public_removal_targets(home, base_entries)
+            print(
+                "would install private layered release: "
+                f"base {base_spec.repo}@{base_release.assets.sha}, "
+                f"overlay {repo}@{overlay_release.assets.sha}"
+            )
+            _install_release_tree_unlocked(
+                base_release.release_root,
+                home,
+                base_release.assets.sha,
+                dry_run=True,
+            )
+            _install_release_tree_unlocked(
+                overlay_release.release_root,
+                home,
+                overlay_release.assets.sha,
+                dry_run=True,
+                public_entries=base_entries,
+                pending_public_removals=pending_public_removals,
+            )
+            return
+
+        with installation_lock(home):
+            pending_public_removals = _pending_public_removal_targets(home, base_entries)
+            overlay_entries = _preflight_release_tree_install(
+                overlay_release.release_root,
+                home,
+                overlay_release.assets.sha,
+                public_entries=base_entries,
+                pending_public_removals=pending_public_removals,
+            )
+            _stage_release_tree_for_install(
+                overlay_release.release_root,
+                home,
+                overlay_release.assets.sha,
+                overlay_entries,
+            )
+            _install_release_tree_unlocked(
+                base_release.release_root,
+                home,
+                base_release.assets.sha,
+                dry_run=False,
+            )
+            _install_release_tree_unlocked(
+                overlay_release.release_root,
+                home,
+                overlay_release.assets.sha,
+                dry_run=False,
+                public_entries=base_entries,
+            )
+            issues = _collect_overlay_issues(home, owner)
+            if issues:
+                for issue in issues:
+                    print(f"overlay issue: {issue}")
+                raise SyncError(f"overlay verification failed with {len(issues)} issue(s)")
+        print(
+            "private layered install ok: "
+            f"base {base_spec.repo}@{base_release.assets.sha}, "
+            f"overlay {repo}@{overlay_release.assets.sha}"
+        )
 
 
 def _current_sha(home: Path, owner: str = PUBLIC_OWNER) -> str | None:
@@ -877,6 +1242,8 @@ def _resolve_release_for_rollback(
 def rollback(home: Path, to_sha: str | None, owner: str = PUBLIC_OWNER) -> None:
     home = home.expanduser()
     owner = _validate_owner(owner)
+    if owner != PUBLIC_OWNER:
+        raise SyncError("rollback currently supports only public releases; rerun install-private")
     if not _releases_root(home, owner).is_dir():
         raise SyncError(f"release root is missing: {_releases_root(home, owner)}")
     with installation_lock(home):
@@ -903,12 +1270,12 @@ def _entries_by_target(entries: list[LinkEntry]) -> dict[PurePosixPath, LinkEntr
 
 def _overlay_scan_parents(
     home: Path,
+    owner: str,
     overlay_entries: list[LinkEntry],
     public_entries: list[LinkEntry],
 ) -> set[Path]:
-    parents = {home, home / "agents", home / "bin", home / "skills"}
-    parents.update(_entry_target_path(home, entry).parent for entry in overlay_entries)
-    parents.update(_entry_target_path(home, entry).parent for entry in public_entries)
+    parents = _known_manifest_target_parents(home, overlay_entries, owner=owner)
+    parents.update(_known_manifest_target_parents(home, public_entries, owner=PUBLIC_OWNER))
     return parents
 
 
@@ -935,6 +1302,8 @@ def _collect_overlay_issues(home: Path, owner: str) -> list[str]:
         live_owner = _link_managed_owner(home, target, known_owners)
         if live_owner != owner:
             issues.append(f"overlay target is not owned by {owner}: {target}")
+        if os.readlink(target) != _desired_link_target(home, entry):
+            issues.append(f"overlay target drift: {target}")
         public_entry = public_by_target.get(entry.target)
         if public_entry is not None and not entry.override:
             issues.append(
@@ -954,7 +1323,7 @@ def _collect_overlay_issues(home: Path, owner: str) -> list[str]:
         if overlay_entry is None or not overlay_entry.override:
             issues.append(f"public target is shadowed by undeclared overlay: {target}")
 
-    for parent in sorted(_overlay_scan_parents(home, overlay_entries, public_entries)):
+    for parent in sorted(_overlay_scan_parents(home, owner, overlay_entries, public_entries)):
         if not parent.is_dir():
             continue
         for candidate in parent.iterdir():
@@ -981,17 +1350,29 @@ def plan_overlay_uninstall_actions(home: Path, owner: str) -> list[LinkAction]:
     if owner == PUBLIC_OWNER:
         raise SyncError("refusing to uninstall public as an overlay")
     overlay_entries = current_release_entries(home, owner)
-    public_by_target = _entries_by_target(current_release_entries(home, PUBLIC_OWNER))
+    public_entries = current_release_entries(home, PUBLIC_OWNER)
+    public_by_target = _entries_by_target(public_entries)
     actions: list[LinkAction] = []
     known_owners = {owner, PUBLIC_OWNER}
+    overlay_targets = {_entry_target_path(home, entry) for entry in overlay_entries}
     for entry in overlay_entries:
         target = _entry_target_path(home, entry)
+        public_entry = public_by_target.get(entry.target)
+        if public_entry is not None and not _path_exists_or_is_link(target):
+            actions.append(
+                LinkAction(
+                    "restore",
+                    target,
+                    _desired_link_target(home, public_entry),
+                    public_entry.kind,
+                )
+            )
+            continue
         if not target.is_symlink():
             continue
         if _link_managed_owner(home, target, known_owners) != owner:
             continue
-        public_entry = public_by_target.get(entry.target)
-        if entry.override and public_entry is not None:
+        if public_entry is not None:
             actions.append(
                 LinkAction(
                     "restore",
@@ -1002,7 +1383,15 @@ def plan_overlay_uninstall_actions(home: Path, owner: str) -> list[LinkAction]:
             )
         else:
             actions.append(LinkAction("remove", target, "", entry.kind))
-    return actions
+    for parent in sorted(_overlay_scan_parents(home, owner, overlay_entries, public_entries)):
+        if not parent.is_dir():
+            continue
+        for candidate in parent.iterdir():
+            if candidate in overlay_targets or not candidate.is_symlink():
+                continue
+            if _link_managed_owner(home, candidate, known_owners) == owner:
+                actions.append(LinkAction("remove", candidate, "", "directory"))
+    return _dedupe_link_actions(actions)
 
 
 def uninstall_overlay(home: Path, owner: str, *, dry_run: bool) -> None:
@@ -1010,16 +1399,25 @@ def uninstall_overlay(home: Path, owner: str, *, dry_run: bool) -> None:
     owner = _validate_owner(owner)
     if owner == PUBLIC_OWNER:
         raise SyncError("refusing to uninstall public as an overlay")
-    actions = plan_overlay_uninstall_actions(home, owner)
-    apply_link_actions(actions, dry_run=dry_run)
-    current = _current_link(home, owner)
+
+    def apply_uninstall() -> None:
+        actions = plan_overlay_uninstall_actions(home, owner)
+        apply_link_actions(actions, dry_run=dry_run)
+        current = _current_link(home, owner)
+        if dry_run:
+            print(f"would remove overlay current pointer {current}")
+        elif current.is_symlink():
+            current.unlink()
+            print(f"removed overlay current pointer {current}")
+        if not actions:
+            print(f"no overlay-managed symlinks found for {owner}")
+
     if dry_run:
-        print(f"would remove overlay current pointer {current}")
-    elif current.is_symlink():
-        current.unlink()
-        print(f"removed overlay current pointer {current}")
-    if not actions:
-        print(f"no overlay-managed symlinks found for {owner}")
+        apply_uninstall()
+        return
+
+    with installation_lock(home):
+        apply_uninstall()
 
 
 def _codex_user_home(home: Path) -> Path:
@@ -1081,19 +1479,91 @@ def _scheduler_paths(platform_name: str, home: Path) -> SchedulerPaths:
     raise SyncError(f"unsupported scheduler platform: {platform_name}")
 
 
+def _legacy_launchd_plist(paths: SchedulerPaths, label: str) -> Path:
+    assert paths.launchd_plist is not None
+    return paths.launchd_plist.parent / f"{label}.plist"
+
+
+def _cleanup_legacy_launchd_schedulers(
+    paths: SchedulerPaths,
+    *,
+    dry_run: bool,
+    disable: bool,
+    remove: bool,
+) -> None:
+    if paths.launchd_plist is None:
+        return
+    if not remove:
+        return
+    domain = f"gui/{os.getuid()}"
+    for label in LEGACY_LAUNCHD_LABELS:
+        legacy_plist = _legacy_launchd_plist(paths, label)
+        if disable:
+            _run_native_command(
+                ["launchctl", "bootout", domain, str(legacy_plist)],
+                dry_run=dry_run,
+                allow_fail=True,
+            )
+            _run_native_command(
+                ["launchctl", "disable", f"{domain}/{label}"],
+                dry_run=dry_run,
+                allow_fail=True,
+            )
+        _unlink_file(legacy_plist, dry_run=dry_run)
+
+
 def _scheduler_log_dir(home: Path) -> Path:
     return _personal_sync_root(home.expanduser()) / "logs"
 
 
-def _scheduler_install_args(runner: Path, repo: str, home: Path) -> list[str]:
-    return [str(runner), "install", "--repo", repo, "--home", str(home.expanduser())]
+def _scheduler_install_args(
+    runner: Path,
+    repo: str,
+    home: Path,
+    *,
+    mode: str = "public",
+    base_repo: str = DEFAULT_PUBLIC_RELEASE_REPO,
+    owner: str = "private",
+) -> list[str]:
+    if mode == "public":
+        return [str(runner), "install", "--repo", repo, "--home", str(home.expanduser())]
+    if mode == "private":
+        return [
+            str(runner),
+            "install-private",
+            "--repo",
+            repo,
+            "--base-repo",
+            base_repo,
+            "--owner",
+            owner,
+            "--home",
+            str(home.expanduser()),
+        ]
+    raise SyncError(f"unsupported scheduler mode: {mode}")
 
 
-def _launchd_plist(home: Path, repo: str, interval_minutes: int, runner: Path) -> dict[str, Any]:
+def _launchd_plist(
+    home: Path,
+    repo: str,
+    interval_minutes: int,
+    runner: Path,
+    *,
+    mode: str = "public",
+    base_repo: str = DEFAULT_PUBLIC_RELEASE_REPO,
+    owner: str = "private",
+) -> dict[str, Any]:
     log_dir = _scheduler_log_dir(home)
     return {
         "Label": LAUNCHD_LABEL,
-        "ProgramArguments": _scheduler_install_args(runner, repo, home),
+        "ProgramArguments": _scheduler_install_args(
+            runner,
+            repo,
+            home,
+            mode=mode,
+            base_repo=base_repo,
+            owner=owner,
+        ),
         "StartInterval": interval_minutes * 60,
         "RunAtLoad": True,
         "StandardOutPath": str(log_dir / "codex-personal-sync.out.log"),
@@ -1106,9 +1576,25 @@ def _systemd_quote(value: str) -> str:
     return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
 
 
-def _systemd_service(home: Path, repo: str, runner: Path) -> str:
+def _systemd_service(
+    home: Path,
+    repo: str,
+    runner: Path,
+    *,
+    mode: str = "public",
+    base_repo: str = DEFAULT_PUBLIC_RELEASE_REPO,
+    owner: str = "private",
+) -> str:
     exec_start = " ".join(
-        _systemd_quote(arg) for arg in _scheduler_install_args(runner, repo, home)
+        _systemd_quote(arg)
+        for arg in _scheduler_install_args(
+            runner,
+            repo,
+            home,
+            mode=mode,
+            base_repo=base_repo,
+            owner=owner,
+        )
     )
     return "\n".join(
         [
@@ -1195,9 +1681,17 @@ def install_scheduler(
     *,
     dry_run: bool,
     enable: bool,
+    mode: str = "public",
+    base_repo: str = DEFAULT_PUBLIC_RELEASE_REPO,
+    owner: str = "private",
 ) -> None:
     if interval_minutes < 1:
         raise SyncError("scheduler interval must be at least 1 minute")
+    if mode not in {"public", "private"}:
+        raise SyncError(f"unsupported scheduler mode: {mode}")
+    owner = _validate_owner(owner)
+    if mode == "private" and owner == PUBLIC_OWNER:
+        raise SyncError("private scheduler owner must not be public")
     home = home.expanduser()
     selected_platform = _scheduler_platform(platform_name)
     runner_path = _scheduler_runner(home, runner)
@@ -1207,11 +1701,25 @@ def install_scheduler(
         assert paths.launchd_plist is not None
         _write_plist(
             paths.launchd_plist,
-            _launchd_plist(home, repo, interval_minutes, runner_path),
+            _launchd_plist(
+                home,
+                repo,
+                interval_minutes,
+                runner_path,
+                mode=mode,
+                base_repo=base_repo,
+                owner=owner,
+            ),
             dry_run=dry_run,
         )
         if not dry_run:
             _scheduler_log_dir(home).mkdir(parents=True, exist_ok=True)
+        _cleanup_legacy_launchd_schedulers(
+            paths,
+            dry_run=dry_run,
+            disable=enable,
+            remove=enable,
+        )
         if enable:
             domain = f"gui/{os.getuid()}"
             _run_native_command(
@@ -1235,7 +1743,14 @@ def install_scheduler(
         assert paths.systemd_timer is not None
         _write_text(
             paths.systemd_service,
-            _systemd_service(home, repo, runner_path),
+            _systemd_service(
+                home,
+                repo,
+                runner_path,
+                mode=mode,
+                base_repo=base_repo,
+                owner=owner,
+            ),
             dry_run=dry_run,
         )
         _write_text(paths.systemd_timer, _systemd_timer(interval_minutes), dry_run=dry_run)
@@ -1285,6 +1800,12 @@ def uninstall_scheduler(
                 dry_run=dry_run,
                 allow_fail=True,
             )
+        _cleanup_legacy_launchd_schedulers(
+            paths,
+            dry_run=dry_run,
+            disable=disable,
+            remove=True,
+        )
         _unlink_file(paths.launchd_plist, dry_run=dry_run)
         print(f"removed macOS launchd scheduler: {paths.launchd_plist}")
         return
@@ -1312,8 +1833,20 @@ def uninstall_scheduler(
     raise SyncError(f"unsupported scheduler platform: {selected_platform}")
 
 
+def _non_empty_env(name: str) -> str | None:
+    value = os.environ.get(name)
+    if value is None:
+        return None
+    value = value.strip()
+    return value or None
+
+
 def default_release_repo() -> str | None:
-    return os.environ.get(DEFAULT_RELEASE_REPO_ENV)
+    return _non_empty_env(DEFAULT_RELEASE_REPO_ENV)
+
+
+def default_base_release_repo() -> str:
+    return _non_empty_env(DEFAULT_BASE_RELEASE_REPO_ENV) or DEFAULT_PUBLIC_RELEASE_REPO
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -1323,11 +1856,27 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     release_repo = default_release_repo()
+    base_release_repo = default_base_release_repo()
 
     install_parser = subparsers.add_parser("install", help="Download and install latest release")
     install_parser.add_argument("--repo", default=release_repo, required=release_repo is None)
     install_parser.add_argument("--home", default="~/.codex")
     install_parser.add_argument("--dry-run", action="store_true")
+
+    install_private_parser = subparsers.add_parser(
+        "install-private",
+        help="Install a public base release and then a private overlay release",
+    )
+    install_private_parser.add_argument(
+        "--repo",
+        default=release_repo,
+        required=release_repo is None,
+        help="Private overlay release repository",
+    )
+    install_private_parser.add_argument("--base-repo", default=base_release_repo)
+    install_private_parser.add_argument("--owner", default="private")
+    install_private_parser.add_argument("--home", default="~/.codex")
+    install_private_parser.add_argument("--dry-run", action="store_true")
 
     status_parser = subparsers.add_parser("status", help="Show current release and link state")
     status_parser.add_argument("--home", default="~/.codex")
@@ -1358,6 +1907,9 @@ def build_parser() -> argparse.ArgumentParser:
         help="Install a user-level scheduler that periodically runs install",
     )
     scheduler_parser.add_argument("--repo", default=release_repo, required=release_repo is None)
+    scheduler_parser.add_argument("--mode", choices=("public", "private"), default="public")
+    scheduler_parser.add_argument("--base-repo", default=base_release_repo)
+    scheduler_parser.add_argument("--owner", default="private")
     scheduler_parser.add_argument("--home", default="~/.codex")
     scheduler_parser.add_argument(
         "--interval-minutes",
@@ -1395,6 +1947,14 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.command == "install":
             install_from_github(args.repo, Path(args.home), dry_run=args.dry_run)
+        elif args.command == "install-private":
+            install_private_from_github(
+                args.repo,
+                Path(args.home),
+                base_repo=args.base_repo,
+                owner=args.owner,
+                dry_run=args.dry_run,
+            )
         elif args.command == "status":
             status(Path(args.home), args.owner)
         elif args.command == "rollback":
@@ -1412,6 +1972,9 @@ def main(argv: list[str] | None = None) -> int:
                 args.runner,
                 dry_run=args.dry_run,
                 enable=not args.no_enable,
+                mode=args.mode,
+                base_repo=args.base_repo,
+                owner=args.owner,
             )
         elif args.command == "uninstall-scheduler":
             uninstall_scheduler(

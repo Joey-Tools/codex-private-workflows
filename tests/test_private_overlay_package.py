@@ -3,12 +3,14 @@ from __future__ import annotations
 import contextlib
 import importlib.util
 import io
+import json
 from pathlib import Path
 import subprocess
 import sys
 import tarfile
 import tempfile
 import unittest
+from unittest import mock
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -55,6 +57,14 @@ def write_public_base_fixture(root: Path) -> None:
     )
 
 
+def write_scheduler_runner(home: Path) -> Path:
+    runner = home / "bin" / "codex-personal-sync"
+    runner.parent.mkdir(parents=True)
+    runner.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    runner.chmod(0o755)
+    return runner
+
+
 class PrivateOverlayPackageTests(unittest.TestCase):
     def setUp(self) -> None:
         self.tmpdir = tempfile.TemporaryDirectory(prefix="codex-private-overlay.")
@@ -67,26 +77,28 @@ class PrivateOverlayPackageTests(unittest.TestCase):
         with contextlib.redirect_stdout(io.StringIO()):
             return callback(*args, **kwargs)
 
-    def build_private_package(self) -> Path:
+    def build_private_package(
+        self,
+        *,
+        manifest: str | None = "personal_codex/private-sync-manifest.json",
+        sha: str = PRIVATE_SHA,
+        repo_root: Path = REPO_ROOT,
+    ) -> Path:
         dist_dir = self.root / "dist"
-        subprocess.run(
-            [
-                sys.executable,
-                str(PACKAGE_SCRIPT),
-                "--repo-root",
-                str(REPO_ROOT),
-                "--manifest",
-                "personal_codex/private-sync-manifest.json",
-                "--sha",
-                PRIVATE_SHA,
-                "--output-dir",
-                str(dist_dir),
-            ],
-            check=True,
-            text=True,
-            capture_output=True,
-        )
-        return dist_dir / f"personal-codex-{PRIVATE_SHA}.tar.gz"
+        args = [
+            sys.executable,
+            str(PACKAGE_SCRIPT),
+            "--repo-root",
+            str(repo_root),
+            "--sha",
+            sha,
+            "--output-dir",
+            str(dist_dir),
+        ]
+        if manifest is not None:
+            args.extend(["--manifest", manifest])
+        subprocess.run(args, check=True, text=True, capture_output=True)
+        return dist_dir / f"personal-codex-{sha}.tar.gz"
 
     def test_private_manifest_packages_overlay_targets(self) -> None:
         archive_path = self.build_private_package()
@@ -94,13 +106,77 @@ class PrivateOverlayPackageTests(unittest.TestCase):
         release_root = MODULE.safe_extract_archive(archive_path, extract_root)
         entries = MODULE.validate_release_tree(release_root)
         targets = {entry.target.as_posix(): entry for entry in entries}
+        manifest = json.loads(
+            (release_root / "personal_codex" / "sync-manifest.json").read_text(
+                encoding="utf-8"
+            )
+        )
 
         self.assertTrue(all(entry.owner == "private" for entry in entries))
+        self.assertEqual(
+            manifest["base_release"]["repo"],
+            "Joey-Tools/codex-toolbox",
+        )
         self.assertIn("AGENTS.md", targets)
         self.assertIn("skills/cisco-trackers-lookup", targets)
         self.assertIn("skills/remote-host-context", targets)
         self.assertIn("skills/apple-notes-work-report", targets)
         self.assertNotIn("bin/codex-personal-sync", targets)
+
+    def test_default_manifest_packages_private_overlay(self) -> None:
+        archive_path = self.build_private_package(manifest=None)
+        release_root = MODULE.safe_extract_archive(archive_path, self.root / "extract")
+        entries = MODULE.validate_release_tree(release_root)
+
+        self.assertTrue(all(entry.owner == "private" for entry in entries))
+        self.assertFalse(
+            any(entry.target.as_posix() == "bin/codex-personal-sync" for entry in entries)
+        )
+
+    def test_package_builder_rejects_nested_directory_symlinks(self) -> None:
+        repo_root = self.root / "repo"
+        source_root = repo_root / "personal_codex" / "skills" / "example"
+        source_root.mkdir(parents=True)
+        (source_root / "SKILL.md").write_text("---\nname: example\n---\n", encoding="utf-8")
+        (source_root / "leak").symlink_to(Path.home())
+        manifest_path = repo_root / "personal_codex" / "private-sync-manifest.json"
+        manifest_path.write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "owner": "private",
+                    "links": [
+                        {
+                            "source": "personal_codex/skills/example",
+                            "target": "skills/example",
+                            "kind": "skill",
+                        }
+                    ],
+                    "reference_only": [],
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(PACKAGE_SCRIPT),
+                "--repo-root",
+                str(repo_root),
+                "--sha",
+                PRIVATE_SHA,
+                "--output-dir",
+                str(self.root / "dist"),
+            ],
+            check=False,
+            text=True,
+            capture_output=True,
+        )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("nested symlink", result.stderr)
 
     def test_private_overlay_installs_over_public_base_and_verifies(self) -> None:
         public_release = self.root / "public-release"
@@ -130,6 +206,146 @@ class PrivateOverlayPackageTests(unittest.TestCase):
         self.assertTrue((home / "AGENTS.md").is_symlink())
         self.assertTrue((home / "skills" / "cisco-trackers-lookup").is_symlink())
         self.run_quietly(MODULE.verify_overlay, home, "private")
+
+    def test_install_private_downloads_public_base_and_overlay(self) -> None:
+        public_release = self.root / "public-release"
+        home = self.root / "home" / ".codex"
+        write_public_base_fixture(public_release)
+        private_release = MODULE.safe_extract_archive(
+            self.build_private_package(),
+            self.root / "private-extract",
+        )
+        downloads: list[tuple[str, str | None]] = []
+
+        def fake_download(repo: str, destination: Path, *, sha: str | None = None):
+            downloads.append((repo, sha))
+            if repo == "Joey-Tools/codex-private-workflows":
+                return MODULE.DownloadedRelease(
+                    repo=repo,
+                    assets=MODULE.ReleaseAssets(
+                        tag_name="personal-codex-20260520-120000-2222222",
+                        sha=PRIVATE_SHA,
+                        archive_name=f"personal-codex-{PRIVATE_SHA}.tar.gz",
+                        checksum_name=f"personal-codex-{PRIVATE_SHA}.sha256",
+                    ),
+                    release_root=private_release,
+                )
+            if repo == "Joey-Tools/codex-toolbox":
+                return MODULE.DownloadedRelease(
+                    repo=repo,
+                    assets=MODULE.ReleaseAssets(
+                        tag_name="personal-codex-20260520-120000-1111111",
+                        sha=PUBLIC_SHA,
+                        archive_name=f"personal-codex-{PUBLIC_SHA}.tar.gz",
+                        checksum_name=f"personal-codex-{PUBLIC_SHA}.sha256",
+                    ),
+                    release_root=public_release,
+                )
+            raise AssertionError(f"unexpected repo: {repo}")
+
+        with mock.patch.object(MODULE, "download_and_extract_release", fake_download):
+            self.run_quietly(
+                MODULE.install_private_from_github,
+                "Joey-Tools/codex-private-workflows",
+                home,
+                base_repo="Fallback/base",
+                owner="private",
+                dry_run=False,
+            )
+
+        self.assertEqual(
+            downloads,
+            [
+                ("Joey-Tools/codex-private-workflows", None),
+                ("Joey-Tools/codex-toolbox", None),
+            ],
+        )
+        self.assertTrue((home / "bin" / "codex-personal-sync").is_symlink())
+        self.assertTrue((home / "AGENTS.md").is_symlink())
+        self.run_quietly(MODULE.verify_overlay, home, "private")
+
+    def test_private_scheduler_invokes_private_install_entrypoint(self) -> None:
+        home = self.root / "home" / ".codex"
+        args = MODULE._scheduler_install_args(
+            Path("/runner"),
+            "Joey-Tools/codex-private-workflows",
+            home,
+            mode="private",
+            base_repo="Joey-Tools/codex-toolbox",
+            owner="private",
+        )
+
+        self.assertEqual(
+            args,
+            [
+                "/runner",
+                "install-private",
+                "--repo",
+                "Joey-Tools/codex-private-workflows",
+                "--base-repo",
+                "Joey-Tools/codex-toolbox",
+                "--owner",
+                "private",
+                "--home",
+                str(home),
+            ],
+        )
+
+    def test_install_scheduler_no_enable_keeps_legacy_macos_plist(self) -> None:
+        user_home = self.root / "home"
+        home = user_home / ".codex"
+        write_scheduler_runner(home)
+        legacy_plist = (
+            user_home
+            / "Library"
+            / "LaunchAgents"
+            / f"{MODULE.LEGACY_LAUNCHD_LABELS[0]}.plist"
+        )
+        legacy_plist.parent.mkdir(parents=True)
+        legacy_plist.write_text("legacy\n", encoding="utf-8")
+
+        with mock.patch.object(MODULE.Path, "home", return_value=user_home):
+            self.run_quietly(
+                MODULE.install_scheduler,
+                home,
+                "owner/repo",
+                60,
+                "macos",
+                None,
+                dry_run=False,
+                enable=False,
+            )
+
+        self.assertTrue(legacy_plist.exists())
+
+    def test_uninstall_scheduler_no_disable_removes_legacy_macos_plist(self) -> None:
+        user_home = self.root / "home"
+        home = user_home / ".codex"
+        legacy_plist = (
+            user_home
+            / "Library"
+            / "LaunchAgents"
+            / f"{MODULE.LEGACY_LAUNCHD_LABELS[0]}.plist"
+        )
+        legacy_plist.parent.mkdir(parents=True)
+        legacy_plist.write_text("legacy\n", encoding="utf-8")
+
+        with mock.patch.object(MODULE.Path, "home", return_value=user_home):
+            self.run_quietly(
+                MODULE.uninstall_scheduler,
+                home,
+                "macos",
+                dry_run=False,
+                disable=False,
+            )
+
+        self.assertFalse(legacy_plist.exists())
+
+    def test_private_rollback_is_rejected(self) -> None:
+        home = self.root / "home" / ".codex"
+
+        with self.assertRaisesRegex(MODULE.SyncError, "only public releases"):
+            self.run_quietly(MODULE.rollback, home, None, "private")
 
 
 if __name__ == "__main__":

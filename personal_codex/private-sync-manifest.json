@@ -1,6 +1,9 @@
 {
   "version": 1,
   "owner": "private",
+  "base_release": {
+    "repo": "Joey-Tools/codex-toolbox"
+  },
   "links": [
     {
       "source": "personal_codex/AGENTS.md",
