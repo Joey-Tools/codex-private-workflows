@@ -10,10 +10,6 @@ on:
       - "scripts/**"
       - "tests/**"
   push:
-    # Publish still gates on the repository default branch below.
-    branches:
-      - master
-      - main
     paths:
       - ".agents/**"
       - ".github/workflows/release.yml"
