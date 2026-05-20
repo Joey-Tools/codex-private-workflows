@@ -1,0 +1,295 @@
+name: Private Overlay Release
+
+on:
+  pull_request:
+    paths:
+      - ".agents/**"
+      - ".github/workflows/release.yml"
+      - "README.md"
+      - "personal_codex/**"
+      - "scripts/**"
+      - "tests/**"
+  push:
+    paths:
+      - ".agents/**"
+      - ".github/workflows/release.yml"
+      - "README.md"
+      - "personal_codex/**"
+      - "scripts/**"
+      - "tests/**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: private-overlay-release-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Build private overlay release
+    runs-on: ubuntu-slim
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Compile helpers
+        run: |
+          python3 -m py_compile \
+            scripts/codex_personal_sync.py \
+            scripts/build_personal_codex_package.py \
+            tests/test_private_overlay_package.py
+
+      - name: Run tests
+        run: python3 -m unittest discover -s tests
+
+      - name: Build release package
+        run: |
+          python3 scripts/build_personal_codex_package.py \
+            --sha "$GITHUB_SHA" \
+            --output-dir dist
+
+      - name: Verify release package
+        run: |
+          python3 - <<'PY'
+          import importlib.util
+          import json
+          import sys
+          from pathlib import Path
+
+          repo_root = Path.cwd()
+          script_path = repo_root / "scripts" / "codex_personal_sync.py"
+          spec = importlib.util.spec_from_file_location("codex_personal_sync", script_path)
+          module = importlib.util.module_from_spec(spec)
+          assert spec is not None
+          assert spec.loader is not None
+          sys.modules[spec.name] = module
+          spec.loader.exec_module(module)
+
+          sha = __import__("os").environ["GITHUB_SHA"]
+          archive_path = repo_root / "dist" / f"personal-codex-{sha}.tar.gz"
+          checksum_path = repo_root / "dist" / f"personal-codex-{sha}.sha256"
+          module.verify_checksum(archive_path, checksum_path)
+          release_root = module.safe_extract_archive(archive_path, repo_root / "dist" / "extract")
+          entries = module.validate_release_tree(release_root)
+          targets = {entry.target.as_posix() for entry in entries}
+          manifest = json.loads(
+              (release_root / "personal_codex" / "sync-manifest.json").read_text(
+                  encoding="utf-8"
+              )
+          )
+
+          if not entries or any(entry.owner != "private" for entry in entries):
+              raise SystemExit("release manifest must contain only private-owned entries")
+          if manifest.get("base_release", {}).get("repo") != "Joey-Tools/codex-toolbox":
+              raise SystemExit("release manifest must declare the public base release repo")
+          if "bin/codex-personal-sync" in targets:
+              raise SystemExit("private overlay must not publish the public sync runner")
+          PY
+
+  publish:
+    name: Publish private overlay release
+    if: github.event_name != 'pull_request' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    needs: release
+    runs-on: ubuntu-slim
+    permissions:
+      contents: write
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Build release package
+        run: |
+          python3 scripts/build_personal_codex_package.py \
+            --sha "$GITHUB_SHA" \
+            --output-dir dist
+
+      - name: Verify release package
+        run: |
+          python3 - <<'PY'
+          import importlib.util
+          import json
+          import sys
+          from pathlib import Path
+
+          repo_root = Path.cwd()
+          script_path = repo_root / "scripts" / "codex_personal_sync.py"
+          spec = importlib.util.spec_from_file_location("codex_personal_sync", script_path)
+          module = importlib.util.module_from_spec(spec)
+          assert spec is not None
+          assert spec.loader is not None
+          sys.modules[spec.name] = module
+          spec.loader.exec_module(module)
+
+          sha = __import__("os").environ["GITHUB_SHA"]
+          archive_path = repo_root / "dist" / f"personal-codex-{sha}.tar.gz"
+          checksum_path = repo_root / "dist" / f"personal-codex-{sha}.sha256"
+          module.verify_checksum(archive_path, checksum_path)
+          release_root = module.safe_extract_archive(archive_path, repo_root / "dist" / "extract")
+          entries = module.validate_release_tree(release_root)
+          targets = {entry.target.as_posix() for entry in entries}
+          manifest = json.loads(
+              (release_root / "personal_codex" / "sync-manifest.json").read_text(
+                  encoding="utf-8"
+              )
+          )
+
+          if not entries or any(entry.owner != "private" for entry in entries):
+              raise SystemExit("release manifest must contain only private-owned entries")
+          if manifest.get("base_release", {}).get("repo") != "Joey-Tools/codex-toolbox":
+              raise SystemExit("release manifest must declare the public base release repo")
+          if "bin/codex-personal-sync" in targets:
+              raise SystemExit("private overlay must not publish the public sync runner")
+          PY
+
+      - name: Publish GitHub release
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          from urllib.parse import quote
+          from urllib.request import Request, urlopen
+
+          api_root = "https://api.github.com"
+          upload_root = "https://uploads.github.com"
+          repo = os.environ["GITHUB_REPOSITORY"]
+          sha = os.environ["GITHUB_SHA"]
+          token = os.environ["GITHUB_TOKEN"]
+          dist = Path("dist")
+          assets = [
+              dist / f"personal-codex-{sha}.tar.gz",
+              dist / f"personal-codex-{sha}.sha256",
+          ]
+          release_tag_prefix = "personal-codex-"
+
+          def request_json(url, *, method="GET", payload=None):
+              data = None
+              headers = {
+                  "Accept": "application/vnd.github+json",
+                  "Authorization": f"Bearer {token}",
+                  "X-GitHub-Api-Version": "2022-11-28",
+              }
+              if payload is not None:
+                  data = json.dumps(payload).encode("utf-8")
+                  headers["Content-Type"] = "application/json"
+              request = Request(url, data=data, headers=headers, method=method)
+              with urlopen(request, timeout=30) as response:
+                  return json.loads(response.read().decode("utf-8"))
+
+          def iter_releases():
+              page = 1
+              while True:
+                  releases = request_json(
+                      f"{api_root}/repos/{repo}/releases?per_page=100&page={page}"
+                  )
+                  if not releases:
+                      break
+                  yield from releases
+                  page += 1
+
+          expected_asset_names = {asset.name for asset in assets}
+          release = None
+          uploaded_asset_names = set()
+          for release in iter_releases():
+              tag_name = release.get("tag_name", "")
+              asset_names = {asset["name"] for asset in release.get("assets", [])}
+              if (
+                  release.get("target_commitish") != sha
+                  or not tag_name.startswith(release_tag_prefix)
+              ):
+                  continue
+              if expected_asset_names <= asset_names:
+                  if release.get("draft", False):
+                      request_json(
+                          f"{api_root}/repos/{repo}/releases/{release['id']}",
+                          method="PATCH",
+                          payload={"draft": False},
+                      )
+                      print(f"Published existing draft release: {release['tag_name']}")
+                      raise SystemExit(0)
+                  print(f"Release already exists: {release['tag_name']}")
+                  raise SystemExit(0)
+              if release.get("draft", False):
+                  uploaded_asset_names = set(asset_names)
+                  break
+              raise SystemExit(
+                  f"published release {release['tag_name']} is missing expected assets"
+              )
+
+          if release is None or release.get("target_commitish") != sha:
+              timestamp = __import__("datetime").datetime.now(
+                  __import__("datetime").timezone.utc
+              ).strftime("%Y%m%d-%H%M%S")
+              tag = f"{release_tag_prefix}{timestamp}-{sha[:7]}"
+              release = request_json(
+                  f"{api_root}/repos/{repo}/releases",
+                  method="POST",
+                  payload={
+                      "tag_name": tag,
+                      "target_commitish": sha,
+                      "name": tag,
+                      "body": f"Private Codex overlay release for {sha}.",
+                      "draft": True,
+                      "prerelease": False,
+                  },
+              )
+              uploaded_asset_names = set()
+          else:
+              tag = release["tag_name"]
+
+          content_types = {
+              ".gz": "application/gzip",
+              ".sha256": "text/plain",
+          }
+          for asset in assets:
+              if asset.name in uploaded_asset_names:
+                  print(f"Asset already exists: {asset.name}")
+                  continue
+              suffix = ".sha256" if asset.name.endswith(".sha256") else asset.suffix
+              url = (
+                  f"{upload_root}/repos/{repo}/releases/{release['id']}/assets"
+                  f"?name={quote(asset.name)}"
+              )
+              request = Request(
+                  url,
+                  data=asset.read_bytes(),
+                  headers={
+                      "Accept": "application/vnd.github+json",
+                      "Authorization": f"Bearer {token}",
+                      "Content-Type": content_types[suffix],
+                      "X-GitHub-Api-Version": "2022-11-28",
+                  },
+                  method="POST",
+              )
+              with urlopen(request, timeout=30) as response:
+                  uploaded = json.loads(response.read().decode("utf-8"))
+              print(f"Uploaded {uploaded['name']}")
+              uploaded_asset_names.add(uploaded["name"])
+
+          if not expected_asset_names <= uploaded_asset_names:
+              raise SystemExit(f"uploaded asset mismatch: {sorted(uploaded_asset_names)}")
+          request_json(
+              f"{api_root}/repos/{repo}/releases/{release['id']}",
+              method="PATCH",
+              payload={"draft": False},
+          )
+          print(f"Published {tag}")
+          PY
