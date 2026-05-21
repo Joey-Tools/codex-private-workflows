@@ -9,6 +9,8 @@
 - private personal skills and private variants of personal skills
 - Apple Notes Work Report overlay
 - private automation `automation.toml` references
+- private automation workspace routing, including Daily Skill Friction's
+  `Joey-Tools/codex-workspace` canonical repo mirror wrapper
 
 Public base release is published by `Joey-Tools/codex-toolbox`. This private overlay
 installs into `~/.codex/personal-sync/overlays/private/current` and manages only
