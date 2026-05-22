@@ -127,6 +127,10 @@ def _release_source_event(release: dict[str, Any]) -> str | None:
     return None
 
 
+def _release_body(sha: str, source_event: str) -> str:
+    return f"Private Codex overlay release for {sha}.\n\nsource_event={source_event}"
+
+
 def recent_complete_releases(
     *,
     repo: str,
@@ -242,13 +246,21 @@ def create_or_find_release(
                 request_json(
                     f"{API_ROOT}/repos/{repo}/releases/{candidate['id']}",
                     method="PATCH",
-                    payload={"draft": False},
+                    payload={"body": _release_body(sha, source_event), "draft": False},
                 )
                 print(f"Published existing draft release: {candidate['tag_name']}")
             else:
                 print(f"Release already exists: {candidate['tag_name']}")
             return candidate, uploaded_asset_names, True
         if candidate.get("draft", False):
+            if _release_source_event(candidate) != source_event:
+                candidate = request_json(
+                    f"{API_ROOT}/repos/{repo}/releases/{candidate['id']}",
+                    method="PATCH",
+                    payload={"body": _release_body(sha, source_event)},
+                )
+                if not isinstance(candidate, dict):
+                    raise ReleaseError("release update API returned an unexpected payload")
             return candidate, uploaded_asset_names, False
         raise ReleaseError(f"published release {candidate['tag_name']} is missing expected assets")
 
@@ -261,7 +273,7 @@ def create_or_find_release(
             "tag_name": tag,
             "target_commitish": sha,
             "name": tag,
-            "body": f"Private Codex overlay release for {sha}.\n\nsource_event={source_event}",
+            "body": _release_body(sha, source_event),
             "draft": True,
             "prerelease": False,
         },

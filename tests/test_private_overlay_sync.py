@@ -328,6 +328,49 @@ class PrivateOverlayReleaseTests(unittest.TestCase):
                 with contextlib.redirect_stdout(io.StringIO()):
                     RELEASE_MODULE.publish_release("owner/repo", sha, dist)
 
+    def test_publish_existing_draft_updates_source_event(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="private-overlay-release.") as temp_dir_raw:
+            dist = Path(temp_dir_raw)
+            sha = "a" * 40
+            (dist / f"personal-codex-{sha}.tar.gz").write_bytes(b"archive")
+            (dist / f"personal-codex-{sha}.sha256").write_text("checksum\n", encoding="utf-8")
+            release = {
+                "id": 10,
+                "tag_name": f"personal-codex-20260522-100000-{sha[:7]}",
+                "target_commitish": sha,
+                "body": "source_event=schedule",
+                "draft": True,
+                "assets": [
+                    {"name": f"personal-codex-{sha}.tar.gz"},
+                    {"name": f"personal-codex-{sha}.sha256"},
+                ],
+            }
+            requests: list[dict[str, object]] = []
+
+            def fake_request_json(url: str, *, method: str = "GET", payload=None, token=None):
+                requests.append({"url": url, "method": method, "payload": payload})
+                return dict(release, body=payload["body"], draft=payload["draft"])
+
+            with mock.patch.object(RELEASE_MODULE, "iter_releases", return_value=iter([release])):
+                with mock.patch.object(RELEASE_MODULE, "request_json", fake_request_json):
+                    with contextlib.redirect_stdout(io.StringIO()):
+                        RELEASE_MODULE.publish_release(
+                            "owner/repo",
+                            sha,
+                            dist,
+                            source_event="workflow_dispatch",
+                        )
+
+        self.assertEqual(len(requests), 1)
+        self.assertEqual(requests[0]["method"], "PATCH")
+        self.assertEqual(
+            requests[0]["payload"],
+            {
+                "body": f"Private Codex overlay release for {sha}.\n\nsource_event=workflow_dispatch",
+                "draft": False,
+            },
+        )
+
     def test_release_complete_requires_published_assets(self) -> None:
         sha = "a" * 40
         complete_release = {
