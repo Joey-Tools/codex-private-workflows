@@ -1,0 +1,168 @@
+name: Scheduled Private Overlay Sync Release
+
+on:
+  schedule:
+    - cron: "17 */8 * * *"
+  workflow_dispatch:
+    inputs:
+      force:
+        description: "Run even when the cooldown window is active."
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  actions: read
+  contents: write
+
+concurrency:
+  group: private-overlay-scheduled-sync-release
+  cancel-in-progress: false
+
+jobs:
+  sync-release:
+    name: Sync and publish private overlay release
+    runs-on: ubuntu-slim
+    timeout-minutes: 15
+    env:
+      FORCE_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.force && 'true' || 'false' }}
+    steps:
+      - name: Check out private overlay
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Check cooldown
+        id: cooldown
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          force_args=()
+          if [ "$FORCE_RUN" = "true" ]; then
+            force_args+=(--force)
+          fi
+          python3 scripts/private_overlay_release.py should-run \
+            --repo "$GITHUB_REPOSITORY" \
+            --workflow scheduled-sync-release.yml \
+            --current-run-id "$GITHUB_RUN_ID" \
+            --event "$GITHUB_EVENT_NAME" \
+            --cooldown-hours 8 \
+            "${force_args[@]}"
+
+      - name: Check out codex-toolbox
+        if: steps.cooldown.outputs.run == 'true'
+        uses: actions/checkout@v4
+        with:
+          repository: Joey-Tools/codex-toolbox
+          path: .source/codex-toolbox
+          persist-credentials: false
+
+      - name: Check out codex-debug-triage
+        if: steps.cooldown.outputs.run == 'true'
+        uses: actions/checkout@v4
+        with:
+          repository: Joey-Tools/codex-debug-triage
+          path: .source/codex-debug-triage
+          persist-credentials: false
+
+      - name: Check out codex-review-workflows
+        if: steps.cooldown.outputs.run == 'true'
+        uses: actions/checkout@v4
+        with:
+          repository: Joey-Tools/codex-review-workflows
+          path: .source/codex-review-workflows
+          persist-credentials: false
+
+      - name: Check out codex-workflow-hygiene
+        if: steps.cooldown.outputs.run == 'true'
+        uses: actions/checkout@v4
+        with:
+          repository: Joey-Tools/codex-workflow-hygiene
+          path: .source/codex-workflow-hygiene
+          persist-credentials: false
+
+      - name: Check out codex-project-journal
+        if: steps.cooldown.outputs.run == 'true'
+        uses: actions/checkout@v4
+        with:
+          repository: Joey-Tools/codex-project-journal
+          path: .source/codex-project-journal
+          persist-credentials: false
+
+      - name: Check out codex-waited-delivery
+        if: steps.cooldown.outputs.run == 'true'
+        uses: actions/checkout@v4
+        with:
+          repository: Joey-Tools/codex-waited-delivery
+          path: .source/codex-waited-delivery
+          persist-credentials: false
+
+      - name: Sync private overlay sources
+        if: steps.cooldown.outputs.run == 'true'
+        run: python3 scripts/sync_private_overlay_sources.py --source-root .source
+
+      - name: Detect sync changes
+        if: steps.cooldown.outputs.run == 'true'
+        id: changes
+        run: |
+          status="$(git status --porcelain -- scripts personal_codex .agents)"
+          if [ -z "$status" ]; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "No private overlay source changes detected."
+            exit 0
+          fi
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+          printf '%s\n' "$status"
+
+      - name: Compile helpers
+        if: steps.changes.outputs.changed == 'true'
+        run: |
+          python3 -m py_compile \
+            scripts/codex_personal_sync.py \
+            scripts/build_personal_codex_package.py \
+            scripts/private_overlay_release.py \
+            scripts/sync_private_overlay_sources.py \
+            tests/test_private_overlay_package.py \
+            tests/test_private_overlay_sync.py
+
+      - name: Run tests
+        if: steps.changes.outputs.changed == 'true'
+        run: python3 -m unittest discover -s tests
+
+      - name: Commit synced overlay
+        if: steps.changes.outputs.changed == 'true'
+        id: commit
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add scripts personal_codex .agents
+          git commit -m "Sync private overlay sources [skip ci]"
+          git push origin "HEAD:${GITHUB_REF_NAME}"
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Build release package
+        if: steps.changes.outputs.changed == 'true'
+        run: |
+          python3 scripts/build_personal_codex_package.py \
+            --sha "${{ steps.commit.outputs.sha }}" \
+            --output-dir dist
+
+      - name: Verify release package
+        if: steps.changes.outputs.changed == 'true'
+        run: |
+          python3 scripts/private_overlay_release.py verify-package \
+            --sha "${{ steps.commit.outputs.sha }}" \
+            --dist dist
+
+      - name: Publish GitHub release
+        if: steps.changes.outputs.changed == 'true'
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          python3 scripts/private_overlay_release.py publish \
+            --repo "$GITHUB_REPOSITORY" \
+            --sha "${{ steps.commit.outputs.sha }}" \
+            --dist dist

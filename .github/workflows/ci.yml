@@ -19,7 +19,13 @@ jobs:
           python-version: "3.x"
       - name: Compile helpers
         run: |
-          python3 -m py_compile scripts/codex_personal_sync.py scripts/build_personal_codex_package.py tests/test_private_overlay_package.py
+          python3 -m py_compile \
+            scripts/codex_personal_sync.py \
+            scripts/build_personal_codex_package.py \
+            scripts/private_overlay_release.py \
+            scripts/sync_private_overlay_sources.py \
+            tests/test_private_overlay_package.py \
+            tests/test_private_overlay_sync.py
       - name: Build and verify private overlay
         run: |
           python3 -m unittest discover -s tests
