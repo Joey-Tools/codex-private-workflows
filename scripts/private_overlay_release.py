@@ -49,7 +49,10 @@ def request_json(
         headers["Content-Type"] = "application/json"
     request = Request(url, data=data, headers=headers, method=method)
     with urlopen(request, timeout=30) as response:
-        return json.loads(response.read().decode("utf-8"))
+        body = response.read()
+        if not body:
+            return {}
+        return json.loads(body.decode("utf-8"))
 
 
 def parse_timestamp(raw: str) -> dt.datetime:
@@ -100,7 +103,29 @@ def _release_asset_names(release: dict[str, Any]) -> set[str]:
     assets = release.get("assets", [])
     if not isinstance(assets, list):
         return set()
-    return {asset["name"] for asset in assets if isinstance(asset, dict) and "name" in asset}
+    return {
+        asset["name"]
+        for asset in assets
+        if isinstance(asset, dict)
+        and "name" in asset
+        and asset.get("state") == "uploaded"
+    }
+
+
+def _incomplete_release_assets(
+    release: dict[str, Any],
+    expected_asset_names: set[str],
+) -> list[dict[str, Any]]:
+    assets = release.get("assets", [])
+    if not isinstance(assets, list):
+        return []
+    return [
+        asset
+        for asset in assets
+        if isinstance(asset, dict)
+        and asset.get("name") in expected_asset_names
+        and asset.get("state") != "uploaded"
+    ]
 
 
 def _release_has_complete_assets(release: dict[str, Any]) -> bool:
@@ -262,7 +287,7 @@ def create_or_find_release(
                 if not isinstance(candidate, dict):
                     raise ReleaseError("release update API returned an unexpected payload")
             return candidate, uploaded_asset_names, False
-        raise ReleaseError(f"published release {candidate['tag_name']} is missing expected assets")
+        return candidate, uploaded_asset_names, False
 
     timestamp = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%d-%H%M%S")
     tag = f"{RELEASE_TAG_PREFIX}{timestamp}-{sha[:7]}"
@@ -309,6 +334,17 @@ def publish_release(repo: str, sha: str, dist: Path, *, source_event: str = "unk
     )
     if done:
         return
+
+    for stale_asset in _incomplete_release_assets(release, expected_asset_names):
+        asset_id = stale_asset.get("id")
+        asset_name = stale_asset.get("name", "unknown")
+        if not isinstance(asset_id, int):
+            raise ReleaseError(f"incomplete release asset has no numeric id: {asset_name}")
+        request_json(
+            f"{API_ROOT}/repos/{repo}/releases/assets/{asset_id}",
+            method="DELETE",
+        )
+        print(f"Deleted incomplete asset: {asset_name}")
 
     content_types = {
         ".gz": "application/gzip",

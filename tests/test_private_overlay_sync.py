@@ -124,6 +124,25 @@ class PrivateOverlaySyncTests(unittest.TestCase):
 
         self.assertFalse((outside / "skills").exists())
 
+    def test_sync_rejects_source_ancestor_symlink(self) -> None:
+        outside = self.root / "outside-source"
+        outside_skill = outside / "example"
+        outside_skill.mkdir(parents=True)
+        (outside_skill / "SKILL.md").write_text("leaked content\n", encoding="utf-8")
+        repo = self.source_root / "example-repo"
+        repo.mkdir()
+        (repo / "skills").symlink_to(outside, target_is_directory=True)
+        rule = SYNC_MODULE.SyncRule(
+            repo="example-repo",
+            source=Path("skills/example"),
+            target=Path("personal_codex/skills/example"),
+        )
+
+        with self.assertRaisesRegex(SYNC_MODULE.SyncError, "source ancestor symlink"):
+            SYNC_MODULE.sync_sources(self.repo_root, self.source_root, (rule,))
+
+        self.assertFalse((self.repo_root / "personal_codex" / "skills" / "example").exists())
+
     def test_ignored_source_symlink_is_not_rejected(self) -> None:
         source = self.source_root / "example-repo" / "skill"
         source.mkdir(parents=True)
@@ -239,8 +258,8 @@ class PrivateOverlayReleaseTests(unittest.TestCase):
                 "body": "source_event=workflow_dispatch",
                 "draft": False,
                 "assets": [
-                    {"name": f"personal-codex-{complete_sha}.tar.gz"},
-                    {"name": f"personal-codex-{complete_sha}.sha256"},
+                    {"name": f"personal-codex-{complete_sha}.tar.gz", "state": "uploaded"},
+                    {"name": f"personal-codex-{complete_sha}.sha256", "state": "uploaded"},
                 ],
             },
             {
@@ -250,8 +269,8 @@ class PrivateOverlayReleaseTests(unittest.TestCase):
                 "body": "source_event=workflow_dispatch",
                 "draft": False,
                 "assets": [
-                    {"name": f"personal-codex-{old_sha}.tar.gz"},
-                    {"name": f"personal-codex-{old_sha}.sha256"},
+                    {"name": f"personal-codex-{old_sha}.tar.gz", "state": "uploaded"},
+                    {"name": f"personal-codex-{old_sha}.sha256", "state": "uploaded"},
                 ],
             },
             {
@@ -261,8 +280,8 @@ class PrivateOverlayReleaseTests(unittest.TestCase):
                 "body": "source_event=workflow_dispatch",
                 "draft": True,
                 "assets": [
-                    {"name": f"personal-codex-{draft_sha}.tar.gz"},
-                    {"name": f"personal-codex-{draft_sha}.sha256"},
+                    {"name": f"personal-codex-{draft_sha}.tar.gz", "state": "uploaded"},
+                    {"name": f"personal-codex-{draft_sha}.sha256", "state": "uploaded"},
                 ],
             },
             {
@@ -271,7 +290,7 @@ class PrivateOverlayReleaseTests(unittest.TestCase):
                 "published_at": "2026-05-22T11:00:00Z",
                 "body": "source_event=workflow_dispatch",
                 "draft": False,
-                "assets": [{"name": f"personal-codex-{missing_sha}.tar.gz"}],
+                "assets": [{"name": f"personal-codex-{missing_sha}.tar.gz", "state": "uploaded"}],
             },
             {
                 "tag_name": f"personal-codex-20260522-110000-{scheduled_sha[:7]}",
@@ -280,8 +299,8 @@ class PrivateOverlayReleaseTests(unittest.TestCase):
                 "body": "source_event=schedule",
                 "draft": False,
                 "assets": [
-                    {"name": f"personal-codex-{scheduled_sha}.tar.gz"},
-                    {"name": f"personal-codex-{scheduled_sha}.sha256"},
+                    {"name": f"personal-codex-{scheduled_sha}.tar.gz", "state": "uploaded"},
+                    {"name": f"personal-codex-{scheduled_sha}.sha256", "state": "uploaded"},
                 ],
             },
         ]
@@ -320,8 +339,8 @@ class PrivateOverlayReleaseTests(unittest.TestCase):
                 "target_commitish": sha,
                 "draft": False,
                 "assets": [
-                    {"name": f"personal-codex-{sha}.tar.gz"},
-                    {"name": f"personal-codex-{sha}.sha256"},
+                    {"name": f"personal-codex-{sha}.tar.gz", "state": "uploaded"},
+                    {"name": f"personal-codex-{sha}.sha256", "state": "uploaded"},
                 ],
             }
             with mock.patch.object(RELEASE_MODULE, "iter_releases", return_value=iter([release])):
@@ -341,8 +360,8 @@ class PrivateOverlayReleaseTests(unittest.TestCase):
                 "body": "source_event=schedule",
                 "draft": True,
                 "assets": [
-                    {"name": f"personal-codex-{sha}.tar.gz"},
-                    {"name": f"personal-codex-{sha}.sha256"},
+                    {"name": f"personal-codex-{sha}.tar.gz", "state": "uploaded"},
+                    {"name": f"personal-codex-{sha}.sha256", "state": "uploaded"},
                 ],
             }
             requests: list[dict[str, object]] = []
@@ -371,6 +390,66 @@ class PrivateOverlayReleaseTests(unittest.TestCase):
             },
         )
 
+    def test_publish_deletes_incomplete_assets_before_reupload(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="private-overlay-release.") as temp_dir_raw:
+            dist = Path(temp_dir_raw)
+            sha = "a" * 40
+            (dist / f"personal-codex-{sha}.tar.gz").write_bytes(b"archive")
+            (dist / f"personal-codex-{sha}.sha256").write_text("checksum\n", encoding="utf-8")
+            release = {
+                "id": 10,
+                "tag_name": f"personal-codex-20260522-100000-{sha[:7]}",
+                "target_commitish": sha,
+                "body": "source_event=workflow_dispatch",
+                "draft": True,
+                "assets": [
+                    {"id": 11, "name": f"personal-codex-{sha}.tar.gz", "state": "uploaded"},
+                    {"id": 12, "name": f"personal-codex-{sha}.sha256", "state": "starter"},
+                ],
+            }
+            requests: list[dict[str, object]] = []
+            uploads: list[str] = []
+
+            def fake_request_json(url: str, *, method: str = "GET", payload=None, token=None):
+                requests.append({"url": url, "method": method, "payload": payload})
+                return {}
+
+            class FakeResponse:
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, exc_type, exc, tb):
+                    return False
+
+                def read(self) -> bytes:
+                    return b'{"name":"personal-codex-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.sha256"}'
+
+            def fake_urlopen(request, timeout=30):
+                uploads.append(request.full_url)
+                return FakeResponse()
+
+            with mock.patch.object(RELEASE_MODULE, "iter_releases", return_value=iter([release])):
+                with mock.patch.object(RELEASE_MODULE, "request_json", fake_request_json):
+                    with mock.patch.object(RELEASE_MODULE, "urlopen", fake_urlopen):
+                        with mock.patch.object(RELEASE_MODULE, "_github_token", return_value="token"):
+                            with contextlib.redirect_stdout(io.StringIO()):
+                                RELEASE_MODULE.publish_release(
+                                    "owner/repo",
+                                    sha,
+                                    dist,
+                                    source_event="workflow_dispatch",
+                                )
+
+        self.assertTrue(
+            any(
+                request["method"] == "DELETE"
+                and str(request["url"]).endswith("/releases/assets/12")
+                for request in requests
+            )
+        )
+        self.assertEqual(len(uploads), 1)
+        self.assertIn(f"personal-codex-{sha}.sha256", uploads[0])
+
     def test_release_complete_requires_published_assets(self) -> None:
         sha = "a" * 40
         complete_release = {
@@ -378,14 +457,21 @@ class PrivateOverlayReleaseTests(unittest.TestCase):
             "target_commitish": sha,
             "draft": False,
             "assets": [
-                {"name": f"personal-codex-{sha}.tar.gz"},
-                {"name": f"personal-codex-{sha}.sha256"},
+                {"name": f"personal-codex-{sha}.tar.gz", "state": "uploaded"},
+                {"name": f"personal-codex-{sha}.sha256", "state": "uploaded"},
             ],
         }
         draft_release = dict(complete_release, draft=True)
         missing_asset_release = dict(
             complete_release,
-            assets=[{"name": f"personal-codex-{sha}.tar.gz"}],
+            assets=[{"name": f"personal-codex-{sha}.tar.gz", "state": "uploaded"}],
+        )
+        incomplete_asset_release = dict(
+            complete_release,
+            assets=[
+                {"name": f"personal-codex-{sha}.tar.gz", "state": "uploaded"},
+                {"name": f"personal-codex-{sha}.sha256", "state": "starter"},
+            ],
         )
 
         with mock.patch.object(RELEASE_MODULE, "iter_releases", return_value=iter([complete_release])):
@@ -393,6 +479,8 @@ class PrivateOverlayReleaseTests(unittest.TestCase):
         with mock.patch.object(RELEASE_MODULE, "iter_releases", return_value=iter([draft_release])):
             self.assertFalse(RELEASE_MODULE.release_complete("owner/repo", sha))
         with mock.patch.object(RELEASE_MODULE, "iter_releases", return_value=iter([missing_asset_release])):
+            self.assertFalse(RELEASE_MODULE.release_complete("owner/repo", sha))
+        with mock.patch.object(RELEASE_MODULE, "iter_releases", return_value=iter([incomplete_asset_release])):
             self.assertFalse(RELEASE_MODULE.release_complete("owner/repo", sha))
 
 

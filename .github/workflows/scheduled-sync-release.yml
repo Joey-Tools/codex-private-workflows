@@ -36,11 +36,25 @@ jobs:
         with:
           python-version: "3.x"
 
+      - name: Check current release
+        id: current-release
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          python3 scripts/private_overlay_release.py release-complete \
+            --repo "$GITHUB_REPOSITORY" \
+            --sha "$GITHUB_SHA"
+
       - name: Check cooldown
         id: cooldown
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: |
+          if [ "${{ steps.current-release.outputs.complete }}" = "false" ]; then
+            echo "run=false" >> "$GITHUB_OUTPUT"
+            echo "reason=current release is incomplete; skipping source sync and publishing current SHA" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           force_args=()
           if [ "$FORCE_RUN" = "true" ]; then
             force_args+=(--force)
@@ -118,18 +132,8 @@ jobs:
           echo "changed=true" >> "$GITHUB_OUTPUT"
           printf '%s\n' "$status"
 
-      - name: Check current release
-        if: steps.cooldown.outputs.run == 'true' && steps.changes.outputs.changed != 'true'
-        id: release-state
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
-        run: |
-          python3 scripts/private_overlay_release.py release-complete \
-            --repo "$GITHUB_REPOSITORY" \
-            --sha "$GITHUB_SHA"
-
       - name: Compile helpers
-        if: steps.changes.outputs.changed == 'true' || steps.release-state.outputs.complete == 'false'
+        if: steps.changes.outputs.changed == 'true' || steps.current-release.outputs.complete == 'false'
         run: |
           python3 -m py_compile \
             scripts/codex_personal_sync.py \
@@ -140,7 +144,7 @@ jobs:
             tests/test_private_overlay_sync.py
 
       - name: Run tests
-        if: steps.changes.outputs.changed == 'true' || steps.release-state.outputs.complete == 'false'
+        if: steps.changes.outputs.changed == 'true' || steps.current-release.outputs.complete == 'false'
         run: python3 -m unittest discover -s tests
 
       - name: Commit synced overlay
@@ -155,7 +159,7 @@ jobs:
           echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
       - name: Build release package
-        if: steps.changes.outputs.changed == 'true' || steps.release-state.outputs.complete == 'false'
+        if: steps.changes.outputs.changed == 'true' || steps.current-release.outputs.complete == 'false'
         env:
           RELEASE_SHA: ${{ steps.commit.outputs.sha || github.sha }}
         run: |
@@ -164,7 +168,7 @@ jobs:
             --output-dir dist
 
       - name: Verify release package
-        if: steps.changes.outputs.changed == 'true' || steps.release-state.outputs.complete == 'false'
+        if: steps.changes.outputs.changed == 'true' || steps.current-release.outputs.complete == 'false'
         env:
           RELEASE_SHA: ${{ steps.commit.outputs.sha || github.sha }}
         run: |
@@ -173,7 +177,7 @@ jobs:
             --dist dist
 
       - name: Publish GitHub release
-        if: steps.changes.outputs.changed == 'true' || steps.release-state.outputs.complete == 'false'
+        if: steps.changes.outputs.changed == 'true' || steps.current-release.outputs.complete == 'false'
         env:
           GITHUB_TOKEN: ${{ github.token }}
           RELEASE_SHA: ${{ steps.commit.outputs.sha || github.sha }}

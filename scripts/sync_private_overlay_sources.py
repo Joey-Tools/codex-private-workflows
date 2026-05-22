@@ -301,6 +301,35 @@ def _ensure_safe_target(repo_root: Path, target: Path) -> None:
         raise SyncError(f"refusing sync target symlink: {target}")
 
 
+def _ensure_safe_source(source_repo_root: Path, source: Path) -> None:
+    source_repo_root_raw = source_repo_root.absolute()
+    source = source.absolute()
+    try:
+        source.relative_to(source_repo_root_raw)
+    except ValueError as exc:
+        raise SyncError(f"sync source escapes source repository root: {source}") from exc
+
+    if source_repo_root_raw.is_symlink():
+        raise SyncError(f"refusing source repository root symlink: {source_repo_root_raw}")
+    ancestor = source
+    ancestors: list[Path] = []
+    while ancestor != source_repo_root_raw:
+        ancestors.append(ancestor)
+        if ancestor.parent == ancestor:
+            raise SyncError(f"sync source escapes source repository root: {source}")
+        ancestor = ancestor.parent
+    for path in reversed(ancestors):
+        if path.is_symlink():
+            raise SyncError(f"refusing sync source ancestor symlink: {path}")
+
+    source_repo_root_resolved = source_repo_root_raw.resolve(strict=True)
+    source_resolved = source.resolve(strict=True)
+    try:
+        source_resolved.relative_to(source_repo_root_resolved)
+    except ValueError as exc:
+        raise SyncError(f"sync source resolves outside source repository root: {source}") from exc
+
+
 def _copy_source_to_staging(source: Path, staging: Path, *, exclude_names: tuple[str, ...] = ()) -> None:
     ignored_names = EXCLUDED_NAMES | frozenset(exclude_names)
     _reject_unignored_symlinks(source, ignored_names)
@@ -394,10 +423,12 @@ def _reject_forbidden_residuals(target: Path, rule: SyncRule) -> None:
 def sync_sources(repo_root: Path, source_root: Path, rules: tuple[SyncRule, ...] = SYNC_RULES) -> None:
     repo_root = repo_root.resolve()
     for rule in rules:
-        source = source_root / rule.repo / rule.source
+        source_repo_root = source_root / rule.repo
+        source = source_repo_root / rule.source
         target = repo_root / rule.target
         if not source.exists():
             raise SyncError(f"sync source missing for {rule.repo}: {source}")
+        _ensure_safe_source(source_repo_root, source)
         _ensure_safe_target(repo_root, target)
         target.parent.mkdir(parents=True, exist_ok=True)
         with tempfile.TemporaryDirectory(prefix=f".{target.name}.staging.", dir=target.parent) as temp_dir:
