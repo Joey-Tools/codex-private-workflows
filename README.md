@@ -61,8 +61,8 @@ gh workflow run scheduled-sync-release.yml \
   -f force=true
 ```
 
-Scheduled fallback runs skip when a non-scheduled successful run happened in the
-previous eight hours. Ordinary manual runs also observe the eight-hour cooldown.
+Scheduled fallback runs skip when a non-scheduled complete release was published
+in the previous eight hours. Ordinary manual runs also observe the eight-hour cooldown.
 Post-merge dispatches should use `force=true` so consecutive source PR merges are
 not suppressed by cooldown.
 

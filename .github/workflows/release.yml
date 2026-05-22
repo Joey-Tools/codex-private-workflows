@@ -104,4 +104,5 @@ jobs:
           python3 scripts/private_overlay_release.py publish \
             --repo "$GITHUB_REPOSITORY" \
             --sha "$GITHUB_SHA" \
-            --dist dist
+            --dist dist \
+            --source-event "$GITHUB_EVENT_NAME"

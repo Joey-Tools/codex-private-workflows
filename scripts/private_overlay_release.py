@@ -117,11 +117,22 @@ def _release_has_complete_assets(release: dict[str, Any]) -> bool:
     return expected_asset_names <= _release_asset_names(release)
 
 
+def _release_source_event(release: dict[str, Any]) -> str | None:
+    body = release.get("body")
+    if not isinstance(body, str):
+        return None
+    for line in body.splitlines():
+        if line.startswith("source_event="):
+            return line.partition("=")[2].strip() or None
+    return None
+
+
 def recent_complete_releases(
     *,
     repo: str,
     now: dt.datetime,
     cooldown_seconds: int,
+    event: str,
 ) -> list[dict[str, Any]]:
     cutoff = now - dt.timedelta(seconds=cooldown_seconds)
     recent: list[dict[str, Any]] = []
@@ -132,6 +143,8 @@ def recent_complete_releases(
         if not isinstance(published_at_raw, str):
             continue
         if parse_timestamp(published_at_raw) < cutoff:
+            continue
+        if event == "schedule" and _release_source_event(release) == "schedule":
             continue
         if _release_has_complete_assets(release):
             recent.append(release)
@@ -155,6 +168,7 @@ def should_run(
         repo=repo,
         now=now,
         cooldown_seconds=cooldown_seconds,
+        event=event,
     )
     if not recent:
         return True, "no recent complete release in cooldown window"
@@ -211,7 +225,13 @@ def iter_releases(repo: str):
         page += 1
 
 
-def create_or_find_release(repo: str, sha: str, asset_names: set[str]) -> tuple[dict[str, Any], set[str], bool]:
+def create_or_find_release(
+    repo: str,
+    sha: str,
+    asset_names: set[str],
+    *,
+    source_event: str = "unknown",
+) -> tuple[dict[str, Any], set[str], bool]:
     for candidate in iter_releases(repo):
         tag_name = candidate.get("tag_name", "")
         uploaded_asset_names = _release_asset_names(candidate)
@@ -241,7 +261,7 @@ def create_or_find_release(repo: str, sha: str, asset_names: set[str]) -> tuple[
             "tag_name": tag,
             "target_commitish": sha,
             "name": tag,
-            "body": f"Private Codex overlay release for {sha}.",
+            "body": f"Private Codex overlay release for {sha}.\n\nsource_event={source_event}",
             "draft": True,
             "prerelease": False,
         },
@@ -260,7 +280,7 @@ def release_complete(repo: str, sha: str) -> bool:
     return False
 
 
-def publish_release(repo: str, sha: str, dist: Path) -> None:
+def publish_release(repo: str, sha: str, dist: Path, *, source_event: str = "unknown") -> None:
     assets = [
         dist / f"personal-codex-{sha}.tar.gz",
         dist / f"personal-codex-{sha}.sha256",
@@ -269,7 +289,12 @@ def publish_release(repo: str, sha: str, dist: Path) -> None:
         if not asset.is_file():
             raise ReleaseError(f"release asset is missing: {asset}")
     expected_asset_names = {asset.name for asset in assets}
-    release, uploaded_asset_names, done = create_or_find_release(repo, sha, expected_asset_names)
+    release, uploaded_asset_names, done = create_or_find_release(
+        repo,
+        sha,
+        expected_asset_names,
+        source_event=source_event,
+    )
     if done:
         return
 
@@ -350,7 +375,7 @@ def command_verify_package(args: argparse.Namespace) -> int:
 
 
 def command_publish(args: argparse.Namespace) -> int:
-    publish_release(args.repo, args.sha, Path(args.dist))
+    publish_release(args.repo, args.sha, Path(args.dist), source_event=args.source_event)
     return 0
 
 
@@ -384,6 +409,7 @@ def build_parser() -> argparse.ArgumentParser:
     publish_parser.add_argument("--repo", required=True)
     publish_parser.add_argument("--sha", required=True)
     publish_parser.add_argument("--dist", default="dist")
+    publish_parser.add_argument("--source-event", default=os.environ.get("GITHUB_EVENT_NAME", "unknown"))
     publish_parser.set_defaults(func=command_publish)
 
     release_complete_parser = subparsers.add_parser("release-complete")

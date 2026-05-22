@@ -194,6 +194,7 @@ class PrivateOverlayReleaseTests(unittest.TestCase):
                 {
                     "tag_name": "personal-codex-20260522-100000-aaaaaaaa",
                     "published_at": "2026-05-22T10:00:00Z",
+                    "body": "source_event=workflow_dispatch",
                 }
             ],
         ):
@@ -229,11 +230,13 @@ class PrivateOverlayReleaseTests(unittest.TestCase):
         old_sha = "b" * 40
         draft_sha = "c" * 40
         missing_sha = "d" * 40
+        scheduled_sha = "e" * 40
         releases = [
             {
                 "tag_name": f"personal-codex-20260522-110000-{complete_sha[:7]}",
                 "target_commitish": complete_sha,
                 "published_at": "2026-05-22T11:00:00Z",
+                "body": "source_event=workflow_dispatch",
                 "draft": False,
                 "assets": [
                     {"name": f"personal-codex-{complete_sha}.tar.gz"},
@@ -244,6 +247,7 @@ class PrivateOverlayReleaseTests(unittest.TestCase):
                 "tag_name": f"personal-codex-20260522-010000-{old_sha[:7]}",
                 "target_commitish": old_sha,
                 "published_at": "2026-05-22T01:00:00Z",
+                "body": "source_event=workflow_dispatch",
                 "draft": False,
                 "assets": [
                     {"name": f"personal-codex-{old_sha}.tar.gz"},
@@ -254,6 +258,7 @@ class PrivateOverlayReleaseTests(unittest.TestCase):
                 "tag_name": f"personal-codex-20260522-110000-{draft_sha[:7]}",
                 "target_commitish": draft_sha,
                 "published_at": "2026-05-22T11:00:00Z",
+                "body": "source_event=workflow_dispatch",
                 "draft": True,
                 "assets": [
                     {"name": f"personal-codex-{draft_sha}.tar.gz"},
@@ -264,8 +269,20 @@ class PrivateOverlayReleaseTests(unittest.TestCase):
                 "tag_name": f"personal-codex-20260522-110000-{missing_sha[:7]}",
                 "target_commitish": missing_sha,
                 "published_at": "2026-05-22T11:00:00Z",
+                "body": "source_event=workflow_dispatch",
                 "draft": False,
                 "assets": [{"name": f"personal-codex-{missing_sha}.tar.gz"}],
+            },
+            {
+                "tag_name": f"personal-codex-20260522-110000-{scheduled_sha[:7]}",
+                "target_commitish": scheduled_sha,
+                "published_at": "2026-05-22T11:00:00Z",
+                "body": "source_event=schedule",
+                "draft": False,
+                "assets": [
+                    {"name": f"personal-codex-{scheduled_sha}.tar.gz"},
+                    {"name": f"personal-codex-{scheduled_sha}.sha256"},
+                ],
             },
         ]
         with mock.patch.object(RELEASE_MODULE, "iter_releases", return_value=iter(releases)):
@@ -273,9 +290,23 @@ class PrivateOverlayReleaseTests(unittest.TestCase):
                 repo="owner/repo",
                 now=now,
                 cooldown_seconds=8 * 60 * 60,
+                event="schedule",
             )
 
         self.assertEqual([release["target_commitish"] for release in recent], [complete_sha])
+
+        with mock.patch.object(RELEASE_MODULE, "iter_releases", return_value=iter(releases)):
+            recent = RELEASE_MODULE.recent_complete_releases(
+                repo="owner/repo",
+                now=now,
+                cooldown_seconds=8 * 60 * 60,
+                event="workflow_dispatch",
+            )
+
+        self.assertEqual(
+            [release["target_commitish"] for release in recent],
+            [complete_sha, scheduled_sha],
+        )
 
     def test_publish_is_idempotent_when_release_assets_exist(self) -> None:
         with tempfile.TemporaryDirectory(prefix="private-overlay-release.") as temp_dir_raw:
