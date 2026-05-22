@@ -194,4 +194,4 @@ PY
 
 ## 4. Escalate To Remote Coverage Only When Needed
 
-If the user is asking for a work summary, activity audit, or session recovery that may include `miku-bot-dev` or `hoteng-srv-01`, use `$remote-host-context` before concluding that the local `~/.codex` tree is complete.
+If Joey is asking for a work summary, activity audit, or session recovery that may include `miku-bot-dev` or `hoteng-srv-01`, use `$remote-host-context` before concluding that the local `~/.codex` tree is complete.

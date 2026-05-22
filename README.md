@@ -22,7 +22,10 @@ private-owned symlinks.
 python3 -m py_compile \
   scripts/codex_personal_sync.py \
   scripts/build_personal_codex_package.py \
-  tests/test_private_overlay_package.py
+  scripts/private_overlay_release.py \
+  scripts/sync_private_overlay_sources.py \
+  tests/test_private_overlay_package.py \
+  tests/test_private_overlay_sync.py
 
 python3 -m unittest discover -s tests
 ```
@@ -43,6 +46,25 @@ python3 scripts/build_personal_codex_package.py \
   --sha <40-hex-sha> \
   --output-dir dist
 ```
+
+`Scheduled Private Overlay Sync Release` is a low-frequency fallback that runs every
+eight hours and can also be manually dispatched. It syncs explicit public Joey-Tools
+sources into this private aggregate, preserves private Joey/Cisco transforms, and
+publishes a new release only when the sync creates a repository diff.
+
+After merging a Joey-Tools source-repo PR that should flow into the private overlay,
+trigger the sync manually so the release is not delayed until the fallback window:
+
+```bash
+gh workflow run scheduled-sync-release.yml \
+  --repo Joey-Tools/codex-private-workflows \
+  -f force=true
+```
+
+Scheduled fallback runs skip when a non-scheduled complete release was published
+in the previous eight hours. Ordinary manual runs also observe the eight-hour cooldown.
+Post-merge dispatches should use `force=true` so consecutive source PR merges are
+not suppressed by cooldown.
 
 The private manifest declares the public base release repo through `base_release.repo`.
 Private machines should bootstrap the public runner from a `Joey-Tools/codex-toolbox`
