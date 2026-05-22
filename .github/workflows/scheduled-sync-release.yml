@@ -16,12 +16,13 @@ permissions:
   contents: write
 
 concurrency:
-  group: private-overlay-scheduled-sync-release
+  group: private-overlay-release-${{ github.repository }}-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
   sync-release:
     name: Sync and publish private overlay release
+    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
     runs-on: ubuntu-slim
     timeout-minutes: 15
     env:
@@ -117,8 +118,18 @@ jobs:
           echo "changed=true" >> "$GITHUB_OUTPUT"
           printf '%s\n' "$status"
 
+      - name: Check current release
+        if: steps.cooldown.outputs.run == 'true' && steps.changes.outputs.changed != 'true'
+        id: release-state
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          python3 scripts/private_overlay_release.py release-complete \
+            --repo "$GITHUB_REPOSITORY" \
+            --sha "$GITHUB_SHA"
+
       - name: Compile helpers
-        if: steps.changes.outputs.changed == 'true'
+        if: steps.changes.outputs.changed == 'true' || steps.release-state.outputs.complete == 'false'
         run: |
           python3 -m py_compile \
             scripts/codex_personal_sync.py \
@@ -129,7 +140,7 @@ jobs:
             tests/test_private_overlay_sync.py
 
       - name: Run tests
-        if: steps.changes.outputs.changed == 'true'
+        if: steps.changes.outputs.changed == 'true' || steps.release-state.outputs.complete == 'false'
         run: python3 -m unittest discover -s tests
 
       - name: Commit synced overlay
@@ -144,25 +155,30 @@ jobs:
           echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
       - name: Build release package
-        if: steps.changes.outputs.changed == 'true'
+        if: steps.changes.outputs.changed == 'true' || steps.release-state.outputs.complete == 'false'
+        env:
+          RELEASE_SHA: ${{ steps.commit.outputs.sha || github.sha }}
         run: |
           python3 scripts/build_personal_codex_package.py \
-            --sha "${{ steps.commit.outputs.sha }}" \
+            --sha "$RELEASE_SHA" \
             --output-dir dist
 
       - name: Verify release package
-        if: steps.changes.outputs.changed == 'true'
+        if: steps.changes.outputs.changed == 'true' || steps.release-state.outputs.complete == 'false'
+        env:
+          RELEASE_SHA: ${{ steps.commit.outputs.sha || github.sha }}
         run: |
           python3 scripts/private_overlay_release.py verify-package \
-            --sha "${{ steps.commit.outputs.sha }}" \
+            --sha "$RELEASE_SHA" \
             --dist dist
 
       - name: Publish GitHub release
-        if: steps.changes.outputs.changed == 'true'
+        if: steps.changes.outputs.changed == 'true' || steps.release-state.outputs.complete == 'false'
         env:
           GITHUB_TOKEN: ${{ github.token }}
+          RELEASE_SHA: ${{ steps.commit.outputs.sha || github.sha }}
         run: |
           python3 scripts/private_overlay_release.py publish \
             --repo "$GITHUB_REPOSITORY" \
-            --sha "${{ steps.commit.outputs.sha }}" \
+            --sha "$RELEASE_SHA" \
             --dist dist

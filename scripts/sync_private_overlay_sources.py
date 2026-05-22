@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 import shutil
 import sys
+import tempfile
 
 
 class SyncError(RuntimeError):
@@ -27,6 +28,7 @@ class SyncRule:
     replacements: tuple[Replacement, ...] = ()
     text_extensions: tuple[str, ...] = (".md", ".yaml", ".yml", ".py", ".toml", ".json")
     exclude_names: tuple[str, ...] = ()
+    forbidden_residuals: tuple[str, ...] = ()
 
 
 def _path(raw: str) -> Path:
@@ -55,6 +57,7 @@ def _rule(
     *,
     common_joey_text: bool = False,
     exclude_names: tuple[str, ...] = (),
+    forbidden_residuals: tuple[str, ...] = (),
 ) -> SyncRule:
     if common_joey_text:
         replacements = replacements + COMMON_JOEY_TEXT_REPLACEMENTS
@@ -64,6 +67,7 @@ def _rule(
         target=_path(target),
         replacements=replacements,
         exclude_names=exclude_names,
+        forbidden_residuals=forbidden_residuals,
     )
 
 
@@ -127,6 +131,14 @@ SYNC_RULES = (
             Replacement("if parsed.hostname not in _allowed_hosts():", "if parsed.hostname not in ALLOWED_HOSTS:"),
         ),
         common_joey_text=True,
+        forbidden_residuals=(
+            "jenkins.example.com",
+            "JENKINS_ARTIFACT_USER",
+            "JENKINS_ARTIFACT_TOKEN",
+            "--auth-profile default",
+            "DEFAULT_ALLOWED_HOSTS",
+            "_allowed_hosts()",
+        ),
     ),
     _rule(
         "codex-review-workflows",
@@ -149,6 +161,10 @@ SYNC_RULES = (
             Replacement("Concrete tracker issue URLs", "Concrete Jira issue URLs"),
         ),
         common_joey_text=True,
+        forbidden_residuals=(
+            "environment-specific remote evidence workflow",
+            "environment-specific workflow",
+        ),
     ),
     _rule(
         "codex-workflow-hygiene",
@@ -244,39 +260,86 @@ def _is_text_candidate(path: Path, extensions: tuple[str, ...]) -> bool:
     return path.suffix in extensions or path.name in {"SKILL.md", "README.md"}
 
 
-def _reject_symlinks(path: Path) -> None:
+def _is_ignored_name(name: str, ignored_names: frozenset[str]) -> bool:
+    return name in ignored_names or any(name.endswith(suffix) for suffix in EXCLUDED_SUFFIXES)
+
+
+def _is_ignored_relative(path: Path, root: Path, ignored_names: frozenset[str]) -> bool:
+    return any(_is_ignored_name(part, ignored_names) for part in path.relative_to(root).parts)
+
+
+def _reject_unignored_symlinks(path: Path, ignored_names: frozenset[str]) -> None:
     if path.is_symlink():
         raise SyncError(f"refusing to sync symlink: {path}")
     if path.is_dir():
         for child in path.rglob("*"):
+            if _is_ignored_relative(child, path, ignored_names):
+                continue
             if child.is_symlink():
                 raise SyncError(f"refusing to sync nested symlink: {child}")
 
 
-def _copy_source(source: Path, target: Path, *, exclude_names: tuple[str, ...] = ()) -> None:
-    _reject_symlinks(source)
-    if target.exists() or target.is_symlink():
-        if target.is_dir() and not target.is_symlink():
-            shutil.rmtree(target)
-        else:
-            target.unlink()
-    target.parent.mkdir(parents=True, exist_ok=True)
+def _ensure_safe_target(repo_root: Path, target: Path) -> None:
+    repo_root = repo_root.resolve()
+    target = target.absolute()
+    try:
+        target.relative_to(repo_root)
+    except ValueError as exc:
+        raise SyncError(f"sync target escapes repository root: {target}") from exc
+
+    ancestor = target.parent
+    ancestors: list[Path] = []
+    while ancestor != repo_root:
+        ancestors.append(ancestor)
+        if ancestor.parent == ancestor:
+            raise SyncError(f"sync target escapes repository root: {target}")
+        ancestor = ancestor.parent
+    for path in reversed(ancestors):
+        if path.is_symlink():
+            raise SyncError(f"refusing sync target ancestor symlink: {path}")
+    if target.is_symlink():
+        raise SyncError(f"refusing sync target symlink: {target}")
+
+
+def _copy_source_to_staging(source: Path, staging: Path, *, exclude_names: tuple[str, ...] = ()) -> None:
+    ignored_names = EXCLUDED_NAMES | frozenset(exclude_names)
+    _reject_unignored_symlinks(source, ignored_names)
     if source.is_dir():
-        ignored_names = EXCLUDED_NAMES | frozenset(exclude_names)
         shutil.copytree(
             source,
-            target,
+            staging,
             ignore=lambda _dir, names: [
                 name
                 for name in names
-                if name in ignored_names or any(name.endswith(suffix) for suffix in EXCLUDED_SUFFIXES)
+                if _is_ignored_name(name, ignored_names)
             ],
         )
         return
     if source.is_file():
-        shutil.copy2(source, target)
+        staging.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, staging)
         return
     raise SyncError(f"unsupported source type: {source}")
+
+
+def _replace_target(target: Path, staging: Path) -> None:
+    target.parent.mkdir(parents=True, exist_ok=True)
+    backup: Path | None = None
+    if target.exists():
+        backup = Path(tempfile.mkdtemp(prefix=f".{target.name}.backup.", dir=target.parent))
+        backup.rmdir()
+        target.rename(backup)
+    try:
+        staging.rename(target)
+    except Exception:
+        if backup is not None and backup.exists() and not target.exists():
+            backup.rename(target)
+        raise
+    if backup is not None:
+        if backup.is_dir():
+            shutil.rmtree(backup)
+        else:
+            backup.unlink()
 
 
 def _apply_replacements(path: Path, replacements: tuple[Replacement, ...]) -> set[int]:
@@ -297,27 +360,52 @@ def _apply_replacements(path: Path, replacements: tuple[Replacement, ...]) -> se
     return found
 
 
+def _text_candidate_paths(target: Path, rule: SyncRule) -> list[Path]:
+    paths = [target] if target.is_file() else sorted(path for path in target.rglob("*") if path.is_file())
+    return [path for path in paths if _is_text_candidate(path, rule.text_extensions)]
+
+
 def _apply_rule_replacements(target: Path, rule: SyncRule) -> None:
     if not rule.replacements:
         return
-    paths = [target] if target.is_file() else sorted(path for path in target.rglob("*") if path.is_file())
     found: set[int] = set()
-    for path in paths:
-        if _is_text_candidate(path, rule.text_extensions):
-            found.update(_apply_replacements(path, rule.replacements))
+    for path in _text_candidate_paths(target, rule):
+        found.update(_apply_replacements(path, rule.replacements))
     for index, replacement in enumerate(rule.replacements):
         if replacement.required and index not in found:
             raise SyncError(f"required replacement did not match for {rule.target}: {replacement.old!r}")
 
 
+def _reject_forbidden_residuals(target: Path, rule: SyncRule) -> None:
+    if not rule.forbidden_residuals:
+        return
+    for path in _text_candidate_paths(target, rule):
+        try:
+            text = path.read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            continue
+        for residual in rule.forbidden_residuals:
+            if residual in text:
+                raise SyncError(
+                    f"forbidden residual {residual!r} remains in {path.relative_to(target)}"
+                )
+
+
 def sync_sources(repo_root: Path, source_root: Path, rules: tuple[SyncRule, ...] = SYNC_RULES) -> None:
+    repo_root = repo_root.resolve()
     for rule in rules:
         source = source_root / rule.repo / rule.source
         target = repo_root / rule.target
         if not source.exists():
             raise SyncError(f"sync source missing for {rule.repo}: {source}")
-        _copy_source(source, target, exclude_names=rule.exclude_names)
-        _apply_rule_replacements(target, rule)
+        _ensure_safe_target(repo_root, target)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix=f".{target.name}.staging.", dir=target.parent) as temp_dir:
+            staging = Path(temp_dir) / target.name
+            _copy_source_to_staging(source, staging, exclude_names=rule.exclude_names)
+            _apply_rule_replacements(staging, rule)
+            _reject_forbidden_residuals(staging, rule)
+            _replace_target(target, staging)
 
 
 def build_parser() -> argparse.ArgumentParser:

@@ -5,6 +5,7 @@ import importlib.util
 import contextlib
 import io
 from pathlib import Path
+import re
 import sys
 import tempfile
 import unittest
@@ -86,10 +87,92 @@ class PrivateOverlaySyncTests(unittest.TestCase):
         with self.assertRaisesRegex(SYNC_MODULE.SyncError, "required replacement"):
             SYNC_MODULE.sync_sources(self.repo_root, self.source_root, (rule,))
 
+    def test_failed_replacement_leaves_existing_target_unchanged(self) -> None:
+        source = self.source_root / "example-repo" / "skill" / "SKILL.md"
+        source.parent.mkdir(parents=True)
+        source.write_text("public content\n", encoding="utf-8")
+        target = self.repo_root / "personal_codex" / "skills" / "example" / "SKILL.md"
+        target.parent.mkdir(parents=True)
+        target.write_text("private content\n", encoding="utf-8")
+        rule = SYNC_MODULE.SyncRule(
+            repo="example-repo",
+            source=Path("skill"),
+            target=Path("personal_codex/skills/example"),
+            replacements=(SYNC_MODULE.Replacement("missing", "replacement"),),
+        )
+
+        with self.assertRaisesRegex(SYNC_MODULE.SyncError, "required replacement"):
+            SYNC_MODULE.sync_sources(self.repo_root, self.source_root, (rule,))
+
+        self.assertEqual(target.read_text(encoding="utf-8"), "private content\n")
+
+    def test_sync_rejects_target_ancestor_symlink(self) -> None:
+        source = self.source_root / "example-repo" / "skill" / "SKILL.md"
+        source.parent.mkdir(parents=True)
+        source.write_text("content\n", encoding="utf-8")
+        outside = self.root / "outside"
+        outside.mkdir()
+        (self.repo_root / "personal_codex").symlink_to(outside, target_is_directory=True)
+        rule = SYNC_MODULE.SyncRule(
+            repo="example-repo",
+            source=Path("skill"),
+            target=Path("personal_codex/skills/example"),
+        )
+
+        with self.assertRaisesRegex(SYNC_MODULE.SyncError, "ancestor symlink"):
+            SYNC_MODULE.sync_sources(self.repo_root, self.source_root, (rule,))
+
+        self.assertFalse((outside / "skills").exists())
+
+    def test_ignored_source_symlink_is_not_rejected(self) -> None:
+        source = self.source_root / "example-repo" / "skill"
+        source.mkdir(parents=True)
+        (source / "SKILL.md").write_text("content\n", encoding="utf-8")
+        (source / ".github").mkdir()
+        (source / ".github" / "leak").symlink_to(Path.home())
+        rule = SYNC_MODULE.SyncRule(
+            repo="example-repo",
+            source=Path("skill"),
+            target=Path("personal_codex/skills/example"),
+        )
+
+        SYNC_MODULE.sync_sources(self.repo_root, self.source_root, (rule,))
+
+        self.assertTrue(
+            (self.repo_root / "personal_codex" / "skills" / "example" / "SKILL.md").is_file()
+        )
+
+    def test_forbidden_residuals_fail_sync(self) -> None:
+        source = self.source_root / "example-repo" / "skill" / "SKILL.md"
+        source.parent.mkdir(parents=True)
+        source.write_text("public-token\n", encoding="utf-8")
+        rule = SYNC_MODULE.SyncRule(
+            repo="example-repo",
+            source=Path("skill"),
+            target=Path("personal_codex/skills/example"),
+            forbidden_residuals=("public-token",),
+        )
+
+        with self.assertRaisesRegex(SYNC_MODULE.SyncError, "forbidden residual"):
+            SYNC_MODULE.sync_sources(self.repo_root, self.source_root, (rule,))
+
+        self.assertFalse((self.repo_root / "personal_codex" / "skills" / "example").exists())
+
+    def test_scheduled_workflow_checks_out_all_sync_rule_repos(self) -> None:
+        workflow = (
+            REPO_ROOT / ".github" / "workflows" / "scheduled-sync-release.yml"
+        ).read_text(encoding="utf-8")
+        checked_out_repos = set(re.findall(r"repository: Joey-Tools/([-a-z0-9]+)", workflow))
+        checked_out_paths = set(re.findall(r"path: \.source/([-a-z0-9]+)", workflow))
+        sync_rule_repos = {rule.repo for rule in SYNC_MODULE.SYNC_RULES}
+
+        self.assertEqual(checked_out_repos, sync_rule_repos)
+        self.assertEqual(checked_out_paths, sync_rule_repos)
+
 
 class PrivateOverlayReleaseTests(unittest.TestCase):
     def test_force_bypasses_cooldown_lookup(self) -> None:
-        with mock.patch.object(RELEASE_MODULE, "recent_successful_runs") as lookup:
+        with mock.patch.object(RELEASE_MODULE, "recent_complete_releases") as lookup:
             run, reason = RELEASE_MODULE.should_run(
                 repo="owner/repo",
                 workflow="scheduled-sync-release.yml",
@@ -103,11 +186,16 @@ class PrivateOverlayReleaseTests(unittest.TestCase):
         self.assertEqual(reason, "force=true")
         lookup.assert_not_called()
 
-    def test_manual_default_skips_when_recent_success_exists(self) -> None:
+    def test_manual_default_skips_when_recent_complete_release_exists(self) -> None:
         with mock.patch.object(
             RELEASE_MODULE,
-            "recent_successful_runs",
-            return_value=[{"id": 2, "event": "workflow_dispatch", "created_at": "2026-05-22T10:00:00Z"}],
+            "recent_complete_releases",
+            return_value=[
+                {
+                    "tag_name": "personal-codex-20260522-100000-aaaaaaaa",
+                    "published_at": "2026-05-22T10:00:00Z",
+                }
+            ],
         ):
             run, reason = RELEASE_MODULE.should_run(
                 repo="owner/repo",
@@ -121,33 +209,73 @@ class PrivateOverlayReleaseTests(unittest.TestCase):
         self.assertFalse(run)
         self.assertIn("cooldown active", reason)
 
-    def test_schedule_ignores_recent_schedule_but_counts_manual(self) -> None:
-        now = dt.datetime(2026, 5, 22, 12, 0, tzinfo=dt.timezone.utc)
-        payload = {
-            "workflow_runs": [
-                {
-                    "id": 2,
-                    "event": "schedule",
-                    "created_at": "2026-05-22T11:00:00Z",
-                },
-                {
-                    "id": 3,
-                    "event": "workflow_dispatch",
-                    "created_at": "2026-05-22T10:30:00Z",
-                },
-            ]
-        }
-        with mock.patch.object(RELEASE_MODULE, "request_json", return_value=payload):
-            recent = RELEASE_MODULE.recent_successful_runs(
+    def test_noop_workflow_runs_do_not_anchor_cooldown(self) -> None:
+        with mock.patch.object(RELEASE_MODULE, "recent_complete_releases", return_value=[]):
+            run, reason = RELEASE_MODULE.should_run(
                 repo="owner/repo",
                 workflow="scheduled-sync-release.yml",
                 current_run_id="1",
-                now=now,
-                cooldown_seconds=8 * 60 * 60,
                 event="schedule",
+                force=False,
+                cooldown_seconds=8 * 60 * 60,
             )
 
-        self.assertEqual([run["id"] for run in recent], [3])
+        self.assertTrue(run)
+        self.assertIn("no recent complete release", reason)
+
+    def test_recent_complete_releases_require_published_complete_assets(self) -> None:
+        now = dt.datetime(2026, 5, 22, 12, 0, tzinfo=dt.timezone.utc)
+        complete_sha = "a" * 40
+        old_sha = "b" * 40
+        draft_sha = "c" * 40
+        missing_sha = "d" * 40
+        releases = [
+            {
+                "tag_name": f"personal-codex-20260522-110000-{complete_sha[:7]}",
+                "target_commitish": complete_sha,
+                "published_at": "2026-05-22T11:00:00Z",
+                "draft": False,
+                "assets": [
+                    {"name": f"personal-codex-{complete_sha}.tar.gz"},
+                    {"name": f"personal-codex-{complete_sha}.sha256"},
+                ],
+            },
+            {
+                "tag_name": f"personal-codex-20260522-010000-{old_sha[:7]}",
+                "target_commitish": old_sha,
+                "published_at": "2026-05-22T01:00:00Z",
+                "draft": False,
+                "assets": [
+                    {"name": f"personal-codex-{old_sha}.tar.gz"},
+                    {"name": f"personal-codex-{old_sha}.sha256"},
+                ],
+            },
+            {
+                "tag_name": f"personal-codex-20260522-110000-{draft_sha[:7]}",
+                "target_commitish": draft_sha,
+                "published_at": "2026-05-22T11:00:00Z",
+                "draft": True,
+                "assets": [
+                    {"name": f"personal-codex-{draft_sha}.tar.gz"},
+                    {"name": f"personal-codex-{draft_sha}.sha256"},
+                ],
+            },
+            {
+                "tag_name": f"personal-codex-20260522-110000-{missing_sha[:7]}",
+                "target_commitish": missing_sha,
+                "published_at": "2026-05-22T11:00:00Z",
+                "draft": False,
+                "assets": [{"name": f"personal-codex-{missing_sha}.tar.gz"}],
+            },
+        ]
+        with mock.patch.object(RELEASE_MODULE, "iter_releases", return_value=iter(releases)):
+            recent = RELEASE_MODULE.recent_complete_releases(
+                repo="owner/repo",
+                now=now,
+                cooldown_seconds=8 * 60 * 60,
+            )
+
+        self.assertEqual([release["target_commitish"] for release in recent], [complete_sha])
 
     def test_publish_is_idempotent_when_release_assets_exist(self) -> None:
         with tempfile.TemporaryDirectory(prefix="private-overlay-release.") as temp_dir_raw:
@@ -168,6 +296,30 @@ class PrivateOverlayReleaseTests(unittest.TestCase):
             with mock.patch.object(RELEASE_MODULE, "iter_releases", return_value=iter([release])):
                 with contextlib.redirect_stdout(io.StringIO()):
                     RELEASE_MODULE.publish_release("owner/repo", sha, dist)
+
+    def test_release_complete_requires_published_assets(self) -> None:
+        sha = "a" * 40
+        complete_release = {
+            "tag_name": f"personal-codex-20260522-100000-{sha[:7]}",
+            "target_commitish": sha,
+            "draft": False,
+            "assets": [
+                {"name": f"personal-codex-{sha}.tar.gz"},
+                {"name": f"personal-codex-{sha}.sha256"},
+            ],
+        }
+        draft_release = dict(complete_release, draft=True)
+        missing_asset_release = dict(
+            complete_release,
+            assets=[{"name": f"personal-codex-{sha}.tar.gz"}],
+        )
+
+        with mock.patch.object(RELEASE_MODULE, "iter_releases", return_value=iter([complete_release])):
+            self.assertTrue(RELEASE_MODULE.release_complete("owner/repo", sha))
+        with mock.patch.object(RELEASE_MODULE, "iter_releases", return_value=iter([draft_release])):
+            self.assertFalse(RELEASE_MODULE.release_complete("owner/repo", sha))
+        with mock.patch.object(RELEASE_MODULE, "iter_releases", return_value=iter([missing_asset_release])):
+            self.assertFalse(RELEASE_MODULE.release_complete("owner/repo", sha))
 
 
 if __name__ == "__main__":

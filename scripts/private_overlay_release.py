@@ -11,11 +11,13 @@ import sys
 from typing import Any
 from urllib.parse import quote
 from urllib.request import Request, urlopen
+import re
 
 
 API_ROOT = "https://api.github.com"
 UPLOAD_ROOT = "https://uploads.github.com"
 RELEASE_TAG_PREFIX = "personal-codex-"
+SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 
 
 class ReleaseError(RuntimeError):
@@ -94,6 +96,48 @@ def recent_successful_runs(
     return recent
 
 
+def _release_asset_names(release: dict[str, Any]) -> set[str]:
+    assets = release.get("assets", [])
+    if not isinstance(assets, list):
+        return set()
+    return {asset["name"] for asset in assets if isinstance(asset, dict) and "name" in asset}
+
+
+def _release_has_complete_assets(release: dict[str, Any]) -> bool:
+    sha = release.get("target_commitish")
+    tag_name = release.get("tag_name", "")
+    if not isinstance(sha, str) or not SHA_RE.fullmatch(sha):
+        return False
+    if not isinstance(tag_name, str) or not tag_name.startswith(RELEASE_TAG_PREFIX):
+        return False
+    expected_asset_names = {
+        f"personal-codex-{sha}.tar.gz",
+        f"personal-codex-{sha}.sha256",
+    }
+    return expected_asset_names <= _release_asset_names(release)
+
+
+def recent_complete_releases(
+    *,
+    repo: str,
+    now: dt.datetime,
+    cooldown_seconds: int,
+) -> list[dict[str, Any]]:
+    cutoff = now - dt.timedelta(seconds=cooldown_seconds)
+    recent: list[dict[str, Any]] = []
+    for release in iter_releases(repo):
+        if not isinstance(release, dict) or release.get("draft", False):
+            continue
+        published_at_raw = release.get("published_at") or release.get("created_at")
+        if not isinstance(published_at_raw, str):
+            continue
+        if parse_timestamp(published_at_raw) < cutoff:
+            continue
+        if _release_has_complete_assets(release):
+            recent.append(release)
+    return recent
+
+
 def should_run(
     *,
     repo: str,
@@ -107,22 +151,19 @@ def should_run(
     if force:
         return True, "force=true"
     now = now or dt.datetime.now(dt.timezone.utc)
-    recent = recent_successful_runs(
+    recent = recent_complete_releases(
         repo=repo,
-        workflow=workflow,
-        current_run_id=current_run_id,
         now=now,
         cooldown_seconds=cooldown_seconds,
-        event=event,
     )
     if not recent:
-        return True, "no recent successful run in cooldown window"
+        return True, "no recent complete release in cooldown window"
     latest = recent[0]
     return (
         False,
-        "cooldown active after "
-        f"{latest.get('event', 'unknown')} run {latest.get('id', 'unknown')} "
-        f"at {latest.get('created_at', 'unknown')}",
+        "cooldown active after complete release "
+        f"{latest.get('tag_name', 'unknown')} at "
+        f"{latest.get('published_at') or latest.get('created_at', 'unknown')}",
     )
 
 
@@ -173,10 +214,7 @@ def iter_releases(repo: str):
 def create_or_find_release(repo: str, sha: str, asset_names: set[str]) -> tuple[dict[str, Any], set[str], bool]:
     for candidate in iter_releases(repo):
         tag_name = candidate.get("tag_name", "")
-        assets = candidate.get("assets", [])
-        if not isinstance(assets, list):
-            assets = []
-        uploaded_asset_names = {asset["name"] for asset in assets if isinstance(asset, dict) and "name" in asset}
+        uploaded_asset_names = _release_asset_names(candidate)
         if candidate.get("target_commitish") != sha or not tag_name.startswith(RELEASE_TAG_PREFIX):
             continue
         if asset_names <= uploaded_asset_names:
@@ -211,6 +249,15 @@ def create_or_find_release(repo: str, sha: str, asset_names: set[str]) -> tuple[
     if not isinstance(release, dict):
         raise ReleaseError("release creation API returned an unexpected payload")
     return release, set(), False
+
+
+def release_complete(repo: str, sha: str) -> bool:
+    for candidate in iter_releases(repo):
+        if candidate.get("target_commitish") != sha:
+            continue
+        if _release_has_complete_assets(candidate) and not candidate.get("draft", False):
+            return True
+    return False
 
 
 def publish_release(repo: str, sha: str, dist: Path) -> None:
@@ -274,6 +321,14 @@ def _write_github_output(run: bool, reason: str) -> None:
         file.write(f"reason={reason}\n")
 
 
+def _write_release_complete_output(complete: bool) -> None:
+    output_path = os.environ.get("GITHUB_OUTPUT")
+    if not output_path:
+        return
+    with Path(output_path).open("a", encoding="utf-8") as file:
+        file.write(f"complete={'true' if complete else 'false'}\n")
+
+
 def command_should_run(args: argparse.Namespace) -> int:
     run, reason = should_run(
         repo=args.repo,
@@ -296,6 +351,13 @@ def command_verify_package(args: argparse.Namespace) -> int:
 
 def command_publish(args: argparse.Namespace) -> int:
     publish_release(args.repo, args.sha, Path(args.dist))
+    return 0
+
+
+def command_release_complete(args: argparse.Namespace) -> int:
+    complete = release_complete(args.repo, args.sha)
+    _write_release_complete_output(complete)
+    print(f"complete={'true' if complete else 'false'}")
     return 0
 
 
@@ -323,6 +385,11 @@ def build_parser() -> argparse.ArgumentParser:
     publish_parser.add_argument("--sha", required=True)
     publish_parser.add_argument("--dist", default="dist")
     publish_parser.set_defaults(func=command_publish)
+
+    release_complete_parser = subparsers.add_parser("release-complete")
+    release_complete_parser.add_argument("--repo", required=True)
+    release_complete_parser.add_argument("--sha", required=True)
+    release_complete_parser.set_defaults(func=command_release_complete)
     return parser
 
 

@@ -23,7 +23,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: private-overlay-release-${{ github.workflow }}-${{ github.ref }}
+  group: private-overlay-release-${{ github.repository }}-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
