@@ -15,8 +15,8 @@ Treat the generated `docs/project_journal/INDEX.md` as a local ignored convenien
 ## Workflow
 
 1. Treat the docs as the default convention.
-- Read the repo `AGENTS.md`, existing docs, and the user request.
-- For Joey repos, assume `docs/PROJECT_STATE.md` and `docs/PROJECT_TODO.md` should exist as stable entrypoints unless the user explicitly opts out or the repo already has a stronger equivalent tracker.
+- Read the repo `AGENTS.md`, existing docs, and Joey's request.
+- For Joey repos, assume `docs/PROJECT_STATE.md` and `docs/PROJECT_TODO.md` should exist as stable entrypoints unless Joey explicitly opts out or the repo already has a stronger equivalent tracker.
 - If the repo already uses `docs/project_journal/`, read the relevant entries and optionally regenerate the ignored index before planning.
 
 2. Recover context before planning.
@@ -86,7 +86,7 @@ Treat the generated `docs/project_journal/INDEX.md` as a local ignored convenien
 - Do not duplicate README, design docs, or PR summaries.
 - Do not invent future work just to fill the files.
 - If the repo has a stronger local convention, follow the repo over this skill.
-- If the user explicitly chooses another tracking mechanism for the repo, follow that choice and stop enforcing these files.
+- If Joey explicitly chooses another tracking mechanism for the repo, follow that choice and stop enforcing these files.
 - Prefer moving old detail out of the top-level files over deleting useful context outright; do this opportunistically when the related workstream is touched, not as a mandatory cleanup pass.
 - Do not turn the docs into a fake append-only event log; keep checkpoints and evidence references compact.
 - Top-level trackers should point to focused notes when needed, not absorb every long blocker narrative inline.

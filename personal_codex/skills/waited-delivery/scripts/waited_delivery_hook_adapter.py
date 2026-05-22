@@ -620,7 +620,7 @@ def _build_stop_continuation_prompt(
         return (
             "A waited-delivery run for this session is still active. "
             f"Do not finish. Read `{parent_prompt}` and keep waiting for delivery child "
-            f"`{child_session_id}` unless the user explicitly interrupts the run."
+            f"`{child_session_id}` unless Joey explicitly interrupts the run."
         )
     return (
         "A waited-delivery run for this session has started but no delivery child has been "
@@ -668,7 +668,7 @@ def _build_stop_fallback_prompt(
         return "\n".join(lines)
     if child_session_id:
         lines.append(
-            f"Keep waiting for delivery child `{child_session_id}` unless the user explicitly interrupts the run."
+            f"Keep waiting for delivery child `{child_session_id}` unless Joey explicitly interrupts the run."
         )
         return "\n".join(lines)
     lines.append("Continue the required spawn -> attach-child -> wait sequence.")
@@ -731,7 +731,7 @@ def _build_stop_last_resort_prompt(
         return "\n".join(lines)
     if child_session_id:
         lines.append(
-            f"Keep waiting for delivery child `{child_session_id}` unless the user explicitly interrupts the run."
+            f"Keep waiting for delivery child `{child_session_id}` unless Joey explicitly interrupts the run."
         )
         return "\n".join(lines)
     lines.append("Continue the required spawn -> attach-child -> wait sequence.")
@@ -770,7 +770,7 @@ def _build_stop_emergency_prompt(
         return "\n".join(lines)
     if child_session_id:
         lines.append(
-            f"Keep waiting for delivery child `{child_session_id}` unless the user explicitly interrupts the run."
+            f"Keep waiting for delivery child `{child_session_id}` unless Joey explicitly interrupts the run."
         )
         return "\n".join(lines)
     lines.append("Continue the required spawn -> attach-child -> wait sequence.")

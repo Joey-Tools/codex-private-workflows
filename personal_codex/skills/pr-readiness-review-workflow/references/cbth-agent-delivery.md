@@ -8,7 +8,7 @@ Required behavior for agents:
 
 - Resolve `source_thread_id` from `CODEX_THREAD_ID` by default.
 - If `CODEX_THREAD_ID` is missing, require an explicit source thread id instead of guessing from recent sessions.
-- After submitting a task, immediately print the recovery block to the user and persist the same block in a task-scoped note or receipt artifact.
+- After submitting a task, immediately print the recovery block to Joey and persist the same block in a task-scoped note or receipt artifact.
 - The recovery block must include `source_thread_id`, `task_id`, `job_id`, the expected way to discover `batch_id`, and read-only inspect commands.
 - Synchronous waiting means polling/awaiting task state only. It must not consume or close delivery.
 - If the agent stops waiting early, async delivery must remain available.
