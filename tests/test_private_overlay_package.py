@@ -178,6 +178,43 @@ class PrivateOverlayPackageTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("nested symlink", result.stderr)
 
+    def test_package_builder_excludes_generated_bytecode(self) -> None:
+        repo_root = self.root / "repo"
+        source_root = repo_root / "personal_codex" / "skills" / "example"
+        cache_root = source_root / "__pycache__"
+        cache_root.mkdir(parents=True)
+        (source_root / "SKILL.md").write_text("---\nname: example\n---\n", encoding="utf-8")
+        (source_root / ".DS_Store").write_text("metadata\n", encoding="utf-8")
+        (cache_root / "session_retrospective.cpython-314.pyc").write_bytes(b"bytecode")
+        manifest_path = repo_root / "personal_codex" / "private-sync-manifest.json"
+        manifest_path.write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "owner": "private",
+                    "links": [
+                        {
+                            "source": "personal_codex/skills/example",
+                            "target": "skills/example",
+                            "kind": "skill",
+                        }
+                    ],
+                    "reference_only": [],
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+        archive_path = self.build_private_package(repo_root=repo_root)
+        with tarfile.open(archive_path, "r:gz") as archive:
+            names = archive.getnames()
+
+        self.assertTrue(any(name.endswith("/SKILL.md") for name in names))
+        self.assertFalse(any("__pycache__" in name for name in names))
+        self.assertFalse(any(name.endswith(".pyc") for name in names))
+        self.assertFalse(any(name.endswith(".DS_Store") for name in names))
+
     def test_private_overlay_installs_over_public_base_and_verifies(self) -> None:
         public_release = self.root / "public-release"
         home = self.root / "home" / ".codex"

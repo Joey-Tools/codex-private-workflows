@@ -14,6 +14,9 @@ from typing import Any
 
 DEFAULT_MANIFEST = Path("personal_codex/private-sync-manifest.json")
 RELEASE_MANIFEST = Path("personal_codex/sync-manifest.json")
+GENERATED_DIR_NAMES = {"__pycache__"}
+GENERATED_FILE_NAMES = {".DS_Store"}
+GENERATED_SUFFIXES = {".pyc", ".pyo"}
 
 
 class PackageError(RuntimeError):
@@ -65,14 +68,29 @@ def _copy_source(repo_root: Path, staging_root: Path, source: Path) -> None:
     destination.parent.mkdir(parents=True, exist_ok=True)
     if source_path.is_dir():
         for child in source_path.rglob("*"):
+            relative_child = child.relative_to(source_path)
+            if _is_generated_path(relative_child):
+                continue
             if child.is_symlink():
                 relative_child = source / child.relative_to(source_path)
                 raise PackageError(f"refusing to package nested symlink source: {relative_child}")
-        shutil.copytree(source_path, destination, symlinks=False)
+        shutil.copytree(source_path, destination, symlinks=False, ignore=_ignore_generated)
     elif source_path.is_file():
         shutil.copy2(source_path, destination)
     else:
         raise PackageError(f"unsupported manifest source type: {source}")
+
+
+def _is_generated_path(path: Path) -> bool:
+    return (
+        any(part in GENERATED_DIR_NAMES for part in path.parts)
+        or path.name in GENERATED_FILE_NAMES
+        or path.suffix in GENERATED_SUFFIXES
+    )
+
+
+def _ignore_generated(_directory: str, names: list[str]) -> set[str]:
+    return {name for name in names if _is_generated_path(Path(name))}
 
 
 def stage_release(repo_root: Path, manifest_path: Path, staging_root: Path) -> None:
@@ -90,7 +108,7 @@ def stage_release(repo_root: Path, manifest_path: Path, staging_root: Path) -> N
 
 
 def _iter_tar_paths(root: Path) -> list[Path]:
-    paths = [path for path in root.rglob("*") if path.name != ".DS_Store"]
+    paths = [path for path in root.rglob("*") if not _is_generated_path(path.relative_to(root))]
     return sorted(paths, key=lambda path: path.relative_to(root).as_posix())
 
 
