@@ -35,7 +35,9 @@ It standardizes a small read-only SSH preflight across Joey's default remote hos
 - `session-meta` expects `--date YYYY/MM/DD`; do not pass ISO `YYYY-MM-DD`.
 - Use `... remote_codex_probe.py fetch-rollout ...` only to copy one validated rollout file under task-scoped `.codex-tmp/remote-host-context/` beneath the current workspace, or under `/tmp`.
 - `fetch-rollout` writes to a single file path via `--output <file>`; do not invent directory flags such as `--output-dir`.
-- When a validated rollout is too large to copy cleanly, use `... remote_codex_probe.py rollout-summary ...` to extract a bounded structured skim on the remote host instead of raising the fetch limit or falling back to bare `ssh ... rg ...`.
+- When a validated rollout is too large to copy cleanly, use `... remote_codex_probe.py rollout-summary ...` to extract a bounded, redacted structured skim on the remote host instead of raising the fetch limit or falling back to bare `ssh ... rg ...`.
+- `rollout-summary` emits a `scan_meta` row. If `scan_truncated` is `true`, treat the result as partial evidence and surface a coverage gap; do not summarize it as a complete scan.
+- `rollout-summary` output text is signal-only, not raw prompt/tool output text. Use it for coarse friction flags and candidate selection; fetch a specific safe rollout or delegate to `codex-session-mining` when exact local-only context is required.
 - `fetch-rollout` may materialize an explicitly verified `archived_sessions/rollout-*.jsonl` path, but the helper should not widen `session-meta` into an unbounded archived-session crawler.
 - Keep the helper focused on remote access and bounded file transfer. Do not turn it into a generic remote search shell.
 
