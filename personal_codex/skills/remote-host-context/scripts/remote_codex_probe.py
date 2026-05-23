@@ -23,7 +23,10 @@ MAX_SESSION_META_LIMIT = 500
 MAX_SESSION_META_DATE_COUNT = 31
 MAX_FETCH_ROLLOUT_BYTES = 16 * 1024 * 1024
 MAX_ROLLOUT_SUMMARY_LIMIT = 200
+MAX_ROLLOUT_SUMMARY_SCAN_BYTES = 2 * 1024 * 1024
 MAX_ROLLOUT_SUMMARY_TAIL_RECORDS = 50
+MAX_ROLLOUT_SUMMARY_TEXT_CHARS = 1200
+MAX_SESSION_META_SCAN_BYTES = 256 * 1024
 REMOTE_PREFLIGHT_TIMEOUT_SECONDS = 15
 REMOTE_COMMAND_TIMEOUT_SECONDS = 60
 TASK_OUTPUT_RELATIVE_DIR = pathlib.Path(".codex-tmp/remote-host-context")
@@ -387,9 +390,12 @@ DATE_STRINGS = CONFIG.get("dates", [])
 LIMIT = int(CONFIG.get("limit", 0))
 ROOT = pathlib.Path(CONFIG["codex_root"]).expanduser()
 MAX_FETCH_ROLLOUT_BYTES = int(CONFIG.get("max_fetch_rollout_bytes", 0))
+SESSION_META_SCAN_BYTES = int(CONFIG.get("session_meta_scan_bytes", 0))
 SUMMARY_LIMIT = int(CONFIG.get("summary_limit", 0))
+SUMMARY_SCAN_BYTES = int(CONFIG.get("summary_scan_bytes", 0))
 SUMMARY_TAIL_RECORDS = int(CONFIG.get("summary_tail_records", 0))
 SUMMARY_MAX_TEXT_CHARS = int(CONFIG.get("summary_max_text_chars", 0))
+SUMMARY_MAX_TEXT_CHARS_LIMIT = {MAX_ROLLOUT_SUMMARY_TEXT_CHARS}
 SUMMARY_KEYWORDS = [str(value) for value in CONFIG.get("summary_keywords", [])]
 ACTIVE_ROLLOUT_RELATIVE_RE = re.compile({ACTIVE_ROLLOUT_RELATIVE_RE.pattern!r})
 ARCHIVED_ROLLOUT_RELATIVE_RE = re.compile({ARCHIVED_ROLLOUT_RELATIVE_RE.pattern!r})
@@ -485,17 +491,78 @@ def message_summary_from_payload(payload):
     return kind, "\\n".join(parts)
 
 
+def user_prompt_signal_text(text):
+    signals = []
+    if re.search(r"(?:exit(?:ed)?(?: with)? code [1-9]\\d*|failed|traceback|error:|permission denied)", text, re.I):
+        signals.append("error:")
+    if re.search(r"(?:approval|require_escalated|sandbox|\\bauth(?:entication|orization|[-_ ]?gated)?\\b|credential|permission denied|TCC)", text, re.I):
+        signals.append("approval")
+    if re.search(r"(?:not run|did not run|unable to run|could not run|untested|未运行|无法运行)", text, re.I):
+        signals.append("could not run")
+    if re.search(r"(?:you missed|you forgot|wrong|incorrect|not what I asked|漏了|忘了|不对|错了)", text, re.I):
+        signals.append("you missed")
+    if re.search(r"(?:lost context|misunderstood|I misunderstood|assumption|assumed|上下文|误解)", text, re.I):
+        signals.append("assumed")
+    if re.search(r"(?:\\b(secret|token|credential|password|private key|production|destructive|rm -rf|reset --hard|customer data|privacy|pii)\\b|客户|客户数据|凭据|凭证|密钥|生产|破坏性)", text, re.I):
+        signals.append("secret")
+    return " ".join(signals) if signals else "user prompt present"
+
+
+def safe_summary_text(kind, text):
+    if kind == "user_message":
+        return user_prompt_signal_text(str(text))
+    return str(text)
+
+
+def event_user_message_text(payload):
+    message = payload.get("message")
+    if isinstance(message, str):
+        return message.strip()
+    if isinstance(message, dict):
+        kind, text = message_summary_from_payload(message)
+        if kind == "user_message" and text:
+            return text.strip()
+    text = payload.get("text")
+    if isinstance(text, str):
+        return text.strip()
+    return ""
+
+
 def summary_record(kind, text, *, line_no, timestamp):
-    value = normalize_text(text, SUMMARY_MAX_TEXT_CHARS)
+    value = normalize_text(safe_summary_text(kind, text), SUMMARY_MAX_TEXT_CHARS)
     if not value:
         return None
-    return {{"kind": kind, "line": line_no, "text": value, "timestamp": timestamp or ""}}
+    record = {{"kind": kind, "line": line_no, "text": value, "timestamp": timestamp or ""}}
+    match_text = normalize_text(text, SUMMARY_MAX_TEXT_CHARS)
+    if kind == "user_message" and match_text and match_text != value:
+        record["_match_text"] = match_text
+    return record
+
+
+def bounded_text_lines(handle, max_scan_bytes):
+    scanned = 0
+    while True:
+        if max_scan_bytes and scanned >= max_scan_bytes:
+            return
+        remaining = max_scan_bytes - scanned if max_scan_bytes else 0
+        line = handle.readline(remaining + 1 if remaining else -1)
+        if not line:
+            return
+        encoded_len = len(line.encode("utf-8", "surrogatepass"))
+        if max_scan_bytes and encoded_len > remaining:
+            return
+        scanned += encoded_len
+        yield line
 
 
 def summarize_rollout():
     rel = pathlib.PurePosixPath(str(CONFIG["rollout"]))
     normalized = rel.as_posix()
     print(ROLLOUT_SUMMARY_BEGIN)
+    if SUMMARY_MAX_TEXT_CHARS < 40 or SUMMARY_MAX_TEXT_CHARS > SUMMARY_MAX_TEXT_CHARS_LIMIT:
+        print(json.dumps({{"ok": False, "error": "summary max text chars out of range"}}, separators=(",", ":"), sort_keys=True))
+        print(ROLLOUT_SUMMARY_END)
+        return
     if not (
         ACTIVE_ROLLOUT_RELATIVE_RE.fullmatch(normalized)
         or ARCHIVED_ROLLOUT_RELATIVE_RE.fullmatch(normalized)
@@ -523,8 +590,9 @@ def summarize_rollout():
     last_user_record = None
     last_task_complete_record = None
 
+    target_size = target.stat().st_size
     with open_rollout_text(target) as handle:
-        for line_no, line in enumerate(handle, 1):
+        for line_no, line in enumerate(bounded_text_lines(handle, SUMMARY_SCAN_BYTES), 1):
             try:
                 obj = json.loads(line)
             except json.JSONDecodeError:
@@ -536,7 +604,9 @@ def summarize_rollout():
                 payload = obj.get("payload", {{}})
                 record = summary_record(
                     "session_meta",
-                    "session_id=" + str(payload.get("id", "")) + " cwd=" + str(payload.get("cwd", "")),
+                    "session_id=" + str(payload.get("id", ""))
+                    + " cwd_present="
+                    + str(bool(payload.get("cwd", ""))).lower(),
                     line_no=line_no,
                     timestamp=timestamp,
                 )
@@ -558,16 +628,22 @@ def summarize_rollout():
                         record = summary_record("function_call_output", output, line_no=line_no, timestamp=timestamp)
             elif record_type == "event_msg":
                 payload = obj.get("payload", {{}})
-                if str(payload.get("type", "")) == "task_complete":
+                payload_type = str(payload.get("type", ""))
+                if payload_type == "task_complete":
                     text = payload.get("last_agent_message")
                     if text:
                         record = summary_record("task_complete", text, line_no=line_no, timestamp=timestamp)
                         last_task_complete_record = record
+                elif payload_type == "user_message":
+                    text = event_user_message_text(payload)
+                    if text:
+                        record = summary_record("user_message", text, line_no=line_no, timestamp=timestamp)
+                        last_user_record = record
 
             if not record or record.get("kind") == "session_meta":
                 continue
 
-            text_value = str(record.get("text", ""))
+            text_value = str(record.get("_match_text") or record.get("text", ""))
             if keywords and any(keyword in text_value.casefold() for keyword in keywords):
                 key = (str(record.get("kind", "")), int(record.get("line", 0)))
                 if key not in matched_seen and (not SUMMARY_LIMIT or len(matched) < SUMMARY_LIMIT):
@@ -577,6 +653,21 @@ def summarize_rollout():
                 tail.append(record)
 
     print(json.dumps({{"ok": True}}, separators=(",", ":"), sort_keys=True))
+    print(json.dumps(
+        {{
+            "kind": "scan_meta",
+            "line": 0,
+            "scan_bytes": SUMMARY_SCAN_BYTES,
+            "scan_truncated": bool(SUMMARY_SCAN_BYTES and target_size > SUMMARY_SCAN_BYTES),
+            "source_bytes": target_size,
+            "text": "scan_truncated=" + str(bool(SUMMARY_SCAN_BYTES and target_size > SUMMARY_SCAN_BYTES)).lower()
+                + " scan_bytes=" + str(SUMMARY_SCAN_BYTES)
+                + " source_bytes=" + str(target_size),
+            "timestamp": "",
+        }},
+        separators=(",", ":"),
+        sort_keys=True,
+    ))
     emitted = set()
 
     def emit(record):
@@ -585,7 +676,9 @@ def summarize_rollout():
         key = (str(record.get("kind", "")), int(record.get("line", 0)))
         if key in emitted:
             return
-        print(json.dumps(record, separators=(",", ":"), sort_keys=True))
+        payload = dict(record)
+        payload.pop("_match_text", None)
+        print(json.dumps(payload, separators=(",", ":"), sort_keys=True))
         emitted.add(key)
 
     emit(session_meta_record)
@@ -626,7 +719,7 @@ def iter_session_meta():
             except (FileNotFoundError, ValueError):
                 continue
             with open_rollout_text(target) as handle:
-                for line in handle:
+                for line in bounded_text_lines(handle, SESSION_META_SCAN_BYTES):
                     try:
                         obj = json.loads(line)
                     except json.JSONDecodeError:
@@ -736,7 +829,7 @@ def _iter_session_meta_records(
             except (FileNotFoundError, ValueError):
                 continue
             with handle:
-                for line in handle:
+                for line in _bounded_text_lines(handle, MAX_SESSION_META_SCAN_BYTES):
                     try:
                         obj = json.loads(line)
                     except json.JSONDecodeError:
@@ -1006,6 +1099,7 @@ def cmd_session_meta(args: argparse.Namespace) -> int:
                 "dates": [date_value.strftime(DATE_FORMAT) for date_value in dates],
                 "limit": args.limit,
                 "codex_root": HOSTS[alias]["codex_root"],
+                "session_meta_scan_bytes": MAX_SESSION_META_SCAN_BYTES,
             }
             try:
                 result = _run_remote_python(alias, payload)
@@ -1152,6 +1246,47 @@ def _message_summary(payload: dict[str, Any]) -> tuple[str, str]:
     return kind, "\n".join(parts).strip()
 
 
+def _user_prompt_signal_text(text: str) -> str:
+    signals: list[str] = []
+    if re.search(r"(?:exit(?:ed)?(?: with)? code [1-9]\d*|failed|traceback|error:|permission denied)", text, re.I):
+        signals.append("error:")
+    if re.search(r"(?:approval|require_escalated|sandbox|\bauth(?:entication|orization|[-_ ]?gated)?\b|credential|permission denied|TCC)", text, re.I):
+        signals.append("approval")
+    if re.search(r"(?:not run|did not run|unable to run|could not run|untested|未运行|无法运行)", text, re.I):
+        signals.append("could not run")
+    if re.search(r"(?:you missed|you forgot|wrong|incorrect|not what I asked|漏了|忘了|不对|错了)", text, re.I):
+        signals.append("you missed")
+    if re.search(r"(?:lost context|misunderstood|I misunderstood|assumption|assumed|上下文|误解)", text, re.I):
+        signals.append("assumed")
+    if re.search(
+        r"(?:\b(secret|token|credential|password|private key|production|destructive|rm -rf|reset --hard|customer data|privacy|pii)\b|客户|客户数据|凭据|凭证|密钥|生产|破坏性)",
+        text,
+        re.I,
+    ):
+        signals.append("secret")
+    return " ".join(signals) if signals else "user prompt present"
+
+
+def _safe_summary_text(kind: str, text: str) -> str:
+    if kind == "user_message":
+        return _user_prompt_signal_text(text)
+    return text
+
+
+def _event_user_message_text(payload: dict[str, Any]) -> str:
+    message = payload.get("message")
+    if isinstance(message, str):
+        return message.strip()
+    if isinstance(message, dict):
+        kind, text = _message_summary(message)
+        if kind == "user_message" and text:
+            return text.strip()
+    text = payload.get("text")
+    if isinstance(text, str):
+        return text.strip()
+    return ""
+
+
 def _build_summary_record(
     *,
     kind: str,
@@ -1160,15 +1295,35 @@ def _build_summary_record(
     timestamp: str,
     max_text_chars: int,
 ) -> dict[str, Any] | None:
-    normalized = _normalize_summary_text(text, max_text_chars=max_text_chars)
+    normalized = _normalize_summary_text(_safe_summary_text(kind, text), max_text_chars=max_text_chars)
     if not normalized:
         return None
-    return {
+    record = {
         "kind": kind,
         "line": line_no,
         "text": normalized,
         "timestamp": timestamp,
     }
+    match_text = _normalize_summary_text(text, max_text_chars=max_text_chars)
+    if kind == "user_message" and match_text and match_text != normalized:
+        record["_match_text"] = match_text
+    return record
+
+
+def _bounded_text_lines(handle: Any, max_scan_bytes: int) -> Iterable[str]:
+    scanned = 0
+    while True:
+        if max_scan_bytes and scanned >= max_scan_bytes:
+            return
+        remaining = max_scan_bytes - scanned if max_scan_bytes else 0
+        line = handle.readline(remaining + 1 if remaining else -1)
+        if not line:
+            return
+        encoded_len = len(line.encode("utf-8", "surrogatepass"))
+        if max_scan_bytes and encoded_len > remaining:
+            return
+        scanned += encoded_len
+        yield line
 
 
 def _summarize_rollout_records(
@@ -1201,7 +1356,7 @@ def _summarize_rollout_records(
             payload = obj.get("payload", {})
             session_meta_record = _build_summary_record(
                 kind="session_meta",
-                text=f"session_id={payload.get('id', '')} cwd={payload.get('cwd', '')}",
+                text=f"session_id={payload.get('id', '')} cwd_present={str(bool(payload.get('cwd', ''))).lower()}",
                 line_no=line_no,
                 timestamp=timestamp,
                 max_text_chars=max_text_chars,
@@ -1237,7 +1392,8 @@ def _summarize_rollout_records(
                     )
         elif record_type == "event_msg":
             payload = obj.get("payload", {})
-            if str(payload.get("type", "")) == "task_complete":
+            payload_type = str(payload.get("type", ""))
+            if payload_type == "task_complete":
                 text = payload.get("last_agent_message")
                 if text:
                     record = _build_summary_record(
@@ -1248,12 +1404,23 @@ def _summarize_rollout_records(
                         max_text_chars=max_text_chars,
                     )
                     last_task_complete_record = record
+            elif payload_type == "user_message":
+                text = _event_user_message_text(payload)
+                if text:
+                    record = _build_summary_record(
+                        kind="user_message",
+                        text=text,
+                        line_no=line_no,
+                        timestamp=timestamp,
+                        max_text_chars=max_text_chars,
+                    )
+                    last_user_record = record
 
         if record is None:
             continue
 
         if search_keywords:
-            text_value = str(record.get("text", "")).casefold()
+            text_value = str(record.get("_match_text") or record.get("text", "")).casefold()
             if any(keyword in text_value for keyword in search_keywords):
                 key = (str(record.get("kind", "")), int(record.get("line", 0)))
                 if key not in matched_seen and (limit <= 0 or len(matched) < limit):
@@ -1273,7 +1440,9 @@ def _summarize_rollout_records(
         if key in emitted:
             return
         emitted.add(key)
-        result.append(record)
+        safe_record = dict(record)
+        safe_record.pop("_match_text", None)
+        result.append(safe_record)
 
     append(session_meta_record)
     for record in matched:
@@ -1286,6 +1455,19 @@ def _summarize_rollout_records(
     if last_assistant_record is None:
         append(last_task_complete_record)
     return result
+
+
+def _rollout_summary_scan_meta(*, source_bytes: int, scan_bytes: int) -> dict[str, Any]:
+    scan_truncated = bool(scan_bytes and source_bytes > scan_bytes)
+    return {
+        "kind": "scan_meta",
+        "line": 0,
+        "scan_bytes": scan_bytes,
+        "scan_truncated": scan_truncated,
+        "source_bytes": source_bytes,
+        "text": f"scan_truncated={str(scan_truncated).lower()} scan_bytes={scan_bytes} source_bytes={source_bytes}",
+        "timestamp": "",
+    }
 
 
 def cmd_rollout_summary(args: argparse.Namespace) -> int:
@@ -1303,26 +1485,41 @@ def cmd_rollout_summary(args: argparse.Namespace) -> int:
             )
         if args.max_text_chars < 40:
             raise ValueError("--max-text-chars must be at least 40")
+        if args.max_text_chars > MAX_ROLLOUT_SUMMARY_TEXT_CHARS:
+            raise ValueError(
+                f"--max-text-chars must stay at or below {MAX_ROLLOUT_SUMMARY_TEXT_CHARS}"
+            )
     except ValueError as error:
         return _error(str(error))
 
     try:
         if HOSTS[alias]["kind"] == "local":
-            with _open_local_rollout_text(_local_codex_root(), rollout_relative_path) as handle:
+            codex_root = _local_codex_root()
+            source_bytes = _safe_rollout_path(codex_root, rollout_relative_path).stat().st_size
+            with _open_local_rollout_text(codex_root, rollout_relative_path) as handle:
                 records = _summarize_rollout_records(
-                    lines=handle,
+                    lines=_bounded_text_lines(handle, MAX_ROLLOUT_SUMMARY_SCAN_BYTES),
                     keywords=args.keyword,
                     limit=args.limit,
                     tail_records=args.tail_records,
                     max_text_chars=args.max_text_chars,
                 )
+            records.insert(
+                0,
+                _rollout_summary_scan_meta(
+                    source_bytes=source_bytes,
+                    scan_bytes=MAX_ROLLOUT_SUMMARY_SCAN_BYTES,
+                ),
+            )
         else:
             payload = {
                 "mode": "rollout-summary",
                 "rollout": rollout_relative_path.as_posix(),
                 "codex_root": HOSTS[alias]["codex_root"],
+                "session_meta_scan_bytes": MAX_SESSION_META_SCAN_BYTES,
                 "summary_keywords": list(args.keyword),
                 "summary_limit": args.limit,
+                "summary_scan_bytes": MAX_ROLLOUT_SUMMARY_SCAN_BYTES,
                 "summary_tail_records": args.tail_records,
                 "summary_max_text_chars": args.max_text_chars,
             }
