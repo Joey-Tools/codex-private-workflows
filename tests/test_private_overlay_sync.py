@@ -202,9 +202,16 @@ class PrivateOverlaySyncTests(unittest.TestCase):
             for link in manifest["links"]
             if link["source"].startswith("personal_codex/skills/")
         }
+        manifest_targets = {
+            link["target"]
+            for link in manifest["links"]
+            if link["source"].startswith("personal_codex/skills/")
+        }
         sync_targets = {str(rule.target) for rule in SYNC_MODULE.SYNC_RULES}
 
         self.assertEqual(manifest_sources - private_only_sources, manifest_sources & sync_targets)
+        self.assertIn("personal_codex/skills/codex-session-retrospective", manifest_sources)
+        self.assertIn("skills/codex-session-retrospective", manifest_targets)
         self.assertIn("personal_codex/skills/codex-session-retrospective", sync_targets)
 
     def test_scheduled_workflow_opens_pr_for_sync_changes(self) -> None:
