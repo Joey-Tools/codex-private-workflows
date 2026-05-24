@@ -207,6 +207,48 @@ class PrivateOverlaySyncTests(unittest.TestCase):
         self.assertEqual(manifest_sources - private_only_sources, manifest_sources & sync_targets)
         self.assertIn("personal_codex/skills/codex-session-retrospective", sync_targets)
 
+    def test_scheduled_workflow_opens_pr_for_sync_changes(self) -> None:
+        workflow = (
+            REPO_ROOT / ".github" / "workflows" / "scheduled-sync-release.yml"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("pull-requests: write", workflow)
+        self.assertIn("persist-credentials: false", workflow)
+        self.assertIn("PRIVATE_OVERLAY_SYNC_PR_TOKEN", workflow)
+        self.assertIn('git remote set-url origin "https://x-access-token:${SYNC_PR_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"', workflow)
+        self.assertIn("gh pr create", workflow)
+        self.assertIn("gh pr edit", workflow)
+        self.assertIn('head="$owner:$branch"', workflow)
+        self.assertIn('gh api --method GET "repos/$GITHUB_REPOSITORY/pulls"', workflow)
+        self.assertNotIn('git push origin "HEAD:${GITHUB_REF_NAME}"', workflow)
+
+    def test_scheduled_workflow_uses_exact_sync_branch_ref(self) -> None:
+        workflow = (
+            REPO_ROOT / ".github" / "workflows" / "scheduled-sync-release.yml"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn('remote_ref="refs/heads/$branch"', workflow)
+        self.assertIn('awk -v ref="$remote_ref"', workflow)
+        self.assertIn('git push --force-with-lease="$remote_ref:$remote_sha"', workflow)
+        self.assertNotIn('git ls-remote --heads origin "$branch"', workflow)
+
+    def test_scheduled_workflow_skips_unchanged_sync_branch(self) -> None:
+        workflow = (
+            REPO_ROOT / ".github" / "workflows" / "scheduled-sync-release.yml"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn('git merge-base --is-ancestor "$GITHUB_SHA" FETCH_HEAD', workflow)
+        self.assertIn("git diff --cached --quiet FETCH_HEAD -- scripts personal_codex .agents", workflow)
+        self.assertIn("already matches generated overlay sources and contains", workflow)
+
+    def test_scheduled_workflow_only_publishes_incomplete_current_release(self) -> None:
+        workflow = (
+            REPO_ROOT / ".github" / "workflows" / "scheduled-sync-release.yml"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("if: steps.current-release.outputs.complete == 'false'", workflow)
+        self.assertNotIn("steps.commit.outputs.sha", workflow)
+
 
 class PrivateOverlayReleaseTests(unittest.TestCase):
     def test_force_bypasses_cooldown_lookup(self) -> None:
