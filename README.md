@@ -54,6 +54,11 @@ opens or updates a sync PR when the source sync creates a repository diff. Mergi
 that PR publishes the private overlay release through the normal `master` push
 release workflow.
 
+The sync PR step requires a `PRIVATE_OVERLAY_SYNC_PR_TOKEN` secret with repository
+contents and pull-request write access. The workflow uses that token for both branch
+pushes and PR creation so the resulting PR `pull_request` validation workflows are
+not suppressed as `GITHUB_TOKEN`-triggered events.
+
 After merging a Joey-Tools source-repo PR that should flow into the private overlay,
 trigger the sync manually so the release is not delayed until the fallback window:
 

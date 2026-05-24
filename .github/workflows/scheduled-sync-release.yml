@@ -152,12 +152,18 @@ jobs:
         if: steps.changes.outputs.changed == 'true'
         id: sync-pr
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.PRIVATE_OVERLAY_SYNC_PR_TOKEN }}
+          SYNC_PR_TOKEN: ${{ secrets.PRIVATE_OVERLAY_SYNC_PR_TOKEN }}
         run: |
           branch="codex/scheduled-private-overlay-sync"
           owner="${GITHUB_REPOSITORY%%/*}"
           remote_ref="refs/heads/$branch"
           body_file="$(mktemp)"
+          if [ -z "$SYNC_PR_TOKEN" ]; then
+            echo "PRIVATE_OVERLAY_SYNC_PR_TOKEN is required so sync PR pushes trigger pull_request workflows." >&2
+            exit 1
+          fi
+          git remote set-url origin "https://x-access-token:${SYNC_PR_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 

@@ -194,6 +194,8 @@ class PrivateOverlaySyncTests(unittest.TestCase):
         ).read_text(encoding="utf-8")
 
         self.assertIn("pull-requests: write", workflow)
+        self.assertIn("PRIVATE_OVERLAY_SYNC_PR_TOKEN", workflow)
+        self.assertIn('git remote set-url origin "https://x-access-token:${SYNC_PR_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"', workflow)
         self.assertIn("gh pr create", workflow)
         self.assertIn("gh pr edit", workflow)
         self.assertIn('head="$owner:$branch"', workflow)
