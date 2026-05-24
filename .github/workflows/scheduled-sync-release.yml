@@ -173,8 +173,13 @@ jobs:
 
           git add scripts personal_codex .agents
 
-          if [ -n "$remote_sha" ] && git diff --cached --quiet FETCH_HEAD -- scripts personal_codex .agents; then
-            echo "Existing $branch already matches generated overlay sources."
+          remote_has_current_base=false
+          if [ -n "$remote_sha" ] && git merge-base --is-ancestor "$GITHUB_SHA" FETCH_HEAD; then
+            remote_has_current_base=true
+          fi
+
+          if [ -n "$remote_sha" ] && [ "$remote_has_current_base" = "true" ] && git diff --cached --quiet FETCH_HEAD -- scripts personal_codex .agents; then
+            echo "Existing $branch already matches generated overlay sources and contains $GITHUB_SHA."
           else
             git switch -c "$branch"
             git commit -m "Sync private overlay sources"

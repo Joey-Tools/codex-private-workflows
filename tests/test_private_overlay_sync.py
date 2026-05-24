@@ -215,8 +215,9 @@ class PrivateOverlaySyncTests(unittest.TestCase):
             REPO_ROOT / ".github" / "workflows" / "scheduled-sync-release.yml"
         ).read_text(encoding="utf-8")
 
+        self.assertIn('git merge-base --is-ancestor "$GITHUB_SHA" FETCH_HEAD', workflow)
         self.assertIn("git diff --cached --quiet FETCH_HEAD -- scripts personal_codex .agents", workflow)
-        self.assertIn("already matches generated overlay sources", workflow)
+        self.assertIn("already matches generated overlay sources and contains", workflow)
 
     def test_scheduled_workflow_only_publishes_incomplete_current_release(self) -> None:
         workflow = (
