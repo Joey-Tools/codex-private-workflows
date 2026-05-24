@@ -439,6 +439,19 @@ class SessionRetrospectiveTests(unittest.TestCase):
 
             self.assertEqual(rows, [])
 
+    def test_remote_probe_session_meta_missing_codex_root_returns_empty(self) -> None:
+        for probe in (REMOTE_PROBE, REMOTE_HOST_CONTEXT_PROBE):
+            with self.subTest(probe=probe.__name__):
+                with tempfile.TemporaryDirectory() as raw:
+                    rows = probe._iter_session_meta_records(
+                        codex_root=Path(raw) / "missing-codex",
+                        dates=[dt.date(2026, 5, 1)],
+                        limit=10,
+                        host="local",
+                    )
+
+                self.assertEqual(rows, [])
+
     def test_remote_probe_session_meta_skips_symlink_date_dir(self) -> None:
         for probe in (REMOTE_PROBE, REMOTE_HOST_CONTEXT_PROBE):
             with self.subTest(probe=probe.__name__):
@@ -6433,7 +6446,7 @@ class SessionRetrospectiveTests(unittest.TestCase):
         self.assertEqual(rows[0]["host"], "miku-bot-dev")
         self.assertIn("failed_command", rows[0]["issue_flags"])
         self.assertIn("remote_source_not_materialized", [gap["reason"] for gap in trend["coverage_gaps"]])
-        self.assertEqual(manifest["sources"][0]["status"], "stale")
+        self.assertEqual(manifest["sources"][0]["status"], "ready")
         self.assertEqual(manifest["sources"][0]["summary_count"], 1)
 
     def test_default_remote_ignores_irrelevant_summary_when_rollouts_cover_window(self) -> None:
@@ -6536,7 +6549,7 @@ class SessionRetrospectiveTests(unittest.TestCase):
         self.assertFalse(state.exists())
         self.assertEqual(len(rows), 2)
         self.assertIn("remote_source_not_materialized", [gap["reason"] for gap in trend["coverage_gaps"]])
-        self.assertEqual(manifest["sources"][0]["status"], "stale")
+        self.assertEqual(manifest["sources"][0]["status"], "ready")
         self.assertEqual(manifest["sources"][0]["rollout_count"], 1)
         self.assertEqual(manifest["sources"][0]["summary_count"], 1)
 
@@ -6563,7 +6576,7 @@ class SessionRetrospectiveTests(unittest.TestCase):
             MODULE.main(["make-shards", "--manifest", str(output / "shard_manifest.json"), "--output", str(shard_output)])
             rows = [json.loads(line) for line in (shard_output / "shards.jsonl").read_text(encoding="utf-8").splitlines()]
 
-        self.assertEqual(manifest["sources"][0]["status"], "stale")
+        self.assertEqual(manifest["sources"][0]["status"], "ready")
         self.assertEqual([row["status"] for row in rows], ["ready", "ready"])
         self.assertEqual([row.get("kind") for row in rows], [None, "summary"])
 
