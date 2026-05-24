@@ -200,6 +200,11 @@ SYNC_RULES = (
         common_joey_text=True,
     ),
     _rule(
+        "codex-workflow-hygiene",
+        "skills/codex-session-retrospective",
+        "personal_codex/skills/codex-session-retrospective",
+    ),
+    _rule(
         "codex-review-workflows",
         "skills/external-review-playbook",
         "personal_codex/skills/external-review-playbook",

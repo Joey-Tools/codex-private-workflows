@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import datetime as dt
-import importlib.util
 import contextlib
+import importlib.util
 import io
+import json
 from pathlib import Path
 import re
 import sys
@@ -187,6 +188,31 @@ class PrivateOverlaySyncTests(unittest.TestCase):
 
         self.assertEqual(checked_out_repos, sync_rule_repos)
         self.assertEqual(checked_out_paths, sync_rule_repos)
+
+    def test_manifest_canonical_skills_are_backed_by_sync_rules(self) -> None:
+        manifest = json.loads(
+            (REPO_ROOT / "personal_codex" / "private-sync-manifest.json").read_text(encoding="utf-8")
+        )
+        private_only_sources = {
+            "personal_codex/skills/cisco-trackers-lookup",
+            "personal_codex/skills/remote-host-context",
+        }
+        manifest_sources = {
+            link["source"]
+            for link in manifest["links"]
+            if link["source"].startswith("personal_codex/skills/")
+        }
+        manifest_targets = {
+            link["target"]
+            for link in manifest["links"]
+            if link["source"].startswith("personal_codex/skills/")
+        }
+        sync_targets = {str(rule.target) for rule in SYNC_MODULE.SYNC_RULES}
+
+        self.assertEqual(manifest_sources - private_only_sources, manifest_sources & sync_targets)
+        self.assertIn("personal_codex/skills/codex-session-retrospective", manifest_sources)
+        self.assertIn("skills/codex-session-retrospective", manifest_targets)
+        self.assertIn("personal_codex/skills/codex-session-retrospective", sync_targets)
 
     def test_scheduled_workflow_opens_pr_for_sync_changes(self) -> None:
         workflow = (

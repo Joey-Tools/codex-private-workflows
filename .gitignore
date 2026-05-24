@@ -1,4 +1,5 @@
 dist/
+.codex-local/
 .codex-tmp/
 __pycache__/
 *.pyc
