@@ -375,6 +375,24 @@ class SessionRetrospectiveTests(unittest.TestCase):
                             probe.pathlib.PurePosixPath(f"sessions/2026/05/01/{rollout_name}"),
                         )
 
+    def test_remote_probe_fetch_rejects_symlink_root(self) -> None:
+        for probe in (REMOTE_PROBE, REMOTE_HOST_CONTEXT_PROBE):
+            with self.subTest(probe=probe.__name__):
+                with tempfile.TemporaryDirectory() as raw:
+                    real_root = Path(raw) / "real-codex"
+                    rollout = real_root / "sessions" / "2026" / "05" / "01" / "rollout-2026-05-01T10-00-00.jsonl"
+                    write_jsonl(rollout, [message("user", "Hidden task.", "2026-05-01T10:00:00Z")])
+                    link_root = Path(raw) / ".codex"
+                    link_root.symlink_to(real_root, target_is_directory=True)
+
+                    with self.assertRaisesRegex(ValueError, "Codex root is a symlink"):
+                        probe._fetch_local_rollout(
+                            link_root,
+                            probe.pathlib.PurePosixPath(
+                                "sessions/2026/05/01/rollout-2026-05-01T10-00-00.jsonl"
+                            ),
+                        )
+
     def test_remote_probe_summary_rejects_symlink_rollout(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw) / ".codex"
@@ -1690,6 +1708,37 @@ class SessionRetrospectiveTests(unittest.TestCase):
                 [
                     message("user", "Please fix the deployment.", "2026-05-22T10:01:00Z"),
                     message("user", "# AGENTS.md instructions\nRepository policy only.", "2026-05-22T10:01:01Z"),
+                    {
+                        "type": "event_msg",
+                        "timestamp": "2026-05-22T10:04:00Z",
+                        "payload": {
+                            "type": "task_complete",
+                            "last_agent_message": "The command failed with exit code 1.",
+                        },
+                    },
+                ],
+            )
+
+            turns = MODULE.extract_rollout(MODULE.Source("local", root), rollout, None, None)
+
+        self.assertEqual(len(turns), 1)
+        self.assertIn("failed_command", turns[0].issue_flags)
+        self.assertIn("blocked_or_failed", turns[0].assistant_action_summary)
+
+    def test_harmless_event_before_wrapper_preserves_active_turn(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw) / ".codex"
+            rollout = root / "sessions" / "2026" / "05" / "22" / "rollout-2026-05-22T10-00-00-abc.jsonl"
+            write_jsonl(
+                rollout,
+                [
+                    message("user", "Please fix the deployment.", "2026-05-22T10:01:00Z"),
+                    {
+                        "type": "event_msg",
+                        "timestamp": "2026-05-22T10:01:01Z",
+                        "payload": {"type": "token_count", "input_tokens": 100},
+                    },
+                    message("user", "# AGENTS.md instructions\nRepository policy only.", "2026-05-22T10:01:02Z"),
                     {
                         "type": "event_msg",
                         "timestamp": "2026-05-22T10:04:00Z",
@@ -8162,6 +8211,8 @@ class SessionRetrospectiveTests(unittest.TestCase):
                 self.assertIn("internal|corp|local|lan|example|invalid|test", script)
                 self.assertIn("meaningful_user_message_text", script)
                 self.assertIn("Persistent internal Codex readonly review contract", script)
+                self.assertIn("ROOT.lstat()", script)
+                self.assertIn("Codex root is a symlink", script)
                 self.assertNotIn("(2,)", script)
                 self.assertNotIn("(16,)", script)
 
