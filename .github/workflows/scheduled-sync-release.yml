@@ -161,8 +161,14 @@ jobs:
           owner="${GITHUB_REPOSITORY%%/*}"
           remote_ref="refs/heads/$branch"
           body_file="$(mktemp)"
+          label="codex-automation"
+          head_sha=""
           if [ -z "$SYNC_PR_TOKEN" ]; then
             echo "PRIVATE_OVERLAY_SYNC_PR_TOKEN is required so sync PR pushes trigger pull_request workflows." >&2
+            exit 1
+          fi
+          if ! gh api --method GET "repos/$GITHUB_REPOSITORY/labels/$label" --jq '.name' >/dev/null; then
+            echo "Required label '$label' is missing from $GITHUB_REPOSITORY." >&2
             exit 1
           fi
           git remote set-url origin "https://x-access-token:${SYNC_PR_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
@@ -186,11 +192,13 @@ jobs:
             remote_has_current_base=true
           fi
 
-          if [ -n "$remote_sha" ] && [ "$remote_has_current_base" = "true" ] && git diff --cached --quiet FETCH_HEAD -- scripts personal_codex .agents; then
-            echo "Existing $branch already matches generated overlay sources and contains $GITHUB_SHA."
+          if [ -n "$remote_sha" ] && [ "$remote_has_current_base" = "true" ] && git diff --cached --quiet FETCH_HEAD; then
+            echo "Existing $branch already matches the full generated overlay tree and contains $GITHUB_SHA."
+            head_sha="$remote_sha"
           else
             git switch -c "$branch"
             git commit -m "Sync private overlay sources"
+            head_sha="$(git rev-parse HEAD)"
             if [ -n "$remote_sha" ]; then
               git push --force-with-lease="$remote_ref:$remote_sha" origin "HEAD:$branch"
             else
@@ -208,21 +216,13 @@ jobs:
           - python3 -m unittest discover -s tests
           EOF
 
-          label_args=()
-          if gh label list --repo "$GITHUB_REPOSITORY" --limit 100 --json name --jq '.[].name' | grep -qx 'codex'; then
-            label_args+=(--label codex)
-          fi
-          if gh label list --repo "$GITHUB_REPOSITORY" --limit 100 --json name --jq '.[].name' | grep -qx 'codex-automation'; then
-            label_args+=(--label codex-automation)
-          fi
-
           pr_url="$(gh api --method GET "repos/$GITHUB_REPOSITORY/pulls" \
             -f state=open \
             -f base="$GITHUB_REF_NAME" \
             -f head="$owner:$branch" \
             --jq '.[0].html_url // empty')"
           if [ -n "$pr_url" ]; then
-            gh pr edit "$pr_url" --title "[codex] Sync private overlay sources" --body-file "$body_file"
+            gh pr edit "$pr_url" --title "[codex] Sync private overlay sources" --body-file "$body_file" --add-label "$label"
           else
             pr_url="$(gh pr create \
               --repo "$GITHUB_REPOSITORY" \
@@ -230,10 +230,33 @@ jobs:
               --body-file "$body_file" \
               --base "$GITHUB_REF_NAME" \
               --head "$branch" \
-              "${label_args[@]}")"
+              --label "$label")"
+          fi
+
+          pr_head_sha="$(gh pr view "$pr_url" --json headRefOid --jq '.headRefOid')"
+          pr_head_ref="$(gh pr view "$pr_url" --json headRefName --jq '.headRefName')"
+          pr_base_ref="$(gh pr view "$pr_url" --json baseRefName --jq '.baseRefName')"
+          if [ "$pr_head_ref" != "$branch" ] || [ "$pr_base_ref" != "$GITHUB_REF_NAME" ]; then
+            echo "Refusing to auto-merge unexpected PR shape: base=$pr_base_ref head=$pr_head_ref" >&2
+            exit 1
+          fi
+          if [ "$pr_head_sha" != "$head_sha" ]; then
+            echo "Refusing to auto-merge $pr_url because head changed from $head_sha to $pr_head_sha." >&2
+            exit 1
+          fi
+          if ! git diff --cached --quiet "$head_sha" || ! git diff --quiet "$head_sha"; then
+            echo "Refusing to auto-merge $pr_url because $head_sha does not match the full generated overlay tree." >&2
+            exit 1
+          fi
+
+          auto_merge_enabled="$(gh pr view "$pr_url" --json autoMergeRequest --jq '.autoMergeRequest != null')"
+          if [ "$auto_merge_enabled" = "true" ]; then
+            echo "Auto-merge is already enabled for $pr_url."
+          else
+            gh pr merge "$pr_url" --auto --squash --delete-branch --match-head-commit "$head_sha"
           fi
           echo "url=$pr_url" >> "$GITHUB_OUTPUT"
-          echo "Opened or updated $pr_url"
+          echo "Opened or updated $pr_url and enabled auto-merge for $head_sha."
 
       - name: Build release package
         if: steps.current-release.outputs.complete == 'false'
