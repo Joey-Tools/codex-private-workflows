@@ -200,6 +200,8 @@ class PrivateOverlaySyncTests(unittest.TestCase):
         self.assertIn("gh pr create", workflow)
         self.assertIn("gh pr edit", workflow)
         self.assertIn('label="codex-automation"', workflow)
+        self.assertIn('gh api --method GET "repos/$GITHUB_REPOSITORY/labels/$label"', workflow)
+        self.assertNotIn("gh label list --repo", workflow)
         self.assertIn('--label "$label"', workflow)
         self.assertIn('--add-label "$label"', workflow)
         self.assertIn('head="$owner:$branch"', workflow)
@@ -217,6 +219,8 @@ class PrivateOverlaySyncTests(unittest.TestCase):
         self.assertIn('pr_head_ref="$(gh pr view "$pr_url" --json headRefName --jq \'.headRefName\')"', workflow)
         self.assertIn('pr_base_ref="$(gh pr view "$pr_url" --json baseRefName --jq \'.baseRefName\')"', workflow)
         self.assertIn('gh pr merge "$pr_url" --auto --squash --delete-branch --match-head-commit "$head_sha"', workflow)
+        self.assertIn('git diff --cached --quiet "$head_sha"', workflow)
+        self.assertIn('git diff --quiet "$head_sha"', workflow)
 
     def test_scheduled_workflow_uses_exact_sync_branch_ref(self) -> None:
         workflow = (
@@ -234,8 +238,16 @@ class PrivateOverlaySyncTests(unittest.TestCase):
         ).read_text(encoding="utf-8")
 
         self.assertIn('git merge-base --is-ancestor "$GITHUB_SHA" FETCH_HEAD', workflow)
-        self.assertIn("git diff --cached --quiet FETCH_HEAD -- scripts personal_codex .agents", workflow)
-        self.assertIn("already matches generated overlay sources and contains", workflow)
+        self.assertIn("git diff --cached --quiet FETCH_HEAD", workflow)
+        self.assertNotIn("git diff --cached --quiet FETCH_HEAD -- scripts personal_codex .agents", workflow)
+        self.assertIn("already matches the full generated overlay tree and contains", workflow)
+
+    def test_readme_documents_sync_pr_token_permissions(self) -> None:
+        readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
+
+        self.assertIn("PRIVATE_OVERLAY_SYNC_PR_TOKEN", readme)
+        self.assertIn("contents, pull-request, and issues write access", readme)
+        self.assertIn("codex-automation", readme)
 
     def test_scheduled_workflow_only_publishes_incomplete_current_release(self) -> None:
         workflow = (
