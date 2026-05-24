@@ -199,9 +199,24 @@ class PrivateOverlaySyncTests(unittest.TestCase):
         self.assertIn('git remote set-url origin "https://x-access-token:${SYNC_PR_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"', workflow)
         self.assertIn("gh pr create", workflow)
         self.assertIn("gh pr edit", workflow)
+        self.assertIn('label="codex-automation"', workflow)
+        self.assertIn('--label "$label"', workflow)
+        self.assertIn('--add-label "$label"', workflow)
         self.assertIn('head="$owner:$branch"', workflow)
         self.assertIn('gh api --method GET "repos/$GITHUB_REPOSITORY/pulls"', workflow)
         self.assertNotIn('git push origin "HEAD:${GITHUB_REF_NAME}"', workflow)
+
+    def test_scheduled_workflow_enables_auto_merge_for_generated_pr(self) -> None:
+        workflow = (
+            REPO_ROOT / ".github" / "workflows" / "scheduled-sync-release.yml"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn('head_sha="$(git rev-parse HEAD)"', workflow)
+        self.assertIn('head_sha="$remote_sha"', workflow)
+        self.assertIn('pr_head_sha="$(gh pr view "$pr_url" --json headRefOid --jq \'.headRefOid\')"', workflow)
+        self.assertIn('pr_head_ref="$(gh pr view "$pr_url" --json headRefName --jq \'.headRefName\')"', workflow)
+        self.assertIn('pr_base_ref="$(gh pr view "$pr_url" --json baseRefName --jq \'.baseRefName\')"', workflow)
+        self.assertIn('gh pr merge "$pr_url" --auto --squash --delete-branch --match-head-commit "$head_sha"', workflow)
 
     def test_scheduled_workflow_uses_exact_sync_branch_ref(self) -> None:
         workflow = (
@@ -229,6 +244,15 @@ class PrivateOverlaySyncTests(unittest.TestCase):
 
         self.assertIn("if: steps.current-release.outputs.complete == 'false'", workflow)
         self.assertNotIn("steps.commit.outputs.sha", workflow)
+
+    def test_release_workflow_runs_required_pr_check_for_all_pull_requests(self) -> None:
+        workflow = (REPO_ROOT / ".github" / "workflows" / "release.yml").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn("  pull_request:\n  push:", workflow)
+        self.assertIn("    branches:\n      - master", workflow)
+        self.assertIn('      - ".github/workflows/**"', workflow)
 
 
 class PrivateOverlayReleaseTests(unittest.TestCase):
