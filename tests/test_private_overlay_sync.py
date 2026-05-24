@@ -188,6 +188,24 @@ class PrivateOverlaySyncTests(unittest.TestCase):
         self.assertEqual(checked_out_repos, sync_rule_repos)
         self.assertEqual(checked_out_paths, sync_rule_repos)
 
+    def test_scheduled_workflow_opens_pr_for_sync_changes(self) -> None:
+        workflow = (
+            REPO_ROOT / ".github" / "workflows" / "scheduled-sync-release.yml"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("pull-requests: write", workflow)
+        self.assertIn("gh pr create", workflow)
+        self.assertIn("gh pr edit", workflow)
+        self.assertNotIn('git push origin "HEAD:${GITHUB_REF_NAME}"', workflow)
+
+    def test_scheduled_workflow_only_publishes_incomplete_current_release(self) -> None:
+        workflow = (
+            REPO_ROOT / ".github" / "workflows" / "scheduled-sync-release.yml"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("if: steps.current-release.outputs.complete == 'false'", workflow)
+        self.assertNotIn("steps.commit.outputs.sha", workflow)
+
 
 class PrivateOverlayReleaseTests(unittest.TestCase):
     def test_force_bypasses_cooldown_lookup(self) -> None:
