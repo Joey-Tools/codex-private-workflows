@@ -14,6 +14,7 @@ on:
 permissions:
   actions: read
   contents: write
+  pull-requests: write
 
 concurrency:
   group: private-overlay-release-${{ github.repository }}-${{ github.ref }}
@@ -30,6 +31,8 @@ jobs:
     steps:
       - name: Check out private overlay
         uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -147,40 +150,114 @@ jobs:
         if: steps.changes.outputs.changed == 'true' || steps.current-release.outputs.complete == 'false'
         run: python3 -m unittest discover -s tests
 
-      - name: Commit synced overlay
+      - name: Open synced overlay pull request
         if: steps.changes.outputs.changed == 'true'
-        id: commit
+        id: sync-pr
+        env:
+          GH_TOKEN: ${{ secrets.PRIVATE_OVERLAY_SYNC_PR_TOKEN }}
+          SYNC_PR_TOKEN: ${{ secrets.PRIVATE_OVERLAY_SYNC_PR_TOKEN }}
         run: |
+          branch="codex/scheduled-private-overlay-sync"
+          owner="${GITHUB_REPOSITORY%%/*}"
+          remote_ref="refs/heads/$branch"
+          body_file="$(mktemp)"
+          if [ -z "$SYNC_PR_TOKEN" ]; then
+            echo "PRIVATE_OVERLAY_SYNC_PR_TOKEN is required so sync PR pushes trigger pull_request workflows." >&2
+            exit 1
+          fi
+          git remote set-url origin "https://x-access-token:${SYNC_PR_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          remote_sha="$(git ls-remote --heads origin "$remote_ref" | awk -v ref="$remote_ref" '$2 == ref {print $1}')"
+          remote_count="$(printf '%s\n' "$remote_sha" | sed '/^$/d' | wc -l | tr -d ' ')"
+          if [ "$remote_count" -gt 1 ]; then
+            echo "Multiple remote refs unexpectedly matched $remote_ref" >&2
+            exit 1
+          fi
+          if [ -n "$remote_sha" ]; then
+            git fetch --no-tags origin "$remote_ref"
+          fi
+
           git add scripts personal_codex .agents
-          git commit -m "Sync private overlay sources [skip ci]"
-          git push origin "HEAD:${GITHUB_REF_NAME}"
-          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+          remote_has_current_base=false
+          if [ -n "$remote_sha" ] && git merge-base --is-ancestor "$GITHUB_SHA" FETCH_HEAD; then
+            remote_has_current_base=true
+          fi
+
+          if [ -n "$remote_sha" ] && [ "$remote_has_current_base" = "true" ] && git diff --cached --quiet FETCH_HEAD -- scripts personal_codex .agents; then
+            echo "Existing $branch already matches generated overlay sources and contains $GITHUB_SHA."
+          else
+            git switch -c "$branch"
+            git commit -m "Sync private overlay sources"
+            if [ -n "$remote_sha" ]; then
+              git push --force-with-lease="$remote_ref:$remote_sha" origin "HEAD:$branch"
+            else
+              git push origin "HEAD:$branch"
+            fi
+          fi
+
+          cat > "$body_file" <<EOF
+          ## Summary
+          - Syncs private overlay sources from the public Joey-Tools repositories.
+          - Replaces the previous scheduled direct-push path, which is blocked by branch rules.
+
+          ## Validation
+          - python3 -m py_compile scripts/codex_personal_sync.py scripts/build_personal_codex_package.py scripts/private_overlay_release.py scripts/sync_private_overlay_sources.py tests/test_private_overlay_package.py tests/test_private_overlay_sync.py
+          - python3 -m unittest discover -s tests
+          EOF
+
+          label_args=()
+          if gh label list --repo "$GITHUB_REPOSITORY" --limit 100 --json name --jq '.[].name' | grep -qx 'codex'; then
+            label_args+=(--label codex)
+          fi
+          if gh label list --repo "$GITHUB_REPOSITORY" --limit 100 --json name --jq '.[].name' | grep -qx 'codex-automation'; then
+            label_args+=(--label codex-automation)
+          fi
+
+          pr_url="$(gh api --method GET "repos/$GITHUB_REPOSITORY/pulls" \
+            -f state=open \
+            -f base="$GITHUB_REF_NAME" \
+            -f head="$owner:$branch" \
+            --jq '.[0].html_url // empty')"
+          if [ -n "$pr_url" ]; then
+            gh pr edit "$pr_url" --title "[codex] Sync private overlay sources" --body-file "$body_file"
+          else
+            pr_url="$(gh pr create \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "[codex] Sync private overlay sources" \
+              --body-file "$body_file" \
+              --base "$GITHUB_REF_NAME" \
+              --head "$branch" \
+              "${label_args[@]}")"
+          fi
+          echo "url=$pr_url" >> "$GITHUB_OUTPUT"
+          echo "Opened or updated $pr_url"
 
       - name: Build release package
-        if: steps.changes.outputs.changed == 'true' || steps.current-release.outputs.complete == 'false'
+        if: steps.current-release.outputs.complete == 'false'
         env:
-          RELEASE_SHA: ${{ steps.commit.outputs.sha || github.sha }}
+          RELEASE_SHA: ${{ github.sha }}
         run: |
           python3 scripts/build_personal_codex_package.py \
             --sha "$RELEASE_SHA" \
             --output-dir dist
 
       - name: Verify release package
-        if: steps.changes.outputs.changed == 'true' || steps.current-release.outputs.complete == 'false'
+        if: steps.current-release.outputs.complete == 'false'
         env:
-          RELEASE_SHA: ${{ steps.commit.outputs.sha || github.sha }}
+          RELEASE_SHA: ${{ github.sha }}
         run: |
           python3 scripts/private_overlay_release.py verify-package \
             --sha "$RELEASE_SHA" \
             --dist dist
 
       - name: Publish GitHub release
-        if: steps.changes.outputs.changed == 'true' || steps.current-release.outputs.complete == 'false'
+        if: steps.current-release.outputs.complete == 'false'
         env:
           GITHUB_TOKEN: ${{ github.token }}
-          RELEASE_SHA: ${{ steps.commit.outputs.sha || github.sha }}
+          RELEASE_SHA: ${{ github.sha }}
         run: |
           python3 scripts/private_overlay_release.py publish \
             --repo "$GITHUB_REPOSITORY" \
