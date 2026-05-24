@@ -65,16 +65,18 @@ def _copy_source(repo_root: Path, staging_root: Path, source: Path) -> None:
         raise PackageError(f"manifest source is missing: {source}")
     if source_path.is_symlink():
         raise PackageError(f"refusing to package symlink source: {source}")
+    if _is_generated_path(source, is_dir=source_path.is_dir()):
+        raise PackageError(f"refusing generated manifest source: {source}")
     destination.parent.mkdir(parents=True, exist_ok=True)
     if source_path.is_dir():
         destination.mkdir(parents=True, exist_ok=True)
         for child in source_path.rglob("*"):
             relative_child = child.relative_to(source_path)
-            if _is_generated_path(relative_child, is_dir=child.is_dir()):
-                continue
             if child.is_symlink():
                 relative_child = source / relative_child
                 raise PackageError(f"refusing to package nested symlink source: {relative_child}")
+            if _is_generated_path(relative_child, is_dir=child.is_dir()):
+                continue
             destination_child = destination / relative_child
             if child.is_dir():
                 destination_child.mkdir(parents=True, exist_ok=True)
@@ -90,16 +92,6 @@ def _copy_source(repo_root: Path, staging_root: Path, source: Path) -> None:
         raise PackageError(f"unsupported manifest source type: {source}")
 
 
-def _is_generated_path(path: Path, *, is_dir: bool | None = None) -> bool:
-    if any(part in GENERATED_DIR_NAMES for part in path.parts):
-        return True
-    if path.name in GENERATED_FILE_NAMES:
-        return True
-    if is_dir is True:
-        return False
-    return path.suffix in GENERATED_SUFFIXES
-
-
 def stage_release(repo_root: Path, manifest_path: Path, staging_root: Path) -> None:
     manifest = _load_manifest(repo_root, manifest_path)
     for source in _manifest_sources(manifest):
@@ -112,6 +104,16 @@ def stage_release(repo_root: Path, manifest_path: Path, staging_root: Path) -> N
         json.dumps(manifest, indent=2, sort_keys=False) + "\n",
         encoding="utf-8",
     )
+
+
+def _is_generated_path(path: Path, *, is_dir: bool | None = None) -> bool:
+    if any(part in GENERATED_DIR_NAMES for part in path.parts):
+        return True
+    if path.name in GENERATED_FILE_NAMES:
+        return True
+    if is_dir is True:
+        return False
+    return path.suffix in GENERATED_SUFFIXES
 
 
 def _iter_tar_paths(root: Path) -> list[Path]:
