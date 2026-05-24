@@ -197,7 +197,7 @@ class PrivateOverlaySyncTests(unittest.TestCase):
         self.assertIn("gh pr create", workflow)
         self.assertIn("gh pr edit", workflow)
         self.assertIn('head="$owner:$branch"', workflow)
-        self.assertIn('gh api "repos/$GITHUB_REPOSITORY/pulls"', workflow)
+        self.assertIn('gh api --method GET "repos/$GITHUB_REPOSITORY/pulls"', workflow)
         self.assertNotIn('git push origin "HEAD:${GITHUB_REF_NAME}"', workflow)
 
     def test_scheduled_workflow_uses_exact_sync_branch_ref(self) -> None:

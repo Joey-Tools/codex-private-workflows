@@ -203,7 +203,7 @@ jobs:
             label_args+=(--label codex-automation)
           fi
 
-          pr_url="$(gh api "repos/$GITHUB_REPOSITORY/pulls" \
+          pr_url="$(gh api --method GET "repos/$GITHUB_REPOSITORY/pulls" \
             -f state=open \
             -f base="$GITHUB_REF_NAME" \
             -f head="$owner:$branch" \
