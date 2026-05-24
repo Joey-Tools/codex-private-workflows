@@ -196,7 +196,27 @@ class PrivateOverlaySyncTests(unittest.TestCase):
         self.assertIn("pull-requests: write", workflow)
         self.assertIn("gh pr create", workflow)
         self.assertIn("gh pr edit", workflow)
+        self.assertIn('head="$owner:$branch"', workflow)
+        self.assertIn('gh api "repos/$GITHUB_REPOSITORY/pulls"', workflow)
         self.assertNotIn('git push origin "HEAD:${GITHUB_REF_NAME}"', workflow)
+
+    def test_scheduled_workflow_uses_exact_sync_branch_ref(self) -> None:
+        workflow = (
+            REPO_ROOT / ".github" / "workflows" / "scheduled-sync-release.yml"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn('remote_ref="refs/heads/$branch"', workflow)
+        self.assertIn('awk -v ref="$remote_ref"', workflow)
+        self.assertIn('git push --force-with-lease="$remote_ref:$remote_sha"', workflow)
+        self.assertNotIn('git ls-remote --heads origin "$branch"', workflow)
+
+    def test_scheduled_workflow_skips_unchanged_sync_branch(self) -> None:
+        workflow = (
+            REPO_ROOT / ".github" / "workflows" / "scheduled-sync-release.yml"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("git diff --cached --quiet FETCH_HEAD -- scripts personal_codex .agents", workflow)
+        self.assertIn("already matches generated overlay sources", workflow)
 
     def test_scheduled_workflow_only_publishes_incomplete_current_release(self) -> None:
         workflow = (
