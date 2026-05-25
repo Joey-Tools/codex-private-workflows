@@ -95,6 +95,15 @@ SYNC_RULES = (
         "personal_codex/skills/copilot-review-playbook",
     ),
     _rule(
+        "codex-review-workflows",
+        "skills/agile-delivery-workflow",
+        "personal_codex/skills/agile-delivery-workflow",
+        (
+            Replacement("user-visible", "Joey-visible", required=False),
+        ),
+        common_joey_text=True,
+    ),
+    _rule(
         "codex-debug-triage",
         "skills/bug-triage-playbook",
         "personal_codex/skills/bug-triage-playbook",
