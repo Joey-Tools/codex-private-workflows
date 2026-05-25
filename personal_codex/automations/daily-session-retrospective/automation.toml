@@ -1,0 +1,27 @@
+version = 1
+id = "daily-session-retrospective"
+kind = "cron"
+name = "Daily Session Retrospective"
+prompt = """
+Run a read-only daily retrospective over Joey's Codex session activity.
+
+Use /Users/hoteng/Program/GitHub/Joey-Tools/codex-workspace as the stable workspace cwd. Treat all local and remote Codex history as read-only. Do not modify ~/.codex, remote hosts, Apple Notes, or raw rollout files.
+
+Evidence scope must match $remote-host-context's default host policy: local machine, miku-bot-dev, and hoteng-srv-01. Start with remote-host-context preflight across those hosts. Choose a fixed scan end timestamp before remote materialization. For remote evidence, use the remote_codex_probe.py bounded flow: preflight, session-meta for bounded dates, fetch-rollout for verified rollout paths, and rollout-summary when a rollout is too large to copy. Materialized remote source roots passed to the retrospective helper must include `source_metadata.json` with `host`, `status`, `window_start`, `window_end`, and `materialized_at`; `window_end` must match the fixed scan end passed to helper `--end`; missing or stale metadata is a coverage gap. Do not use unbounded remote rg/jq/ssh searches. If a host is unreachable, stale, missing ~/.codex, or gated by auth, report that exact coverage gap.
+
+Use the installed codex-session-retrospective workflow from $HOME/.codex/skills/codex-session-retrospective/SKILL.md. The preferred helper path is $HOME/.codex/skills/codex-session-retrospective/scripts/session_retrospective.py. If the installed helper is missing, first run `python3 scripts/codex_workspace.py status --repo codex-workflow-hygiene --strict` from the workspace and use the verified codex-workflow-hygiene helper only when that strict status succeeds and the helper file exists there. If the canonical helper is not available yet, run `python3 scripts/codex_workspace.py status --repo codex-private-workflows --strict` and use the verified `personal_codex/skills/codex-session-retrospective/scripts/session_retrospective.py` source helper only when that strict status succeeds. If neither strict source is ready, report blocked. Do not run a stale, dirty, wrong-branch, or hardcoded fallback helper.
+
+Scan from the previous completed retrospective run when state is available, and also revisit active threads from the last 14 days so cross-day turns in old conversations are not missed. Use a bounded map-reduce workflow: generate a shard manifest first, use maximum practical subagent concurrency for independent extractor-redactor shards, let later aggregation/review stages consume only redacted summaries, and run remaining shards in waves if runtime quota blocks top concurrency.
+
+Write task-local scan artifacts under .codex-local/session-retrospective/runs/<YYYYMMDD>/daily/. Run validate-output on that run dir, then run export-retained into .codex-local/session-retrospective/retained/<YYYYMMDD>/daily/ and validate-retained on the retained export. The history repository is Joey-Tools/codex-session-retrospective-history. Use scripts/codex_workspace.py status --repo codex-session-retrospective-history --strict before preparing a write worktree. If ready, use scripts/codex_workspace.py prepare-run --repo codex-session-retrospective-history --date <YYYYMMDD> --topic daily-session-retrospective and first create one state-advancing history commit that changes exactly one retained export directory containing only `episodes.jsonl`, `turn_flags.jsonl`, `trend_report.json`, and `retained_manifest.json`. Commit only validator-supported redacted reports or schemas separately after that retained-export commit. Before reporting history commit success or advancing state, run the helper's validate-history-commit command with `--history-ref HEAD` against the retained-export commit and validate-history-tree against the final history worktree HEAD after all follow-on commits; this proves final HEAD still contains the same retained export unchanged. Do not create any additional history commits after validate-history-tree succeeds during the same run. Never commit the helper's transient `shard_manifest.json`, `shards.jsonl`, or full `turn_summaries.jsonl`. If the history repo mirror is unavailable or either history validation fails, keep the local cache and report `history commit blocked`. Advance the daily scan state only after the retained export validates, the dedicated retained-export history commit succeeds, and the final history tree validates; pass the same daily run dir, same retained export dir, the history worktree path as `--history-repo`, the retained-export commit's 40-character SHA as `--history-commit`, and the audited final history ref as `--history-ref HEAD` to advance-state. Do not pass an older commit or branch for `--history-ref`; advance-state requires the audited ref to resolve to current history `HEAD` and to still contain the same retained export unchanged.
+
+Do not commit raw rollout files, full prompts, internal URLs, secrets, customer data, proprietary code snippets, or unredacted tool output. Report the scanned window, host coverage, subagent waves used, history commit status, top episode/topic friction, turn-level prompt improvement candidates, verification gaps, and safety/privacy flags.
+"""
+status = "ACTIVE"
+rrule = "FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR,SA,SU;BYHOUR=3;BYMINUTE=35"
+model = "gpt-5.5"
+reasoning_effort = "xhigh"
+execution_environment = "worktree"
+cwds = ["/Users/hoteng/Program/GitHub/Joey-Tools/codex-workspace"]
+created_at = 1779408000000
+updated_at = 1779408000000

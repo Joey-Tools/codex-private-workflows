@@ -11,6 +11,8 @@
 - private automation `automation.toml` references
 - private automation workspace routing, including Daily Skill Friction's
   `Joey-Tools/codex-workspace` canonical repo mirror wrapper
+- private session retrospective automation routing for cross-host, redacted
+  retrospective history capture
 
 Public base release is published by `Joey-Tools/codex-toolbox`. This private overlay
 installs into `~/.codex/personal-sync/overlays/private/current` and manages only
@@ -55,9 +57,10 @@ that PR publishes the private overlay release through the normal `master` push
 release workflow.
 
 The sync PR step requires a `PRIVATE_OVERLAY_SYNC_PR_TOKEN` secret with repository
-contents and pull-request write access. The workflow uses that token for both branch
-pushes and PR creation so the resulting PR `pull_request` validation workflows are
-not suppressed as `GITHUB_TOKEN`-triggered events.
+contents, pull-request, and issues write access. The workflow uses that token for
+branch pushes, PR creation, and the `codex-automation` PR label so the resulting
+PR `pull_request` validation workflows are not suppressed as `GITHUB_TOKEN`-triggered
+events.
 
 After merging a Joey-Tools source-repo PR that should flow into the private overlay,
 trigger the sync manually so the release is not delayed until the fallback window:

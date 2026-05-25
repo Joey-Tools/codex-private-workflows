@@ -2,17 +2,12 @@ name: Private Overlay Release
 
 on:
   pull_request:
-    paths:
-      - ".agents/**"
-      - ".github/workflows/release.yml"
-      - "README.md"
-      - "personal_codex/**"
-      - "scripts/**"
-      - "tests/**"
   push:
+    branches:
+      - master
     paths:
       - ".agents/**"
-      - ".github/workflows/release.yml"
+      - ".github/workflows/**"
       - "README.md"
       - "personal_codex/**"
       - "scripts/**"

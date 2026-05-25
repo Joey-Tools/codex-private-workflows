@@ -179,6 +179,181 @@ class PrivateOverlayPackageTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("nested symlink", result.stderr)
 
+    def test_package_builder_rejects_generated_manifest_sources(self) -> None:
+        repo_root = self.root / "repo"
+        cache_root = repo_root / "personal_codex" / "skills" / "example" / "__pycache__"
+        cache_root.mkdir(parents=True)
+        (cache_root / "generated.pyc").write_bytes(b"bytecode")
+        manifest_path = repo_root / "personal_codex" / "private-sync-manifest.json"
+        manifest_path.write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "owner": "private",
+                    "links": [
+                        {
+                            "source": "personal_codex/skills/example/__pycache__",
+                            "target": "skills/example/__pycache__",
+                            "kind": "directory",
+                        }
+                    ],
+                    "reference_only": [],
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(PACKAGE_SCRIPT),
+                "--repo-root",
+                str(repo_root),
+                "--sha",
+                PRIVATE_SHA,
+                "--output-dir",
+                str(self.root / "dist"),
+            ],
+            check=False,
+            text=True,
+            capture_output=True,
+        )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("refusing generated manifest source", result.stderr)
+
+    def test_package_builder_rejects_generated_manifest_file_sources(self) -> None:
+        repo_root = self.root / "repo"
+        source_file = repo_root / "personal_codex" / "skills" / "example" / "generated.pyc"
+        source_file.parent.mkdir(parents=True)
+        source_file.write_bytes(b"bytecode")
+        manifest_path = repo_root / "personal_codex" / "private-sync-manifest.json"
+        manifest_path.write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "owner": "private",
+                    "links": [
+                        {
+                            "source": "personal_codex/skills/example/generated.pyc",
+                            "target": "skills/example/generated.pyc",
+                            "kind": "file",
+                        }
+                    ],
+                    "reference_only": [],
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(PACKAGE_SCRIPT),
+                "--repo-root",
+                str(repo_root),
+                "--sha",
+                PRIVATE_SHA,
+                "--output-dir",
+                str(self.root / "dist"),
+            ],
+            check=False,
+            text=True,
+            capture_output=True,
+        )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("refusing generated manifest source", result.stderr)
+
+    def test_package_builder_rejects_symlink_inside_generated_directory(self) -> None:
+        repo_root = self.root / "repo"
+        source_root = repo_root / "personal_codex" / "skills" / "example"
+        cache_root = source_root / "__pycache__"
+        cache_root.mkdir(parents=True)
+        (source_root / "SKILL.md").write_text("---\nname: example\n---\n", encoding="utf-8")
+        (cache_root / "leak.pyc").symlink_to(Path.home())
+        manifest_path = repo_root / "personal_codex" / "private-sync-manifest.json"
+        manifest_path.write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "owner": "private",
+                    "links": [
+                        {
+                            "source": "personal_codex/skills/example",
+                            "target": "skills/example",
+                            "kind": "skill",
+                        }
+                    ],
+                    "reference_only": [],
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(PACKAGE_SCRIPT),
+                "--repo-root",
+                str(repo_root),
+                "--sha",
+                PRIVATE_SHA,
+                "--output-dir",
+                str(self.root / "dist"),
+            ],
+            check=False,
+            text=True,
+            capture_output=True,
+        )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("nested symlink", result.stderr)
+
+    def test_package_builder_excludes_generated_bytecode(self) -> None:
+        repo_root = self.root / "repo"
+        source_root = repo_root / "personal_codex" / "skills" / "example"
+        cache_root = source_root / "__pycache__"
+        cache_root.mkdir(parents=True)
+        fixture_asset = source_root / "assets" / "example.pyc" / "fixture.txt"
+        fixture_asset.parent.mkdir(parents=True)
+        (source_root / "SKILL.md").write_text("---\nname: example\n---\n", encoding="utf-8")
+        (source_root / ".DS_Store").write_text("metadata\n", encoding="utf-8")
+        (cache_root / "session_retrospective.cpython-314.pyc").write_bytes(b"bytecode")
+        fixture_asset.write_text("not bytecode\n", encoding="utf-8")
+        manifest_path = repo_root / "personal_codex" / "private-sync-manifest.json"
+        manifest_path.write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "owner": "private",
+                    "links": [
+                        {
+                            "source": "personal_codex/skills/example",
+                            "target": "skills/example",
+                            "kind": "skill",
+                        }
+                    ],
+                    "reference_only": [],
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+        archive_path = self.build_private_package(repo_root=repo_root)
+        with tarfile.open(archive_path, "r:gz") as archive:
+            names = archive.getnames()
+
+        self.assertTrue(any(name.endswith("/SKILL.md") for name in names))
+        self.assertTrue(any(name.endswith("/assets/example.pyc/fixture.txt") for name in names))
+        self.assertFalse(any("__pycache__" in name for name in names))
+        self.assertFalse(any(name.endswith("session_retrospective.cpython-314.pyc") for name in names))
+        self.assertFalse(any(name.endswith(".DS_Store") for name in names))
+
     def test_private_overlay_installs_over_public_base_and_verifies(self) -> None:
         public_release = self.root / "public-release"
         home = self.root / "home" / ".codex"

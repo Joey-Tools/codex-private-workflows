@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import datetime as dt
-import importlib.util
 import contextlib
+import importlib.util
 import io
+import json
 from pathlib import Path
 import re
 import sys
@@ -221,6 +222,31 @@ class PrivateOverlaySyncTests(unittest.TestCase):
         self.assertEqual(checked_out_repos, sync_rule_repos)
         self.assertEqual(checked_out_paths, sync_rule_repos)
 
+    def test_manifest_canonical_skills_are_backed_by_sync_rules(self) -> None:
+        manifest = json.loads(
+            (REPO_ROOT / "personal_codex" / "private-sync-manifest.json").read_text(encoding="utf-8")
+        )
+        private_only_sources = {
+            "personal_codex/skills/cisco-trackers-lookup",
+            "personal_codex/skills/remote-host-context",
+        }
+        manifest_sources = {
+            link["source"]
+            for link in manifest["links"]
+            if link["source"].startswith("personal_codex/skills/")
+        }
+        manifest_targets = {
+            link["target"]
+            for link in manifest["links"]
+            if link["source"].startswith("personal_codex/skills/")
+        }
+        sync_targets = {str(rule.target) for rule in SYNC_MODULE.SYNC_RULES}
+
+        self.assertEqual(manifest_sources - private_only_sources, manifest_sources & sync_targets)
+        self.assertIn("personal_codex/skills/codex-session-retrospective", manifest_sources)
+        self.assertIn("skills/codex-session-retrospective", manifest_targets)
+        self.assertIn("personal_codex/skills/codex-session-retrospective", sync_targets)
+
     def test_scheduled_workflow_opens_pr_for_sync_changes(self) -> None:
         workflow = (
             REPO_ROOT / ".github" / "workflows" / "scheduled-sync-release.yml"
@@ -232,9 +258,28 @@ class PrivateOverlaySyncTests(unittest.TestCase):
         self.assertIn('git remote set-url origin "https://x-access-token:${SYNC_PR_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"', workflow)
         self.assertIn("gh pr create", workflow)
         self.assertIn("gh pr edit", workflow)
+        self.assertIn('label="codex-automation"', workflow)
+        self.assertIn('gh api --method GET "repos/$GITHUB_REPOSITORY/labels/$label"', workflow)
+        self.assertNotIn("gh label list --repo", workflow)
+        self.assertIn('--label "$label"', workflow)
+        self.assertIn('--add-label "$label"', workflow)
         self.assertIn('head="$owner:$branch"', workflow)
         self.assertIn('gh api --method GET "repos/$GITHUB_REPOSITORY/pulls"', workflow)
         self.assertNotIn('git push origin "HEAD:${GITHUB_REF_NAME}"', workflow)
+
+    def test_scheduled_workflow_enables_auto_merge_for_generated_pr(self) -> None:
+        workflow = (
+            REPO_ROOT / ".github" / "workflows" / "scheduled-sync-release.yml"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn('head_sha="$(git rev-parse HEAD)"', workflow)
+        self.assertIn('head_sha="$remote_sha"', workflow)
+        self.assertIn('pr_head_sha="$(gh pr view "$pr_url" --json headRefOid --jq \'.headRefOid\')"', workflow)
+        self.assertIn('pr_head_ref="$(gh pr view "$pr_url" --json headRefName --jq \'.headRefName\')"', workflow)
+        self.assertIn('pr_base_ref="$(gh pr view "$pr_url" --json baseRefName --jq \'.baseRefName\')"', workflow)
+        self.assertIn('gh pr merge "$pr_url" --auto --squash --delete-branch --match-head-commit "$head_sha"', workflow)
+        self.assertIn('git diff --cached --quiet "$head_sha"', workflow)
+        self.assertIn('git diff --quiet "$head_sha"', workflow)
 
     def test_scheduled_workflow_uses_exact_sync_branch_ref(self) -> None:
         workflow = (
@@ -252,8 +297,16 @@ class PrivateOverlaySyncTests(unittest.TestCase):
         ).read_text(encoding="utf-8")
 
         self.assertIn('git merge-base --is-ancestor "$GITHUB_SHA" FETCH_HEAD', workflow)
-        self.assertIn("git diff --cached --quiet FETCH_HEAD -- scripts personal_codex .agents", workflow)
-        self.assertIn("already matches generated overlay sources and contains", workflow)
+        self.assertIn("git diff --cached --quiet FETCH_HEAD", workflow)
+        self.assertNotIn("git diff --cached --quiet FETCH_HEAD -- scripts personal_codex .agents", workflow)
+        self.assertIn("already matches the full generated overlay tree and contains", workflow)
+
+    def test_readme_documents_sync_pr_token_permissions(self) -> None:
+        readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
+
+        self.assertIn("PRIVATE_OVERLAY_SYNC_PR_TOKEN", readme)
+        self.assertIn("contents, pull-request, and issues write access", readme)
+        self.assertIn("codex-automation", readme)
 
     def test_scheduled_workflow_only_publishes_incomplete_current_release(self) -> None:
         workflow = (
@@ -262,6 +315,15 @@ class PrivateOverlaySyncTests(unittest.TestCase):
 
         self.assertIn("if: steps.current-release.outputs.complete == 'false'", workflow)
         self.assertNotIn("steps.commit.outputs.sha", workflow)
+
+    def test_release_workflow_runs_required_pr_check_for_all_pull_requests(self) -> None:
+        workflow = (REPO_ROOT / ".github" / "workflows" / "release.yml").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn("  pull_request:\n  push:", workflow)
+        self.assertIn("    branches:\n      - master", workflow)
+        self.assertIn('      - ".github/workflows/**"', workflow)
 
 
 class PrivateOverlayReleaseTests(unittest.TestCase):

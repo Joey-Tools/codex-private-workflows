@@ -46,6 +46,11 @@
       "kind": "skill"
     },
     {
+      "source": "personal_codex/skills/codex-session-retrospective",
+      "target": "skills/codex-session-retrospective",
+      "kind": "skill"
+    },
+    {
       "source": "personal_codex/skills/copilot-review-playbook",
       "target": "skills/copilot-review-playbook",
       "kind": "directory"
@@ -98,6 +103,8 @@
   ],
   "reference_only": [
     "personal_codex/automations/daily-skill-friction/automation.toml",
-    "personal_codex/automations/daily-work-report-draft/automation.toml"
+    "personal_codex/automations/daily-work-report-draft/automation.toml",
+    "personal_codex/automations/daily-session-retrospective/automation.toml",
+    "personal_codex/automations/weekly-session-retrospective/automation.toml"
   ]
 }
