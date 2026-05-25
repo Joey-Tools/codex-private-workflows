@@ -118,6 +118,7 @@ class PrivateOverlayPackageTests(unittest.TestCase):
             "Joey-Tools/codex-toolbox",
         )
         self.assertIn("AGENTS.md", targets)
+        self.assertIn("skills/agile-delivery-workflow", targets)
         self.assertIn("skills/cisco-trackers-lookup", targets)
         self.assertIn("skills/remote-host-context", targets)
         self.assertIn("skills/apple-notes-work-report", targets)

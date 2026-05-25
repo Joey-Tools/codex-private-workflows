@@ -60,6 +60,39 @@ class PrivateOverlaySyncTests(unittest.TestCase):
         target = self.repo_root / "personal_codex" / "skills" / "example" / "SKILL.md"
         self.assertEqual(target.read_text(encoding="utf-8"), "Use this when Joey asks.\n")
 
+    def test_agile_delivery_sync_rule_builds_private_variant(self) -> None:
+        source = (
+            self.source_root
+            / "codex-review-workflows"
+            / "skills"
+            / "agile-delivery-workflow"
+            / "SKILL.md"
+        )
+        source.parent.mkdir(parents=True)
+        source.write_text(
+            "Use this when the user asks.\nState the core user-visible behavior.\n",
+            encoding="utf-8",
+        )
+        rule = next(
+            rule
+            for rule in SYNC_MODULE.SYNC_RULES
+            if rule.target == Path("personal_codex/skills/agile-delivery-workflow")
+        )
+
+        SYNC_MODULE.sync_sources(self.repo_root, self.source_root, (rule,))
+
+        target = (
+            self.repo_root
+            / "personal_codex"
+            / "skills"
+            / "agile-delivery-workflow"
+            / "SKILL.md"
+        )
+        self.assertEqual(
+            target.read_text(encoding="utf-8"),
+            "Use this when Joey asks.\nState the core Joey-visible behavior.\n",
+        )
+
     def test_sync_rule_rejects_symlink_sources(self) -> None:
         source = self.source_root / "example-repo" / "skill"
         source.mkdir(parents=True)

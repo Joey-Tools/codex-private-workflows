@@ -16,6 +16,11 @@
       "kind": "file"
     },
     {
+      "source": "personal_codex/skills/agile-delivery-workflow",
+      "target": "skills/agile-delivery-workflow",
+      "kind": "skill"
+    },
+    {
       "source": "personal_codex/skills/bug-triage-playbook",
       "target": "skills/bug-triage-playbook",
       "kind": "skill"

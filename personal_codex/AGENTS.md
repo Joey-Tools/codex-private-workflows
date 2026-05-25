@@ -12,6 +12,7 @@
 - For moderate or complex tasks, separate planning from implementation: align on the approach first, then execute, and avoid unnecessary clarification loops when reasonable assumptions are enough.
 - Do not expand the scope into unrelated rewrites or side quests. Low-level fixes for mistakes introduced in the current task stay in scope and should be corrected directly.
 - Use `$joey-skill-authoring` when creating or revising skills, or when deciding whether guidance belongs in `AGENTS.md`, `SKILL.md`, or `references/`.
+- Use `$agile-delivery-workflow` when Joey explicitly asks to prioritize an early usable MVP or says `先可用`, `快速迭代`, `偏 agile`, `MVP`, or `scout`; stop first at a focused checked signed local commit, then continue to normal delivery/PR workflow only when requested.
 - Use `$codex-rules-hygiene` when auditing or pruning `~/.codex/rules/default.rules`, especially after recent approvals suggest wrapper drift, helper gaps, or approval-log buildup rather than genuinely new stable command families.
 - Use `$codex-session-mining` when a task depends on `~/.codex/session_index.jsonl`, `history.jsonl`, or `sessions/**/rollout-*.jsonl`, such as recent-session audits, prior-work recovery, or mining repeated skill friction.
 - Use `$codex-session-retrospective` for read-only, cross-host collaboration retrospectives that produce redacted episode/topic summaries, turn-level prompt-improvement flags, and private history-ready reports.
