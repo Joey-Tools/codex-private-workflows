@@ -42,8 +42,8 @@ waiting, release automation, or merge-readiness unless Joey asks to continue.
 4. Create the MVP checkpoint.
 - Use the repository's normal local commit policy for the focused slice.
 - The checkpoint is not merge-ready by default.
-- Do not push, open a PR, wait for CI, run external review, or merge unless Joey
-  explicitly asks for that next phase.
+- Do not push, open a PR, wait for CI, run external review, or merge unless the
+  user explicitly asks for that next phase.
 
 5. Report the checkpoint.
 - Include the local commit SHA.
@@ -57,11 +57,11 @@ waiting, release automation, or merge-readiness unless Joey asks to continue.
   [$change-delivery-workflow](../change-delivery-workflow/SKILL.md): repo
   conventions, focused validation, commit hygiene, and truthful reporting.
 - Do not invoke the full local delivery gate by default. Use
-  `$change-delivery-workflow` as a full workflow only when Joey asks to continue
-  past the MVP checkpoint or explicitly wants the complete local gate.
+  `$change-delivery-workflow` as a full workflow only when Joey asks to
+  continue past the MVP checkpoint or explicitly wants the complete local gate.
 - Use [$pr-readiness-review-workflow](../pr-readiness-review-workflow/SKILL.md)
-  only when Joey asks to continue toward a PR, full gates, CI/review waiting, or
-  merge-ready status.
+  only when Joey asks to continue toward a PR, full gates, CI/review waiting,
+  or merge-ready status.
 
 ## Guardrails
 
