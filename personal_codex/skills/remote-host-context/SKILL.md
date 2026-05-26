@@ -37,6 +37,7 @@ It standardizes a small read-only SSH preflight across Joey's default remote hos
 - `fetch-rollout` writes to a single file path via `--output <file>`; do not invent directory flags such as `--output-dir`.
 - When a validated rollout is too large to copy cleanly, use `... remote_codex_probe.py chunked-rollout-summary ...` to scan the whole file in JSONL-record chunks and return structured evidence with byte/record ranges.
 - `chunked-rollout-summary` is the default large-rollout fallback; it aims for whole-rollout semantic coverage without copying all raw transcript text.
+- Oversized single JSONL records are not parsed in the summary path; the helper emits `chunk_meta` and bounded `fetch_ranges` so exact wording can be fetched explicitly without loading the whole record during summary.
 - `rollout-summary` remains a bounded prefix skim. If its `scan_meta.scan_truncated` is `true`, treat it as candidate selection only and upgrade to `chunked-rollout-summary` before writing an activity or work-report conclusion.
 - `rollout-summary` emits a `scan_meta` row. If `scan_truncated` is `true`, treat the result as partial evidence and surface a coverage gap; do not summarize it as a complete scan.
 - `chunked-rollout-summary` emits `chunk_meta` rows. If a chunk has `raw_fetch_recommended=true`, use `... remote_codex_probe.py fetch-rollout-chunk ...` for the listed `fetch_ranges`; oversized JSONL records may require fetching multiple ranges and concatenating them locally for exact wording.

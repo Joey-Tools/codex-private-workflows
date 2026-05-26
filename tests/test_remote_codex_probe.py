@@ -34,6 +34,19 @@ def write_rollout(codex_root: Path, lines: list[str]) -> str:
     return "sessions/2026/05/26/rollout-2026-05-26T10-00-00-example.jsonl"
 
 
+class SizeGuardedBytesIO(io.BytesIO):
+    def __init__(self, data: bytes, *, max_readline_size: int) -> None:
+        super().__init__(data)
+        self.max_readline_size = max_readline_size
+        self.readline_sizes: list[int] = []
+
+    def readline(self, size: int = -1) -> bytes:
+        self.readline_sizes.append(size)
+        if size < 0 or size > self.max_readline_size:
+            raise AssertionError(f"unbounded readline: {size}")
+        return super().readline(size)
+
+
 class RemoteCodexProbeChunkTests(unittest.TestCase):
     def test_remote_python_script_compiles_for_chunk_commands(self) -> None:
         chunked_script = MODULE._remote_python_script(
@@ -100,6 +113,21 @@ class RemoteCodexProbeChunkTests(unittest.TestCase):
         self.assertTrue(all(record["byte_end"] > record["byte_start"] for record in chunk_meta))
         self.assertTrue(any(record["raw_fetch_recommended"] for record in chunk_meta))
         self.assertTrue(any(record["kind"] == "function_call_output" for record in records))
+
+    def test_iter_rollout_chunks_never_reads_unbounded_oversized_line(self) -> None:
+        data = b'{"timestamp":"2026-05-26T10:00:00Z","type":"response_item","payload":"' + b"x" * 200 + b'"}\n'
+        handle = SizeGuardedBytesIO(data, max_readline_size=17)
+
+        chunks = list(MODULE._iter_rollout_chunks(handle, chunk_bytes=16))
+
+        self.assertEqual(len(chunks), 1)
+        self.assertTrue(chunks[0].oversized_record)
+        self.assertEqual(chunks[0].byte_start, 0)
+        self.assertEqual(chunks[0].byte_end, len(data))
+        self.assertEqual(chunks[0].record_start, 1)
+        self.assertEqual(chunks[0].record_end, 1)
+        self.assertEqual(chunks[0].lines, ("",))
+        self.assertTrue(all(size == 17 for size in handle.readline_sizes))
 
     def test_chunked_rollout_summary_splits_oversized_fetch_ranges(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

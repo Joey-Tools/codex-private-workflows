@@ -499,6 +499,19 @@ def _timestamp_from_jsonl_line(line: str) -> str:
     return str(timestamp) if isinstance(timestamp, str) else ""
 
 
+def _raw_line_parts(raw_line: Any) -> tuple[bytes, str]:
+    if isinstance(raw_line, str):
+        return raw_line.encode("utf-8", "surrogatepass"), raw_line
+    raw_bytes = bytes(raw_line)
+    return raw_bytes, raw_bytes.decode("utf-8", "replace")
+
+
+def _raw_line_endswith_newline(raw_line: Any) -> bool:
+    if isinstance(raw_line, str):
+        return raw_line.endswith("\n")
+    return bytes(raw_line).endswith(b"\n")
+
+
 def _iter_rollout_chunks(
     handle: Any,
     *,
@@ -544,22 +557,50 @@ def _iter_rollout_chunks(
         oversized_record = False
         return chunk
 
+    read_limit = chunk_bytes + 1
+
     while True:
-        raw_line = handle.readline()
+        raw_line = handle.readline(read_limit)
         if not raw_line:
             chunk = flush()
             if chunk is not None:
                 yield chunk
             return
-        if isinstance(raw_line, str):
-            raw_bytes = raw_line.encode("utf-8", "surrogatepass")
-            line = raw_line
-        else:
-            raw_bytes = bytes(raw_line)
-            line = raw_bytes.decode("utf-8", "replace")
+        raw_bytes, line = _raw_line_parts(raw_line)
         line_start = offset
-        offset += len(raw_bytes)
         record_no += 1
+        line_truncated = len(raw_line) == read_limit and not _raw_line_endswith_newline(raw_line)
+        if len(raw_bytes) > chunk_bytes or line_truncated:
+            if lines:
+                chunk = flush()
+                if chunk is not None:
+                    yield chunk
+
+            total_bytes = len(raw_bytes)
+            while line_truncated:
+                segment = handle.readline(read_limit)
+                if not segment:
+                    break
+                segment_bytes, _ = _raw_line_parts(segment)
+                total_bytes += len(segment_bytes)
+                line_truncated = len(segment) == read_limit and not _raw_line_endswith_newline(segment)
+
+            offset += total_bytes
+            yield RolloutChunk(
+                index=chunk_index,
+                byte_start=line_start,
+                byte_end=line_start + total_bytes,
+                record_start=record_no,
+                record_end=record_no,
+                first_timestamp="",
+                last_timestamp="",
+                oversized_record=True,
+                lines=("",),
+            )
+            chunk_index += 1
+            continue
+
+        offset += len(raw_bytes)
 
         if lines and current_bytes + len(raw_bytes) > chunk_bytes:
             chunk = flush()
@@ -578,11 +619,6 @@ def _iter_rollout_chunks(
         oversized_record = oversized_record or len(raw_bytes) > chunk_bytes
         lines.append(line)
         current_bytes += len(raw_bytes)
-
-        if len(raw_bytes) > chunk_bytes:
-            chunk = flush()
-            if chunk is not None:
-                yield chunk
 
 
 def _fetch_ranges_for_byte_range(
@@ -872,6 +908,19 @@ def timestamp_from_jsonl_line(line):
     return str(value) if isinstance(value, str) else ""
 
 
+def raw_line_parts(raw_line):
+    if isinstance(raw_line, str):
+        return raw_line.encode("utf-8", "surrogatepass"), raw_line
+    raw_bytes = bytes(raw_line)
+    return raw_bytes, raw_bytes.decode("utf-8", "replace")
+
+
+def raw_line_endswith_newline(raw_line):
+    if isinstance(raw_line, str):
+        return raw_line.endswith("\\n")
+    return bytes(raw_line).endswith(b"\\n")
+
+
 def iter_rollout_chunks(handle, chunk_bytes):
     if chunk_bytes < 1:
         raise ValueError("chunk bytes must be positive")
@@ -912,22 +961,50 @@ def iter_rollout_chunks(handle, chunk_bytes):
         oversized_record = False
         return chunk
 
+    read_limit = chunk_bytes + 1
+
     while True:
-        raw_line = handle.readline()
+        raw_line = handle.readline(read_limit)
         if not raw_line:
             chunk = flush()
             if chunk is not None:
                 yield chunk
             return
-        if isinstance(raw_line, str):
-            raw_bytes = raw_line.encode("utf-8", "surrogatepass")
-            line = raw_line
-        else:
-            raw_bytes = bytes(raw_line)
-            line = raw_bytes.decode("utf-8", "replace")
+        raw_bytes, line = raw_line_parts(raw_line)
         line_start = offset
-        offset += len(raw_bytes)
         record_no += 1
+        line_truncated = len(raw_line) == read_limit and not raw_line_endswith_newline(raw_line)
+        if len(raw_bytes) > chunk_bytes or line_truncated:
+            if lines:
+                chunk = flush()
+                if chunk is not None:
+                    yield chunk
+
+            total_bytes = len(raw_bytes)
+            while line_truncated:
+                segment = handle.readline(read_limit)
+                if not segment:
+                    break
+                segment_bytes, _ = raw_line_parts(segment)
+                total_bytes += len(segment_bytes)
+                line_truncated = len(segment) == read_limit and not raw_line_endswith_newline(segment)
+
+            offset += total_bytes
+            yield {{
+                "index": chunk_index,
+                "byte_start": line_start,
+                "byte_end": line_start + total_bytes,
+                "record_start": record_no,
+                "record_end": record_no,
+                "first_timestamp": "",
+                "last_timestamp": "",
+                "oversized_record": True,
+                "lines": ("",),
+            }}
+            chunk_index += 1
+            continue
+
+        offset += len(raw_bytes)
 
         if lines and current_bytes + len(raw_bytes) > chunk_bytes:
             chunk = flush()
@@ -946,11 +1023,6 @@ def iter_rollout_chunks(handle, chunk_bytes):
         oversized_record = oversized_record or len(raw_bytes) > chunk_bytes
         lines.append(line)
         current_bytes += len(raw_bytes)
-
-        if len(raw_bytes) > chunk_bytes:
-            chunk = flush()
-            if chunk is not None:
-                yield chunk
 
 
 def fetch_ranges_for_byte_range(byte_start, byte_end, max_bytes):
