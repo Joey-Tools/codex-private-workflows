@@ -24,6 +24,9 @@ DATE_FORMAT = "%Y/%m/%d"
 MAX_SESSION_META_LIMIT = 500
 MAX_SESSION_META_DATE_COUNT = 31
 MAX_FETCH_ROLLOUT_BYTES = 16 * 1024 * 1024
+DEFAULT_ROLLOUT_CHUNK_BYTES = 1024 * 1024
+MAX_ROLLOUT_CHUNK_BYTES = 2 * 1024 * 1024
+MAX_FETCH_ROLLOUT_CHUNK_BYTES = 2 * 1024 * 1024
 MAX_ROLLOUT_SUMMARY_LIMIT = 200
 MAX_ROLLOUT_SUMMARY_SCAN_BYTES = 2 * 1024 * 1024
 MAX_ROLLOUT_SUMMARY_TAIL_RECORDS = 50
@@ -82,8 +85,12 @@ REMOTE_SESSION_META_END = "__REMOTE_CODEX_PROBE_SESSION_META_END__"
 SESSION_META_LIMIT_TRUNCATED_REASON = "session_meta_limit_truncated"
 REMOTE_FETCH_ROLLOUT_BEGIN = "__REMOTE_CODEX_PROBE_FETCH_ROLLOUT_BEGIN__"
 REMOTE_FETCH_ROLLOUT_END = "__REMOTE_CODEX_PROBE_FETCH_ROLLOUT_END__"
+REMOTE_FETCH_ROLLOUT_CHUNK_BEGIN = "__REMOTE_CODEX_PROBE_FETCH_ROLLOUT_CHUNK_BEGIN__"
+REMOTE_FETCH_ROLLOUT_CHUNK_END = "__REMOTE_CODEX_PROBE_FETCH_ROLLOUT_CHUNK_END__"
 REMOTE_ROLLOUT_SUMMARY_BEGIN = "__REMOTE_CODEX_PROBE_ROLLOUT_SUMMARY_BEGIN__"
 REMOTE_ROLLOUT_SUMMARY_END = "__REMOTE_CODEX_PROBE_ROLLOUT_SUMMARY_END__"
+REMOTE_CHUNKED_ROLLOUT_SUMMARY_BEGIN = "__REMOTE_CODEX_PROBE_CHUNKED_ROLLOUT_SUMMARY_BEGIN__"
+REMOTE_CHUNKED_ROLLOUT_SUMMARY_END = "__REMOTE_CODEX_PROBE_CHUNKED_ROLLOUT_SUMMARY_END__"
 
 HOSTS: dict[str, dict[str, str]] = {
     "local": {"kind": "local", "label": "local", "codex_root": "~/.codex"},
@@ -112,6 +119,19 @@ HOSTS: dict[str, dict[str, str]] = {
 class SessionMetaScan:
     rows: list[dict[str, str]]
     truncated: bool
+
+
+@dataclasses.dataclass(frozen=True)
+class RolloutChunk:
+    index: int
+    byte_start: int
+    byte_end: int
+    record_start: int
+    record_end: int
+    first_timestamp: str
+    last_timestamp: str
+    oversized_record: bool
+    lines: tuple[str, ...]
 
 
 class SessionMetaRolloutError(ValueError):
@@ -386,6 +406,39 @@ def _read_local_rollout_bytes(
             os.close(fd)
 
 
+def _read_local_rollout_byte_range(
+    codex_root: pathlib.Path,
+    rollout_relative_path: pathlib.PurePosixPath,
+    *,
+    byte_start: int,
+    byte_end: int,
+    max_bytes: int,
+) -> bytes:
+    if byte_start < 0:
+        raise ValueError("--byte-start must be non-negative")
+    if byte_end <= byte_start:
+        raise ValueError("--byte-end must be greater than --byte-start")
+    length = byte_end - byte_start
+    if length > max_bytes:
+        raise ValueError(f"chunk too large: {length} bytes > {max_bytes}")
+    target = _safe_rollout_path(codex_root, rollout_relative_path)
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(str(target), flags)
+    try:
+        stat_result = os.fstat(fd)
+        if not stat.S_ISREG(stat_result.st_mode):
+            raise ValueError("rollout path is not a regular file")
+        if byte_end > stat_result.st_size:
+            raise ValueError(f"--byte-end exceeds rollout size: {byte_end} > {stat_result.st_size}")
+        with os.fdopen(fd, "rb") as handle:
+            fd = -1
+            handle.seek(byte_start)
+            return handle.read(length)
+    finally:
+        if fd != -1:
+            os.close(fd)
+
+
 def _write_private_bytes(output: pathlib.Path, data: bytes) -> None:
     output.parent.mkdir(parents=True, exist_ok=True)
     try:
@@ -435,6 +488,128 @@ def _session_meta_rollout_dedupe_key(relative_path: pathlib.PurePosixPath) -> st
     if len(parts) >= 2 and parts[0] == "archived_sessions":
         return f"archived_sessions/{relative_path.name}"
     return relative_path.as_posix()
+
+
+def _timestamp_from_jsonl_line(line: str) -> str:
+    try:
+        obj = json.loads(line)
+    except json.JSONDecodeError:
+        return ""
+    timestamp = obj.get("timestamp")
+    return str(timestamp) if isinstance(timestamp, str) else ""
+
+
+def _iter_rollout_chunks(
+    handle: Any,
+    *,
+    chunk_bytes: int,
+) -> Iterable[RolloutChunk]:
+    if chunk_bytes < 1:
+        raise ValueError("--chunk-bytes must be positive")
+
+    chunk_index = 0
+    offset = 0
+    record_no = 0
+    lines: list[str] = []
+    current_bytes = 0
+    byte_start = 0
+    record_start = 0
+    first_timestamp = ""
+    last_timestamp = ""
+    oversized_record = False
+
+    def flush() -> RolloutChunk | None:
+        nonlocal chunk_index, lines, current_bytes, byte_start, record_start
+        nonlocal first_timestamp, last_timestamp, oversized_record
+        if not lines:
+            return None
+        chunk = RolloutChunk(
+            index=chunk_index,
+            byte_start=byte_start,
+            byte_end=byte_start + current_bytes,
+            record_start=record_start,
+            record_end=record_start + len(lines) - 1,
+            first_timestamp=first_timestamp,
+            last_timestamp=last_timestamp,
+            oversized_record=oversized_record,
+            lines=tuple(lines),
+        )
+        chunk_index += 1
+        lines = []
+        current_bytes = 0
+        byte_start = 0
+        record_start = 0
+        first_timestamp = ""
+        last_timestamp = ""
+        oversized_record = False
+        return chunk
+
+    while True:
+        raw_line = handle.readline()
+        if not raw_line:
+            chunk = flush()
+            if chunk is not None:
+                yield chunk
+            return
+        if isinstance(raw_line, str):
+            raw_bytes = raw_line.encode("utf-8", "surrogatepass")
+            line = raw_line
+        else:
+            raw_bytes = bytes(raw_line)
+            line = raw_bytes.decode("utf-8", "replace")
+        line_start = offset
+        offset += len(raw_bytes)
+        record_no += 1
+
+        if lines and current_bytes + len(raw_bytes) > chunk_bytes:
+            chunk = flush()
+            if chunk is not None:
+                yield chunk
+
+        if not lines:
+            byte_start = line_start
+            record_start = record_no
+
+        timestamp = _timestamp_from_jsonl_line(line)
+        if timestamp and not first_timestamp:
+            first_timestamp = timestamp
+        if timestamp:
+            last_timestamp = timestamp
+        oversized_record = oversized_record or len(raw_bytes) > chunk_bytes
+        lines.append(line)
+        current_bytes += len(raw_bytes)
+
+        if len(raw_bytes) > chunk_bytes:
+            chunk = flush()
+            if chunk is not None:
+                yield chunk
+
+
+def _fetch_ranges_for_byte_range(
+    *,
+    byte_start: int,
+    byte_end: int,
+    max_bytes: int,
+) -> list[dict[str, int]]:
+    if byte_start < 0:
+        raise ValueError("byte_start must be non-negative")
+    if byte_end <= byte_start:
+        raise ValueError("byte_end must be greater than byte_start")
+    if max_bytes < 1:
+        raise ValueError("max_bytes must be positive")
+    ranges: list[dict[str, int]] = []
+    cursor = byte_start
+    while cursor < byte_end:
+        next_cursor = min(cursor + max_bytes, byte_end)
+        ranges.append(
+            {
+                "range_index": len(ranges),
+                "byte_start": cursor,
+                "byte_end": next_cursor,
+            }
+        )
+        cursor = next_cursor
+    return ranges
 
 
 def _parse_kv_lines(text: str) -> dict[str, str]:
@@ -531,6 +706,7 @@ DATE_STRINGS = CONFIG.get("dates", [])
 LIMIT = int(CONFIG.get("limit", 0))
 ROOT = pathlib.Path(CONFIG["codex_root"]).expanduser()
 MAX_FETCH_ROLLOUT_BYTES = int(CONFIG.get("max_fetch_rollout_bytes", 0))
+MAX_FETCH_ROLLOUT_CHUNK_BYTES = int(CONFIG.get("max_fetch_rollout_chunk_bytes", 0))
 SESSION_META_SCAN_BYTES = int(CONFIG.get("session_meta_scan_bytes", 0))
 SUMMARY_LIMIT = int(CONFIG.get("summary_limit", 0))
 SUMMARY_SCAN_BYTES = int(CONFIG.get("summary_scan_bytes", 0))
@@ -538,6 +714,9 @@ SUMMARY_TAIL_RECORDS = int(CONFIG.get("summary_tail_records", 0))
 SUMMARY_MAX_TEXT_CHARS = int(CONFIG.get("summary_max_text_chars", 0))
 SUMMARY_MAX_TEXT_CHARS_LIMIT = {MAX_ROLLOUT_SUMMARY_TEXT_CHARS}
 SUMMARY_KEYWORDS = [str(value) for value in CONFIG.get("summary_keywords", [])]
+CHUNK_BYTES = int(CONFIG.get("chunk_bytes", 0))
+FETCH_CHUNK_BYTE_START = int(CONFIG.get("byte_start", 0))
+FETCH_CHUNK_BYTE_END = int(CONFIG.get("byte_end", 0))
 ACTIVE_ROLLOUT_RELATIVE_RE = re.compile({ACTIVE_ROLLOUT_RELATIVE_RE.pattern!r})
 ARCHIVED_ROLLOUT_RELATIVE_RE = re.compile({ARCHIVED_ROLLOUT_RELATIVE_RE.pattern!r})
 PRIVATE_IPV4_SIGNAL_RE = re.compile({PRIVATE_IPV4_SIGNAL_RE.pattern!r})
@@ -554,8 +733,12 @@ SESSION_META_END = {REMOTE_SESSION_META_END!r}
 SESSION_META_LIMIT_TRUNCATED_REASON = {SESSION_META_LIMIT_TRUNCATED_REASON!r}
 FETCH_ROLLOUT_BEGIN = {REMOTE_FETCH_ROLLOUT_BEGIN!r}
 FETCH_ROLLOUT_END = {REMOTE_FETCH_ROLLOUT_END!r}
+FETCH_ROLLOUT_CHUNK_BEGIN = {REMOTE_FETCH_ROLLOUT_CHUNK_BEGIN!r}
+FETCH_ROLLOUT_CHUNK_END = {REMOTE_FETCH_ROLLOUT_CHUNK_END!r}
 ROLLOUT_SUMMARY_BEGIN = {REMOTE_ROLLOUT_SUMMARY_BEGIN!r}
 ROLLOUT_SUMMARY_END = {REMOTE_ROLLOUT_SUMMARY_END!r}
+CHUNKED_ROLLOUT_SUMMARY_BEGIN = {REMOTE_CHUNKED_ROLLOUT_SUMMARY_BEGIN!r}
+CHUNKED_ROLLOUT_SUMMARY_END = {REMOTE_CHUNKED_ROLLOUT_SUMMARY_END!r}
 
 
 def path_is_relative_to(path, root):
@@ -640,6 +823,31 @@ def read_rollout_bytes(target, max_bytes):
             os.close(fd)
 
 
+def read_rollout_byte_range(target, byte_start, byte_end, max_bytes):
+    if byte_start < 0:
+        raise ValueError("byte start must be non-negative")
+    if byte_end <= byte_start:
+        raise ValueError("byte end must be greater than byte start")
+    length = byte_end - byte_start
+    if max_bytes and length > max_bytes:
+        raise ValueError("chunk too large: " + str(length) + " bytes > " + str(max_bytes))
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(str(target), flags)
+    try:
+        stat_result = os.fstat(fd)
+        if not stat.S_ISREG(stat_result.st_mode):
+            raise ValueError("rollout path is not a regular file")
+        if byte_end > stat_result.st_size:
+            raise ValueError("byte end exceeds rollout size: " + str(byte_end) + " > " + str(stat_result.st_size))
+        with os.fdopen(fd, "rb") as handle:
+            fd = -1
+            handle.seek(byte_start)
+            return handle.read(length)
+    finally:
+        if fd != -1:
+            os.close(fd)
+
+
 def flat_archived_rollout_matches_date(rollout, date_text):
     return rollout.name.startswith("rollout-" + date_text.replace("/", "-"))
 
@@ -653,6 +861,116 @@ def session_meta_rollout_dedupe_key(rel):
     if len(parts) >= 2 and parts[0] == "archived_sessions":
         return "archived_sessions/" + rel.name
     return rel.as_posix()
+
+
+def timestamp_from_jsonl_line(line):
+    try:
+        obj = json.loads(line)
+    except json.JSONDecodeError:
+        return ""
+    value = obj.get("timestamp")
+    return str(value) if isinstance(value, str) else ""
+
+
+def iter_rollout_chunks(handle, chunk_bytes):
+    if chunk_bytes < 1:
+        raise ValueError("chunk bytes must be positive")
+    chunk_index = 0
+    offset = 0
+    record_no = 0
+    lines = []
+    current_bytes = 0
+    byte_start = 0
+    record_start = 0
+    first_timestamp = ""
+    last_timestamp = ""
+    oversized_record = False
+
+    def flush():
+        nonlocal chunk_index, lines, current_bytes, byte_start, record_start
+        nonlocal first_timestamp, last_timestamp, oversized_record
+        if not lines:
+            return None
+        chunk = {{
+            "index": chunk_index,
+            "byte_start": byte_start,
+            "byte_end": byte_start + current_bytes,
+            "record_start": record_start,
+            "record_end": record_start + len(lines) - 1,
+            "first_timestamp": first_timestamp,
+            "last_timestamp": last_timestamp,
+            "oversized_record": oversized_record,
+            "lines": tuple(lines),
+        }}
+        chunk_index += 1
+        lines = []
+        current_bytes = 0
+        byte_start = 0
+        record_start = 0
+        first_timestamp = ""
+        last_timestamp = ""
+        oversized_record = False
+        return chunk
+
+    while True:
+        raw_line = handle.readline()
+        if not raw_line:
+            chunk = flush()
+            if chunk is not None:
+                yield chunk
+            return
+        if isinstance(raw_line, str):
+            raw_bytes = raw_line.encode("utf-8", "surrogatepass")
+            line = raw_line
+        else:
+            raw_bytes = bytes(raw_line)
+            line = raw_bytes.decode("utf-8", "replace")
+        line_start = offset
+        offset += len(raw_bytes)
+        record_no += 1
+
+        if lines and current_bytes + len(raw_bytes) > chunk_bytes:
+            chunk = flush()
+            if chunk is not None:
+                yield chunk
+
+        if not lines:
+            byte_start = line_start
+            record_start = record_no
+
+        timestamp = timestamp_from_jsonl_line(line)
+        if timestamp and not first_timestamp:
+            first_timestamp = timestamp
+        if timestamp:
+            last_timestamp = timestamp
+        oversized_record = oversized_record or len(raw_bytes) > chunk_bytes
+        lines.append(line)
+        current_bytes += len(raw_bytes)
+
+        if len(raw_bytes) > chunk_bytes:
+            chunk = flush()
+            if chunk is not None:
+                yield chunk
+
+
+def fetch_ranges_for_byte_range(byte_start, byte_end, max_bytes):
+    if byte_start < 0:
+        raise ValueError("byte_start must be non-negative")
+    if byte_end <= byte_start:
+        raise ValueError("byte_end must be greater than byte_start")
+    if max_bytes < 1:
+        raise ValueError("max_bytes must be positive")
+    ranges = []
+    cursor = byte_start
+    while cursor < byte_end:
+        next_cursor = min(cursor + max_bytes, byte_end)
+        ranges.append({{
+            "range_index": len(ranges),
+            "byte_start": cursor,
+            "byte_end": next_cursor,
+        }})
+        cursor = next_cursor
+    return ranges
 
 
 def normalize_text(text, max_chars):
@@ -778,7 +1096,7 @@ def summary_record(kind, text, *, line_no, timestamp, session_id=""):
 
 
 def summary_record_has_signal(record):
-    if record is None or str(record.get("kind", "")) in ("session_meta", "scan_meta"):
+    if record is None or str(record.get("kind", "")) in ("session_meta", "scan_meta", "chunk_meta"):
         return False
     text = str(record.get("text", ""))
     return any(marker in text for marker in SUMMARY_SIGNAL_MARKERS)
@@ -801,6 +1119,234 @@ def bounded_text_lines(handle, max_scan_bytes):
             return
         scanned += len(raw_bytes)
         yield raw_bytes.decode("utf-8", "replace")
+
+
+def summarize_records(lines, line_offset=0):
+    keywords = [value.casefold() for value in SUMMARY_KEYWORDS if value]
+    matched = []
+    matched_seen = set()
+    signal_records = []
+    signal_seen = set()
+    tail = collections.deque(maxlen=SUMMARY_TAIL_RECORDS)
+    session_meta_record = None
+    last_assistant_record = None
+    last_user_record = None
+    last_task_complete_record = None
+
+    for line_no, line in enumerate(lines, line_offset + 1):
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        timestamp = str(obj.get("timestamp", ""))
+        record = None
+        record_type = str(obj.get("type", ""))
+        if record_type == "session_meta" and session_meta_record is None:
+            payload = obj.get("payload", {{}})
+            record = summary_record(
+                "session_meta",
+                "session_id=" + str(payload.get("id", ""))
+                + " cwd_present="
+                + str(bool(payload.get("cwd", ""))).lower(),
+                line_no=line_no,
+                timestamp=timestamp,
+                session_id=str(payload.get("id", "")),
+            )
+            session_meta_record = record
+        elif record_type == "response_item":
+            payload = obj.get("payload", {{}})
+            payload_type = str(payload.get("type", ""))
+            if payload_type == "message":
+                kind, text = message_summary_from_payload(payload)
+                if text:
+                    record = summary_record(kind, text, line_no=line_no, timestamp=timestamp)
+                    if kind == "assistant_message":
+                        last_assistant_record = record
+                    elif kind == "user_message" and record is not None:
+                        last_user_record = record
+            elif payload_type == "function_call_output":
+                output = payload.get("output")
+                if isinstance(output, str) and output.strip():
+                    record = summary_record("function_call_output", output, line_no=line_no, timestamp=timestamp)
+        elif record_type == "event_msg":
+            payload = obj.get("payload", {{}})
+            payload_type = str(payload.get("type", ""))
+            if payload_type == "task_complete":
+                text = payload.get("last_agent_message")
+                if text:
+                    record = summary_record("task_complete", text, line_no=line_no, timestamp=timestamp)
+                    last_task_complete_record = record
+            elif payload_type == "user_message":
+                text = event_user_message_text(payload)
+                if text:
+                    record = summary_record("user_message", text, line_no=line_no, timestamp=timestamp)
+                    if record is not None:
+                        last_user_record = record
+
+        if not record or record.get("kind") == "session_meta":
+            continue
+
+        if summary_record_has_signal(record):
+            key = (str(record.get("kind", "")), int(record.get("line", 0)))
+            if key not in signal_seen and (not SUMMARY_LIMIT or len(signal_records) < SUMMARY_LIMIT):
+                signal_records.append(record)
+                signal_seen.add(key)
+
+        text_value = str(record.get("_match_text") or record.get("text", ""))
+        if keywords and any(keyword in text_value.casefold() for keyword in keywords):
+            key = (str(record.get("kind", "")), int(record.get("line", 0)))
+            if key not in matched_seen and (not SUMMARY_LIMIT or len(matched) < SUMMARY_LIMIT):
+                matched.append(record)
+                matched_seen.add(key)
+        if SUMMARY_TAIL_RECORDS:
+            tail.append(record)
+
+    emitted = set()
+    output = []
+
+    def append(record):
+        if not record:
+            return
+        key = (str(record.get("kind", "")), int(record.get("line", 0)))
+        if key in emitted:
+            return
+        payload = dict(record)
+        payload.pop("_match_text", None)
+        output.append(payload)
+        emitted.add(key)
+
+    append(session_meta_record)
+    for record in signal_records:
+        append(record)
+    for record in matched:
+        append(record)
+    if not keywords:
+        for record in tail:
+            append(record)
+    append(last_user_record)
+    append(last_assistant_record)
+    if last_assistant_record is None:
+        append(last_task_complete_record)
+    return output
+
+
+def chunk_common_fields(chunk):
+    return {{
+        "chunk_index": chunk["index"],
+        "byte_start": chunk["byte_start"],
+        "byte_end": chunk["byte_end"],
+        "record_start": chunk["record_start"],
+        "record_end": chunk["record_end"],
+        "first_timestamp": chunk["first_timestamp"],
+        "last_timestamp": chunk["last_timestamp"],
+        "record_count": len(chunk["lines"]),
+    }}
+
+
+def chunk_reason_codes(chunk, records):
+    evidence_records = [
+        record
+        for record in records
+        if str(record.get("kind", "")) not in ("session_meta", "scan_meta", "chunk_meta")
+    ]
+    codes = []
+    if chunk["oversized_record"]:
+        codes.append("oversized_record")
+    if not evidence_records:
+        codes.append("no_structured_evidence")
+    if not any(record.get("kind") == "user_message" for record in evidence_records):
+        codes.append("missing_meaningful_user_message")
+    if not any(record.get("kind") in ("assistant_message", "task_complete") for record in evidence_records):
+        codes.append("missing_final_summary")
+    if any(summary_record_has_signal(record) for record in evidence_records):
+        codes.append("signal_or_redaction_present")
+    return codes
+
+
+def chunk_meta_record(chunk, records, source_bytes, chunk_bytes):
+    reason_codes = chunk_reason_codes(chunk, records)
+    redacted_or_signal_only_records = sum(1 for record in records if summary_record_has_signal(record))
+    raw_fetch_recommended = (
+        bool(chunk["oversized_record"])
+        or "no_structured_evidence" in reason_codes
+        or redacted_or_signal_only_records > 0
+    )
+    meta = {{
+        "kind": "chunk_meta",
+        "line": chunk["record_start"],
+        "source_bytes": source_bytes,
+        "chunk_bytes": chunk_bytes,
+        "coverage_status": "partial" if raw_fetch_recommended else "complete",
+        "reason_codes": reason_codes,
+        "records_emitted": len(records),
+        "redacted_or_signal_only_records": redacted_or_signal_only_records,
+        "raw_fetch_recommended": raw_fetch_recommended,
+        "timestamp": chunk["first_timestamp"],
+    }}
+    meta.update(chunk_common_fields(chunk))
+    if raw_fetch_recommended:
+        fetch_ranges = fetch_ranges_for_byte_range(
+            chunk["byte_start"],
+            chunk["byte_end"],
+            MAX_FETCH_ROLLOUT_CHUNK_BYTES,
+        )
+        meta["fetch_ranges"] = fetch_ranges
+        meta["fetch_range_count"] = len(fetch_ranges)
+        meta["fetch_chunk_bytes"] = MAX_FETCH_ROLLOUT_CHUNK_BYTES
+    return meta
+
+
+def summarize_rollout_chunks():
+    rel = pathlib.PurePosixPath(str(CONFIG["rollout"]))
+    normalized = rel.as_posix()
+    print(CHUNKED_ROLLOUT_SUMMARY_BEGIN)
+    if SUMMARY_MAX_TEXT_CHARS < 40 or SUMMARY_MAX_TEXT_CHARS > SUMMARY_MAX_TEXT_CHARS_LIMIT:
+        print(json.dumps({{"ok": False, "error": "summary max text chars out of range"}}, separators=(",", ":"), sort_keys=True))
+        print(CHUNKED_ROLLOUT_SUMMARY_END)
+        return
+    if CHUNK_BYTES < 1:
+        print(json.dumps({{"ok": False, "error": "chunk bytes out of range"}}, separators=(",", ":"), sort_keys=True))
+        print(CHUNKED_ROLLOUT_SUMMARY_END)
+        return
+    if not (
+        ACTIVE_ROLLOUT_RELATIVE_RE.fullmatch(normalized)
+        or ARCHIVED_ROLLOUT_RELATIVE_RE.fullmatch(normalized)
+    ):
+        print(json.dumps({{"ok": False, "error": "invalid rollout path"}}, separators=(",", ":"), sort_keys=True))
+        print(CHUNKED_ROLLOUT_SUMMARY_END)
+        return
+    try:
+        target = safe_rollout_path(rel)
+    except FileNotFoundError:
+        print(json.dumps({{"ok": False, "error": "rollout not found"}}, separators=(",", ":"), sort_keys=True))
+        print(CHUNKED_ROLLOUT_SUMMARY_END)
+        return
+    except ValueError as error:
+        print(json.dumps({{"ok": False, "error": str(error)}}, separators=(",", ":"), sort_keys=True))
+        print(CHUNKED_ROLLOUT_SUMMARY_END)
+        return
+    try:
+        source_bytes = target.stat().st_size
+        handle = open_rollout_text(target)
+    except OSError:
+        print(json.dumps({{"ok": False, "error": "rollout unreadable"}}, separators=(",", ":"), sort_keys=True))
+        print(CHUNKED_ROLLOUT_SUMMARY_END)
+        return
+    print(json.dumps({{"ok": True}}, separators=(",", ":"), sort_keys=True))
+    with handle:
+        try:
+            chunks = iter_rollout_chunks(handle, CHUNK_BYTES)
+            for chunk in chunks:
+                records = summarize_records(chunk["lines"], line_offset=int(chunk["record_start"]) - 1)
+                common = chunk_common_fields(chunk)
+                print(json.dumps(chunk_meta_record(chunk, records, source_bytes, CHUNK_BYTES), separators=(",", ":"), sort_keys=True))
+                for record in records:
+                    payload = dict(record)
+                    payload.update(common)
+                    print(json.dumps(payload, separators=(",", ":"), sort_keys=True))
+        except ValueError as error:
+            print(json.dumps({{"kind": "error", "error": str(error)}}, separators=(",", ":"), sort_keys=True))
+    print(CHUNKED_ROLLOUT_SUMMARY_END)
 
 
 def summarize_rollout():
@@ -1083,6 +1629,43 @@ def fetch_rollout():
     print(FETCH_ROLLOUT_END)
 
 
+def fetch_rollout_chunk():
+    rel = pathlib.PurePosixPath(str(CONFIG["rollout"]))
+    normalized = rel.as_posix()
+    print(FETCH_ROLLOUT_CHUNK_BEGIN)
+    if not (
+        ACTIVE_ROLLOUT_RELATIVE_RE.fullmatch(normalized)
+        or ARCHIVED_ROLLOUT_RELATIVE_RE.fullmatch(normalized)
+    ):
+        print(json.dumps({{"ok": False, "error": "invalid rollout path"}}, separators=(",", ":"), sort_keys=True))
+        print(FETCH_ROLLOUT_CHUNK_END)
+        return
+    try:
+        target = safe_rollout_path(rel)
+        data = read_rollout_byte_range(
+            target,
+            FETCH_CHUNK_BYTE_START,
+            FETCH_CHUNK_BYTE_END,
+            MAX_FETCH_ROLLOUT_CHUNK_BYTES,
+        )
+    except FileNotFoundError:
+        print(json.dumps({{"ok": False, "error": "rollout not found"}}, separators=(",", ":"), sort_keys=True))
+        print(FETCH_ROLLOUT_CHUNK_END)
+        return
+    except OSError:
+        print(json.dumps({{"ok": False, "error": "rollout unreadable"}}, separators=(",", ":"), sort_keys=True))
+        print(FETCH_ROLLOUT_CHUNK_END)
+        return
+    except ValueError as error:
+        print(json.dumps({{"ok": False, "error": str(error)}}, separators=(",", ":"), sort_keys=True))
+        print(FETCH_ROLLOUT_CHUNK_END)
+        return
+    payload = base64.b64encode(data).decode("ascii")
+    print(json.dumps({{"ok": True, "bytes": len(data)}}, separators=(",", ":"), sort_keys=True))
+    print(payload)
+    print(FETCH_ROLLOUT_CHUNK_END)
+
+
 if CONFIG["mode"] == "session-meta":
     try:
         iter_session_meta()
@@ -1091,8 +1674,12 @@ if CONFIG["mode"] == "session-meta":
         raise SystemExit(1)
 elif CONFIG["mode"] == "fetch-rollout":
     fetch_rollout()
+elif CONFIG["mode"] == "fetch-rollout-chunk":
+    fetch_rollout_chunk()
 elif CONFIG["mode"] == "rollout-summary":
     summarize_rollout()
+elif CONFIG["mode"] == "chunked-rollout-summary":
+    summarize_rollout_chunks()
 else:
     raise SystemExit("unknown mode: " + str(CONFIG["mode"]))
 """.lstrip()
@@ -1239,6 +1826,22 @@ def _fetch_local_rollout(codex_root: pathlib.Path, rollout_relative_path: pathli
     )
 
 
+def _fetch_local_rollout_chunk(
+    codex_root: pathlib.Path,
+    rollout_relative_path: pathlib.PurePosixPath,
+    *,
+    byte_start: int,
+    byte_end: int,
+) -> bytes:
+    return _read_local_rollout_byte_range(
+        codex_root,
+        rollout_relative_path,
+        byte_start=byte_start,
+        byte_end=byte_end,
+        max_bytes=MAX_FETCH_ROLLOUT_CHUNK_BYTES,
+    )
+
+
 def _print_tsv(rows: list[dict[str, str]], columns: list[str]) -> None:
     print("\t".join(columns))
     for row in rows:
@@ -1302,6 +1905,7 @@ def _extract_framed_fetch_rollout_payload(
     end_marker: str,
     host: str,
     command: str,
+    max_bytes: int = MAX_FETCH_ROLLOUT_BYTES,
 ) -> bytes:
     payload_lines = _extract_framed_lines(
         text,
@@ -1352,9 +1956,9 @@ def _extract_framed_fetch_rollout_payload(
         raise ValueError(
             f"remote {command} output on host {host} was truncated or mismatched its payload size"
         )
-    if len(data) > MAX_FETCH_ROLLOUT_BYTES:
+    if len(data) > max_bytes:
         raise ValueError(
-            f"rollout too large: {len(data)} bytes > {MAX_FETCH_ROLLOUT_BYTES}"
+            f"rollout too large: {len(data)} bytes > {max_bytes}"
         )
     return data
 
@@ -1651,6 +2255,104 @@ def cmd_fetch_rollout(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_fetch_rollout_chunk(args: argparse.Namespace) -> int:
+    try:
+        hosts = _resolve_hosts([args.host])
+        alias = hosts[0]
+        rollout_relative_path = _resolve_rollout_relative_path(args.rollout)
+        output = _resolve_output_path(args.output)
+        if args.byte_start < 0:
+            raise ValueError("--byte-start must be non-negative")
+        if args.byte_end <= args.byte_start:
+            raise ValueError("--byte-end must be greater than --byte-start")
+        if args.byte_end - args.byte_start > MAX_FETCH_ROLLOUT_CHUNK_BYTES:
+            raise ValueError(
+                f"chunk too large: {args.byte_end - args.byte_start} bytes > {MAX_FETCH_ROLLOUT_CHUNK_BYTES}"
+            )
+    except ValueError as error:
+        return _error(str(error))
+
+    try:
+        if HOSTS[alias]["kind"] == "local":
+            data = _fetch_local_rollout_chunk(
+                _local_codex_root(),
+                rollout_relative_path,
+                byte_start=args.byte_start,
+                byte_end=args.byte_end,
+            )
+        else:
+            payload = {
+                "mode": "fetch-rollout-chunk",
+                "rollout": rollout_relative_path.as_posix(),
+                "codex_root": HOSTS[alias]["codex_root"],
+                "byte_start": args.byte_start,
+                "byte_end": args.byte_end,
+                "max_fetch_rollout_chunk_bytes": MAX_FETCH_ROLLOUT_CHUNK_BYTES,
+            }
+            try:
+                result = _run_remote_python(alias, payload)
+            except RuntimeError as error:
+                print(f"host={alias}", file=sys.stderr)
+                print(f"rollout={rollout_relative_path.as_posix()}", file=sys.stderr)
+                print(f"error={error}", file=sys.stderr)
+                return 1
+            if result.returncode != 0:
+                message = result.stderr.strip() or result.stdout.strip() or "remote fetch-rollout-chunk failed"
+                print(f"host={alias}", file=sys.stderr)
+                print(f"rollout={rollout_relative_path.as_posix()}", file=sys.stderr)
+                print(f"error={message}", file=sys.stderr)
+                return 1
+            try:
+                data = _extract_framed_fetch_rollout_payload(
+                    result.stdout,
+                    begin_marker=REMOTE_FETCH_ROLLOUT_CHUNK_BEGIN,
+                    end_marker=REMOTE_FETCH_ROLLOUT_CHUNK_END,
+                    host=alias,
+                    command="fetch-rollout-chunk",
+                    max_bytes=MAX_FETCH_ROLLOUT_CHUNK_BYTES,
+                )
+            except FileNotFoundError:
+                print(f"host={alias}", file=sys.stderr)
+                print(f"rollout={rollout_relative_path.as_posix()}", file=sys.stderr)
+                print("error=rollout not found", file=sys.stderr)
+                return 1
+            except ValueError as error:
+                print(f"host={alias}", file=sys.stderr)
+                print(f"rollout={rollout_relative_path.as_posix()}", file=sys.stderr)
+                print(f"error={error}", file=sys.stderr)
+                return 1
+    except FileNotFoundError:
+        print(f"host={alias}", file=sys.stderr)
+        print(f"rollout={rollout_relative_path.as_posix()}", file=sys.stderr)
+        print("error=rollout not found", file=sys.stderr)
+        return 1
+    except OSError:
+        print(f"host={alias}", file=sys.stderr)
+        print(f"rollout={rollout_relative_path.as_posix()}", file=sys.stderr)
+        print("error=rollout unreadable", file=sys.stderr)
+        return 1
+    except ValueError as error:
+        print(f"host={alias}", file=sys.stderr)
+        print(f"rollout={rollout_relative_path.as_posix()}", file=sys.stderr)
+        print(f"error={error}", file=sys.stderr)
+        return 1
+
+    try:
+        _write_private_bytes(output, data)
+    except (OSError, ValueError) as error:
+        print(f"host={alias}", file=sys.stderr)
+        print(f"rollout={rollout_relative_path.as_posix()}", file=sys.stderr)
+        print(f"error={error}", file=sys.stderr)
+        return 1
+    print(f"host={alias}")
+    print(f"rollout={rollout_relative_path.as_posix()}")
+    print(f"byte_start={args.byte_start}")
+    print(f"byte_end={args.byte_end}")
+    print(f"output={output}")
+    print(f"bytes={len(data)}")
+    return 0
+
+
 def _normalize_summary_text(value: str, *, max_text_chars: int) -> str:
     collapsed = " ".join(str(value).replace("\r", "\n").split())
     if max_text_chars > 3 and len(collapsed) > max_text_chars:
@@ -1740,7 +2442,7 @@ def _safe_summary_text(kind: str, text: str) -> str:
 
 
 def _summary_record_has_signal(record: dict[str, Any] | None) -> bool:
-    if record is None or str(record.get("kind", "")) in {"session_meta", "scan_meta"}:
+    if record is None or str(record.get("kind", "")) in {"session_meta", "scan_meta", "chunk_meta"}:
         return False
     text = str(record.get("text", ""))
     return any(marker in text for marker in SUMMARY_SIGNAL_MARKERS)
@@ -1817,6 +2519,7 @@ def _summarize_rollout_records(
     limit: int,
     tail_records: int,
     max_text_chars: int,
+    line_offset: int = 0,
 ) -> list[dict[str, Any]]:
     search_keywords = [value.casefold() for value in keywords if value]
     matched: list[dict[str, Any]] = []
@@ -1829,7 +2532,7 @@ def _summarize_rollout_records(
     last_user_record: dict[str, Any] | None = None
     last_task_complete_record: dict[str, Any] | None = None
 
-    for line_no, line in enumerate(lines, 1):
+    for line_no, line in enumerate(lines, line_offset + 1):
         try:
             obj = json.loads(line)
         except json.JSONDecodeError:
@@ -1966,6 +2669,122 @@ def _rollout_summary_scan_meta(*, source_bytes: int, scan_bytes: int) -> dict[st
     }
 
 
+def _chunk_common_fields(chunk: RolloutChunk) -> dict[str, Any]:
+    return {
+        "chunk_index": chunk.index,
+        "byte_start": chunk.byte_start,
+        "byte_end": chunk.byte_end,
+        "record_start": chunk.record_start,
+        "record_end": chunk.record_end,
+        "first_timestamp": chunk.first_timestamp,
+        "last_timestamp": chunk.last_timestamp,
+        "record_count": len(chunk.lines),
+    }
+
+
+def _chunk_reason_codes(
+    chunk: RolloutChunk,
+    records: list[dict[str, Any]],
+) -> list[str]:
+    evidence_records = [
+        record
+        for record in records
+        if str(record.get("kind", "")) not in {"session_meta", "scan_meta", "chunk_meta"}
+    ]
+    codes: list[str] = []
+    if chunk.oversized_record:
+        codes.append("oversized_record")
+    if not evidence_records:
+        codes.append("no_structured_evidence")
+    if not any(record.get("kind") == "user_message" for record in evidence_records):
+        codes.append("missing_meaningful_user_message")
+    if not any(record.get("kind") in {"assistant_message", "task_complete"} for record in evidence_records):
+        codes.append("missing_final_summary")
+    if any(_summary_record_has_signal(record) for record in evidence_records):
+        codes.append("signal_or_redaction_present")
+    return codes
+
+
+def _chunk_meta_record(
+    *,
+    chunk: RolloutChunk,
+    records: list[dict[str, Any]],
+    source_bytes: int,
+    chunk_bytes: int,
+) -> dict[str, Any]:
+    reason_codes = _chunk_reason_codes(chunk, records)
+    redacted_or_signal_only_records = sum(
+        1 for record in records if _summary_record_has_signal(record)
+    )
+    raw_fetch_recommended = (
+        chunk.oversized_record
+        or "no_structured_evidence" in reason_codes
+        or redacted_or_signal_only_records > 0
+    )
+    meta = {
+        "kind": "chunk_meta",
+        "line": chunk.record_start,
+        "source_bytes": source_bytes,
+        "chunk_bytes": chunk_bytes,
+        "coverage_status": "partial" if raw_fetch_recommended else "complete",
+        "reason_codes": reason_codes,
+        "records_emitted": len(records),
+        "redacted_or_signal_only_records": redacted_or_signal_only_records,
+        "raw_fetch_recommended": raw_fetch_recommended,
+        "timestamp": chunk.first_timestamp,
+    }
+    meta.update(_chunk_common_fields(chunk))
+    if raw_fetch_recommended:
+        fetch_ranges = _fetch_ranges_for_byte_range(
+            byte_start=chunk.byte_start,
+            byte_end=chunk.byte_end,
+            max_bytes=MAX_FETCH_ROLLOUT_CHUNK_BYTES,
+        )
+        meta["fetch_ranges"] = fetch_ranges
+        meta["fetch_range_count"] = len(fetch_ranges)
+        meta["fetch_chunk_bytes"] = MAX_FETCH_ROLLOUT_CHUNK_BYTES
+    return meta
+
+
+def _chunked_rollout_summary_records(
+    *,
+    codex_root: pathlib.Path,
+    rollout_relative_path: pathlib.PurePosixPath,
+    chunk_bytes: int,
+    keywords: list[str],
+    limit_per_chunk: int,
+    tail_records: int,
+    max_text_chars: int,
+) -> list[dict[str, Any]]:
+    target = _safe_rollout_path(codex_root, rollout_relative_path)
+    source_bytes = target.stat().st_size
+    output: list[dict[str, Any]] = []
+    with _open_local_rollout_text(codex_root, rollout_relative_path) as handle:
+        for chunk in _iter_rollout_chunks(handle, chunk_bytes=chunk_bytes):
+            records = _summarize_rollout_records(
+                lines=chunk.lines,
+                keywords=keywords,
+                limit=limit_per_chunk,
+                tail_records=tail_records,
+                max_text_chars=max_text_chars,
+                line_offset=chunk.record_start - 1,
+            )
+            common = _chunk_common_fields(chunk)
+            output.append(
+                _chunk_meta_record(
+                    chunk=chunk,
+                    records=records,
+                    source_bytes=source_bytes,
+                    chunk_bytes=chunk_bytes,
+                )
+            )
+            for record in records:
+                item = dict(record)
+                item.update(common)
+                output.append(item)
+    return output
+
+
 def cmd_rollout_summary(args: argparse.Namespace) -> int:
     try:
         hosts = _resolve_hosts([args.host])
@@ -2078,6 +2897,114 @@ def cmd_rollout_summary(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_chunked_rollout_summary(args: argparse.Namespace) -> int:
+    try:
+        hosts = _resolve_hosts([args.host])
+        alias = hosts[0]
+        rollout_relative_path = _resolve_rollout_relative_path(args.rollout)
+        if args.chunk_bytes < 1 or args.chunk_bytes > MAX_ROLLOUT_CHUNK_BYTES:
+            raise ValueError(
+                f"--chunk-bytes must stay between 1 and {MAX_ROLLOUT_CHUNK_BYTES}"
+            )
+        if args.limit_per_chunk < 1 or args.limit_per_chunk > MAX_ROLLOUT_SUMMARY_LIMIT:
+            raise ValueError(
+                f"--limit-per-chunk must stay between 1 and {MAX_ROLLOUT_SUMMARY_LIMIT}"
+            )
+        if args.tail_records < 0 or args.tail_records > MAX_ROLLOUT_SUMMARY_TAIL_RECORDS:
+            raise ValueError(
+                f"--tail-records must stay between 0 and {MAX_ROLLOUT_SUMMARY_TAIL_RECORDS}"
+            )
+        if args.max_text_chars < 40:
+            raise ValueError("--max-text-chars must be at least 40")
+        if args.max_text_chars > MAX_ROLLOUT_SUMMARY_TEXT_CHARS:
+            raise ValueError(
+                f"--max-text-chars must stay at or below {MAX_ROLLOUT_SUMMARY_TEXT_CHARS}"
+            )
+    except ValueError as error:
+        return _error(str(error))
+
+    try:
+        if HOSTS[alias]["kind"] == "local":
+            records = _chunked_rollout_summary_records(
+                codex_root=_local_codex_root(),
+                rollout_relative_path=rollout_relative_path,
+                chunk_bytes=args.chunk_bytes,
+                keywords=args.keyword,
+                limit_per_chunk=args.limit_per_chunk,
+                tail_records=args.tail_records,
+                max_text_chars=args.max_text_chars,
+            )
+        else:
+            payload = {
+                "mode": "chunked-rollout-summary",
+                "rollout": rollout_relative_path.as_posix(),
+                "codex_root": HOSTS[alias]["codex_root"],
+                "max_fetch_rollout_chunk_bytes": MAX_FETCH_ROLLOUT_CHUNK_BYTES,
+                "summary_keywords": list(args.keyword),
+                "summary_limit": args.limit_per_chunk,
+                "summary_tail_records": args.tail_records,
+                "summary_max_text_chars": args.max_text_chars,
+                "chunk_bytes": args.chunk_bytes,
+            }
+            try:
+                result = _run_remote_python(alias, payload)
+            except RuntimeError as error:
+                print(f"host={alias}", file=sys.stderr)
+                print(f"rollout={rollout_relative_path.as_posix()}", file=sys.stderr)
+                print(f"error={error}", file=sys.stderr)
+                return 1
+            if result.returncode != 0:
+                message = (
+                    result.stderr.strip()
+                    or result.stdout.strip()
+                    or "remote chunked-rollout-summary failed"
+                )
+                print(f"host={alias}", file=sys.stderr)
+                print(f"rollout={rollout_relative_path.as_posix()}", file=sys.stderr)
+                print(f"error={message}", file=sys.stderr)
+                return 1
+            try:
+                records = _extract_framed_rollout_summary_records(
+                    result.stdout,
+                    begin_marker=REMOTE_CHUNKED_ROLLOUT_SUMMARY_BEGIN,
+                    end_marker=REMOTE_CHUNKED_ROLLOUT_SUMMARY_END,
+                    host=alias,
+                    command="chunked-rollout-summary",
+                )
+            except FileNotFoundError:
+                print(f"host={alias}", file=sys.stderr)
+                print(f"rollout={rollout_relative_path.as_posix()}", file=sys.stderr)
+                print("error=rollout not found", file=sys.stderr)
+                return 1
+            except ValueError as error:
+                print(f"host={alias}", file=sys.stderr)
+                print(f"rollout={rollout_relative_path.as_posix()}", file=sys.stderr)
+                print(f"error={error}", file=sys.stderr)
+                return 1
+    except FileNotFoundError:
+        print(f"host={alias}", file=sys.stderr)
+        print(f"rollout={rollout_relative_path.as_posix()}", file=sys.stderr)
+        print("error=rollout not found", file=sys.stderr)
+        return 1
+    except OSError:
+        print(f"host={alias}", file=sys.stderr)
+        print(f"rollout={rollout_relative_path.as_posix()}", file=sys.stderr)
+        print("error=rollout unreadable", file=sys.stderr)
+        return 1
+    except ValueError as error:
+        print(f"host={alias}", file=sys.stderr)
+        print(f"rollout={rollout_relative_path.as_posix()}", file=sys.stderr)
+        print(f"error={error}", file=sys.stderr)
+        return 1
+
+    for record in records:
+        item = dict(record)
+        item["host"] = alias
+        item["rollout"] = rollout_relative_path.as_posix()
+        print(json.dumps(item, separators=(",", ":"), sort_keys=True))
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Read bounded Codex session evidence from Joey's default hosts without ad hoc SSH literals."
@@ -2119,6 +3046,25 @@ def build_parser() -> argparse.ArgumentParser:
     )
     fetch_rollout.set_defaults(func=cmd_fetch_rollout)
 
+    fetch_rollout_chunk = subparsers.add_parser(
+        "fetch-rollout-chunk",
+        help="Copy one bounded byte-range chunk from a validated rollout file.",
+    )
+    fetch_rollout_chunk.add_argument("--host", required=True)
+    fetch_rollout_chunk.add_argument(
+        "--rollout",
+        required=True,
+        help="Relative rollout path under the remote Codex root (sessions/... or archived_sessions/...).",
+    )
+    fetch_rollout_chunk.add_argument("--byte-start", type=int, required=True)
+    fetch_rollout_chunk.add_argument("--byte-end", type=int, required=True)
+    fetch_rollout_chunk.add_argument(
+        "--output",
+        required=True,
+        help="Output path must resolve under .codex-tmp/remote-host-context/ or /tmp.",
+    )
+    fetch_rollout_chunk.set_defaults(func=cmd_fetch_rollout_chunk)
+
     rollout_summary = subparsers.add_parser(
         "rollout-summary",
         help="Read a bounded redacted prefix summary from one rollout without copying the full file.",
@@ -2134,6 +3080,23 @@ def build_parser() -> argparse.ArgumentParser:
     rollout_summary.add_argument("--tail-records", type=int, default=8)
     rollout_summary.add_argument("--max-text-chars", type=int, default=400)
     rollout_summary.set_defaults(func=cmd_rollout_summary)
+
+    chunked_rollout_summary = subparsers.add_parser(
+        "chunked-rollout-summary",
+        help="Read chunked structured summaries across a whole rollout without copying all raw text.",
+    )
+    chunked_rollout_summary.add_argument("--host", required=True)
+    chunked_rollout_summary.add_argument(
+        "--rollout",
+        required=True,
+        help="Relative rollout path under the remote Codex root (sessions/... or archived_sessions/...).",
+    )
+    chunked_rollout_summary.add_argument("--keyword", action="append", default=[])
+    chunked_rollout_summary.add_argument("--chunk-bytes", type=int, default=DEFAULT_ROLLOUT_CHUNK_BYTES)
+    chunked_rollout_summary.add_argument("--limit-per-chunk", type=int, default=40)
+    chunked_rollout_summary.add_argument("--tail-records", type=int, default=8)
+    chunked_rollout_summary.add_argument("--max-text-chars", type=int, default=400)
+    chunked_rollout_summary.set_defaults(func=cmd_chunked_rollout_summary)
 
     return parser
 
