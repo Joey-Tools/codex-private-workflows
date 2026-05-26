@@ -35,9 +35,14 @@ It standardizes a small read-only SSH preflight across Joey's default remote hos
 - `session-meta` expects `--date YYYY/MM/DD`; do not pass ISO `YYYY-MM-DD`.
 - Use `... remote_codex_probe.py fetch-rollout ...` only to copy one validated rollout file under task-scoped `.codex-tmp/remote-host-context/` beneath the current workspace, or under `/tmp`.
 - `fetch-rollout` writes to a single file path via `--output <file>`; do not invent directory flags such as `--output-dir`.
-- When a validated rollout is too large to copy cleanly, use `... remote_codex_probe.py rollout-summary ...` to extract a bounded, redacted structured skim on the remote host instead of raising the fetch limit or falling back to bare `ssh ... rg ...`.
+- When a validated rollout is too large to copy cleanly, use `... remote_codex_probe.py chunked-rollout-summary ...` to scan the whole file in JSONL-record chunks and return structured evidence with byte/record ranges.
+- `chunked-rollout-summary` is the default large-rollout fallback; it aims for whole-rollout semantic coverage without copying all raw transcript text.
+- Oversized single JSONL records are not parsed in the summary path; the helper emits `chunk_meta` and bounded `fetch_ranges` so exact wording can be fetched explicitly without loading the whole record during summary.
+- `rollout-summary` remains a bounded prefix skim. If its `scan_meta.scan_truncated` is `true`, treat it as candidate selection only and upgrade to `chunked-rollout-summary` before writing an activity or work-report conclusion.
 - `rollout-summary` emits a `scan_meta` row. If `scan_truncated` is `true`, treat the result as partial evidence and surface a coverage gap; do not summarize it as a complete scan.
-- `rollout-summary` output text is signal-only, not raw prompt/tool output text. Use it for coarse friction flags and candidate selection; fetch a specific safe rollout or delegate to `codex-session-mining` when exact local-only context is required.
+- `chunked-rollout-summary` emits `chunk_meta` rows. If a chunk has `raw_fetch_recommended=true`, use `... remote_codex_probe.py fetch-rollout-chunk ...` for the listed `fetch_ranges`; oversized JSONL records may require fetching multiple ranges and concatenating them locally for exact wording.
+- `rollout-summary` and `chunked-rollout-summary` output text is signal-only, not raw prompt/tool output text. Use it for coarse friction flags, coverage, and candidate selection; fetch a specific safe rollout/chunk or delegate to `codex-session-mining` when exact local-only context is required.
+- `fetch-rollout-chunk` writes one bounded byte range via `--byte-start`, `--byte-end`, and `--output <file>`; use `chunk_meta.fetch_ranges[]` when present, or the chunk `byte_start`/`byte_end` only when no split range is listed.
 - `fetch-rollout` may materialize an explicitly verified `archived_sessions/rollout-*.jsonl` path, but the helper should not widen `session-meta` into an unbounded archived-session crawler.
 - Keep the helper focused on remote access and bounded file transfer. Do not turn it into a generic remote search shell.
 
@@ -51,7 +56,7 @@ It standardizes a small read-only SSH preflight across Joey's default remote hos
 
 4. Delegate deeper rollout mining back to `codex-session-mining`.
 - Once `fetch-rollout` has materialized the canonical remote rollout locally, let [$codex-session-mining](../codex-session-mining/SKILL.md) own the extraction, filtering, wrapper-noise skipping, and skill-friction classification.
-- If `fetch-rollout` is blocked only by rollout size, prefer `rollout-summary` plus one or more smaller sampled rollouts before escalating to a heavier fallback.
+- If `fetch-rollout` is blocked only by rollout size, prefer `chunked-rollout-summary` first, then fetch only the `raw_fetch_recommended` chunk ranges that materially affect the answer.
 - Do not keep a second remote-only search flow here that duplicates `codex-session-mining` semantics.
 - If the helper lacks one bounded remote-read primitive that keeps recurring, patch the helper or its references instead of approving another host-specific `ssh ... jq ...` literal.
 
@@ -63,6 +68,7 @@ It standardizes a small read-only SSH preflight across Joey's default remote hos
 
 6. Feed the result into the parent workflow.
 - For `$apple-notes-work-report`, merge remote host evidence before deciding an item is missing from the report.
+- For `$apple-notes-work-report`, a truncated or raw-fetch-recommended remote rollout is an evidence gap until `chunked-rollout-summary` and any necessary bounded chunk fetches have been handled or explicitly blocked.
 - For session-mining or workflow-summary tasks, list which hosts contributed evidence and which hosts were stale or unavailable.
 - For repo recovery tasks, read remote repo journals only after the host preflight confirms the host was active.
 - If helper-level bounded reads are still insufficient and the remote host already has Codex installed, a remote read-only Codex agent is an acceptable last-resort fallback. Scope it to one verified rollout or one repo/day question, require citations to session ids or rollout paths, and keep it read-only on the remote host.
