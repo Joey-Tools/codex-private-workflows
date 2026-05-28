@@ -93,6 +93,63 @@ class PrivateOverlaySyncTests(unittest.TestCase):
             "Use this when Joey asks.\nState the core Joey-visible behavior.\n",
         )
 
+    def test_project_journal_sync_rule_matches_current_public_wording(self) -> None:
+        source = self.source_root / "codex-project-journal" / "SKILL.md"
+        source.parent.mkdir(parents=True)
+        source.write_text(
+            "\n".join(
+                [
+                    "Manage repository project journals.",
+                    "For repositories, assume docs exist.",
+                    "Find repositories recently touched by Codex sessions.",
+                    "Use this when converting existing repositories.",
+                    "Do not batch-install hooks across repositories.",
+                    "",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        script = source.parent / "scripts" / "project_journal.py"
+        script.parent.mkdir()
+        script.write_text(
+            '"""Manage cross-repo project journal indexes for Codex workflows."""\n',
+            encoding="utf-8",
+        )
+        rule = next(
+            rule
+            for rule in SYNC_MODULE.SYNC_RULES
+            if rule.target == Path("personal_codex/skills/project-journal")
+        )
+
+        SYNC_MODULE.sync_sources(self.repo_root, self.source_root, (rule,))
+
+        target = (
+            self.repo_root
+            / "personal_codex"
+            / "skills"
+            / "project-journal"
+            / "SKILL.md"
+        )
+        text = target.read_text(encoding="utf-8")
+        self.assertIn("Manage Joey repo project journals.", text)
+        self.assertIn("For Joey repos, assume docs exist.", text)
+        self.assertIn("Find Joey repos recently touched by Codex sessions.", text)
+        self.assertIn("Use this when converting existing Joey repos.", text)
+        self.assertIn("Do not batch-install hooks across Joey repos.", text)
+        self.assertNotIn("For repositories", text)
+        synced_script = (
+            self.repo_root
+            / "personal_codex"
+            / "skills"
+            / "project-journal"
+            / "scripts"
+            / "project_journal.py"
+        )
+        self.assertIn(
+            "Manage cross-repo project journal indexes for Joey's Codex workflows.",
+            synced_script.read_text(encoding="utf-8"),
+        )
+
     def test_sync_rule_rejects_symlink_sources(self) -> None:
         source = self.source_root / "example-repo" / "skill"
         source.mkdir(parents=True)
