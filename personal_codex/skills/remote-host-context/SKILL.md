@@ -25,12 +25,14 @@ It standardizes a small read-only SSH preflight across Joey's default remote hos
 - Check each remote host for reachability, user/home identity, and presence of `~/.codex`.
 - If the task will need text search inside remote history, also check whether `rg` is available on that host.
 - Report the exact missing gate: SSH/auth failure, host unreachable, missing `~/.codex`, or no matching evidence in the requested date range.
-- Prefer a short direct `ssh -o BatchMode=yes ...` argv preflight so approval reuse stays stable.
+- Prefer the installed helper path `/Users/hoteng/.codex/skills/remote-host-context/scripts/remote_codex_probe.py` when available, so approved installed-helper prefix rules match; use the checked-out skill helper only for local development or when the installed helper is absent.
 - Treat that preflight as a bounded host check, not a license to keep host-specific `jq`, `rg`, or shell-wrapped remote queries in `~/.codex/rules/default.rules`.
 - If the same remote summary or mining pattern starts repeating, factor it into a dedicated helper under this skill instead of widening bare `ssh` approvals with more literal commands.
 
 2. Use the helper for bounded remote Codex reads once the preflight is clear.
-- Prefer `python3 "$HOME/.codex/skills/remote-host-context/scripts/remote_codex_probe.py" preflight ...` for recurring host checks.
+- Prefer `python3 /Users/hoteng/.codex/skills/remote-host-context/scripts/remote_codex_probe.py preflight ...` for recurring host checks.
+- For required remote evidence workflows, if `remote_codex_probe.py preflight`, `session-meta`, `rollout-summary`, `chunked-rollout-summary`, `fetch-rollout`, or `fetch-rollout-chunk` fails with a local sandbox/network error such as `Operation not permitted`, a DNS/network gate, or a connection blocked before SSH authentication, immediately rerun the same helper command with `sandbox_permissions=require_escalated`.
+- Only report a host as unreachable after that escalated retry also fails, and include the exact gate from the failed retry.
 - Use `... remote_codex_probe.py session-meta ...` only to list candidate session ids, cwd values, and canonical rollout paths from bounded `sessions/YYYY/MM/DD/` date trees.
 - `session-meta` expects `--date YYYY/MM/DD`; do not pass ISO `YYYY-MM-DD`.
 - Use `... remote_codex_probe.py fetch-rollout ...` only to copy one validated rollout file under task-scoped `.codex-tmp/remote-host-context/` beneath the current workspace, or under `/tmp`.
