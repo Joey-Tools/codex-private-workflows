@@ -103,6 +103,7 @@
   ],
   "reference_only": [
     "personal_codex/automations/daily-skill-friction/automation.toml",
+    "personal_codex/automations/daily-skill-friction/com.hoteng.codex.daily-skill-friction-prefetch.plist",
     "personal_codex/automations/daily-work-report-draft/automation.toml",
     "personal_codex/automations/daily-session-retrospective/automation.toml",
     "personal_codex/automations/weekly-session-retrospective/automation.toml"
