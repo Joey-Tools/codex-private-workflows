@@ -31,6 +31,8 @@ It standardizes a small read-only SSH preflight across Joey's default remote hos
 
 2. Use the helper for bounded remote Codex reads once the preflight is clear.
 - Prefer `python3 /Users/hoteng/.codex/skills/remote-host-context/scripts/remote_codex_probe.py preflight ...` for recurring host checks.
+- The helper takes a repeatable `--host` option for `preflight` and `session-meta`; do not pass positional host names or a plural `--hosts` flag.
+- For the default evidence scope, use `python3 /Users/hoteng/.codex/skills/remote-host-context/scripts/remote_codex_probe.py preflight --host local --host miku-bot-dev --host hoteng-srv-01`.
 - For required remote evidence workflows, if `remote_codex_probe.py preflight`, `session-meta`, `rollout-summary`, `chunked-rollout-summary`, `fetch-rollout`, or `fetch-rollout-chunk` fails with a local sandbox/network error such as `Operation not permitted`, a DNS/network gate, or a connection blocked before SSH authentication, immediately rerun the same helper command with `sandbox_permissions=require_escalated`.
 - Only report a host as unreachable after that escalated retry also fails, and include the exact gate from the failed retry.
 - Use `... remote_codex_probe.py session-meta ...` only to list candidate session ids, cwd values, and canonical rollout paths from bounded `sessions/YYYY/MM/DD/` date trees.

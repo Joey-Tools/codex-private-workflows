@@ -24,6 +24,7 @@ assert SPEC is not None
 assert SPEC.loader is not None
 sys.modules[SPEC.name] = MODULE
 SPEC.loader.exec_module(MODULE)
+SKILL_PATH = REPO_ROOT / "personal_codex/skills/remote-host-context/SKILL.md"
 
 
 def write_rollout(codex_root: Path, lines: list[str]) -> str:
@@ -32,6 +33,18 @@ def write_rollout(codex_root: Path, lines: list[str]) -> str:
     rollout = rollout_dir / "rollout-2026-05-26T10-00-00-example.jsonl"
     rollout.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return "sessions/2026/05/26/rollout-2026-05-26T10-00-00-example.jsonl"
+
+
+class RemoteHostContextDocumentationTests(unittest.TestCase):
+    def test_skill_documents_repeatable_host_preflight_shape(self) -> None:
+        skill = SKILL_PATH.read_text(encoding="utf-8")
+
+        self.assertIn(
+            "preflight --host local --host miku-bot-dev --host hoteng-srv-01",
+            skill,
+        )
+        self.assertIn("do not pass positional host names", skill)
+        self.assertIn("plural `--hosts` flag", skill)
 
 
 class SizeGuardedBytesIO(io.BytesIO):
