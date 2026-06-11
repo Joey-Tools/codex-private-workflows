@@ -218,7 +218,7 @@ class PrivateOverlaySyncTests(unittest.TestCase):
         with self.assertRaisesRegex(SYNC_MODULE.SyncError, "required replacement"):
             SYNC_MODULE.sync_sources(self.repo_root, self.source_root, (rule,))
 
-    def test_required_replacement_accepts_already_replaced_text(self) -> None:
+    def test_required_replacement_rejects_unmatched_new_text(self) -> None:
         source = self.source_root / "example-repo" / "skill" / "SKILL.md"
         source.parent.mkdir(parents=True)
         source.write_text("private replacement\n", encoding="utf-8")
@@ -229,10 +229,8 @@ class PrivateOverlaySyncTests(unittest.TestCase):
             replacements=(SYNC_MODULE.Replacement("public placeholder", "private replacement"),),
         )
 
-        SYNC_MODULE.sync_sources(self.repo_root, self.source_root, (rule,))
-
-        target = self.repo_root / "personal_codex" / "skills" / "example" / "SKILL.md"
-        self.assertEqual(target.read_text(encoding="utf-8"), "private replacement\n")
+        with self.assertRaisesRegex(SYNC_MODULE.SyncError, "required replacement"):
+            SYNC_MODULE.sync_sources(self.repo_root, self.source_root, (rule,))
 
     def test_failed_replacement_leaves_existing_target_unchanged(self) -> None:
         source = self.source_root / "example-repo" / "skill" / "SKILL.md"

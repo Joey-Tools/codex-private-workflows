@@ -416,17 +416,6 @@ def _apply_replacements(path: Path, replacements: tuple[Replacement, ...]) -> se
     return found
 
 
-def _replacement_new_text_present(target: Path, rule: SyncRule, replacement: Replacement) -> bool:
-    for path in _text_candidate_paths(target, rule):
-        try:
-            text = path.read_text(encoding="utf-8")
-        except UnicodeDecodeError:
-            continue
-        if replacement.new in text:
-            return True
-    return False
-
-
 def _text_candidate_paths(target: Path, rule: SyncRule) -> list[Path]:
     paths = [target] if target.is_file() else sorted(path for path in target.rglob("*") if path.is_file())
     return [path for path in paths if _is_text_candidate(path, rule.text_extensions)]
@@ -439,11 +428,7 @@ def _apply_rule_replacements(target: Path, rule: SyncRule) -> None:
     for path in _text_candidate_paths(target, rule):
         found.update(_apply_replacements(path, rule.replacements))
     for index, replacement in enumerate(rule.replacements):
-        if (
-            replacement.required
-            and index not in found
-            and not _replacement_new_text_present(target, rule, replacement)
-        ):
+        if replacement.required and index not in found:
             raise SyncError(f"required replacement did not match for {rule.target}: {replacement.old!r}")
 
 
