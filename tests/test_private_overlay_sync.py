@@ -93,6 +93,70 @@ class PrivateOverlaySyncTests(unittest.TestCase):
             "Use this when Joey asks.\nState the core Joey-visible behavior.\n",
         )
 
+    def test_session_mining_sync_rule_builds_remote_host_private_variant(self) -> None:
+        source = self.source_root / "codex-workflow-hygiene" / "skills" / "codex-session-mining"
+        references = source / "references"
+        references.mkdir(parents=True)
+        (source / "SKILL.md").write_text(
+            "description: pair with an environment-specific remote evidence workflow when remote-host evidence may matter.\n"
+            "- If the task might depend on remote-host evidence, let an environment-specific remote evidence workflow materialize remote rollout candidates locally before concluding that local history is complete.\n"
+            "- Do not recreate a second remote-access workflow here; this skill owns local extraction and interpretation after remote evidence is materialized.\n",
+            encoding="utf-8",
+        )
+        (references / "workflow.md").write_text(
+            "If the user is asking for a work summary, activity audit, or session recovery that may include remote hosts, use an environment-specific remote evidence workflow before concluding that the local `~/.codex` tree is complete.\n",
+            encoding="utf-8",
+        )
+        rule = next(
+            rule
+            for rule in SYNC_MODULE.SYNC_RULES
+            if rule.target == Path("personal_codex/skills/codex-session-mining")
+        )
+
+        SYNC_MODULE.sync_sources(self.repo_root, self.source_root, (rule,))
+
+        synced_skill = (
+            self.repo_root / "personal_codex" / "skills" / "codex-session-mining" / "SKILL.md"
+        ).read_text(encoding="utf-8")
+        synced_reference = (
+            self.repo_root
+            / "personal_codex"
+            / "skills"
+            / "codex-session-mining"
+            / "references"
+            / "workflow.md"
+        ).read_text(encoding="utf-8")
+        self.assertIn("pair with `$remote-host-context`", synced_skill)
+        self.assertIn("miku-bot-dev", synced_skill)
+        self.assertIn("hoteng-srv-01", synced_skill)
+        self.assertIn("Remote access belongs to `remote-host-context`", synced_skill)
+        self.assertNotIn("environment-specific remote evidence workflow", synced_skill)
+        self.assertIn("$remote-host-context", synced_reference)
+
+    def test_session_mining_sync_rule_rejects_remote_host_residuals(self) -> None:
+        source = self.source_root / "codex-workflow-hygiene" / "skills" / "codex-session-mining"
+        references = source / "references"
+        references.mkdir(parents=True)
+        (source / "SKILL.md").write_text(
+            "description: pair with an environment-specific remote evidence workflow when remote-host evidence may matter.\n"
+            "- If the task might depend on remote-host evidence, let an environment-specific remote evidence workflow materialize remote rollout candidates locally before concluding that local history is complete.\n"
+            "- Do not recreate a second remote-access workflow here; this skill owns local extraction and interpretation after remote evidence is materialized.\n"
+            "- A new environment-specific workflow note must not slip through.\n",
+            encoding="utf-8",
+        )
+        (references / "workflow.md").write_text(
+            "If the user is asking for a work summary, activity audit, or session recovery that may include remote hosts, use an environment-specific remote evidence workflow before concluding that the local `~/.codex` tree is complete.\n",
+            encoding="utf-8",
+        )
+        rule = next(
+            rule
+            for rule in SYNC_MODULE.SYNC_RULES
+            if rule.target == Path("personal_codex/skills/codex-session-mining")
+        )
+
+        with self.assertRaisesRegex(SYNC_MODULE.SyncError, "forbidden residual"):
+            SYNC_MODULE.sync_sources(self.repo_root, self.source_root, (rule,))
+
     def test_project_journal_sync_rule_matches_current_public_wording(self) -> None:
         source = self.source_root / "codex-project-journal" / "SKILL.md"
         source.parent.mkdir(parents=True)
@@ -173,6 +237,20 @@ class PrivateOverlaySyncTests(unittest.TestCase):
             source=Path("skill"),
             target=Path("personal_codex/skills/example"),
             replacements=(SYNC_MODULE.Replacement("missing", "replacement"),),
+        )
+
+        with self.assertRaisesRegex(SYNC_MODULE.SyncError, "required replacement"):
+            SYNC_MODULE.sync_sources(self.repo_root, self.source_root, (rule,))
+
+    def test_required_replacement_rejects_unmatched_new_text(self) -> None:
+        source = self.source_root / "example-repo" / "skill" / "SKILL.md"
+        source.parent.mkdir(parents=True)
+        source.write_text("private replacement\n", encoding="utf-8")
+        rule = SYNC_MODULE.SyncRule(
+            repo="example-repo",
+            source=Path("skill"),
+            target=Path("personal_codex/skills/example"),
+            replacements=(SYNC_MODULE.Replacement("public placeholder", "private replacement"),),
         )
 
         with self.assertRaisesRegex(SYNC_MODULE.SyncError, "required replacement"):
