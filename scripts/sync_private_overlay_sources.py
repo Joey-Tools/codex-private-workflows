@@ -185,20 +185,33 @@ SYNC_RULES = (
                 "pair with `$remote-host-context` when remote-host evidence may matter.",
             ),
             Replacement(
+                "If the task might depend on remote-host evidence, let an environment-specific remote evidence workflow materialize remote rollout candidates locally before concluding that local history is complete.",
+                "If the task might depend on work done on `miku-bot-dev` or `hoteng-srv-01`, use `$remote-host-context` before concluding the local machine is complete.\n"
+                "- When remote-host coverage is needed, let `remote-host-context` own the remote access step. Use its helper to materialize remote rollout candidates locally, then continue the actual mining here.",
+            ),
+            Replacement(
                 "If the task might depend on remote-host evidence",
                 "If the task might depend on work done on `miku-bot-dev` or `hoteng-srv-01`",
+                required=False,
             ),
             Replacement(
                 "use an environment-specific remote evidence workflow before concluding the local machine is complete.",
                 "use `$remote-host-context` before concluding the local machine is complete.",
+                required=False,
             ),
             Replacement(
                 "let an environment-specific remote evidence workflow own the remote access step. Materialize remote rollout candidates locally",
                 "let `remote-host-context` own the remote access step. Use its helper to materialize remote rollout candidates locally",
+                required=False,
+            ),
+            Replacement(
+                "Do not recreate a second remote-access workflow here; this skill owns local extraction and interpretation after remote evidence is materialized.",
+                "Do not recreate a second remote-access workflow here. Remote access belongs to `remote-host-context`; this skill owns local extraction and interpretation after the evidence is available.",
             ),
             Replacement(
                 "Remote access belongs to an environment-specific workflow",
                 "Remote access belongs to `remote-host-context`",
+                required=False,
             ),
             Replacement(
                 "If the user is asking for a work summary, activity audit, or session recovery that may include remote hosts, use an environment-specific remote evidence workflow before concluding that the local `~/.codex` tree is complete.",
@@ -403,6 +416,17 @@ def _apply_replacements(path: Path, replacements: tuple[Replacement, ...]) -> se
     return found
 
 
+def _replacement_new_text_present(target: Path, rule: SyncRule, replacement: Replacement) -> bool:
+    for path in _text_candidate_paths(target, rule):
+        try:
+            text = path.read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            continue
+        if replacement.new in text:
+            return True
+    return False
+
+
 def _text_candidate_paths(target: Path, rule: SyncRule) -> list[Path]:
     paths = [target] if target.is_file() else sorted(path for path in target.rglob("*") if path.is_file())
     return [path for path in paths if _is_text_candidate(path, rule.text_extensions)]
@@ -415,7 +439,11 @@ def _apply_rule_replacements(target: Path, rule: SyncRule) -> None:
     for path in _text_candidate_paths(target, rule):
         found.update(_apply_replacements(path, rule.replacements))
     for index, replacement in enumerate(rule.replacements):
-        if replacement.required and index not in found:
+        if (
+            replacement.required
+            and index not in found
+            and not _replacement_new_text_present(target, rule, replacement)
+        ):
             raise SyncError(f"required replacement did not match for {rule.target}: {replacement.old!r}")
 
 
