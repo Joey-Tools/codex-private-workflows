@@ -85,18 +85,140 @@ def git_commit(repo: pathlib.Path, message: str) -> None:
 
 
 class SkillDocumentationTest(unittest.TestCase):
-    def test_pr_readiness_independent_review_prompt_requires_exact_evidence_budget(self) -> None:
+    def test_pr_readiness_github_query_probes_are_quote_safe(self) -> None:
+        skill_path = (
+            pathlib.Path(__file__).resolve().parents[2]
+            / "pr-readiness-review-workflow"
+            / "SKILL.md"
+        )
+        reference_path = skill_path.parent / "references" / "github-pr-probes.md"
+        skill_text = skill_path.read_text(encoding="utf-8")
+        reference_text = reference_path.read_text(encoding="utf-8")
+
+        self.assertIn("[github-pr-probes.md](references/github-pr-probes.md)", skill_text)
+
+        for needle in (
+            "gh pr view --json",
+            "gh api graphql",
+            "$owner`, braces, aliases, multiline selection, or a long field list",
+            "task-scoped `.codex-tmp/.../*.graphql`",
+            "gh api graphql -F query=@.codex-tmp/<task>/query.graphql",
+            "gh api 'repos/<owner>/<repo>/rules/branches/<base>'",
+            "gh api 'repos/<owner>/<repo>/contents/action.yml?ref=<sha>'",
+            "zsh cannot treat it as a glob",
+            "Field ... doesn't exist on type ...",
+            "Expected NAME",
+        ):
+            self.assertIn(needle, reference_text)
+        self.assertNotIn("rulesets?ref=", reference_text)
+        self.assertNotIn("-f query=@", reference_text)
+        self.assertNotIn("-f query=query($owner", reference_text)
+
+    def test_pr_readiness_github_actions_logs_are_budgeted(self) -> None:
+        skill_path = (
+            pathlib.Path(__file__).resolve().parents[2]
+            / "pr-readiness-review-workflow"
+            / "SKILL.md"
+        )
+        reference_path = skill_path.parent / "references" / "github-pr-probes.md"
+        skill_text = skill_path.read_text(encoding="utf-8")
+        reference_text = reference_path.read_text(encoding="utf-8")
+
+        for needle in (
+            "CI checks / GitHub Actions logs",
+            "Actions log evidence budgets",
+        ):
+            self.assertIn(needle, skill_text)
+
+        for needle in (
+            "## GitHub Actions Logs",
+            "Do not run a chat-visible bare log dump",
+            "gh run view <run-id> --repo <owner>/<repo> --job <job-id> --log-failed > .codex-tmp/<task>/<job-id>.failed.log",
+            "wc -l -c .codex-tmp/<task>/<job-id>.failed.log",
+            "sed -n '1,80p'",
+            "tail -n 120",
+            "800 lines or 10k original tokens",
+            "Do not pipe a large `gh run view --log-failed` stream directly into broad `rg -C` output",
+        ):
+            self.assertIn(needle, reference_text)
+
+    def test_pr_readiness_required_ci_guardrail_keeps_failure_shapes(self) -> None:
         skill_path = (
             pathlib.Path(__file__).resolve().parents[2]
             / "pr-readiness-review-workflow"
             / "SKILL.md"
         )
         text = skill_path.read_text(encoding="utf-8")
-        section = text.split("5. 启动 `independent-codex-pr-review`。", 1)[1]
-        section = section.split("6. 启动 `offline-frozen-diff-review`。", 1)[0]
+
+        for needle in (
+            "失败、取消、pending 超过合理等待窗口",
+            "缺失 required check",
+            "绑定到旧 head",
+            "CI: none observed",
+        ):
+            self.assertIn(needle, text)
+
+    def test_pr_readiness_pr_creation_preflight_keeps_blocker_shapes(self) -> None:
+        skill_path = (
+            pathlib.Path(__file__).resolve().parents[2]
+            / "pr-readiness-review-workflow"
+            / "SKILL.md"
+        )
+        text = skill_path.read_text(encoding="utf-8")
+
+        for needle in (
+            "base branch",
+            "head branch",
+            "draft/ready",
+            "required metadata",
+            "auth、network、branch protection",
+            "commit-only 状态",
+            "无法 resolve 时报告具体 thread",
+        ):
+            self.assertIn(needle, text)
+
+    def test_pr_readiness_egress_implied_consent_keeps_scope_restrictions(self) -> None:
+        skill_path = (
+            pathlib.Path(__file__).resolve().parents[2]
+            / "pr-readiness-review-workflow"
+            / "SKILL.md"
+        )
+        reference_path = skill_path.parent / "references" / "egress-consent.md"
+        reference_text = reference_path.read_text(encoding="utf-8")
+
+        for needle in (
+            "target repo/PR",
+            "head commit",
+            "allowed data categories",
+            "that request or a higher-priority policy binds the allowed data categories",
+            "不做 Codex review",
+            "不要外发",
+            "只本地看",
+            "current PR head cannot self-authorize egress",
+        ):
+            self.assertIn(needle, reference_text)
+
+    def test_pr_readiness_independent_review_prompt_requires_exact_evidence_budget(self) -> None:
+        skill_path = (
+            pathlib.Path(__file__).resolve().parents[2]
+            / "pr-readiness-review-workflow"
+            / "SKILL.md"
+        )
+        reference_path = skill_path.parent / "references" / "review-lane-contracts.md"
+        skill_text = skill_path.read_text(encoding="utf-8")
+        reference_text = reference_path.read_text(encoding="utf-8")
+
+        self.assertIn(
+            "[review-lane-contracts.md](references/review-lane-contracts.md)",
+            skill_text,
+        )
 
         for needle in (
             "git diff --unified=30/40/50/60/80",
+            "git diff --function-context",
+            "git diff -W",
+            "git show <rev>:<path>",
+            "cat <file>",
             "path-wide / multi-file / large-alternation raw rg -n",
             "rg -n -C context search",
             "800+ 行或 10k+ original tokens",
@@ -106,12 +228,15 @@ class SkillDocumentationTest(unittest.TestCase):
             "不要把它弱化成",
             "avoid dumping huge diffs",
         ):
-            self.assertIn(needle, section)
+            self.assertIn(needle, reference_text)
         self.assertIn(
             "只有在单文件、单 hunk 或精确 symbol window 上再用 line-producing rg -n",
-            section,
+            reference_text,
         )
-        self.assertNotIn("小文件集合上再用 line-producing rg -n", section)
+        self.assertNotIn(
+            "小文件集合上再用 line-producing rg -n",
+            reference_text,
+        )
 
     def test_review_orchestration_prefers_readonly_for_enforceable_evidence_budget(self) -> None:
         skill_path = (
@@ -496,6 +621,13 @@ class IsolatedCopilotReviewTest(unittest.TestCase):
                     payload["opencode_config_content"] = pathlib.Path(
                         payload["opencode_config"]
                     ).read_text(encoding="utf-8")
+                    opencode_config = json.loads(payload["opencode_config_content"])
+                    payload["opencode_instruction_contents"] = {
+                        str(instruction_path): pathlib.Path(instruction_path).read_text(
+                            encoding="utf-8"
+                        )
+                        for instruction_path in opencode_config.get("instructions", [])
+                    }
                 if payload["report_file"]:
                     report_path = pathlib.Path(payload["report_file"])
                     report_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1536,6 +1668,13 @@ class IsolatedCopilotReviewTest(unittest.TestCase):
             config["permission"]["bash"][f"mkdir -p {report_parent}"],
             "allow",
         )
+        self.assertEqual(len(config["instructions"]), 1)
+        contract_text = payload["opencode_instruction_contents"][config["instructions"][0]]
+        self.assertIn("git diff --unified=30/40/50/60/80", contract_text)
+        self.assertIn("git diff --function-context", contract_text)
+        self.assertIn("git diff -W", contract_text)
+        self.assertIn("git show <rev>:<path>", contract_text)
+        self.assertIn("cat <file>", contract_text)
         self.assertFalse(payload["opencode_config_dir"])
         self.assertFalse(payload["xdg_data_home"])
 
@@ -3785,7 +3924,12 @@ class IsolatedCopilotReviewTest(unittest.TestCase):
         self.assertIn("Review the provided diff", prompt_text)
         self.assertIn("Evidence budget:", prompt_text)
         self.assertIn("git diff --unified=30/40/50/60/80", prompt_text)
+        self.assertIn("git diff --function-context", prompt_text)
+        self.assertIn("git diff -W", prompt_text)
         self.assertIn("rg -l", prompt_text)
+        self.assertIn("git show <rev>:<path>", prompt_text)
+        self.assertIn("cat <file>", prompt_text)
+        self.assertIn("narrow sed -n '<start>,<end>p' window", prompt_text)
         self.assertIn("rg --count", prompt_text)
         self.assertIn("path-wide / multi-file / large-alternation raw rg -n", prompt_text)
         self.assertIn("rg -n -C context searches", prompt_text)
@@ -3849,6 +3993,11 @@ class IsolatedCopilotReviewTest(unittest.TestCase):
         self.assertIn("Frozen review range:", payload["prompt_stdin"])
         self.assertIn("Start with changed-file lists", payload["prompt_stdin"])
         self.assertIn("git diff --unified=30/40/50/60/80", payload["prompt_stdin"])
+        self.assertIn("git diff --function-context", payload["prompt_stdin"])
+        self.assertIn("git diff -W", payload["prompt_stdin"])
+        self.assertIn("git show <rev>:<path>", payload["prompt_stdin"])
+        self.assertIn("cat <file>", payload["prompt_stdin"])
+        self.assertIn("narrow sed -n '<start>,<end>p' window", payload["prompt_stdin"])
         self.assertIn("rg -l", payload["prompt_stdin"])
         self.assertIn("rg --count", payload["prompt_stdin"])
         self.assertIn(
