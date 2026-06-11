@@ -220,6 +220,10 @@ SYNC_RULES = (
             Replacement("remote hosts", "`miku-bot-dev` or `hoteng-srv-01`", required=False),
         ),
         common_joey_text=True,
+        forbidden_residuals=(
+            "environment-specific remote evidence workflow",
+            "environment-specific workflow",
+        ),
     ),
     _rule(
         "codex-workflow-hygiene",
