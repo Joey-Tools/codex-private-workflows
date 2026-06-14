@@ -4988,7 +4988,7 @@ class SessionRetrospectiveTests(unittest.TestCase):
         self.assertEqual(relevance, "unknown")
         self.assertEqual(scan.call_args.kwargs["max_scan_bytes"], MODULE.ROLLOUT_TIMESTAMP_SCAN_BYTES)
 
-    def test_old_oversized_rollout_with_large_in_window_record_blocks_state(self) -> None:
+    def test_old_oversized_rollout_with_large_in_window_record_is_summarized(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw) / ".codex"
             write_local_evidence(root)
@@ -5017,8 +5017,10 @@ class SessionRetrospectiveTests(unittest.TestCase):
             )
             trend = json.loads((output / "trend_report.json").read_text(encoding="utf-8"))
 
+        gap_reasons = [gap["reason"] for gap in trend["coverage_gaps"]]
         self.assertFalse(state.exists())
-        self.assertEqual(trend["coverage_gaps"][0]["reason"], "oversized_rollout_skipped")
+        self.assertIn("partial_host_scope", gap_reasons)
+        self.assertNotIn("oversized_rollout_skipped", gap_reasons)
 
     def test_old_oversized_rollout_with_uncertain_middle_timestamp_blocks_state(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
