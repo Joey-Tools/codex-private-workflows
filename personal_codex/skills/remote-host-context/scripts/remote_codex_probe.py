@@ -29,6 +29,7 @@ MAX_ROLLOUT_CHUNK_BYTES = 2 * 1024 * 1024
 MAX_FETCH_ROLLOUT_CHUNK_BYTES = 2 * 1024 * 1024
 MAX_ROLLOUT_SUMMARY_LIMIT = 200
 MAX_ROLLOUT_SUMMARY_SCAN_BYTES = 2 * 1024 * 1024
+MAX_ROLLOUT_SUMMARY_LINE_BYTES = 1024 * 1024
 MAX_ROLLOUT_SUMMARY_TAIL_RECORDS = 50
 MAX_ROLLOUT_SUMMARY_TEXT_CHARS = 1200
 MAX_SESSION_META_SCAN_BYTES = 256 * 1024
@@ -746,6 +747,7 @@ MAX_FETCH_ROLLOUT_CHUNK_BYTES = int(CONFIG.get("max_fetch_rollout_chunk_bytes", 
 SESSION_META_SCAN_BYTES = int(CONFIG.get("session_meta_scan_bytes", 0))
 SUMMARY_LIMIT = int(CONFIG.get("summary_limit", 0))
 SUMMARY_SCAN_BYTES = int(CONFIG.get("summary_scan_bytes", 0))
+SUMMARY_LINE_BYTES = int(CONFIG.get("summary_line_bytes", 0)) or {MAX_ROLLOUT_SUMMARY_LINE_BYTES}
 SUMMARY_TAIL_RECORDS = int(CONFIG.get("summary_tail_records", 0))
 SUMMARY_MAX_TEXT_CHARS = int(CONFIG.get("summary_max_text_chars", 0))
 SUMMARY_MAX_TEXT_CHARS_LIMIT = {MAX_ROLLOUT_SUMMARY_TEXT_CHARS}
@@ -1176,21 +1178,51 @@ def summary_record_has_signal(record):
 
 def bounded_text_lines(handle, max_scan_bytes):
     scanned = 0
+    buffer = bytearray()
+    dropping_oversized_line = False
+    chunk_bytes = 64 * 1024
+
+    def line_ended(part):
+        return part.endswith(b"\\n") or part.endswith(b"\\r")
+
     while True:
         if max_scan_bytes and scanned >= max_scan_bytes:
+            if dropping_oversized_line:
+                yield "\\n"
+            elif buffer:
+                yield bytes(buffer).decode("utf-8", "replace")
             return
         remaining = max_scan_bytes - scanned if max_scan_bytes else 0
-        raw_line = handle.readline(remaining + 1 if remaining else -1)
-        if not raw_line:
+        read_size = min(chunk_bytes, remaining) if remaining else chunk_bytes
+        chunk = handle.read(read_size)
+        if not chunk:
+            if dropping_oversized_line:
+                yield "\\n"
+            elif buffer:
+                yield bytes(buffer).decode("utf-8", "replace")
             return
-        if isinstance(raw_line, str):
-            raw_bytes = raw_line.encode("utf-8", "surrogatepass")
+        if isinstance(chunk, str):
+            raw_bytes = chunk.encode("utf-8", "surrogatepass")
         else:
-            raw_bytes = bytes(raw_line)
-        if max_scan_bytes and len(raw_bytes) > remaining:
-            return
+            raw_bytes = bytes(chunk)
         scanned += len(raw_bytes)
-        yield raw_bytes.decode("utf-8", "replace")
+        for part in raw_bytes.splitlines(keepends=True):
+            if dropping_oversized_line:
+                if line_ended(part):
+                    yield "\\n"
+                    dropping_oversized_line = False
+                continue
+            if len(buffer) + len(part) > SUMMARY_LINE_BYTES:
+                buffer.clear()
+                dropping_oversized_line = True
+                if line_ended(part):
+                    yield "\\n"
+                    dropping_oversized_line = False
+                continue
+            buffer.extend(part)
+            if line_ended(part):
+                yield bytes(buffer).decode("utf-8", "replace")
+                buffer.clear()
 
 
 def summarize_records(lines, line_offset=0):
@@ -2567,21 +2599,51 @@ def _build_summary_record(
 
 def _bounded_text_lines(handle: Any, max_scan_bytes: int) -> Iterable[str]:
     scanned = 0
+    buffer = bytearray()
+    dropping_oversized_line = False
+    chunk_bytes = 64 * 1024
+
+    def line_ended(part: bytes) -> bool:
+        return part.endswith(b"\n") or part.endswith(b"\r")
+
     while True:
         if max_scan_bytes and scanned >= max_scan_bytes:
+            if dropping_oversized_line:
+                yield "\n"
+            elif buffer:
+                yield bytes(buffer).decode("utf-8", "replace")
             return
         remaining = max_scan_bytes - scanned if max_scan_bytes else 0
-        raw_line = handle.readline(remaining + 1 if remaining else -1)
-        if not raw_line:
+        read_size = min(chunk_bytes, remaining) if remaining else chunk_bytes
+        chunk = handle.read(read_size)
+        if not chunk:
+            if dropping_oversized_line:
+                yield "\n"
+            elif buffer:
+                yield bytes(buffer).decode("utf-8", "replace")
             return
-        if isinstance(raw_line, str):
-            raw_bytes = raw_line.encode("utf-8", "surrogatepass")
+        if isinstance(chunk, str):
+            raw_bytes = chunk.encode("utf-8", "surrogatepass")
         else:
-            raw_bytes = bytes(raw_line)
-        if max_scan_bytes and len(raw_bytes) > remaining:
-            return
+            raw_bytes = bytes(chunk)
         scanned += len(raw_bytes)
-        yield raw_bytes.decode("utf-8", "replace")
+        for part in raw_bytes.splitlines(keepends=True):
+            if dropping_oversized_line:
+                if line_ended(part):
+                    yield "\n"
+                    dropping_oversized_line = False
+                continue
+            if len(buffer) + len(part) > MAX_ROLLOUT_SUMMARY_LINE_BYTES:
+                buffer.clear()
+                dropping_oversized_line = True
+                if line_ended(part):
+                    yield "\n"
+                    dropping_oversized_line = False
+                continue
+            buffer.extend(part)
+            if line_ended(part):
+                yield bytes(buffer).decode("utf-8", "replace")
+                buffer.clear()
 
 
 def _summarize_rollout_records(
@@ -2907,6 +2969,7 @@ def cmd_rollout_summary(args: argparse.Namespace) -> int:
                 "summary_keywords": list(args.keyword),
                 "summary_limit": args.limit,
                 "summary_scan_bytes": MAX_ROLLOUT_SUMMARY_SCAN_BYTES,
+                "summary_line_bytes": MAX_ROLLOUT_SUMMARY_LINE_BYTES,
                 "summary_tail_records": args.tail_records,
                 "summary_max_text_chars": args.max_text_chars,
             }

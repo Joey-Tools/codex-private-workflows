@@ -1323,7 +1323,10 @@ class SessionRetrospectiveTests(unittest.TestCase):
 
         for probe in (REMOTE_PROBE, REMOTE_HOST_CONTEXT_PROBE):
             with self.subTest(probe=probe.__name__):
-                self.assertEqual(list(probe._bounded_text_lines(io.BytesIO(payload), len(first))), [])
+                self.assertEqual(
+                    list(probe._bounded_text_lines(io.BytesIO(payload), len(first))),
+                    [payload[: len(first)].decode("utf-8", "replace")],
+                )
                 self.assertEqual(
                     list(probe._bounded_text_lines(io.BytesIO(payload), len(first.encode("utf-8")))),
                     [first],
@@ -10289,7 +10292,9 @@ class SessionRetrospectiveTests(unittest.TestCase):
                 self.assertIn("ROOT.lstat()", script)
                 self.assertIn("Codex root is a symlink", script)
                 self.assertIn('os.fdopen(fd, "rb")', script)
-                self.assertIn('raw_bytes.decode("utf-8", "replace")', script)
+                self.assertIn("raw_bytes.splitlines(keepends=True)", script)
+                self.assertIn("if max_scan_bytes and scanned >= max_scan_bytes:\n            if dropping_oversized_line:", script)
+                self.assertIn("SUMMARY_LINE_BYTES", script)
                 self.assertNotIn("(2,)", script)
                 self.assertNotIn("(16,)", script)
 
