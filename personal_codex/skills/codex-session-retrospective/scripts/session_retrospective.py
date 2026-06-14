@@ -1281,7 +1281,7 @@ def generate_local_rollout_summaries_for_source(
             end,
             allow_mtime_fallback=rollout_mtime_fallback,
         )
-        if relevance != "relevant":
+        if relevance == "irrelevant":
             continue
         rollout_ref = source_relative_path_ref(rollout, source.root)
         if (

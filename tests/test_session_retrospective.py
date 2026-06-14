@@ -5052,7 +5052,7 @@ class SessionRetrospectiveTests(unittest.TestCase):
         self.assertEqual(trend["coverage_gaps"][0]["reason"], "oversized_rollout_skipped")
         self.assertNotIn("path_ref", trend["coverage_gaps"][0])
 
-    def test_unknown_relevance_oversized_rollout_does_not_generate_local_summary(self) -> None:
+    def test_unknown_relevance_oversized_rollout_generates_bounded_local_summary(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw) / ".codex"
             write_local_evidence(root)
@@ -5069,7 +5069,13 @@ class SessionRetrospectiveTests(unittest.TestCase):
 
             with mock.patch.object(MODULE, "ROLLOUT_TIMESTAMP_SCAN_BYTES", 128):
                 MODULE.run_scan(
-                    types.SimpleNamespace(source=[f"local={root}"], output=str(output), state=None, max_raw_bytes=1000, allow_partial_hosts=True),
+                    types.SimpleNamespace(
+                        source=[f"local={root}"],
+                        output=str(output),
+                        state=None,
+                        max_raw_bytes=1000,
+                        allow_partial_hosts=True,
+                    ),
                     mode="daily",
                     start=MODULE.parse_time("2026-05-01T00:00:00Z"),
                     end=MODULE.parse_time("2026-05-02T00:00:00Z"),
@@ -5077,8 +5083,8 @@ class SessionRetrospectiveTests(unittest.TestCase):
             trend = json.loads((output / "trend_report.json").read_text(encoding="utf-8"))
             manifest = json.loads((output / "shard_manifest.json").read_text(encoding="utf-8"))
 
-        self.assertIn("oversized_rollout_skipped", [gap["reason"] for gap in trend["coverage_gaps"]])
-        self.assertNotIn("generated_summaries", manifest["sources"][0])
+        self.assertNotIn("oversized_rollout_skipped", [gap["reason"] for gap in trend["coverage_gaps"]])
+        self.assertEqual(len(manifest["sources"][0]["generated_summaries"]), 1)
 
     def test_generated_local_summary_with_json_errors_is_not_ready_shard(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
