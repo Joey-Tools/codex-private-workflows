@@ -212,6 +212,7 @@ class SkillDocumentationTest(unittest.TestCase):
             "[review-lane-contracts.md](references/review-lane-contracts.md)",
             skill_text,
         )
+        self.assertIn("整文件 `nl -ba`", skill_text)
 
         for needle in (
             "git diff --unified=30/40/50/60/80",
@@ -225,6 +226,9 @@ class SkillDocumentationTest(unittest.TestCase):
             "git status --short --untracked-files=no",
             "rg -l",
             "rg --count",
+            "删减版 `Evidence-budget contract` 是无效的",
+            "bare `git show <rev>:<path>`",
+            "整文件 `nl -ba`",
             "不要把它弱化成",
             "avoid dumping huge diffs",
         ):
@@ -233,6 +237,11 @@ class SkillDocumentationTest(unittest.TestCase):
             "只有在单文件、单 hunk 或精确 symbol window 上再用 line-producing rg -n",
             reference_text,
         )
+        constraint_list = reference_text.split(
+            "If you hand-write, shorten, or replay this prompt, preserve these exact evidence-budget constraints:",
+            1,
+        )[1].split("删减版 `Evidence-budget contract` 是无效的", 1)[0]
+        self.assertIn("- 整文件 `nl -ba`", constraint_list)
         self.assertNotIn(
             "小文件集合上再用 line-producing rg -n",
             reference_text,
@@ -245,6 +254,22 @@ class SkillDocumentationTest(unittest.TestCase):
             / "SKILL.md"
         )
         text = skill_path.read_text(encoding="utf-8")
+        self.assertIn(
+            "direct findings-only review-only child prompts",
+            text,
+        )
+        self.assertIn(
+            "shortened `Evidence-budget contract`",
+            text,
+        )
+        self.assertIn(
+            "use a pollable TTY/PTY session",
+            text,
+        )
+        self.assertIn(
+            "do not depend on `write_stdin`",
+            text,
+        )
         self.assertIn(
             "default to `codex-readonly` when the review needs an enforceable evidence budget",
             text,
@@ -3302,6 +3327,134 @@ class IsolatedCopilotReviewTest(unittest.TestCase):
                     f"readonly git shim blocked subcommand option: {blocked_flag}",
                     completed.stderr,
                 )
+
+    def test_readonly_git_shim_allows_apply_stat_modes_only(self) -> None:
+        other_repo = self._create_plain_repo("apply-stat-probe")
+        (other_repo / "file.txt").write_text("changed\n", encoding="utf-8")
+        patch_file = self.root / "apply-stat.patch"
+        diff = git(other_repo, "diff", "--", "file.txt")
+        self.assertEqual(diff.returncode, 0, diff.stderr)
+        patch_file.write_text(diff.stdout, encoding="utf-8")
+
+        for flag in ("--stat", "--stat=80", "--numstat", "--summary"):
+            with self.subTest(flag=flag):
+                control = git(other_repo, "apply", flag, str(patch_file))
+                completed = self._run_shim(
+                    "-C",
+                    str(other_repo),
+                    "apply",
+                    flag,
+                    str(patch_file),
+                )
+
+                self.assertEqual(completed.returncode, control.returncode)
+                self.assertEqual(completed.stdout, control.stdout)
+                self.assertEqual(completed.stderr, control.stderr)
+
+        blocked = self._run_shim(
+            "-C",
+            str(other_repo),
+            "apply",
+            str(patch_file),
+        )
+        self.assertEqual(blocked.returncode, 126)
+        self.assertIn(
+            "readonly git shim blocked subcommand: apply",
+            blocked.stderr,
+        )
+
+        blocked_apply = self._run_shim(
+            "-C",
+            str(other_repo),
+            "apply",
+            "--stat",
+            "--apply",
+            str(patch_file),
+        )
+        self.assertEqual(blocked_apply.returncode, 126)
+        self.assertIn(
+            "readonly git shim blocked subcommand: apply",
+            blocked_apply.stderr,
+        )
+        self.assertEqual(
+            (other_repo / "file.txt").read_text(encoding="utf-8"),
+            "changed\n",
+        )
+
+        blocked_no_stat = self._run_shim(
+            "-C",
+            str(other_repo),
+            "apply",
+            "--stat",
+            "--no-stat",
+            str(patch_file),
+        )
+        self.assertEqual(blocked_no_stat.returncode, 126)
+        self.assertIn(
+            "readonly git shim blocked subcommand: apply",
+            blocked_no_stat.stderr,
+        )
+        self.assertEqual(
+            (other_repo / "file.txt").read_text(encoding="utf-8"),
+            "changed\n",
+        )
+
+        blocked_directory_value = self._run_shim(
+            "-C",
+            str(other_repo),
+            "apply",
+            "--directory",
+            "--stat",
+            str(patch_file),
+        )
+        self.assertEqual(blocked_directory_value.returncode, 126)
+        self.assertIn(
+            "readonly git shim blocked subcommand: apply",
+            blocked_directory_value.stderr,
+        )
+        self.assertEqual(
+            (other_repo / "file.txt").read_text(encoding="utf-8"),
+            "changed\n",
+        )
+
+        blocked_apply_abbreviation = self._run_shim(
+            "-C",
+            str(other_repo),
+            "apply",
+            "--stat",
+            "--app",
+            str(patch_file),
+        )
+        self.assertEqual(blocked_apply_abbreviation.returncode, 126)
+        self.assertIn(
+            "readonly git shim blocked subcommand: apply",
+            blocked_apply_abbreviation.stderr,
+        )
+        self.assertEqual(
+            (other_repo / "file.txt").read_text(encoding="utf-8"),
+            "changed\n",
+        )
+
+        fake_ancestor = self.root / "fake-ancestor.index"
+        blocked_fake_ancestor = self._run_shim(
+            "-C",
+            str(other_repo),
+            "apply",
+            "--stat",
+            "--build-fake-ancestor",
+            str(fake_ancestor),
+            str(patch_file),
+        )
+        self.assertEqual(blocked_fake_ancestor.returncode, 126)
+        self.assertIn(
+            "readonly git shim blocked subcommand: apply",
+            blocked_fake_ancestor.stderr,
+        )
+        self.assertFalse(fake_ancestor.exists())
+        self.assertEqual(
+            (other_repo / "file.txt").read_text(encoding="utf-8"),
+            "changed\n",
+        )
 
     def test_readonly_git_shim_preserves_diff_no_index_outside_repo(self) -> None:
         scratch = self.root / "no-index-probe"

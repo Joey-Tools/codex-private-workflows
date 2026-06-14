@@ -9,6 +9,7 @@ import sys
 
 
 ALLOWED_SUBCOMMANDS = {
+    "apply",
     "blame",
     "cat-file",
     "describe",
@@ -173,6 +174,17 @@ FILTER_KEY_RE = re.compile(
 )
 FILTER_QUERY_PATTERN = r"^filter\..*"
 
+READONLY_APPLY_ENABLE_FLAGS = {
+    "--numstat": "numstat",
+    "--stat": "stat",
+    "--summary": "summary",
+}
+
+READONLY_APPLY_DISABLE_FLAGS = {
+    "--no-numstat": "numstat",
+    "--no-stat": "stat",
+    "--no-summary": "summary",
+}
 
 def _is_allowed_global_config(config: str) -> bool:
     key, separator, value = config.partition("=")
@@ -368,6 +380,38 @@ def _blocked_subcommand_flag(
     return None
 
 
+def _is_readonly_apply(
+    forwarded_args: list[str],
+    *,
+    subcommand_index: int | None,
+) -> bool:
+    if subcommand_index is None:
+        return False
+
+    readonly_modes = {
+        "numstat": False,
+        "stat": False,
+        "summary": False,
+    }
+    for arg in forwarded_args[subcommand_index + 1:]:
+        if arg == "--":
+            break
+        matched_readonly_mode = None
+        for flag, mode in READONLY_APPLY_ENABLE_FLAGS.items():
+            if arg == flag or arg.startswith(flag + "="):
+                matched_readonly_mode = mode
+                break
+        if matched_readonly_mode is not None:
+            readonly_modes[matched_readonly_mode] = True
+            continue
+        if arg in READONLY_APPLY_DISABLE_FLAGS:
+            readonly_modes[READONLY_APPLY_DISABLE_FLAGS[arg]] = False
+            continue
+        if arg.startswith("-") and arg != "-":
+            return False
+    return any(readonly_modes.values())
+
+
 def _exec_argv(
     real_git: str,
     forwarded_args: list[str],
@@ -418,6 +462,15 @@ def main() -> int:
             f"readonly git shim blocked subcommand option: {blocked_flag}",
             file=sys.stderr,
         )
+        return 126
+    if (
+        value == "apply"
+        and not _is_readonly_apply(
+            forwarded_args,
+            subcommand_index=subcommand_index,
+        )
+    ):
+        print("readonly git shim blocked subcommand: apply", file=sys.stderr)
         return 126
     if (
         action == "meta"
