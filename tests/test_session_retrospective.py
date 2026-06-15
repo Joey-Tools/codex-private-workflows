@@ -10218,7 +10218,6 @@ class SessionRetrospectiveTests(unittest.TestCase):
         samples = [
             "Contact joey@example.com",
             "Open https://internal.example/ticket",
-            "Inspect /Users/hoteng/customer/repo",
             "customer_id=AcmeCorp",
             "Authorization: Bearer abcdefghijklmnopqrstuvwxyz",
             "Use sk-proj-abcdefghijklmnop123456",
@@ -10239,6 +10238,11 @@ class SessionRetrospectiveTests(unittest.TestCase):
                 signal = REMOTE_PROBE._safe_summary_text("user_message", sample)
                 self.assertIn("secret", signal)
                 self.assertNotIn(sample, signal)
+
+    def test_remote_probe_ignores_ordinary_joey_home_path_context(self) -> None:
+        signal = REMOTE_PROBE._safe_summary_text("user_message", "Inspect /Users/hoteng/customer/repo")
+
+        self.assertEqual(signal, "user message present")
 
     def test_remote_host_context_probe_redaction_only_sensitive_text_contributes_signal(self) -> None:
         samples = [
