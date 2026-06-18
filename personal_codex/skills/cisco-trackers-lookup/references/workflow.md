@@ -12,11 +12,14 @@ Keep recurring approvals anchored to the installed personal-skill paths under `~
 
 ## 1. Cisco Jira
 
-Check whether the fixed auth env vars are present:
+Check whether the fixed bearer-token auth env var is present:
 
 ```bash
-printenv Jira_email Jira_token
+printenv Jira_token
 ```
+
+The `jira_eng_gpk2_default` profile sends `Jira_token` as `Authorization: Bearer ...`.
+`Jira_email` and `Jira_username` may exist in Joey's shell environment, but this Jira instance rejects Basic Auth and the helper must not use those values for Jira REST calls.
 
 Read one issue:
 
