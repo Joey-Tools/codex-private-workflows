@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import base64
 import json
 import os
 import re
@@ -16,7 +15,7 @@ JIRA_HOST = "jira-eng-gpk2.cisco.com"
 JIRA_BASE_URL = f"https://{JIRA_HOST}/jira"
 ISSUE_KEY_RE = re.compile(r"^[A-Z][A-Z0-9]+-\d+$")
 AUTH_PROFILES = {
-    "jira_eng_gpk2_default": ("Jira_email", "Jira_token"),
+    "jira_eng_gpk2_default": "Jira_token",
 }
 ISSUE_FIELDS = (
     "summary,description,status,priority,labels,created,updated,"
@@ -79,31 +78,28 @@ def _normalize_issue_ref(issue_ref: str) -> str:
     return match.group(1).upper()
 
 
-def _add_basic_auth(
+def _add_bearer_auth(
     request: urllib.request.Request,
     auth_profile: str,
 ) -> str:
     try:
-        user_env, token_env = AUTH_PROFILES[auth_profile]
+        token_env = AUTH_PROFILES[auth_profile]
     except KeyError as exc:
         raise ValueError(f"unknown auth profile: {auth_profile}") from exc
-    user = os.getenv(user_env)
     token = os.getenv(token_env)
-    if not user or not token:
+    if not token:
         raise ValueError(
-            f"missing auth env for profile {auth_profile}: expected {user_env} and {token_env}"
+            f"missing auth env for profile {auth_profile}: expected {token_env}"
         )
-    raw = f"{user}:{token}".encode("utf-8")
-    header = base64.b64encode(raw).decode("ascii")
-    request.add_header("Authorization", f"Basic {header}")
-    return "present"
+    request.add_header("Authorization", f"Bearer {token}")
+    return "bearer"
 
 
 def _build_issue_request(issue_key: str, fields: str, auth_profile: str) -> tuple[urllib.request.Request, str]:
     url = f"{JIRA_BASE_URL}/rest/api/2/issue/{issue_key}?fields={urllib.parse.quote(fields, safe=',')}"
     request = urllib.request.Request(url, method="GET")
     request.add_header("Accept", "application/json")
-    auth_state = _add_basic_auth(request, auth_profile)
+    auth_state = _add_bearer_auth(request, auth_profile)
     return request, auth_state
 
 
