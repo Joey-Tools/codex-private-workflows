@@ -11254,10 +11254,14 @@ def cmd_advance_state(args: argparse.Namespace) -> int:
 
 
 def add_common_scan_args(parser: argparse.ArgumentParser) -> None:
+    default_remote_source_help = ", ".join(DEFAULT_REMOTE_HOSTS)
     parser.add_argument(
         "--source",
         action="append",
-        help="Source in HOST=PATH form. Defaults to local=~/.codex plus materialized miku-bot-dev and hoteng-srv-01 sources.",
+        help=(
+            "Source in HOST=PATH form. Defaults to local=~/.codex plus materialized "
+            f"{default_remote_source_help} sources."
+        ),
     )
     parser.add_argument("--state", help="State JSON path for incremental runs.")
     parser.add_argument("--output", required=True, help="Output directory for retrospective artifacts.")

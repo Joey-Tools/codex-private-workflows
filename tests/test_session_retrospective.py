@@ -347,6 +347,16 @@ class SessionRetrospectiveTests(unittest.TestCase):
         self.assertEqual(sources[2].missing_reason, "remote_source_not_materialized")
         self.assertEqual(sources[3].missing_reason, "remote_source_not_materialized")
 
+    def test_common_scan_source_help_lists_default_remote_hosts(self) -> None:
+        parser = MODULE.argparse.ArgumentParser()
+
+        MODULE.add_common_scan_args(parser)
+        source_help = next(action.help for action in parser._actions if action.dest == "source")
+
+        self.assertIn("local=~/.codex", source_help)
+        for host in MODULE.DEFAULT_REMOTE_HOSTS:
+            self.assertIn(host, source_help)
+
     def test_remote_probe_helper_is_bundled_with_skill(self) -> None:
         helper = SCRIPT.parent / "remote_codex_probe.py"
         skill = SCRIPT.parents[1] / "SKILL.md"
