@@ -214,7 +214,7 @@ BASELINE_MODE_PATTERN = re.compile(r"^baseline-[1-9][0-9]{0,3}d$")
 MAX_BASELINE_WINDOW_DAYS = 9999
 TIMESTAMPED_ROLLOUT_PATH_HINT_GRACE = dt.timedelta(hours=2)
 
-DEFAULT_REMOTE_HOSTS = ("miku-bot-dev", "hoteng-srv-01")
+DEFAULT_REMOTE_HOSTS = ("miku-bot-dev", "hoteng-srv-01", "codex-hoteng-srv-01")
 RETAINED_SOURCE_HOST_ALIASES = {
     "miku-server-dev": "miku-bot-dev",
 }
@@ -11254,10 +11254,14 @@ def cmd_advance_state(args: argparse.Namespace) -> int:
 
 
 def add_common_scan_args(parser: argparse.ArgumentParser) -> None:
+    default_remote_source_help = ", ".join(DEFAULT_REMOTE_HOSTS)
     parser.add_argument(
         "--source",
         action="append",
-        help="Source in HOST=PATH form. Defaults to local=~/.codex plus materialized miku-bot-dev and hoteng-srv-01 sources.",
+        help=(
+            "Source in HOST=PATH form. Defaults to local=~/.codex plus materialized default remote sources "
+            f"({default_remote_source_help})."
+        ),
     )
     parser.add_argument("--state", help="State JSON path for incremental runs.")
     parser.add_argument("--output", required=True, help="Output directory for retrospective artifacts.")

@@ -119,6 +119,13 @@ def write_default_remote_sources(base: str | Path, *, timestamp: str = "2026-05-
     return source_args
 
 
+def source_flag_args(sources: list[str]) -> list[str]:
+    args: list[str] = []
+    for source in sources:
+        args.extend(["--source", source])
+    return args
+
+
 def manifest_fixture(**overrides: object) -> dict:
     manifest = {
         "schema_version": 1,
@@ -331,10 +338,34 @@ class SessionRetrospectiveTests(unittest.TestCase):
     def test_default_sources_include_remote_hosts_as_missing_until_materialized(self) -> None:
         sources = MODULE.parse_sources(None)
 
-        self.assertEqual([source.host for source in sources], ["local", "miku-bot-dev", "hoteng-srv-01"])
+        self.assertEqual(
+            [source.host for source in sources],
+            ["local", "miku-bot-dev", "hoteng-srv-01", "codex-hoteng-srv-01"],
+        )
         self.assertIsNone(sources[0].missing_reason)
         self.assertEqual(sources[1].missing_reason, "remote_source_not_materialized")
         self.assertEqual(sources[2].missing_reason, "remote_source_not_materialized")
+        self.assertEqual(sources[3].missing_reason, "remote_source_not_materialized")
+
+    def test_common_scan_source_help_lists_default_remote_hosts(self) -> None:
+        parser = MODULE.argparse.ArgumentParser()
+
+        MODULE.add_common_scan_args(parser)
+        source_help = next(action.help for action in parser._actions if action.dest == "source")
+
+        self.assertIn("local=~/.codex", source_help)
+        for host in MODULE.DEFAULT_REMOTE_HOSTS:
+            self.assertIn(host, source_help)
+
+    def test_skill_retained_host_guidance_lists_default_remote_hosts(self) -> None:
+        skill_text = (SCRIPT.parents[1] / "SKILL.md").read_text(encoding="utf-8")
+        retained_guidance = next(line for line in skill_text.splitlines() if "Retained host labels" in line)
+
+        self.assertNotIn("the two default remote hosts", retained_guidance)
+        self.assertIn("local", retained_guidance)
+        self.assertIn("custom_source", retained_guidance)
+        for host in MODULE.DEFAULT_REMOTE_HOSTS:
+            self.assertIn(host, retained_guidance)
 
     def test_remote_probe_helper_is_bundled_with_skill(self) -> None:
         helper = SCRIPT.parent / "remote_codex_probe.py"
@@ -1432,8 +1463,12 @@ class SessionRetrospectiveTests(unittest.TestCase):
     def test_explicit_sources_still_require_default_host_coverage(self) -> None:
         sources = MODULE.parse_sources(["local=/tmp/local", "miku-bot-dev=/tmp/miku"])
 
-        self.assertEqual([source.host for source in sources], ["local", "miku-bot-dev", "hoteng-srv-01"])
+        self.assertEqual(
+            [source.host for source in sources],
+            ["local", "miku-bot-dev", "hoteng-srv-01", "codex-hoteng-srv-01"],
+        )
         self.assertEqual(sources[2].missing_reason, "remote_source_not_materialized")
+        self.assertEqual(sources[3].missing_reason, "remote_source_not_materialized")
         self.assertEqual(
             [source.host for source in MODULE.parse_sources(["local=/tmp/local"], require_default_hosts=False)],
             ["local"],
@@ -1442,10 +1477,14 @@ class SessionRetrospectiveTests(unittest.TestCase):
     def test_parse_sources_canonicalizes_default_remote_aliases(self) -> None:
         sources = MODULE.parse_sources(["miku-server-dev=/tmp/miku"])
 
-        self.assertEqual([source.host for source in sources], ["local", "miku-bot-dev", "hoteng-srv-01"])
+        self.assertEqual(
+            [source.host for source in sources],
+            ["local", "miku-bot-dev", "hoteng-srv-01", "codex-hoteng-srv-01"],
+        )
         self.assertTrue(sources[1].explicit)
         self.assertIsNone(sources[1].missing_reason)
         self.assertEqual(sources[2].missing_reason, "remote_source_not_materialized")
+        self.assertEqual(sources[3].missing_reason, "remote_source_not_materialized")
 
     def test_partial_host_default_sources_use_local_only(self) -> None:
         sources = MODULE.parse_sources(None, require_default_hosts=False)
@@ -3560,10 +3599,7 @@ class SessionRetrospectiveTests(unittest.TestCase):
                         str(state),
                         "--source",
                         f"local={root}",
-                        "--source",
-                        remote_sources[0],
-                        "--source",
-                        remote_sources[1],
+                        *source_flag_args(remote_sources),
                         "--output",
                         str(output),
                     ]
@@ -3615,10 +3651,7 @@ class SessionRetrospectiveTests(unittest.TestCase):
                         str(state),
                         "--source",
                         f"local={root}",
-                        "--source",
-                        remote_sources[0],
-                        "--source",
-                        remote_sources[1],
+                        *source_flag_args(remote_sources),
                         "--output",
                         str(output),
                     ]

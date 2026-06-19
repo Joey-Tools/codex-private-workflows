@@ -186,12 +186,12 @@ SYNC_RULES = (
             ),
             Replacement(
                 "If the task might depend on remote-host evidence, let an environment-specific remote evidence workflow materialize remote rollout candidates locally before concluding that local history is complete.",
-                "If the task might depend on work done on `miku-bot-dev` or `hoteng-srv-01`, use `$remote-host-context` before concluding the local machine is complete.\n"
+                "If the task might depend on work done on `miku-bot-dev`, `hoteng-srv-01`, or `codex-hoteng-srv-01`, use `$remote-host-context` before concluding the local machine is complete.\n"
                 "- When remote-host coverage is needed, let `remote-host-context` own the remote access step. Use its helper to materialize remote rollout candidates locally, then continue the actual mining here.",
             ),
             Replacement(
                 "If the task might depend on remote-host evidence",
-                "If the task might depend on work done on `miku-bot-dev` or `hoteng-srv-01`",
+                "If the task might depend on work done on `miku-bot-dev`, `hoteng-srv-01`, or `codex-hoteng-srv-01`",
                 required=False,
             ),
             Replacement(
@@ -215,9 +215,9 @@ SYNC_RULES = (
             ),
             Replacement(
                 "If the user is asking for a work summary, activity audit, or session recovery that may include remote hosts, use an environment-specific remote evidence workflow before concluding that the local `~/.codex` tree is complete.",
-                "If the user is asking for a work summary, activity audit, or session recovery that may include `miku-bot-dev` or `hoteng-srv-01`, use `$remote-host-context` before concluding that the local `~/.codex` tree is complete.",
+                "If the user is asking for a work summary, activity audit, or session recovery that may include `miku-bot-dev`, `hoteng-srv-01`, or `codex-hoteng-srv-01`, use `$remote-host-context` before concluding that the local `~/.codex` tree is complete.",
             ),
-            Replacement("remote hosts", "`miku-bot-dev` or `hoteng-srv-01`", required=False),
+            Replacement("remote hosts", "`miku-bot-dev`, `hoteng-srv-01`, or `codex-hoteng-srv-01`", required=False),
         ),
         common_joey_text=True,
         forbidden_residuals=(

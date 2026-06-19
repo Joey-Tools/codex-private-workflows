@@ -40,11 +40,18 @@ class RemoteHostContextDocumentationTests(unittest.TestCase):
         skill = SKILL_PATH.read_text(encoding="utf-8")
 
         self.assertIn(
-            "preflight --host local --host miku-bot-dev --host hoteng-srv-01",
+            "preflight --host local --host miku-bot-dev --host hoteng-srv-01 --host codex-hoteng-srv-01",
             skill,
         )
         self.assertIn("do not pass positional host names", skill)
         self.assertIn("plural `--hosts` flag", skill)
+
+    def test_codex_hoteng_srv_uses_distinct_codex_home(self) -> None:
+        host = MODULE.HOSTS["codex-hoteng-srv-01"]
+
+        self.assertEqual(host["label"], "codex-hoteng-srv-01")
+        self.assertEqual(host["ssh_target"], "codex-hoteng-srv-01")
+        self.assertEqual(host["codex_root"], "/home/codex/.codex")
 
 
 class SizeGuardedBytesIO(io.BytesIO):

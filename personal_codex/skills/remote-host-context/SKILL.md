@@ -1,6 +1,6 @@
 ---
 name: remote-host-context
-description: Collect read-only task evidence across Joey's local machine, miku-bot-dev, and hoteng-srv-01. Use when Apple Notes work reports, session/history scans, repo-state recovery, or similar workflow summaries might miss work done on remote hosts.
+description: Collect read-only task evidence across Joey's local machine, miku-bot-dev, hoteng-srv-01, and codex-hoteng-srv-01. Use when Apple Notes work reports, session/history scans, repo-state recovery, or similar workflow summaries might miss work done on remote hosts.
 ---
 
 # Remote Host Context
@@ -16,7 +16,8 @@ It standardizes a small read-only SSH preflight across Joey's default remote hos
   - local machine
   - `miku-bot-dev` (Joey may also refer to it as `miku-server-dev`)
   - `hoteng-srv-01`
-- Do not require Joey to mention `hoteng-srv-01` separately in future conversations. Include it in the default preflight.
+  - `codex-hoteng-srv-01`
+- Do not require Joey to mention `hoteng-srv-01` or `codex-hoteng-srv-01` separately in future conversations. Include both in the default preflight.
 - For tasks rooted in local mutable state such as Apple Notes, local GUI apps, or local databases, keep all writes local. Remote hosts contribute evidence only unless Joey explicitly asks to modify them.
 
 ## Workflow
@@ -32,7 +33,7 @@ It standardizes a small read-only SSH preflight across Joey's default remote hos
 2. Use the helper for bounded remote Codex reads once the preflight is clear.
 - Prefer `python3 /Users/hoteng/.codex/skills/remote-host-context/scripts/remote_codex_probe.py preflight ...` for recurring host checks.
 - The helper takes a repeatable `--host` option for `preflight` and `session-meta`; do not pass positional host names or a plural `--hosts` flag.
-- For the default evidence scope, use `python3 /Users/hoteng/.codex/skills/remote-host-context/scripts/remote_codex_probe.py preflight --host local --host miku-bot-dev --host hoteng-srv-01`.
+- For the default evidence scope, use `python3 /Users/hoteng/.codex/skills/remote-host-context/scripts/remote_codex_probe.py preflight --host local --host miku-bot-dev --host hoteng-srv-01 --host codex-hoteng-srv-01`.
 - For required remote evidence workflows, if `remote_codex_probe.py preflight`, `session-meta`, `rollout-summary`, `chunked-rollout-summary`, `fetch-rollout`, or `fetch-rollout-chunk` fails with a local sandbox/network error such as `Operation not permitted`, a DNS/network gate, or a connection blocked before SSH authentication, immediately rerun the same helper command with `sandbox_permissions=require_escalated`.
 - Only report a host as unreachable after that escalated retry also fails, and include the exact gate from the failed retry.
 - Use `... remote_codex_probe.py session-meta ...` only to list candidate session ids, cwd values, and canonical rollout paths from bounded `sessions/YYYY/MM/DD/` date trees.
@@ -67,6 +68,7 @@ It standardizes a small read-only SSH preflight across Joey's default remote hos
 5. Interpret host-specific structure correctly.
 - `miku-bot-dev` currently stores Codex history directly in `/home/hoteng/.codex`.
 - `hoteng-srv-01` currently stores Codex history directly in `/home/hoteng/.codex`.
+- `codex-hoteng-srv-01` currently logs in as user `codex` on host `hoteng-srv-01` and stores Codex history directly in `/home/codex/.codex`.
 - On `hoteng-srv-01`, dev-shell-kit containers may mount the host `~/.codex` into the container. Treat the host path as canonical by default instead of entering containers first.
 - If a host is stale relative to the requested date range, say that explicitly and deprioritize it instead of silently dropping it.
 
