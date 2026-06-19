@@ -357,6 +357,16 @@ class SessionRetrospectiveTests(unittest.TestCase):
         for host in MODULE.DEFAULT_REMOTE_HOSTS:
             self.assertIn(host, source_help)
 
+    def test_skill_retained_host_guidance_lists_default_remote_hosts(self) -> None:
+        skill_text = (SCRIPT.parents[1] / "SKILL.md").read_text(encoding="utf-8")
+        retained_guidance = next(line for line in skill_text.splitlines() if "Retained host labels" in line)
+
+        self.assertNotIn("the two default remote hosts", retained_guidance)
+        self.assertIn("local", retained_guidance)
+        self.assertIn("custom_source", retained_guidance)
+        for host in MODULE.DEFAULT_REMOTE_HOSTS:
+            self.assertIn(host, retained_guidance)
+
     def test_remote_probe_helper_is_bundled_with_skill(self) -> None:
         helper = SCRIPT.parent / "remote_codex_probe.py"
         skill = SCRIPT.parents[1] / "SKILL.md"
