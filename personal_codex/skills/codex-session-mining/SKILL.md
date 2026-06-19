@@ -30,7 +30,7 @@ Use this skill for:
 
 1. Scope the lookup.
 - Decide whether the request is keyed by exact session ID, date window, repo/cwd, user phrasing, or a workflow pattern such as "skill friction in the last day."
-- If the task might depend on work done on `miku-bot-dev` or `hoteng-srv-01`, use `$remote-host-context` before concluding the local machine is complete.
+- If the task might depend on work done on `miku-bot-dev`, `hoteng-srv-01`, or `codex-hoteng-srv-01`, use `$remote-host-context` before concluding the local machine is complete.
 - When remote-host coverage is needed, let `remote-host-context` own the remote access step. Use its helper to materialize remote rollout candidates locally, then continue the actual mining here.
 
 2. Locate the smallest file set before reading content.

@@ -129,6 +129,7 @@ class PrivateOverlaySyncTests(unittest.TestCase):
         self.assertIn("pair with `$remote-host-context`", synced_skill)
         self.assertIn("miku-bot-dev", synced_skill)
         self.assertIn("hoteng-srv-01", synced_skill)
+        self.assertIn("codex-hoteng-srv-01", synced_skill)
         self.assertIn("Remote access belongs to `remote-host-context`", synced_skill)
         self.assertNotIn("environment-specific remote evidence workflow", synced_skill)
         self.assertIn("$remote-host-context", synced_reference)

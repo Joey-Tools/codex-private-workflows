@@ -1,6 +1,7 @@
 # Verified Hosts
 
 Verified on 2026-03-10.
+`codex-hoteng-srv-01` was added and verified on 2026-06-19.
 Re-check these assumptions if a host starts returning stale or missing evidence.
 
 ## Local Machine
@@ -35,6 +36,20 @@ Re-check these assumptions if a host starts returning stale or missing evidence.
   - at least one dev-shell-kit container mounted `/home/hoteng/.codex` into the container
   - default policy should still treat the host path as canonical
 
+## codex-hoteng-srv-01
+
+- SSH alias: `codex-hoteng-srv-01`
+- Verified remote hostname on 2026-06-19: `hoteng-srv-01`
+- Verified login user: `codex`
+- Verified login home: `/home/codex`
+- Verified Codex root: `/home/codex/.codex`
+- Verified tools:
+  - `rg`
+  - `python3`
+- Host note:
+  - this reaches the same machine hostname as `hoteng-srv-01`, but with a distinct login user and Codex evidence root
+  - treat it as a separate default evidence host
+
 ## Preflight Shape
 
 Use a minimal read-only preflight before deeper reads:
@@ -53,7 +68,7 @@ If deeper remote reads start repeating across sessions, add a helper under `~/.c
 Current dedicated helper path for those repeated remote Codex reads:
 
 ```bash
-python3 "$HOME/.codex/skills/remote-host-context/scripts/remote_codex_probe.py" preflight --host local --host miku-bot-dev --host hoteng-srv-01
+python3 "$HOME/.codex/skills/remote-host-context/scripts/remote_codex_probe.py" preflight --host local --host miku-bot-dev --host hoteng-srv-01 --host codex-hoteng-srv-01
 ```
 
 Use `session-meta` only to enumerate canonical rollout candidates, then hand the copied rollout back to `codex-session-mining` locally for the actual transcript search and filtering.

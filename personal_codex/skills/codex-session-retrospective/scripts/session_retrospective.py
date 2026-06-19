@@ -214,7 +214,7 @@ BASELINE_MODE_PATTERN = re.compile(r"^baseline-[1-9][0-9]{0,3}d$")
 MAX_BASELINE_WINDOW_DAYS = 9999
 TIMESTAMPED_ROLLOUT_PATH_HINT_GRACE = dt.timedelta(hours=2)
 
-DEFAULT_REMOTE_HOSTS = ("miku-bot-dev", "hoteng-srv-01")
+DEFAULT_REMOTE_HOSTS = ("miku-bot-dev", "hoteng-srv-01", "codex-hoteng-srv-01")
 RETAINED_SOURCE_HOST_ALIASES = {
     "miku-server-dev": "miku-bot-dev",
 }

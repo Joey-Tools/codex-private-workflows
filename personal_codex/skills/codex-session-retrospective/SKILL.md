@@ -12,7 +12,7 @@ The workflow is read-only against Codex history and remote hosts. It produces re
 
 ## Evidence Scope
 
-- Default host scope follows `$remote-host-context`: local machine, `miku-bot-dev`, and `hoteng-srv-01`.
+- Default host scope follows `$remote-host-context`: local machine, `miku-bot-dev`, `hoteng-srv-01`, and `codex-hoteng-srv-01`.
 - Local sources are `~/.codex/session_index.jsonl`, `~/.codex/history.jsonl`, and `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl`.
 - Archived rollout files under `archived_sessions/` are in scope, but archive or unarchive file mtimes must not define session time; use record timestamps, rollout filenames, or dated paths instead.
 - Remote evidence must be collected through `$remote-host-context` preflight plus this skill's bundled `scripts/remote_codex_probe.py` bounded reads.
