@@ -328,12 +328,6 @@ HOSTS: dict[str, dict[str, str]] = {
         "ssh_target": "hoteng-srv-01",
         "codex_root": "/home/hoteng/.codex",
     },
-    "codex-hoteng-srv-01": {
-        "kind": "ssh",
-        "label": "codex-hoteng-srv-01",
-        "ssh_target": "codex-hoteng-srv-01",
-        "codex_root": "/home/codex/.codex",
-    },
 }
 
 
