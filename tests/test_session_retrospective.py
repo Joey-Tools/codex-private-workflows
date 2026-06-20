@@ -340,12 +340,11 @@ class SessionRetrospectiveTests(unittest.TestCase):
 
         self.assertEqual(
             [source.host for source in sources],
-            ["local", "miku-bot-dev", "hoteng-srv-01", "codex-hoteng-srv-01"],
+            ["local", "miku-bot-dev", "hoteng-srv-01"],
         )
         self.assertIsNone(sources[0].missing_reason)
         self.assertEqual(sources[1].missing_reason, "remote_source_not_materialized")
         self.assertEqual(sources[2].missing_reason, "remote_source_not_materialized")
-        self.assertEqual(sources[3].missing_reason, "remote_source_not_materialized")
 
     def test_common_scan_source_help_lists_default_remote_hosts(self) -> None:
         parser = MODULE.argparse.ArgumentParser()
@@ -361,11 +360,9 @@ class SessionRetrospectiveTests(unittest.TestCase):
         skill_text = (SCRIPT.parents[1] / "SKILL.md").read_text(encoding="utf-8")
         retained_guidance = next(line for line in skill_text.splitlines() if "Retained host labels" in line)
 
-        self.assertNotIn("the two default remote hosts", retained_guidance)
+        self.assertIn("the two default remote hosts", retained_guidance)
         self.assertIn("local", retained_guidance)
         self.assertIn("custom_source", retained_guidance)
-        for host in MODULE.DEFAULT_REMOTE_HOSTS:
-            self.assertIn(host, retained_guidance)
 
     def test_remote_probe_helper_is_bundled_with_skill(self) -> None:
         helper = SCRIPT.parent / "remote_codex_probe.py"
@@ -1465,10 +1462,9 @@ class SessionRetrospectiveTests(unittest.TestCase):
 
         self.assertEqual(
             [source.host for source in sources],
-            ["local", "miku-bot-dev", "hoteng-srv-01", "codex-hoteng-srv-01"],
+            ["local", "miku-bot-dev", "hoteng-srv-01"],
         )
         self.assertEqual(sources[2].missing_reason, "remote_source_not_materialized")
-        self.assertEqual(sources[3].missing_reason, "remote_source_not_materialized")
         self.assertEqual(
             [source.host for source in MODULE.parse_sources(["local=/tmp/local"], require_default_hosts=False)],
             ["local"],
@@ -1479,12 +1475,11 @@ class SessionRetrospectiveTests(unittest.TestCase):
 
         self.assertEqual(
             [source.host for source in sources],
-            ["local", "miku-bot-dev", "hoteng-srv-01", "codex-hoteng-srv-01"],
+            ["local", "miku-bot-dev", "hoteng-srv-01"],
         )
         self.assertTrue(sources[1].explicit)
         self.assertIsNone(sources[1].missing_reason)
         self.assertEqual(sources[2].missing_reason, "remote_source_not_materialized")
-        self.assertEqual(sources[3].missing_reason, "remote_source_not_materialized")
 
     def test_partial_host_default_sources_use_local_only(self) -> None:
         sources = MODULE.parse_sources(None, require_default_hosts=False)

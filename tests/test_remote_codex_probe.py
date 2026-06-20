@@ -40,7 +40,7 @@ class RemoteHostContextDocumentationTests(unittest.TestCase):
         skill = SKILL_PATH.read_text(encoding="utf-8")
 
         self.assertIn(
-            "preflight --host local --host miku-bot-dev --host hoteng-srv-01 --host codex-hoteng-srv-01",
+            "preflight --host local --host miku-bot-dev --host hoteng-srv-01",
             skill,
         )
         self.assertIn("do not pass positional host names", skill)

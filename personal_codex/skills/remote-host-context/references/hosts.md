@@ -48,7 +48,7 @@ Re-check these assumptions if a host starts returning stale or missing evidence.
   - `python3`
 - Host note:
   - this reaches the same machine hostname as `hoteng-srv-01`, but with a distinct login user and Codex evidence root
-  - treat it as a separate default evidence host
+  - treat it as an explicit optional alias, not part of the default evidence scope
 
 ## Preflight Shape
 
@@ -68,7 +68,7 @@ If deeper remote reads start repeating across sessions, add a helper under `~/.c
 Current dedicated helper path for those repeated remote Codex reads:
 
 ```bash
-python3 "$HOME/.codex/skills/remote-host-context/scripts/remote_codex_probe.py" preflight --host local --host miku-bot-dev --host hoteng-srv-01 --host codex-hoteng-srv-01
+python3 "$HOME/.codex/skills/remote-host-context/scripts/remote_codex_probe.py" preflight --host local --host miku-bot-dev --host hoteng-srv-01
 ```
 
 Use `session-meta` only to enumerate canonical rollout candidates, then hand the copied rollout back to `codex-session-mining` locally for the actual transcript search and filtering.
