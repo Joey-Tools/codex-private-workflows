@@ -9,7 +9,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
-import tomllib
+import ast
 import unittest
 from unittest import mock
 
@@ -31,7 +31,10 @@ PRIVATE_SHA = "2" * 40
 
 def automation_prompt(automation_id: str) -> str:
     path = REPO_ROOT / "personal_codex" / "automations" / automation_id / "automation.toml"
-    return tomllib.loads(path.read_text(encoding="utf-8"))["prompt"]
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if line.startswith("prompt = "):
+            return ast.literal_eval(line.partition("=")[2].strip())
+    raise AssertionError(f"missing prompt in {path}")
 
 
 def write_public_base_fixture(root: Path) -> None:
