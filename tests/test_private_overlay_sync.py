@@ -215,6 +215,37 @@ class PrivateOverlaySyncTests(unittest.TestCase):
             synced_script.read_text(encoding="utf-8"),
         )
 
+    def test_skill_authoring_sync_rule_copies_validator_wrapper(self) -> None:
+        source = self.source_root / "codex-workflow-hygiene" / "skills" / "codex-skill-authoring"
+        scripts = source / "scripts"
+        scripts.mkdir(parents=True)
+        (source / "SKILL.md").write_text(
+            "# Codex Skill Authoring\n"
+            "Create concise concise Codex skills.\n"
+            'Use "$HOME/.codex/skills/codex-skill-authoring/scripts/codex_skill_validate.py".\n'
+            "Use this when the user asks.\n"
+            "Avoid user-specific validator mirrors.\n",
+            encoding="utf-8",
+        )
+        (scripts / "codex_skill_validate.py").write_text("#!/usr/bin/env python3\n", encoding="utf-8")
+        rule = next(
+            rule
+            for rule in SYNC_MODULE.SYNC_RULES
+            if rule.target == Path("personal_codex/skills/joey-skill-authoring")
+        )
+
+        SYNC_MODULE.sync_sources(self.repo_root, self.source_root, (rule,))
+
+        target = self.repo_root / "personal_codex" / "skills" / "joey-skill-authoring"
+        synced_skill = (target / "SKILL.md").read_text(encoding="utf-8")
+        self.assertIn(
+            '"$HOME/.codex/skills/joey-skill-authoring/scripts/codex_skill_validate.py"',
+            synced_skill,
+        )
+        self.assertIn("Use this when Joey asks.", synced_skill)
+        self.assertIn("Joey-specific validator mirrors.", synced_skill)
+        self.assertTrue((target / "scripts" / "codex_skill_validate.py").exists())
+
     def test_sync_rule_rejects_symlink_sources(self) -> None:
         source = self.source_root / "example-repo" / "skill"
         source.mkdir(parents=True)
