@@ -9,6 +9,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import ast
 import unittest
 from unittest import mock
 
@@ -26,6 +27,14 @@ SPEC.loader.exec_module(MODULE)
 
 PUBLIC_SHA = "1" * 40
 PRIVATE_SHA = "2" * 40
+
+
+def automation_prompt(automation_id: str) -> str:
+    path = REPO_ROOT / "personal_codex" / "automations" / automation_id / "automation.toml"
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if line.startswith("prompt = "):
+            return ast.literal_eval(line.partition("=")[2].strip())
+    raise AssertionError(f"missing prompt in {path}")
 
 
 def write_public_base_fixture(root: Path) -> None:
@@ -522,6 +531,22 @@ class PrivateOverlayPackageTests(unittest.TestCase):
 
         with self.assertRaisesRegex(MODULE.SyncError, "only public releases"):
             self.run_quietly(MODULE.rollback, home, None, "private")
+
+
+class PrivateAutomationPromptTests(unittest.TestCase):
+    def test_daily_work_report_bounds_memory_reads(self) -> None:
+        prompt = automation_prompt("daily-work-report-draft")
+
+        self.assertIn("When reading this automation's memory", prompt)
+        self.assertIn("do not dump the whole file or a fixed 200-line head", prompt)
+        self.assertIn("widen only when needed for the candidate-day calculation", prompt)
+
+    def test_daily_skill_friction_bounds_memory_reads(self) -> None:
+        prompt = automation_prompt("daily-skill-friction")
+
+        self.assertIn("When reading this automation's memory", prompt)
+        self.assertIn("structured parser or narrowly bounded extraction", prompt)
+        self.assertIn("latest completed-run End timestamp", prompt)
 
 
 if __name__ == "__main__":
