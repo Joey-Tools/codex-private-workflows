@@ -40,7 +40,7 @@ Keep `AGENTS.md` as the short policy/index layer, keep `SKILL.md` procedural, an
 ## Use These Creation Defaults
 
 - Prefer `python3 "$HOME/.codex/skills/.system/skill-creator/scripts/init_skill.py" <skill-name> --path ~/.codex/skills` for personal skills, or `python3 "$HOME/.codex/skills/.system/skill-creator/scripts/init_skill.py" <skill-name> --path .agents/skills` for repo-local skills.
-- Prefer `"$HOME/.codex/skills/joey-skill-authoring/scripts/codex_skill_validate.py" ...` to validate one or more skills through Joey's local wrapper. The wrapper calls the installed OpenAI validator at `$HOME/.codex/skills/.system/skill-creator/scripts/quick_validate.py`; do not edit or mirror OpenAI's validator for Joey-specific workflow changes.
+- Prefer `"$HOME/.codex/skills/joey-skill-authoring/scripts/codex_skill_validate.py" ...` to validate one or more skills through the local wrapper. The wrapper calls the installed OpenAI validator at `$HOME/.codex/skills/.system/skill-creator/scripts/quick_validate.py`; do not edit or mirror OpenAI's validator for Joey-specific workflow changes.
 - If the wrapper is unavailable, fall back to `uv run --isolated --with pyyaml python3 "$HOME/.codex/skills/.system/skill-creator/scripts/quick_validate.py" ...` for direct single-skill validation.
 - Fall back to `python3 "$HOME/.codex/skills/.system/skill-creator/scripts/quick_validate.py" ...` only when the needed dependency is already available locally or when `uv` is not the right tool for the environment.
 - Use the Python entrypoint directly if the helper wrapper exists but is not executable in the current environment.
