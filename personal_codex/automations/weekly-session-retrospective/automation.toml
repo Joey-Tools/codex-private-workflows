@@ -19,9 +19,9 @@ Do not commit raw rollout files, full prompts, internal URLs, secrets, customer 
 """
 status = "ACTIVE"
 rrule = "FREQ=WEEKLY;BYDAY=SUN;BYHOUR=4;BYMINUTE=10"
-model = "gpt-5.6-sol"
-reasoning_effort = "xhigh"
+model = "gpt-5.6-terra"
+reasoning_effort = "high"
 execution_environment = "worktree"
 cwds = ["/Users/hoteng/Program/GitHub/Joey-Tools/codex-workspace"]
 created_at = 1779408000000
-updated_at = 1782555482000
+updated_at = 1782558779000
