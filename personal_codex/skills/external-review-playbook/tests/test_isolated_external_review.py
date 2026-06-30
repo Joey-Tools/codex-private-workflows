@@ -9039,6 +9039,7 @@ class IsolatedCopilotReviewTest(unittest.TestCase):
             "Error: not entitled to use model gpt-5.5\n",
             "Error: unsupported model gpt-5.5\n",
             "Error: unsupported model gpt-5.5.\n",
+            "Error: The 'gpt-5.5' model requires a newer version of Codex.\n",
             "unsupported_model: gpt-5.5\n",
             "Error: model_id=gpt-5.5; model is overloaded\n",
         ):
@@ -9153,6 +9154,18 @@ class IsolatedCopilotReviewTest(unittest.TestCase):
 
         stderr_path.write_text(
             "Error: unsupported model gpt-5.6-sol.\n",
+            encoding="utf-8",
+        )
+        self.assertTrue(
+            module._codex_model_fallback_error(
+                stdout_path=stdout_path,
+                stderr_path=stderr_path,
+                primary_model="gpt-5.6-sol",
+            )
+        )
+
+        stderr_path.write_text(
+            "Error: The 'gpt-5.6-sol' model requires a newer version of Codex.\n",
             encoding="utf-8",
         )
         self.assertTrue(
