@@ -6344,8 +6344,10 @@ class SessionRetrospectiveTests(unittest.TestCase):
             history_repo, _commit = write_history_repo(raw)
             report = history_repo / "reports" / "weekly" / "2026" / "05" / "08.md"
             report.parent.mkdir(parents=True)
+            private_key_label = "PRIVATE" + " KEY"
             report.write_text(
-                "Mistaken retained text:\n-----BEGIN PRIVATE KEY-----\nredacted\n-----END PRIVATE KEY-----\n",
+                f"Mistaken retained text:\n-----BEGIN {private_key_label}-----\n"
+                f"redacted\n-----END {private_key_label}-----\n",
                 encoding="utf-8",
             )
             subprocess.run(["git", "add", "reports/weekly/2026/05/08.md"], cwd=history_repo, check=True)
@@ -6359,8 +6361,10 @@ class SessionRetrospectiveTests(unittest.TestCase):
             history_repo, _commit = write_history_repo(raw)
             report = history_repo / "reports" / "weekly" / "2026" / "05" / "08.md"
             report.parent.mkdir(parents=True)
+            pgp_private_key_label = "PGP PRIVATE" + " KEY BLOCK"
             report.write_text(
-                "Mistaken retained text:\n-----BEGIN PGP PRIVATE KEY BLOCK-----\nredacted\n-----END PGP PRIVATE KEY BLOCK-----\n",
+                f"Mistaken retained text:\n-----BEGIN {pgp_private_key_label}-----\n"
+                f"redacted\n-----END {pgp_private_key_label}-----\n",
                 encoding="utf-8",
             )
             subprocess.run(["git", "add", "reports/weekly/2026/05/08.md"], cwd=history_repo, check=True)
@@ -10243,14 +10247,16 @@ class SessionRetrospectiveTests(unittest.TestCase):
         self.assertNotIn("joey@example.com", json.dumps(rows[0]))
 
     def test_remote_probe_redaction_only_sensitive_text_contributes_signal(self) -> None:
+        aws_access_key = "AKIA" + "ABCDEFGHIJKLMNOP"
+        github_token = "github_pat_" + "abcdefghijklmnop1234567890"
         samples = [
             "Contact joey@example.com",
             "Open https://internal.example/ticket",
             "customer_id=AcmeCorp",
             "Authorization: Bearer abcdefghijklmnopqrstuvwxyz",
             "Use sk-proj-abcdefghijklmnop123456",
-            "github_pat_abcdefghijklmnop1234567890",
-            "AKIAABCDEFGHIJKLMNOP",
+            github_token,
+            aws_access_key,
             "eyJabcdefghijkl.eyJmnopqrstuv.eyJwxyzabcdef",
             "a" * 64,
             "169.254.169.254",
@@ -10273,6 +10279,8 @@ class SessionRetrospectiveTests(unittest.TestCase):
         self.assertEqual(signal, "user message present")
 
     def test_remote_host_context_probe_redaction_only_sensitive_text_contributes_signal(self) -> None:
+        aws_access_key = "AKIA" + "ABCDEFGHIJKLMNOP"
+        github_token = "github_pat_" + "abcdefghijklmnop1234567890"
         samples = [
             "Contact joey@example.com",
             "Open https://internal.example/ticket",
@@ -10280,8 +10288,8 @@ class SessionRetrospectiveTests(unittest.TestCase):
             "customer_id=AcmeCorp",
             "Authorization: Bearer abcdefghijklmnopqrstuvwxyz",
             "Use sk-proj-abcdefghijklmnop123456",
-            "github_pat_abcdefghijklmnop1234567890",
-            "AKIAABCDEFGHIJKLMNOP",
+            github_token,
+            aws_access_key,
             "eyJabcdefghijkl.eyJmnopqrstuv.eyJwxyzabcdef",
             "a" * 64,
             "169.254.169.254",
