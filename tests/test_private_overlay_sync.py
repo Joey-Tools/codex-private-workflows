@@ -75,6 +75,28 @@ class PrivateOverlaySyncTests(unittest.TestCase):
             self.assertFalse((self.repo_root / relative).exists())
         self.assertTrue((survivor / "SKILL.md").is_file())
 
+    def test_sync_requires_self_contained_canonical_review_target(self) -> None:
+        target = self.repo_root / SYNC_MODULE.CANONICAL_REVIEW_TARGET
+        target.mkdir(parents=True)
+        (target / "SKILL.md").write_text("canonical\n", encoding="utf-8")
+
+        with self.assertRaisesRegex(SYNC_MODULE.SyncError, "missing required file"):
+            SYNC_MODULE.sync_sources(self.repo_root, self.source_root, ())
+
+        for relative in SYNC_MODULE.CANONICAL_REVIEW_REQUIRED_FILES:
+            path = target / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("canonical\n", encoding="utf-8")
+        (target / "SKILL.md").write_text(
+            "Use $pr-readiness-review-workflow.\n",
+            encoding="utf-8",
+        )
+        with self.assertRaisesRegex(SYNC_MODULE.SyncError, "retired reference"):
+            SYNC_MODULE.sync_sources(self.repo_root, self.source_root, ())
+
+        (target / "SKILL.md").write_text("canonical\n", encoding="utf-8")
+        SYNC_MODULE.sync_sources(self.repo_root, self.source_root, ())
+
     def test_agile_delivery_sync_rule_builds_private_variant(self) -> None:
         source = (
             self.source_root

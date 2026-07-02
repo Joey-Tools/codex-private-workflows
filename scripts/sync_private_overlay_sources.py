@@ -275,6 +275,22 @@ RETIRED_TARGETS = tuple(
     )
 )
 
+CANONICAL_REVIEW_TARGET = _path("personal_codex/skills/review-orchestration-playbook")
+CANONICAL_REVIEW_REQUIRED_FILES = tuple(
+    _path(path)
+    for path in (
+        "SKILL.md",
+        "references/helper-contract.md",
+        "references/pr-readiness.md",
+        "references/review-lane-contracts.md",
+        "references/review-prompt-templates.md",
+    )
+)
+RETIRED_REVIEW_REFERENCES = (
+    "$pr-readiness-review-workflow",
+    "../external-review-playbook",
+)
+
 
 EXCLUDED_NAMES = frozenset({".git", ".github", "__pycache__"})
 EXCLUDED_SUFFIXES = (".pyc",)
@@ -405,6 +421,23 @@ def _remove_retired_targets(repo_root: Path) -> None:
             target.unlink()
 
 
+def _validate_canonical_review_target(repo_root: Path) -> None:
+    target = repo_root / CANONICAL_REVIEW_TARGET
+    if not target.exists():
+        return
+    for relative in CANONICAL_REVIEW_REQUIRED_FILES:
+        if not (target / relative).is_file():
+            raise SyncError(f"canonical review target missing required file: {relative}")
+    for path in sorted(target.rglob("*.md")):
+        text = path.read_text(encoding="utf-8")
+        for reference in RETIRED_REVIEW_REFERENCES:
+            if reference in text:
+                raise SyncError(
+                    "canonical review target retains retired reference "
+                    f"{reference!r} in {path.relative_to(target)}"
+                )
+
+
 def _apply_replacements(path: Path, replacements: tuple[Replacement, ...]) -> set[int]:
     try:
         text = path.read_text(encoding="utf-8")
@@ -472,6 +505,7 @@ def sync_sources(repo_root: Path, source_root: Path, rules: tuple[SyncRule, ...]
             _apply_rule_replacements(staging, rule)
             _reject_forbidden_residuals(staging, rule)
             _replace_target(target, staging)
+    _validate_canonical_review_target(repo_root)
 
 
 def build_parser() -> argparse.ArgumentParser:
