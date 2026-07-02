@@ -60,6 +60,21 @@ class PrivateOverlaySyncTests(unittest.TestCase):
         target = self.repo_root / "personal_codex" / "skills" / "example" / "SKILL.md"
         self.assertEqual(target.read_text(encoding="utf-8"), "Use this when Joey asks.\n")
 
+    def test_sync_removes_retired_review_skill_targets(self) -> None:
+        for relative in SYNC_MODULE.RETIRED_TARGETS:
+            target = self.repo_root / relative
+            target.mkdir(parents=True)
+            (target / "SKILL.md").write_text("retired\n", encoding="utf-8")
+        survivor = self.repo_root / "personal_codex" / "skills" / "survivor"
+        survivor.mkdir(parents=True)
+        (survivor / "SKILL.md").write_text("keep\n", encoding="utf-8")
+
+        SYNC_MODULE.sync_sources(self.repo_root, self.source_root, ())
+
+        for relative in SYNC_MODULE.RETIRED_TARGETS:
+            self.assertFalse((self.repo_root / relative).exists())
+        self.assertTrue((survivor / "SKILL.md").is_file())
+
     def test_agile_delivery_sync_rule_builds_private_variant(self) -> None:
         source = (
             self.source_root
@@ -408,8 +423,11 @@ class PrivateOverlaySyncTests(unittest.TestCase):
             if link["source"].startswith("personal_codex/skills/")
         }
         sync_targets = {str(rule.target) for rule in SYNC_MODULE.SYNC_RULES}
+        retired_targets = {str(path) for path in SYNC_MODULE.RETIRED_TARGETS}
 
         self.assertEqual(manifest_sources - private_only_sources, manifest_sources & sync_targets)
+        self.assertTrue(manifest_sources.isdisjoint(retired_targets))
+        self.assertTrue(sync_targets.isdisjoint(retired_targets))
         self.assertIn("personal_codex/skills/codex-session-retrospective", manifest_sources)
         self.assertIn("skills/codex-session-retrospective", manifest_targets)
         self.assertIn("personal_codex/skills/codex-session-retrospective", sync_targets)

@@ -91,11 +91,6 @@ SYNC_RULES = (
     ),
     _rule(
         "codex-review-workflows",
-        "skills/copilot-review-playbook",
-        "personal_codex/skills/copilot-review-playbook",
-    ),
-    _rule(
-        "codex-review-workflows",
         "skills/agile-delivery-workflow",
         "personal_codex/skills/agile-delivery-workflow",
         (
@@ -231,12 +226,6 @@ SYNC_RULES = (
         "personal_codex/skills/codex-session-retrospective",
     ),
     _rule(
-        "codex-review-workflows",
-        "skills/external-review-playbook",
-        "personal_codex/skills/external-review-playbook",
-        common_joey_text=True,
-    ),
-    _rule(
         "codex-workflow-hygiene",
         "skills/codex-skill-authoring",
         "personal_codex/skills/joey-skill-authoring",
@@ -245,12 +234,6 @@ SYNC_RULES = (
             Replacement("Codex Skill Authoring", "Joey Skill Authoring"),
             Replacement("Create concise concise Codex skills.", "Create concise Joey-style Codex skills."),
         ),
-        common_joey_text=True,
-    ),
-    _rule(
-        "codex-review-workflows",
-        "skills/pr-readiness-review-workflow",
-        "personal_codex/skills/pr-readiness-review-workflow",
         common_joey_text=True,
     ),
     _rule(
@@ -280,6 +263,16 @@ SYNC_RULES = (
         "personal_codex/skills/waited-delivery",
         common_joey_text=True,
     ),
+)
+
+
+RETIRED_TARGETS = tuple(
+    _path(path)
+    for path in (
+        "personal_codex/skills/copilot-review-playbook",
+        "personal_codex/skills/external-review-playbook",
+        "personal_codex/skills/pr-readiness-review-workflow",
+    )
 )
 
 
@@ -402,6 +395,16 @@ def _replace_target(target: Path, staging: Path) -> None:
             backup.unlink()
 
 
+def _remove_retired_targets(repo_root: Path) -> None:
+    for relative in RETIRED_TARGETS:
+        target = repo_root / relative
+        _ensure_safe_target(repo_root, target)
+        if target.is_dir():
+            shutil.rmtree(target)
+        elif target.exists():
+            target.unlink()
+
+
 def _apply_replacements(path: Path, replacements: tuple[Replacement, ...]) -> set[int]:
     try:
         text = path.read_text(encoding="utf-8")
@@ -453,6 +456,7 @@ def _reject_forbidden_residuals(target: Path, rule: SyncRule) -> None:
 
 def sync_sources(repo_root: Path, source_root: Path, rules: tuple[SyncRule, ...] = SYNC_RULES) -> None:
     repo_root = repo_root.resolve()
+    _remove_retired_targets(repo_root)
     for rule in rules:
         source_repo_root = source_root / rule.repo
         source = source_repo_root / rule.source

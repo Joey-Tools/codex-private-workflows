@@ -51,23 +51,8 @@
       "kind": "skill"
     },
     {
-      "source": "personal_codex/skills/copilot-review-playbook",
-      "target": "skills/copilot-review-playbook",
-      "kind": "directory"
-    },
-    {
-      "source": "personal_codex/skills/external-review-playbook",
-      "target": "skills/external-review-playbook",
-      "kind": "skill"
-    },
-    {
       "source": "personal_codex/skills/joey-skill-authoring",
       "target": "skills/joey-skill-authoring",
-      "kind": "skill"
-    },
-    {
-      "source": "personal_codex/skills/pr-readiness-review-workflow",
-      "target": "skills/pr-readiness-review-workflow",
       "kind": "skill"
     },
     {
