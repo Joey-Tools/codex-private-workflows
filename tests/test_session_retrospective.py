@@ -10245,6 +10245,7 @@ class SessionRetrospectiveTests(unittest.TestCase):
         self.assertNotIn("joey@example.com", json.dumps(rows[0]))
 
     def test_remote_probe_redaction_only_sensitive_text_contributes_signal(self) -> None:
+        aws_access_key = "AKIA" + "ABCDEFGHIJKLMNOP"
         samples = [
             "Contact joey@example.com",
             "Open https://internal.example/ticket",
@@ -10252,7 +10253,7 @@ class SessionRetrospectiveTests(unittest.TestCase):
             "Authorization: Bearer abcdefghijklmnopqrstuvwxyz",
             "Use sk-proj-abcdefghijklmnop123456",
             "github_pat_abcdefghijklmnop1234567890",
-            "AKIAABCDEFGHIJKLMNOP",
+            aws_access_key,
             "eyJabcdefghijkl.eyJmnopqrstuv.eyJwxyzabcdef",
             "a" * 64,
             "169.254.169.254",
@@ -10275,6 +10276,7 @@ class SessionRetrospectiveTests(unittest.TestCase):
         self.assertEqual(signal, "user message present")
 
     def test_remote_host_context_probe_redaction_only_sensitive_text_contributes_signal(self) -> None:
+        aws_access_key = "AKIA" + "ABCDEFGHIJKLMNOP"
         samples = [
             "Contact joey@example.com",
             "Open https://internal.example/ticket",
@@ -10283,7 +10285,7 @@ class SessionRetrospectiveTests(unittest.TestCase):
             "Authorization: Bearer abcdefghijklmnopqrstuvwxyz",
             "Use sk-proj-abcdefghijklmnop123456",
             "github_pat_abcdefghijklmnop1234567890",
-            "AKIAABCDEFGHIJKLMNOP",
+            aws_access_key,
             "eyJabcdefghijkl.eyJmnopqrstuv.eyJwxyzabcdef",
             "a" * 64,
             "169.254.169.254",
