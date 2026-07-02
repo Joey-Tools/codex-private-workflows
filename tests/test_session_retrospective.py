@@ -10248,13 +10248,14 @@ class SessionRetrospectiveTests(unittest.TestCase):
 
     def test_remote_probe_redaction_only_sensitive_text_contributes_signal(self) -> None:
         aws_access_key = "AKIA" + "ABCDEFGHIJKLMNOP"
+        github_token = "github_pat_" + "abcdefghijklmnop1234567890"
         samples = [
             "Contact joey@example.com",
             "Open https://internal.example/ticket",
             "customer_id=AcmeCorp",
             "Authorization: Bearer abcdefghijklmnopqrstuvwxyz",
             "Use sk-proj-abcdefghijklmnop123456",
-            "github_pat_abcdefghijklmnop1234567890",
+            github_token,
             aws_access_key,
             "eyJabcdefghijkl.eyJmnopqrstuv.eyJwxyzabcdef",
             "a" * 64,
@@ -10279,6 +10280,7 @@ class SessionRetrospectiveTests(unittest.TestCase):
 
     def test_remote_host_context_probe_redaction_only_sensitive_text_contributes_signal(self) -> None:
         aws_access_key = "AKIA" + "ABCDEFGHIJKLMNOP"
+        github_token = "github_pat_" + "abcdefghijklmnop1234567890"
         samples = [
             "Contact joey@example.com",
             "Open https://internal.example/ticket",
@@ -10286,7 +10288,7 @@ class SessionRetrospectiveTests(unittest.TestCase):
             "customer_id=AcmeCorp",
             "Authorization: Bearer abcdefghijklmnopqrstuvwxyz",
             "Use sk-proj-abcdefghijklmnop123456",
-            "github_pat_abcdefghijklmnop1234567890",
+            github_token,
             aws_access_key,
             "eyJabcdefghijkl.eyJmnopqrstuv.eyJwxyzabcdef",
             "a" * 64,
