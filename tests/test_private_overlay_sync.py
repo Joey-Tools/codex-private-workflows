@@ -60,6 +60,93 @@ class PrivateOverlaySyncTests(unittest.TestCase):
         target = self.repo_root / "personal_codex" / "skills" / "example" / "SKILL.md"
         self.assertEqual(target.read_text(encoding="utf-8"), "Use this when Joey asks.\n")
 
+    def test_sync_removes_retired_review_skill_targets(self) -> None:
+        for relative in SYNC_MODULE.RETIRED_TARGETS:
+            target = self.repo_root / relative
+            target.mkdir(parents=True)
+            (target / "SKILL.md").write_text("retired\n", encoding="utf-8")
+        survivor = self.repo_root / "personal_codex" / "skills" / "survivor"
+        survivor.mkdir(parents=True)
+        (survivor / "SKILL.md").write_text("keep\n", encoding="utf-8")
+
+        SYNC_MODULE.sync_sources(self.repo_root, self.source_root, ())
+
+        for relative in SYNC_MODULE.RETIRED_TARGETS:
+            self.assertFalse((self.repo_root / relative).exists())
+        self.assertTrue((survivor / "SKILL.md").is_file())
+
+    def test_invalid_canonical_staging_preserves_existing_and_retired_targets(self) -> None:
+        for relative in SYNC_MODULE.RETIRED_TARGETS:
+            retired = self.repo_root / relative
+            retired.mkdir(parents=True)
+            (retired / "SKILL.md").write_text("retired\n", encoding="utf-8")
+
+        existing = self.repo_root / SYNC_MODULE.CANONICAL_REVIEW_TARGET
+        for relative in SYNC_MODULE.CANONICAL_REVIEW_REQUIRED_FILES:
+            path = existing / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("existing\n", encoding="utf-8")
+
+        source = (
+            self.source_root
+            / "codex-review-workflows"
+            / "skills"
+            / "review-orchestration-playbook"
+        )
+        source.mkdir(parents=True)
+        (source / "SKILL.md").write_text("incomplete\n", encoding="utf-8")
+        rule = SYNC_MODULE.SyncRule(
+            repo="codex-review-workflows",
+            source=Path("skills/review-orchestration-playbook"),
+            target=SYNC_MODULE.CANONICAL_REVIEW_TARGET,
+        )
+
+        with self.assertRaisesRegex(SYNC_MODULE.SyncError, "missing required file"):
+            SYNC_MODULE.sync_sources(self.repo_root, self.source_root, (rule,))
+
+        self.assertEqual(
+            (existing / "SKILL.md").read_text(encoding="utf-8"),
+            "existing\n",
+        )
+        for relative in SYNC_MODULE.RETIRED_TARGETS:
+            self.assertTrue((self.repo_root / relative / "SKILL.md").is_file())
+
+    def test_sync_requires_self_contained_canonical_review_target(self) -> None:
+        target = self.repo_root / SYNC_MODULE.CANONICAL_REVIEW_TARGET
+        target.mkdir(parents=True)
+        (target / "SKILL.md").write_text("canonical\n", encoding="utf-8")
+
+        with self.assertRaisesRegex(SYNC_MODULE.SyncError, "missing required file"):
+            SYNC_MODULE.sync_sources(self.repo_root, self.source_root, ())
+
+        for relative in SYNC_MODULE.CANONICAL_REVIEW_REQUIRED_FILES:
+            path = target / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("canonical\n", encoding="utf-8")
+        (target / "SKILL.md").write_text(
+            "Use $pr-readiness-review-workflow.\n",
+            encoding="utf-8",
+        )
+        with self.assertRaisesRegex(SYNC_MODULE.SyncError, "retired reference"):
+            SYNC_MODULE.sync_sources(self.repo_root, self.source_root, ())
+
+        (target / "SKILL.md").write_text("canonical\n", encoding="utf-8")
+        SYNC_MODULE.sync_sources(self.repo_root, self.source_root, ())
+
+    def test_sync_rejects_retired_review_reference_outside_canonical_target(self) -> None:
+        agents = self.repo_root / "personal_codex" / "AGENTS.md"
+        agents.parent.mkdir(parents=True)
+        agents.write_text(
+            "Use $external-review-playbook.\n",
+            encoding="utf-8",
+        )
+
+        with self.assertRaisesRegex(
+            SYNC_MODULE.SyncError,
+            "private overlay retains retired review reference",
+        ):
+            SYNC_MODULE.sync_sources(self.repo_root, self.source_root, ())
+
     def test_agile_delivery_sync_rule_builds_private_variant(self) -> None:
         source = (
             self.source_root
@@ -408,8 +495,11 @@ class PrivateOverlaySyncTests(unittest.TestCase):
             if link["source"].startswith("personal_codex/skills/")
         }
         sync_targets = {str(rule.target) for rule in SYNC_MODULE.SYNC_RULES}
+        retired_targets = {str(path) for path in SYNC_MODULE.RETIRED_TARGETS}
 
         self.assertEqual(manifest_sources - private_only_sources, manifest_sources & sync_targets)
+        self.assertTrue(manifest_sources.isdisjoint(retired_targets))
+        self.assertTrue(sync_targets.isdisjoint(retired_targets))
         self.assertIn("personal_codex/skills/codex-session-retrospective", manifest_sources)
         self.assertIn("skills/codex-session-retrospective", manifest_targets)
         self.assertIn("personal_codex/skills/codex-session-retrospective", sync_targets)

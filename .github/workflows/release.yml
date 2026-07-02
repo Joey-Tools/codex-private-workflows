@@ -50,6 +50,12 @@ jobs:
       - name: Run tests
         run: python3 -m unittest discover -s tests
 
+      - name: Verify canonical review workflow
+        run: |
+          python3 -m unittest discover \
+            -s personal_codex/skills/review-orchestration-playbook/tests \
+            -p 'test_*.py'
+
       - name: Build release package
         run: |
           python3 scripts/build_personal_codex_package.py \

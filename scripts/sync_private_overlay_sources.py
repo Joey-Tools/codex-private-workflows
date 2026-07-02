@@ -91,11 +91,6 @@ SYNC_RULES = (
     ),
     _rule(
         "codex-review-workflows",
-        "skills/copilot-review-playbook",
-        "personal_codex/skills/copilot-review-playbook",
-    ),
-    _rule(
-        "codex-review-workflows",
         "skills/agile-delivery-workflow",
         "personal_codex/skills/agile-delivery-workflow",
         (
@@ -231,12 +226,6 @@ SYNC_RULES = (
         "personal_codex/skills/codex-session-retrospective",
     ),
     _rule(
-        "codex-review-workflows",
-        "skills/external-review-playbook",
-        "personal_codex/skills/external-review-playbook",
-        common_joey_text=True,
-    ),
-    _rule(
         "codex-workflow-hygiene",
         "skills/codex-skill-authoring",
         "personal_codex/skills/joey-skill-authoring",
@@ -245,12 +234,6 @@ SYNC_RULES = (
             Replacement("Codex Skill Authoring", "Joey Skill Authoring"),
             Replacement("Create concise concise Codex skills.", "Create concise Joey-style Codex skills."),
         ),
-        common_joey_text=True,
-    ),
-    _rule(
-        "codex-review-workflows",
-        "skills/pr-readiness-review-workflow",
-        "personal_codex/skills/pr-readiness-review-workflow",
         common_joey_text=True,
     ),
     _rule(
@@ -272,6 +255,20 @@ SYNC_RULES = (
         "codex-review-workflows",
         "skills/review-orchestration-playbook",
         "personal_codex/skills/review-orchestration-playbook",
+        (
+            Replacement(
+                "REPO_ROOT = SKILL_ROOT.parents[1]",
+                "OVERLAY_ROOT = SKILL_ROOT.parents[1]\nREPO_ROOT = OVERLAY_ROOT.parent",
+            ),
+            Replacement(
+                "(REPO_ROOT / relative).exists()",
+                "(OVERLAY_ROOT / relative).exists()",
+            ),
+            Replacement(
+                'with (REPO_ROOT / "agents/reviewer.toml").open("rb") as handle:',
+                'with (OVERLAY_ROOT / "agents/reviewer.toml").open("rb") as handle:',
+            ),
+        ),
         common_joey_text=True,
     ),
     _rule(
@@ -280,6 +277,33 @@ SYNC_RULES = (
         "personal_codex/skills/waited-delivery",
         common_joey_text=True,
     ),
+)
+
+
+RETIRED_TARGETS = tuple(
+    _path(path)
+    for path in (
+        "personal_codex/skills/copilot-review-playbook",
+        "personal_codex/skills/external-review-playbook",
+        "personal_codex/skills/pr-readiness-review-workflow",
+    )
+)
+
+CANONICAL_REVIEW_TARGET = _path("personal_codex/skills/review-orchestration-playbook")
+CANONICAL_REVIEW_REQUIRED_FILES = tuple(
+    _path(path)
+    for path in (
+        "SKILL.md",
+        "references/helper-contract.md",
+        "references/pr-readiness.md",
+        "references/review-lane-contracts.md",
+        "references/review-prompt-templates.md",
+    )
+)
+RETIRED_REVIEW_REFERENCES = (
+    "pr-readiness-review-workflow",
+    "external-review-playbook",
+    "copilot-review-playbook",
 )
 
 
@@ -402,6 +426,50 @@ def _replace_target(target: Path, staging: Path) -> None:
             backup.unlink()
 
 
+def _remove_retired_targets(repo_root: Path) -> None:
+    for relative in RETIRED_TARGETS:
+        target = repo_root / relative
+        _ensure_safe_target(repo_root, target)
+        if target.is_dir():
+            shutil.rmtree(target)
+        elif target.exists():
+            target.unlink()
+
+
+def _validate_canonical_review_target_contents(target: Path) -> None:
+    if not target.exists():
+        return
+    for relative in CANONICAL_REVIEW_REQUIRED_FILES:
+        if not (target / relative).is_file():
+            raise SyncError(f"canonical review target missing required file: {relative}")
+    for path in sorted(target.rglob("*.md")):
+        text = path.read_text(encoding="utf-8")
+        for reference in RETIRED_REVIEW_REFERENCES:
+            if reference in text:
+                raise SyncError(
+                    "canonical review target retains retired reference "
+                    f"{reference!r} in {path.relative_to(target)}"
+                )
+
+
+def _validate_canonical_review_target(repo_root: Path) -> None:
+    _validate_canonical_review_target_contents(repo_root / CANONICAL_REVIEW_TARGET)
+
+
+def _validate_no_retired_review_references(repo_root: Path) -> None:
+    overlay_root = repo_root / "personal_codex"
+    if not overlay_root.exists():
+        return
+    for path in sorted(overlay_root.rglob("*.md")):
+        text = path.read_text(encoding="utf-8")
+        for reference in RETIRED_REVIEW_REFERENCES:
+            if reference in text:
+                raise SyncError(
+                    "private overlay retains retired review reference "
+                    f"{reference!r} in {path.relative_to(repo_root)}"
+                )
+
+
 def _apply_replacements(path: Path, replacements: tuple[Replacement, ...]) -> set[int]:
     try:
         text = path.read_text(encoding="utf-8")
@@ -467,7 +535,12 @@ def sync_sources(repo_root: Path, source_root: Path, rules: tuple[SyncRule, ...]
             _copy_source_to_staging(source, staging, exclude_names=rule.exclude_names)
             _apply_rule_replacements(staging, rule)
             _reject_forbidden_residuals(staging, rule)
+            if rule.target == CANONICAL_REVIEW_TARGET:
+                _validate_canonical_review_target_contents(staging)
             _replace_target(target, staging)
+    _validate_canonical_review_target(repo_root)
+    _remove_retired_targets(repo_root)
+    _validate_no_retired_review_references(repo_root)
 
 
 def build_parser() -> argparse.ArgumentParser:
