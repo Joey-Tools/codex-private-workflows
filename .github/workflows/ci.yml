@@ -29,3 +29,8 @@ jobs:
       - name: Build and verify private overlay
         run: |
           python3 -m unittest discover -s tests
+      - name: Verify canonical review workflow
+        run: |
+          python3 -m unittest discover \
+            -s personal_codex/skills/review-orchestration-playbook/tests \
+            -p 'test_*.py'

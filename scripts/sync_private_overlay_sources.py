@@ -255,6 +255,20 @@ SYNC_RULES = (
         "codex-review-workflows",
         "skills/review-orchestration-playbook",
         "personal_codex/skills/review-orchestration-playbook",
+        (
+            Replacement(
+                "REPO_ROOT = SKILL_ROOT.parents[1]",
+                "OVERLAY_ROOT = SKILL_ROOT.parents[1]\nREPO_ROOT = OVERLAY_ROOT.parent",
+            ),
+            Replacement(
+                "(REPO_ROOT / relative).exists()",
+                "(OVERLAY_ROOT / relative).exists()",
+            ),
+            Replacement(
+                'with (REPO_ROOT / "agents/reviewer.toml").open("rb") as handle:',
+                'with (OVERLAY_ROOT / "agents/reviewer.toml").open("rb") as handle:',
+            ),
+        ),
         common_joey_text=True,
     ),
     _rule(
@@ -287,8 +301,9 @@ CANONICAL_REVIEW_REQUIRED_FILES = tuple(
     )
 )
 RETIRED_REVIEW_REFERENCES = (
-    "$pr-readiness-review-workflow",
-    "../external-review-playbook",
+    "pr-readiness-review-workflow",
+    "external-review-playbook",
+    "copilot-review-playbook",
 )
 
 
@@ -438,6 +453,20 @@ def _validate_canonical_review_target(repo_root: Path) -> None:
                 )
 
 
+def _validate_no_retired_review_references(repo_root: Path) -> None:
+    overlay_root = repo_root / "personal_codex"
+    if not overlay_root.exists():
+        return
+    for path in sorted(overlay_root.rglob("*.md")):
+        text = path.read_text(encoding="utf-8")
+        for reference in RETIRED_REVIEW_REFERENCES:
+            if reference in text:
+                raise SyncError(
+                    "private overlay retains retired review reference "
+                    f"{reference!r} in {path.relative_to(repo_root)}"
+                )
+
+
 def _apply_replacements(path: Path, replacements: tuple[Replacement, ...]) -> set[int]:
     try:
         text = path.read_text(encoding="utf-8")
@@ -506,6 +535,7 @@ def sync_sources(repo_root: Path, source_root: Path, rules: tuple[SyncRule, ...]
             _reject_forbidden_residuals(staging, rule)
             _replace_target(target, staging)
     _validate_canonical_review_target(repo_root)
+    _validate_no_retired_review_references(repo_root)
 
 
 def build_parser() -> argparse.ArgumentParser:

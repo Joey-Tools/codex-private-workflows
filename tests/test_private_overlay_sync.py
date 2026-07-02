@@ -97,6 +97,20 @@ class PrivateOverlaySyncTests(unittest.TestCase):
         (target / "SKILL.md").write_text("canonical\n", encoding="utf-8")
         SYNC_MODULE.sync_sources(self.repo_root, self.source_root, ())
 
+    def test_sync_rejects_retired_review_reference_outside_canonical_target(self) -> None:
+        agents = self.repo_root / "personal_codex" / "AGENTS.md"
+        agents.parent.mkdir(parents=True)
+        agents.write_text(
+            "Use $external-review-playbook.\n",
+            encoding="utf-8",
+        )
+
+        with self.assertRaisesRegex(
+            SYNC_MODULE.SyncError,
+            "private overlay retains retired review reference",
+        ):
+            SYNC_MODULE.sync_sources(self.repo_root, self.source_root, ())
+
     def test_agile_delivery_sync_rule_builds_private_variant(self) -> None:
         source = (
             self.source_root
