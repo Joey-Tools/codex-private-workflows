@@ -436,8 +436,7 @@ def _remove_retired_targets(repo_root: Path) -> None:
             target.unlink()
 
 
-def _validate_canonical_review_target(repo_root: Path) -> None:
-    target = repo_root / CANONICAL_REVIEW_TARGET
+def _validate_canonical_review_target_contents(target: Path) -> None:
     if not target.exists():
         return
     for relative in CANONICAL_REVIEW_REQUIRED_FILES:
@@ -451,6 +450,10 @@ def _validate_canonical_review_target(repo_root: Path) -> None:
                     "canonical review target retains retired reference "
                     f"{reference!r} in {path.relative_to(target)}"
                 )
+
+
+def _validate_canonical_review_target(repo_root: Path) -> None:
+    _validate_canonical_review_target_contents(repo_root / CANONICAL_REVIEW_TARGET)
 
 
 def _validate_no_retired_review_references(repo_root: Path) -> None:
@@ -518,7 +521,6 @@ def _reject_forbidden_residuals(target: Path, rule: SyncRule) -> None:
 
 def sync_sources(repo_root: Path, source_root: Path, rules: tuple[SyncRule, ...] = SYNC_RULES) -> None:
     repo_root = repo_root.resolve()
-    _remove_retired_targets(repo_root)
     for rule in rules:
         source_repo_root = source_root / rule.repo
         source = source_repo_root / rule.source
@@ -533,8 +535,11 @@ def sync_sources(repo_root: Path, source_root: Path, rules: tuple[SyncRule, ...]
             _copy_source_to_staging(source, staging, exclude_names=rule.exclude_names)
             _apply_rule_replacements(staging, rule)
             _reject_forbidden_residuals(staging, rule)
+            if rule.target == CANONICAL_REVIEW_TARGET:
+                _validate_canonical_review_target_contents(staging)
             _replace_target(target, staging)
     _validate_canonical_review_target(repo_root)
+    _remove_retired_targets(repo_root)
     _validate_no_retired_review_references(repo_root)
 
 

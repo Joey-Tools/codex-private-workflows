@@ -75,6 +75,42 @@ class PrivateOverlaySyncTests(unittest.TestCase):
             self.assertFalse((self.repo_root / relative).exists())
         self.assertTrue((survivor / "SKILL.md").is_file())
 
+    def test_invalid_canonical_staging_preserves_existing_and_retired_targets(self) -> None:
+        for relative in SYNC_MODULE.RETIRED_TARGETS:
+            retired = self.repo_root / relative
+            retired.mkdir(parents=True)
+            (retired / "SKILL.md").write_text("retired\n", encoding="utf-8")
+
+        existing = self.repo_root / SYNC_MODULE.CANONICAL_REVIEW_TARGET
+        for relative in SYNC_MODULE.CANONICAL_REVIEW_REQUIRED_FILES:
+            path = existing / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("existing\n", encoding="utf-8")
+
+        source = (
+            self.source_root
+            / "codex-review-workflows"
+            / "skills"
+            / "review-orchestration-playbook"
+        )
+        source.mkdir(parents=True)
+        (source / "SKILL.md").write_text("incomplete\n", encoding="utf-8")
+        rule = SYNC_MODULE.SyncRule(
+            repo="codex-review-workflows",
+            source=Path("skills/review-orchestration-playbook"),
+            target=SYNC_MODULE.CANONICAL_REVIEW_TARGET,
+        )
+
+        with self.assertRaisesRegex(SYNC_MODULE.SyncError, "missing required file"):
+            SYNC_MODULE.sync_sources(self.repo_root, self.source_root, (rule,))
+
+        self.assertEqual(
+            (existing / "SKILL.md").read_text(encoding="utf-8"),
+            "existing\n",
+        )
+        for relative in SYNC_MODULE.RETIRED_TARGETS:
+            self.assertTrue((self.repo_root / relative / "SKILL.md").is_file())
+
     def test_sync_requires_self_contained_canonical_review_target(self) -> None:
         target = self.repo_root / SYNC_MODULE.CANONICAL_REVIEW_TARGET
         target.mkdir(parents=True)
