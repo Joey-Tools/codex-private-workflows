@@ -2,6 +2,7 @@
 
 - Keep this file short. Cross-repo rules belong here; repo-specific policy belongs in the repo `AGENTS.md` or a repo-local skill.
 - Explanations, discussion, analysis, and summaries use Simplified Chinese. Code, comments, identifiers, commit messages, and Markdown code blocks use English.
+- When first using a self-coined, nonstandard term or shorthand in a task, immediately add a brief plain-language explanation in parentheses.
 - Do not claim a test, build, lint run, or command was executed unless it was actually run.
 - If a final answer includes app directives such as `::git-stage`, `::git-commit`, `::git-push`, or `::git-create-pr`, include at least one short natural-language summary first; directive-only final answers are not allowed.
 - For non-trivial logic changes, prefer adding or updating tests.
