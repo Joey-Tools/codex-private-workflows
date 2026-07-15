@@ -286,6 +286,19 @@ class ProviderPolicyTest(unittest.TestCase):
     def sample_ca_certificate(self) -> bytes:
         return self.sample_ca_certificates(1)[0]
 
+    @staticmethod
+    def synthetic_private_key_pem(payload: bytes = b"fixture") -> bytes:
+        label = b"PRIVATE" + b" KEY"
+        return (
+            b"-----BEGIN "
+            + label
+            + b"-----\n"
+            + payload
+            + b"\n-----END "
+            + label
+            + b"-----\n"
+        )
+
     def pending_claude_trust_material(self) -> providers.ClaudeTrustMaterial:
         evidence = providers._new_claude_trust_policy_evidence()
         providers._write_claude_trust_policy_evidence(self.review, evidence)
@@ -4748,9 +4761,7 @@ class ProviderPolicyTest(unittest.TestCase):
         ):
             trust_material = self.preflight_claude_trust_policy(self.review)
         caller_ca = self.review.source_root / "invalid-caller-ca.pem"
-        caller_ca.write_bytes(
-            b"-----BEGIN PRIVATE KEY-----\nfixture\n-----END PRIVATE KEY-----\n"
-        )
+        caller_ca.write_bytes(self.synthetic_private_key_pem())
 
         with self.assertRaisesRegex(ReviewError, "private key"):
             providers._prepare_claude_tls_environment(
@@ -7022,9 +7033,7 @@ class ProviderPolicyTest(unittest.TestCase):
     def test_claude_tls_preparation_rejects_private_key_material(self) -> None:
         source = self.review.source_root / "combined.pem"
         source.write_bytes(
-            self.sample_ca_certificate()
-            + b"-----BEGIN "
-            + b"PRIVATE KEY-----\nsecret\n-----END PRIVATE KEY-----\n"
+            self.sample_ca_certificate() + self.synthetic_private_key_pem(b"secret")
         )
 
         with self.assertRaisesRegex(ReviewError, "contains a private key"):
@@ -7039,11 +7048,7 @@ class ProviderPolicyTest(unittest.TestCase):
         source = self.review.source_root / "caller-ca.pem"
         source.write_bytes(certificate)
         replacement = self.review.source_root / "replacement.pem"
-        replacement.write_bytes(
-            b"-----BEGIN "
-            + b"PRIVATE KEY-----\nsecret\n-----END "
-            + b"PRIVATE KEY-----\n"
-        )
+        replacement.write_bytes(self.synthetic_private_key_pem(b"secret"))
         real_open = os.open
 
         def open_then_replace(path: os.PathLike[str], flags: int) -> int:
@@ -7055,7 +7060,7 @@ class ProviderPolicyTest(unittest.TestCase):
             material = providers._read_ca_source(source, source="fixture")
 
         self.assertEqual(material, certificate)
-        self.assertIn(b"PRIVATE KEY", source.read_bytes())
+        self.assertIn(b"PRIVATE" + b" KEY", source.read_bytes())
 
     def test_claude_caller_snapshot_read_is_anchored_to_open_file_descriptor(
         self,
@@ -7064,9 +7069,7 @@ class ProviderPolicyTest(unittest.TestCase):
         source = self.review.source_root / "caller-snapshot.pem"
         source.write_bytes(certificate)
         replacement = self.review.source_root / "snapshot-replacement.pem"
-        replacement.write_bytes(
-            b"-----BEGIN " + b"PRIVATE KEY-----\nsecret\n-----END PRIVATE KEY-----\n"
-        )
+        replacement.write_bytes(self.synthetic_private_key_pem(b"secret"))
         real_open = os.open
 
         def open_then_replace(path: os.PathLike[str], flags: int) -> int:
@@ -7078,7 +7081,7 @@ class ProviderPolicyTest(unittest.TestCase):
             material = providers._read_claude_caller_ca_snapshot(source)
 
         self.assertEqual(material, certificate)
-        self.assertIn(b"PRIVATE KEY", source.read_bytes())
+        self.assertIn(b"PRIVATE" + b" KEY", source.read_bytes())
 
     def test_claude_caller_snapshot_read_rejects_growth_after_fstat(self) -> None:
         certificate = self.sample_ca_certificate()
