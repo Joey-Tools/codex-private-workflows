@@ -124,6 +124,7 @@ MAX_CHANGED_ENTRIES = 100_000
 MAX_CHANGED_BLOB_SCAN_BYTES = 512 * 1024 * 1024
 MAX_REVIEW_PROMPT_BYTES = 64 * 1024
 MAX_SYNTHETIC_SECRET_EXEMPTIONS_BYTES = 64 * 1024
+MAX_DIFF_LINE_BYTES = MAX_SNAPSHOT_BLOB_BYTES + 4096
 LONG_ALPHANUMERIC_SECRET = re.compile(rb"[A-Za-z0-9]{24,512}")
 LONG_NUMERIC_SECRET = re.compile(rb"[0-9]{16,512}")
 SYNTHETIC_SECRET_EXEMPTIONS_FILE = "synthetic-secret-exemptions.json"
@@ -137,6 +138,7 @@ class SyntheticSecretExemption:
     blob_oid: str
     rule: str
     value: bytes
+    diff_deleted_occurrences: int = 1
 
 
 KNOWN_SYNTHETIC_SECRET_EXEMPTIONS = {
@@ -177,7 +179,7 @@ def _resolve_synthetic_secret_exemptions(
 
 def _synthetic_secret_exemption_evidence(
     exemption: SyntheticSecretExemption,
-) -> dict[str, str]:
+) -> dict[str, str | int]:
     return {
         "id": exemption.identifier,
         "path": exemption.path,
@@ -185,6 +187,7 @@ def _synthetic_secret_exemption_evidence(
         "blob_oid": exemption.blob_oid,
         "rule": exemption.rule,
         "value_sha256": hashlib.sha256(exemption.value).hexdigest(),
+        "diff_deleted_occurrences": exemption.diff_deleted_occurrences,
     }
 
 
@@ -1367,17 +1370,16 @@ def validate_external_workspace(review: ReviewWorkspace) -> tuple[str, ...]:
             continue
         if not candidate.is_file():
             continue
-        ignored_secret_values = (
-            tuple(
-                exemption.value for exemption in synthetic_secret_exemptions
+        if (
+            relative == ".codex-review/review.diff"
+            and synthetic_secret_exemptions
+        ):
+            secret_rule = _frozen_diff_secret_rule(
+                candidate,
+                synthetic_secret_exemptions=synthetic_secret_exemptions,
             )
-            if relative == ".codex-review/review.diff"
-            else ()
-        )
-        secret_rule = _file_secret_rule(
-            candidate,
-            ignored_secret_values=ignored_secret_values,
-        )
+        else:
+            secret_rule = _file_secret_rule(candidate)
         if secret_rule:
             record_finding(f"{path_display} ({secret_rule})")
     if sensitive_finding_count:
@@ -1452,13 +1454,85 @@ def _file_secret_rule(
         ) from error
 
 
+def _frozen_diff_secret_rule(
+    path: pathlib.Path,
+    *,
+    synthetic_secret_exemptions: tuple[SyntheticSecretExemption, ...],
+) -> str | None:
+    section_exemptions: dict[bytes, list[SyntheticSecretExemption]] = {}
+    deleted_headers: dict[str, bytes] = {}
+    masked_occurrences = {
+        exemption.identifier: 0 for exemption in synthetic_secret_exemptions
+    }
+    for exemption in synthetic_secret_exemptions:
+        encoded_path = os.fsencode(exemption.path)
+        if any(character in encoded_path for character in (b"\0", b"\n", b"\r")):
+            raise ReviewError(
+                "synthetic secret exemption path cannot be represented safely in a diff"
+            )
+        section_header = (
+            b"diff --git a/"
+            + encoded_path
+            + b" b/"
+            + encoded_path
+        )
+        section_exemptions.setdefault(section_header, []).append(exemption)
+        deleted_headers[exemption.identifier] = b"--- a/" + encoded_path
+
+    active_exemptions: tuple[SyntheticSecretExemption, ...] = ()
+    finding: str | None = None
+    try:
+        with path.open("rb") as handle:
+            while line := handle.readline(MAX_DIFF_LINE_BYTES + 1):
+                if len(line) > MAX_DIFF_LINE_BYTES:
+                    raise ReviewError(
+                        "frozen review diff line exceeds the bounded scan limit"
+                    )
+                stripped = line.rstrip(b"\r\n")
+                if line.startswith(b"diff --git "):
+                    active_exemptions = tuple(
+                        section_exemptions.get(stripped, ())
+                    )
+                filtered = line
+                if active_exemptions and line.startswith(b"-"):
+                    for exemption in active_exemptions:
+                        if stripped == deleted_headers[exemption.identifier]:
+                            continue
+                        filtered, count = _mask_exact_secret_value(
+                            filtered,
+                            exemption.value,
+                        )
+                        masked_occurrences[exemption.identifier] += count
+                if finding is None:
+                    finding = _value_secret_rule(filtered)
+    except OSError as error:
+        path_display = _redact_secret_path(os.fspath(path), "review diff path")
+        error_code = f" (errno {error.errno})" if error.errno is not None else ""
+        raise ReviewError(
+            f"cannot scan frozen review diff {path_display}{error_code}"
+        ) from error
+
+    for exemption in synthetic_secret_exemptions:
+        actual = masked_occurrences[exemption.identifier]
+        expected = exemption.diff_deleted_occurrences
+        if actual != expected:
+            raise ReviewError(
+                "synthetic secret exemption diff representation changed for "
+                f"{exemption.identifier}: expected {expected} exact deleted "
+                f"occurrence(s), found {actual}"
+            )
+    return finding
+
+
 def _stream_secret_rule(
     stream: BinaryIO,
     *,
     size: int | None = None,
     ignored_secret_values: tuple[bytes, ...] = (),
 ) -> str | None:
-    overlap = 4096
+    overlap = max(
+        (4096, *(len(value) + 2 for value in ignored_secret_values))
+    )
     pending = b""
     remaining = size
     finding: str | None = None
@@ -1475,24 +1549,55 @@ def _stream_secret_rule(
             finding = _value_secret_rule(
                 pending + chunk,
                 ignored_secret_values=ignored_secret_values,
+                defer_trailing_ignored_prefixes=True,
             )
         pending = (pending + chunk)[-overlap:]
+    if finding is None and pending:
+        finding = _value_secret_rule(
+            pending,
+            ignored_secret_values=ignored_secret_values,
+        )
     return finding
+
+
+def _mask_exact_secret_value(value: bytes, ignored: bytes) -> tuple[bytes, int]:
+    if not ignored:
+        raise ReviewError("synthetic secret exemption value cannot be empty")
+    return re.subn(
+        rb"(?<!\w)" + re.escape(ignored) + rb"(?!\w)",
+        b"",
+        value,
+    )
 
 
 def _without_exact_secret_values(
     value: bytes,
     ignored_secret_values: tuple[bytes, ...],
+    *,
+    defer_trailing_ignored_prefixes: bool = False,
 ) -> bytes:
     filtered = value
     for ignored in ignored_secret_values:
-        if not ignored:
-            raise ReviewError("synthetic secret exemption value cannot be empty")
-        filtered = re.sub(
-            rb"(?<!\w)" + re.escape(ignored) + rb"(?!\w)",
-            b"",
-            filtered,
-        )
+        deferred_start: int | None = None
+        if defer_trailing_ignored_prefixes:
+            maximum = min(len(ignored), len(filtered))
+            for length in range(maximum, 0, -1):
+                prefix = ignored[:length]
+                if not filtered.endswith(prefix):
+                    continue
+                start = len(filtered) - length
+                if start == 0 or re.match(
+                    rb"\w", filtered[start - 1 : start]
+                ) is None:
+                    deferred_start = start
+                break
+        if deferred_start is not None:
+            filtered, _count = _mask_exact_secret_value(
+                filtered[:deferred_start],
+                ignored,
+            )
+        else:
+            filtered, _count = _mask_exact_secret_value(filtered, ignored)
     return filtered
 
 
@@ -1500,8 +1605,13 @@ def _value_secret_rule(
     value: bytes,
     *,
     ignored_secret_values: tuple[bytes, ...] = (),
+    defer_trailing_ignored_prefixes: bool = False,
 ) -> str | None:
-    value = _without_exact_secret_values(value, ignored_secret_values)
+    value = _without_exact_secret_values(
+        value,
+        ignored_secret_values,
+        defer_trailing_ignored_prefixes=defer_trailing_ignored_prefixes,
+    )
     for rule, pattern in SECRET_PATTERNS:
         if pattern.search(value):
             return rule
