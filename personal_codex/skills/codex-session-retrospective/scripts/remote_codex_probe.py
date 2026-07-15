@@ -310,6 +310,12 @@ REMOTE_ROLLOUT_SUMMARY_END = "__REMOTE_CODEX_PROBE_ROLLOUT_SUMMARY_END__"
 
 HOSTS: dict[str, dict[str, str]] = {
     "local": {"kind": "local", "label": "local", "codex_root": "~/.codex"},
+    "BL-mac-mini-m4-hoteng": {
+        "kind": "ssh",
+        "label": "BL-mac-mini-m4-hoteng",
+        "ssh_target": "BL-mac-mini-m4-hoteng",
+        "codex_root": "/Users/hoteng/.codex",
+    },
     "miku-bot-dev": {
         "kind": "ssh",
         "label": "miku-bot-dev",
@@ -327,6 +333,12 @@ HOSTS: dict[str, dict[str, str]] = {
         "label": "hoteng-srv-01",
         "ssh_target": "hoteng-srv-01",
         "codex_root": "/home/hoteng/.codex",
+    },
+    "codex-hoteng-srv-01": {
+        "kind": "ssh",
+        "label": "codex-hoteng-srv-01",
+        "ssh_target": "codex-hoteng-srv-01",
+        "codex_root": "/home/codex/.codex",
     },
 }
 
