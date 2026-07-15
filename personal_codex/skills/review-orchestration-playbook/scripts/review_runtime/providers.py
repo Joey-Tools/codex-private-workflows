@@ -190,6 +190,10 @@ CLAUDE_CALLER_CA_SNAPSHOT_LIMIT_BYTES = (
     CLAUDE_CA_DIR_LIMIT_BYTES
     + CLAUDE_CA_FILE_LIMIT_BYTES * len(CLAUDE_TLS_FILE_ENV_KEYS)
 )
+CLAUDE_CA_BUNDLE_LIMIT_BYTES = (
+    CLAUDE_CALLER_CA_SNAPSHOT_LIMIT_BYTES
+    + CLAUDE_CA_FILE_LIMIT_BYTES * (1 + len(CLAUDE_TRUST_CERTIFICATE_SOURCES))
+)
 CLAUDE_TRUST_SETTINGS_LIMIT_BYTES = 1024 * 1024
 CLAUDE_TRUST_ENTRY_LIMIT = 4096
 CLAUDE_ADDITIONAL_TRUST_ROOT_LIMIT = 256
@@ -1871,15 +1875,22 @@ def _is_claude_tls_environment_prepared(
     review: ReviewWorkspace,
     env: dict[str, str],
 ) -> bool:
-    bundle = review.container_dir / "claude-ca" / CLAUDE_CA_BUNDLE_NAME
+    ca_root = review.container_dir / "claude-ca"
+    bundle = ca_root / CLAUDE_CA_BUNDLE_NAME
     try:
+        root_metadata = ca_root.lstat()
         metadata = bundle.lstat()
     except OSError:
         return False
+    owner = os.geteuid()
     if (
-        not stat.S_ISREG(metadata.st_mode)
+        not stat.S_ISDIR(root_metadata.st_mode)
+        or root_metadata.st_uid != owner
+        or root_metadata.st_mode & 0o077
+        or not stat.S_ISREG(metadata.st_mode)
+        or metadata.st_uid != owner
         or metadata.st_size <= 0
-        or metadata.st_size > CLAUDE_CALLER_CA_SNAPSHOT_LIMIT_BYTES
+        or metadata.st_size > CLAUDE_CA_BUNDLE_LIMIT_BYTES
         or metadata.st_mode & 0o077
     ):
         return False
@@ -3757,6 +3768,12 @@ def run_review(
                 review,
                 claude_executable,
                 claude_env,
+            )
+            trust_material = _preflight_claude_trust_policy(review)
+            claude_env = _prepare_claude_tls_environment(
+                review,
+                claude_env,
+                trust_material=trust_material,
             )
     except ClaudeTrustSettingsDeny:
         _write_claude_trust_deny(review)

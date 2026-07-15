@@ -1721,6 +1721,81 @@ class ProviderPolicyTest(unittest.TestCase):
             trust_material=trust_material,
         )
 
+    def test_run_review_refreshes_trust_after_local_login_warmup(self) -> None:
+        claude_env: dict[str, str] = {}
+        initial_material = providers.ClaudeTrustMaterial(
+            certificates=self.sample_ca_certificate(),
+            excluded_sha1_fingerprints=frozenset(),
+        )
+        refreshed_material = providers.ClaudeTrustMaterial(
+            certificates=b"",
+            excluded_sha1_fingerprints=frozenset({"B" * 40}),
+        )
+        warmup_env = {"TLS_PHASE": "warmup"}
+        review_env = {"TLS_PHASE": "review"}
+        self.trust_preflight.side_effect = (initial_material, refreshed_material)
+        with (
+            mock.patch.object(
+                providers,
+                "child_environment",
+                return_value=claude_env,
+            ),
+            mock.patch.object(
+                providers,
+                "_resolve_validated_claude_executable",
+                return_value=(pathlib.Path("/fixture/claude"), claude_env),
+            ),
+            mock.patch.object(
+                providers,
+                "_with_claude_review_tool_path",
+                return_value=claude_env,
+            ),
+            mock.patch.object(
+                providers,
+                "_prepare_claude_tls_environment",
+                side_effect=(warmup_env, review_env),
+            ) as prepare_tls,
+            mock.patch.object(
+                providers,
+                "_claude_attempt",
+                return_value=self.attempt(
+                    "claude",
+                    providers.CLAUDE_MODELS[0],
+                    "success",
+                    final_text="No findings.",
+                ),
+            ) as claude_attempt,
+        ):
+            outcome = providers.run_review(
+                review=self.review,
+                reviewer="claude",
+                egress_consent="triple-review",
+            )
+
+        self.assertEqual(outcome.returncode, 0)
+        self.assertEqual(self.trust_preflight.call_count, 2)
+        self.warmup.assert_called_once_with(
+            self.review,
+            pathlib.Path("/fixture/claude"),
+            warmup_env,
+        )
+        self.assertEqual(
+            prepare_tls.call_args_list,
+            [
+                mock.call(
+                    self.review,
+                    claude_env,
+                    trust_material=initial_material,
+                ),
+                mock.call(
+                    self.review,
+                    warmup_env,
+                    trust_material=refreshed_material,
+                ),
+            ],
+        )
+        self.assertEqual(claude_attempt.call_args.kwargs["env"], review_env)
+
     def test_native_claude_entitlement_exhaustion_stops_the_lane(self) -> None:
         claude_env = {"ANTHROPIC_API_KEY": "fixture-key"}
         attempts = tuple(
@@ -3045,6 +3120,32 @@ class ProviderPolicyTest(unittest.TestCase):
         self.assertEqual(
             pathlib.Path(repeated["SSL_CERT_FILE"]).read_bytes(), first_content
         )
+
+    def test_claude_prepared_bundle_uses_complete_bundle_limit(self) -> None:
+        certificate = self.sample_ca_certificate()
+        ca_root = self.review.container_dir / "claude-ca"
+        ca_root.mkdir(mode=0o700)
+        bundle = ca_root / providers.CLAUDE_CA_BUNDLE_NAME
+        bundle.write_bytes(certificate)
+        bundle.chmod(0o600)
+        env = {key: str(bundle) for key in providers.CLAUDE_TLS_FILE_ENV_KEYS}
+        env[providers.CLAUDE_CERT_STORE_ENV] = providers.CLAUDE_CERT_STORE
+
+        with (
+            mock.patch.object(
+                providers,
+                "CLAUDE_CALLER_CA_SNAPSHOT_LIMIT_BYTES",
+                len(certificate) - 1,
+            ),
+            mock.patch.object(
+                providers,
+                "CLAUDE_CA_BUNDLE_LIMIT_BYTES",
+                len(certificate),
+            ),
+        ):
+            self.assertTrue(
+                providers._is_claude_tls_environment_prepared(self.review, env)
+            )
 
     def test_claude_final_tls_environment_drops_removed_trust_root(self) -> None:
         system_certificate, caller_certificate, removed_trust_certificate = (
