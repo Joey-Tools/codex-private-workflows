@@ -13,7 +13,7 @@ REPO_ROOT = OVERLAY_ROOT.parent
 SCRIPTS = SKILL_ROOT / "scripts"
 sys.path.insert(0, str(SCRIPTS))
 
-from review_runtime import providers  # noqa: E402
+from review_runtime import providers, workspace  # noqa: E402
 
 
 class RepositoryContractTest(unittest.TestCase):
@@ -102,6 +102,32 @@ class RepositoryContractTest(unittest.TestCase):
             readiness.index("4. After the helper preflight passes"),
         )
         self.assertIn("Require its retained `preflight.json`", readiness)
+
+    def test_synthetic_fixture_exemption_is_exact_and_documented(self) -> None:
+        identifier = (
+            "codex-workflow-hygiene-session-retrospective-github-pat-v1"
+        )
+        exemption = workspace.KNOWN_SYNTHETIC_SECRET_EXEMPTIONS[identifier]
+        skill = (SKILL_ROOT / "SKILL.md").read_text(encoding="utf-8")
+        helper_contract = (SKILL_ROOT / "references/helper-contract.md").read_text(
+            encoding="utf-8"
+        )
+        readiness = (SKILL_ROOT / "references/pr-readiness.md").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertEqual(exemption.identifier, identifier)
+        self.assertEqual(exemption.path, "tests/test_session_retrospective.py")
+        self.assertEqual(exemption.side, "base")
+        self.assertEqual(
+            exemption.blob_oid,
+            "a7f3c30fad480a3c31b47a18acd2bd3afef08cc3",
+        )
+        self.assertEqual(exemption.rule, "github-token")
+        self.assertIn("never add a generic token", skill)
+        self.assertIn("--synthetic-secret-exemption", helper_contract)
+        self.assertIn("value digest", helper_contract)
+        self.assertIn("path-only or test-directory allowlist", readiness)
 
     def test_independent_codex_process_output_is_task_scoped_and_bounded(self) -> None:
         readiness = (SKILL_ROOT / "references/pr-readiness.md").read_text(

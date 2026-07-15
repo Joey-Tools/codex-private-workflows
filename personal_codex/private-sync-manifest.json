@@ -21,6 +21,11 @@
       "kind": "skill"
     },
     {
+      "source": "personal_codex/skills/bounded-command-output",
+      "target": "skills/bounded-command-output",
+      "kind": "skill"
+    },
+    {
       "source": "personal_codex/skills/bug-triage-playbook",
       "target": "skills/bug-triage-playbook",
       "kind": "skill"
