@@ -3174,14 +3174,133 @@ class ProviderPolicyTest(unittest.TestCase):
         )
 
     def test_claude_ca_output_budgets_cover_pem_normalization(self) -> None:
-        self.assertGreater(
+        self.assertEqual(
             providers.CLAUDE_CALLER_CA_SNAPSHOT_LIMIT_BYTES,
-            providers.CLAUDE_CALLER_CA_INPUT_LIMIT_BYTES,
+            providers.CLAUDE_CALLER_CA_INPUT_LIMIT_BYTES
+            + (providers.CLAUDE_CALLER_CA_INPUT_LIMIT_BYTES + 31) // 32,
         )
-        self.assertGreater(
+        self.assertEqual(
             providers.CLAUDE_CA_BUNDLE_LIMIT_BYTES,
-            providers.CLAUDE_CA_BUNDLE_INPUT_LIMIT_BYTES,
+            providers.CLAUDE_CA_BUNDLE_INPUT_LIMIT_BYTES
+            + (providers.CLAUDE_CA_BUNDLE_INPUT_LIMIT_BYTES + 31) // 32,
         )
+
+    def test_claude_tls_preparation_enforces_canonical_output_budgets(self) -> None:
+        system_certificate, caller_certificate, trust_certificate = (
+            self.sample_ca_certificates(3)
+        )
+        caller_lines = caller_certificate.strip().splitlines()
+        compact_caller = (
+            b"\n".join(
+                (
+                    caller_lines[0],
+                    b"".join(caller_lines[1:-1]),
+                    caller_lines[-1],
+                )
+            )
+            + b"\n"
+        )
+        canonical_system = providers._canonical_ca_certificate(
+            system_certificate,
+            source="system fixture",
+        )[1]
+        canonical_caller = providers._canonical_ca_certificate(
+            compact_caller,
+            source="caller fixture",
+        )[1]
+        canonical_trust = providers._canonical_ca_certificate(
+            trust_certificate,
+            source="trust fixture",
+        )[1]
+        expected_bundle = canonical_system + canonical_trust + canonical_caller
+        self.assertGreater(len(canonical_caller), len(compact_caller))
+        self.assertLessEqual(
+            len(canonical_caller),
+            len(compact_caller) + (len(compact_caller) + 31) // 32,
+        )
+        self.claude_system_ca.write_bytes(system_certificate)
+        caller_path = self.review.source_root / "compact-caller.pem"
+        caller_path.write_bytes(compact_caller)
+        trust_material = providers.ClaudeTrustMaterial(
+            certificates=trust_certificate,
+            excluded_sha1_fingerprints=frozenset(),
+        )
+        ca_root = self.review.container_dir / "claude-ca"
+        snapshot = ca_root / providers.CLAUDE_CALLER_CA_SNAPSHOT_NAME
+        bundle = ca_root / providers.CLAUDE_CA_BUNDLE_NAME
+
+        def reset_ca_root() -> None:
+            snapshot.unlink(missing_ok=True)
+            bundle.unlink(missing_ok=True)
+            ca_root.rmdir()
+
+        with (
+            mock.patch.object(
+                providers,
+                "CLAUDE_CALLER_CA_SNAPSHOT_LIMIT_BYTES",
+                len(canonical_caller),
+            ),
+            mock.patch.object(
+                providers,
+                "CLAUDE_CA_BUNDLE_LIMIT_BYTES",
+                len(expected_bundle),
+            ),
+        ):
+            providers._prepare_claude_tls_environment(
+                self.review,
+                {"NODE_EXTRA_CA_CERTS": str(caller_path)},
+                trust_material=trust_material,
+            )
+
+        self.assertEqual(snapshot.read_bytes(), canonical_caller)
+        self.assertEqual(bundle.read_bytes(), expected_bundle)
+        reset_ca_root()
+
+        with (
+            mock.patch.object(
+                providers,
+                "CLAUDE_CALLER_CA_SNAPSHOT_LIMIT_BYTES",
+                len(canonical_caller) - 1,
+            ),
+            mock.patch.object(
+                providers,
+                "CLAUDE_CA_BUNDLE_LIMIT_BYTES",
+                len(expected_bundle),
+            ),
+            self.assertRaisesRegex(
+                ReviewError,
+                "Claude caller CA snapshot exceeds the size limit",
+            ),
+        ):
+            providers._prepare_claude_tls_environment(
+                self.review,
+                {"NODE_EXTRA_CA_CERTS": str(caller_path)},
+                trust_material=trust_material,
+            )
+        ca_root.rmdir()
+
+        with (
+            mock.patch.object(
+                providers,
+                "CLAUDE_CALLER_CA_SNAPSHOT_LIMIT_BYTES",
+                len(canonical_caller),
+            ),
+            mock.patch.object(
+                providers,
+                "CLAUDE_CA_BUNDLE_LIMIT_BYTES",
+                len(expected_bundle) - 1,
+            ),
+            self.assertRaisesRegex(
+                ReviewError,
+                "Claude review CA bundle exceeds the size limit",
+            ),
+        ):
+            providers._prepare_claude_tls_environment(
+                self.review,
+                {"NODE_EXTRA_CA_CERTS": str(caller_path)},
+                trust_material=trust_material,
+            )
+        ca_root.rmdir()
 
     def test_claude_final_tls_environment_drops_removed_trust_root(self) -> None:
         system_certificate, caller_certificate, removed_trust_certificate = (
