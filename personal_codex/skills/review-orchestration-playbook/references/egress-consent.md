@@ -27,6 +27,8 @@ Record the actual runtime/model used in the terminal review report so consent an
 
 The helper enforces the intended scope with a frozen detached workspace, runtime-specific minimal environment, provider path/tool restrictions, an escaping-symlink preflight, and a conservative scan of all base-to-head changed paths, both sides of every changed raw blob, the head snapshot, frozen diff, and prompt for credential-like paths and high-confidence secret patterns. Raw-blob scanning covers deleted binary credentials that a Git binary patch would encode, while changed-path scanning covers deleted credentials and nested credential filenames. A match blocks external launch and reports only its side/path/rule, never the matched value. This scan is a safety backstop, not proof that content is secret-free and not an expansion of consent: if a credential or unrelated private artifact is known to be present, stop and narrow the scope even when the scanner does not match it.
 
+A helper-defined synthetic-fixture exemption does not expand consent to real credentials. It must be selected explicitly by its registered ID, match the exact path, base-side blob OID, scanner rule, synthetic value, and deleted-diff occurrence count, fail closed on any drift, and appear in the retained preflight evidence. The frozen diff remains fully scanned outside that exact deleted occurrence. Never substitute a generic token allowlist, fixture-directory exclusion, or disabled base/diff scan.
+
 ## Approval-Gated Invocation
 
 Make consent machine-visible in the helper argv:

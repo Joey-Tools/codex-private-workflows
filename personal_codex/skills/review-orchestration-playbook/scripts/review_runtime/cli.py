@@ -19,7 +19,12 @@ from .providers import CLAUDE_EGRESS_CONSENTS, run_review
 from .state import FINAL_CLEANUP_TIMEOUT_SECONDS
 from .state import cleanup as cleanup_state
 from .state import final, run_state, start, status, wait
-from .workspace import ReviewWorkspace, cleanup_workspace, prepare_workspace
+from .workspace import (
+    ReviewWorkspace,
+    cleanup_workspace,
+    prepare_workspace,
+    synthetic_secret_exemption_ids,
+)
 
 
 def _add_review_arguments(parser: argparse.ArgumentParser) -> None:
@@ -49,6 +54,15 @@ def _add_review_arguments(parser: argparse.ArgumentParser) -> None:
             "external-review authorization."
         ),
     )
+    parser.add_argument(
+        "--synthetic-secret-exemption",
+        action="append",
+        choices=synthetic_secret_exemption_ids(),
+        help=(
+            "Explicitly select one named, exact synthetic-fixture exemption. "
+            "The helper fails closed unless every selected exemption matches."
+        ),
+    )
 
 
 def _validate_review_arguments(args: argparse.Namespace) -> None:
@@ -58,6 +72,9 @@ def _validate_review_arguments(args: argparse.Namespace) -> None:
         )
     if args.reviewer != "claude" and args.egress_consent is not None:
         raise ReviewError("--egress-consent is valid only with --reviewer claude")
+    synthetic_exemptions = getattr(args, "synthetic_secret_exemption", None) or []
+    if len(set(synthetic_exemptions)) != len(synthetic_exemptions):
+        raise ReviewError("--synthetic-secret-exemption values must be unique")
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -110,6 +127,9 @@ def _run_foreground(args: argparse.Namespace) -> int:
             base_ref=args.base_ref,
             head_ref=args.head_ref,
             ownership_handoff=accept_workspace,
+            synthetic_secret_exemptions=tuple(
+                getattr(args, "synthetic_secret_exemption", None) or ()
+            ),
             prompt_override=(
                 pathlib.Path(args.prompt_file) if args.prompt_file else None
             ),
@@ -180,6 +200,9 @@ def _run_stateful(argv: list[str], *, script_path: pathlib.Path) -> int:
             prompt_file=pathlib.Path(args.prompt_file) if args.prompt_file else None,
             keep_workspace=args.keep_workspace,
             egress_consent=args.egress_consent,
+            synthetic_secret_exemptions=tuple(
+                args.synthetic_secret_exemption or ()
+            ),
             publisher=lambda created: print(created, flush=True),
         )
         return 0

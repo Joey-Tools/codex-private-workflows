@@ -3683,7 +3683,7 @@ def run_review(
         return Outcome(2, None, tuple())
 
     try:
-        validate_external_workspace(review)
+        synthetic_secret_exemptions = validate_external_workspace(review)
     except ReviewError as error:
         write_text_atomic(
             review.container_dir / "runner-error.txt",
@@ -3697,6 +3697,7 @@ def run_review(
             "review_range": f"{review.base_ref}..{review.head_ref}",
             "scope": "frozen tracked workspace, diff, and review prompt",
             "status": "sensitive-content and escaping-symlink checks passed",
+            "synthetic_secret_exemptions": list(synthetic_secret_exemptions),
         },
     )
 

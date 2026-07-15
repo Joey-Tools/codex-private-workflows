@@ -27,6 +27,50 @@ def prepared_workspace(review):
 
 
 class ForegroundCleanupTest(unittest.TestCase):
+    def test_stateful_start_passes_named_synthetic_fixture_exemption(self) -> None:
+        identifier = cli.synthetic_secret_exemption_ids()[0]
+        with mock.patch.object(cli, "start") as start:
+            returncode = cli.main(
+                [
+                    "stateful",
+                    "start",
+                    "--repo",
+                    "/tmp/repo",
+                    "--base-ref",
+                    "a" * 40,
+                    "--head-ref",
+                    "b" * 40,
+                    "--synthetic-secret-exemption",
+                    identifier,
+                ]
+            )
+
+        self.assertEqual(returncode, 0)
+        self.assertEqual(
+            start.call_args.kwargs["synthetic_secret_exemptions"],
+            (identifier,),
+        )
+
+    def test_duplicate_synthetic_fixture_exemption_is_rejected(self) -> None:
+        identifier = cli.synthetic_secret_exemption_ids()[0]
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            returncode = cli.main(
+                [
+                    "--base-ref",
+                    "a" * 40,
+                    "--head-ref",
+                    "b" * 40,
+                    "--synthetic-secret-exemption",
+                    identifier,
+                    "--synthetic-secret-exemption",
+                    identifier,
+                ]
+            )
+
+        self.assertEqual(returncode, 2)
+        self.assertIn("must be unique", stderr.getvalue())
+
     def test_stateful_cleanup_dispatches_bounded_cleanup(self) -> None:
         state_dir = pathlib.Path("/tmp/isolated-review-state")
         with mock.patch.object(cli, "cleanup_state", return_value=0) as cleanup:
