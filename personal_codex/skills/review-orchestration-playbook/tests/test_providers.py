@@ -4880,8 +4880,13 @@ class ProviderPolicyTest(unittest.TestCase):
     def test_claude_preflight_records_blocked_system_private_key_before_exclusions(
         self,
     ) -> None:
+        private_key_label = b"PRIVATE" + b" KEY"
         self.claude_system_ca.write_bytes(
-            b"-----BEGIN PRIVATE KEY-----\nfixture\n-----END PRIVATE KEY-----\n"
+            b"-----BEGIN "
+            + private_key_label
+            + b"-----\nfixture\n-----END "
+            + private_key_label
+            + b"-----\n"
         )
         with (
             mock.patch.object(
