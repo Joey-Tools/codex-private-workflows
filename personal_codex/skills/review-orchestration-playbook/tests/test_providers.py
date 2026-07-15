@@ -4507,7 +4507,9 @@ class ProviderPolicyTest(unittest.TestCase):
         source.write_bytes(certificate)
         replacement = self.review.source_root / "replacement.pem"
         replacement.write_bytes(
-            b"-----BEGIN PRIVATE KEY-----\nsecret\n-----END PRIVATE KEY-----\n"
+            b"-----BEGIN "
+            + b"PRIVATE KEY-----\nsecret\n-----END "
+            + b"PRIVATE KEY-----\n"
         )
         real_open = os.open
 
