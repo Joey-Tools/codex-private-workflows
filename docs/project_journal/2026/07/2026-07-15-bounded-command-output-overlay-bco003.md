@@ -20,6 +20,7 @@ superseded_by:
 ## Current State
 
 - The private sync rule and manifest install `bounded-command-output` from `codex-workflow-hygiene`.
+- The bundled copy matches the merged canonical source at `codex-workflow-hygiene@95befb9`: initial inventories use a total count plus an explicit sample cap, and retained logs enforce aggregate byte/segment ceilings rather than relying on ordinary rotation.
 - Detailed cross-workflow command recipes no longer live in the private AGENTS file.
 - Domain skills remain responsible for debugging, delivery, and review decisions.
 - The exemption requires an explicit CLI ID and binds the fixture path, base-side blob OID, scanner rule, and exact value; drift or any additional secret still blocks review.
