@@ -7,6 +7,7 @@ import json
 import os
 import pathlib
 import plistlib
+import signal
 import socket
 import socketserver
 import ssl
@@ -3808,6 +3809,237 @@ class ProviderPolicyTest(unittest.TestCase):
                 (fingerprint,),
                 ca_root=self.review.container_dir,
             )
+
+    def test_claude_trust_classifies_only_explicit_verify_failure_as_invalid(
+        self,
+    ) -> None:
+        certificate = self.strict_root_certificate()
+        der, canonical = providers._canonical_ca_certificate(
+            certificate,
+            source="verification fixture",
+        )
+
+        for error_code, error_reason in (
+            (10, "certificate has expired"),
+            (69, "CA signature digest algorithm too weak"),
+        ):
+            for prefix, diagnostic_stream in (("", "stderr"), ("error ", "stdout")):
+                captures: list[common.BoundedCapture] = []
+
+                def explicit_failure(
+                    argv: tuple[str, ...],
+                    **_kwargs: object,
+                ) -> common.BoundedCapture:
+                    diagnostic = (
+                        f"{prefix}{argv[-1]}: verification failed: "
+                        f"{error_code} ({error_reason})\n"
+                    ).encode()
+                    capture = common.BoundedCapture(
+                        argv=argv,
+                        returncode=2,
+                        stdout=bytearray(
+                            diagnostic
+                            if diagnostic_stream == "stdout"
+                            else b"bounded stdout"
+                        ),
+                        stderr=bytearray(
+                            diagnostic
+                            if diagnostic_stream == "stderr"
+                            else b"bounded stderr"
+                        ),
+                    )
+                    captures.append(capture)
+                    return capture
+
+                with (
+                    self.subTest(
+                        error_code=error_code,
+                        prefix=prefix,
+                        diagnostic_stream=diagnostic_stream,
+                    ),
+                    mock.patch.object(
+                        providers,
+                        "run_bounded_capture",
+                        side_effect=explicit_failure,
+                    ),
+                    self.assertRaises(providers.ClaudeTrustCertificateInvalid),
+                ):
+                    providers._verify_unconditional_trust_root(
+                        der,
+                        canonical,
+                        ca_root=self.review.container_dir,
+                    )
+
+                self.assertEqual(len(captures), 1)
+                self.assertFalse(any(captures[0].stdout))
+                self.assertFalse(any(captures[0].stderr))
+
+    def test_claude_trust_verify_uses_safe_relative_certificate_path(self) -> None:
+        certificate = self.strict_root_certificate()
+        der, canonical = providers._canonical_ca_certificate(
+            certificate,
+            source="verification fixture",
+        )
+        ca_root = self.review.container_dir / "trust\nroot"
+        ca_root.mkdir()
+        captures: list[common.BoundedCapture] = []
+
+        def explicit_failure(
+            argv: tuple[str, ...],
+            **kwargs: object,
+        ) -> common.BoundedCapture:
+            self.assertEqual(kwargs["cwd"], ca_root)
+            self.assertNotIn("/", argv[-1])
+            self.assertNotIn("\n", argv[-1])
+            self.assertEqual(argv[-2], argv[-1])
+            self.assertEqual(
+                kwargs["env"],
+                {
+                    "LANG": "C",
+                    "LC_ALL": "C",
+                    "PATH": providers.TRUSTED_PATH,
+                    "SSL_CERT_FILE": argv[-1],
+                    "SSL_CERT_DIR": ".",
+                },
+            )
+            diagnostic = (
+                f"{argv[-1]}: verification failed: "
+                "10 (certificate has expired)\n"
+            ).encode()
+            capture = common.BoundedCapture(
+                argv=argv,
+                returncode=2,
+                stdout=bytearray(),
+                stderr=bytearray(diagnostic),
+            )
+            captures.append(capture)
+            return capture
+
+        with (
+            mock.patch.object(
+                providers,
+                "run_bounded_capture",
+                side_effect=explicit_failure,
+            ),
+            self.assertRaises(providers.ClaudeTrustCertificateInvalid),
+        ):
+            providers._verify_unconditional_trust_root(
+                der,
+                canonical,
+                ca_root=ca_root,
+            )
+
+        self.assertEqual(len(captures), 1)
+        self.assertFalse(any(captures[0].stdout))
+        self.assertFalse(any(captures[0].stderr))
+
+    def test_claude_trust_does_not_treat_verify_tool_failures_as_invalid(
+        self,
+    ) -> None:
+        certificate = self.strict_root_certificate()
+        der, canonical = providers._canonical_ca_certificate(
+            certificate,
+            source="verification fixture",
+        )
+        cases = (
+            "non-two-exact-diagnostic",
+            "wrong-path",
+            "path-prefix",
+            "path-bound-unspecified",
+            "path-bound-out-of-memory",
+            "path-bound-application-verification",
+            "path-bound-invalid-call",
+            "path-bound-store-lookup",
+            "internal-error",
+            "signal",
+        )
+
+        for case in cases:
+            captures: list[common.BoundedCapture] = []
+
+            def tool_failure(
+                argv: tuple[str, ...],
+                **_kwargs: object,
+            ) -> common.BoundedCapture:
+                path = argv[-1]
+                if case == "non-two-exact-diagnostic":
+                    returncode = 1
+                    diagnostic = (
+                        f"{path}: verification failed: "
+                        "10 (certificate has expired)\n"
+                    ).encode()
+                elif case == "wrong-path":
+                    returncode = 2
+                    diagnostic = (
+                        f"{path}.other: verification failed: "
+                        "10 (certificate has expired)\n"
+                    ).encode()
+                elif case == "path-prefix":
+                    returncode = 2
+                    diagnostic = (
+                        f"prefix-{path}: verification failed: "
+                        "10 (certificate has expired)\n"
+                    ).encode()
+                elif case == "path-bound-unspecified":
+                    returncode = 2
+                    diagnostic = (
+                        f"{path}: verification failed: "
+                        "1 (unspecified certificate verification error)\n"
+                    ).encode()
+                elif case == "path-bound-out-of-memory":
+                    returncode = 2
+                    diagnostic = (
+                        f"{path}: verification failed: 17 (out of memory)\n"
+                    ).encode()
+                elif case == "path-bound-application-verification":
+                    returncode = 2
+                    diagnostic = (
+                        f"{path}: verification failed: "
+                        "50 (application verification failure)\n"
+                    ).encode()
+                elif case == "path-bound-invalid-call":
+                    returncode = 2
+                    diagnostic = (
+                        f"{path}: verification failed: 65 (invalid call)\n"
+                    ).encode()
+                elif case == "path-bound-store-lookup":
+                    returncode = 2
+                    diagnostic = (
+                        f"{path}: verification failed: 66 (store lookup error)\n"
+                    ).encode()
+                elif case == "internal-error":
+                    returncode = 2
+                    diagnostic = b"internal verification engine failure\n"
+                else:
+                    returncode = -int(signal.SIGTERM)
+                    diagnostic = b"terminated verification runtime\n"
+                capture = common.BoundedCapture(
+                    argv=argv,
+                    returncode=returncode,
+                    stdout=bytearray(b"bounded stdout"),
+                    stderr=bytearray(diagnostic),
+                )
+                captures.append(capture)
+                return capture
+
+            with (
+                self.subTest(case=case),
+                mock.patch.object(
+                    providers,
+                    "run_bounded_capture",
+                    side_effect=tool_failure,
+                ),
+                self.assertRaises(providers.ClaudeTrustToolUnavailable),
+            ):
+                providers._verify_unconditional_trust_root(
+                    der,
+                    canonical,
+                    ca_root=self.review.container_dir,
+                )
+
+            self.assertEqual(len(captures), 1)
+            self.assertFalse(any(captures[0].stdout))
+            self.assertFalse(any(captures[0].stderr))
 
     def test_claude_trust_bounds_additional_root_count(self) -> None:
         with self.assertRaisesRegex(

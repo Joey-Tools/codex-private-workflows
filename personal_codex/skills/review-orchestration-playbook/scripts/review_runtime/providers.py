@@ -156,6 +156,19 @@ CLAUDE_TRUST_FINGERPRINT = re.compile(r"^[0-9A-Fa-f]{40}$")
 CLAUDE_TRUST_RESULT_KEY = "kSecTrustSettingsResult"
 CLAUDE_TRUST_RESULT_DENY = 3
 CLAUDE_TRUST_RESULTS = frozenset({1, 2, 3, 4})
+CLAUDE_OPENSSL_CERTIFICATE_FAILURE_CODES = frozenset(
+    (
+        *range(2, 17),
+        *range(18, 50),
+        *range(51, 55),
+        62,
+        63,
+        64,
+        67,
+        68,
+        69,
+    )
+)
 CLAUDE_KEYCHAIN_BROKER_PORT_ENV = "CODEX_CLAUDE_KEYCHAIN_BROKER_PORT"
 CLAUDE_KEYCHAIN_BROKER_CAPABILITY_ENV = "CODEX_CLAUDE_KEYCHAIN_BROKER_CAPABILITY"
 CLAUDE_KEYCHAIN_BROKER_CAPABILITY = re.compile(r"^[0-9a-f]{64}$")
@@ -1096,6 +1109,7 @@ def _verify_unconditional_trust_root(
         dir=ca_root,
     )
     certificate_path = pathlib.Path(temporary)
+    certificate_name = certificate_path.name
     try:
         os.fchmod(fd, 0o600)
         handle = os.fdopen(fd, "wb")
@@ -1108,8 +1122,8 @@ def _verify_unconditional_trust_root(
             "LANG": "C",
             "LC_ALL": "C",
             "PATH": TRUSTED_PATH,
-            "SSL_CERT_FILE": str(certificate_path),
-            "SSL_CERT_DIR": str(ca_root),
+            "SSL_CERT_FILE": certificate_name,
+            "SSL_CERT_DIR": ".",
         }
         try:
             completed = run_bounded_capture(
@@ -1121,8 +1135,8 @@ def _verify_unconditional_trust_root(
                     "-purpose",
                     "any",
                     "-trusted",
-                    str(certificate_path),
-                    str(certificate_path),
+                    certificate_name,
+                    certificate_name,
                 ),
                 cwd=ca_root,
                 env=verify_env,
@@ -1136,9 +1150,27 @@ def _verify_unconditional_trust_root(
             ) from error
         try:
             if completed.returncode != 0:
-                raise ClaudeTrustCertificateInvalid(
-                    "Claude trust settings reference a certificate that is not a "
-                    "currently valid self-signed CA root"
+                lines = (
+                    bytes(completed.stdout) + b"\n" + bytes(completed.stderr)
+                ).splitlines()
+                diagnostic = re.compile(
+                    rb"(?:error )?"
+                    + re.escape(os.fsencode(certificate_name))
+                    + rb": verification failed: ([0-9]+) \([^\r\n]*\)"
+                )
+                explicit_verification_failure = completed.returncode == 2 and any(
+                    (match := diagnostic.fullmatch(line)) is not None
+                    and int(match.group(1))
+                    in CLAUDE_OPENSSL_CERTIFICATE_FAILURE_CODES
+                    for line in lines
+                )
+                if explicit_verification_failure:
+                    raise ClaudeTrustCertificateInvalid(
+                        "Claude trust settings reference a certificate that is not a "
+                        "currently valid self-signed CA root"
+                    )
+                raise ClaudeTrustToolUnavailable(
+                    "Claude TLS root verification tooling failed unexpectedly"
                 )
         finally:
             completed.stdout[:] = b"\x00" * len(completed.stdout)
