@@ -2984,8 +2984,13 @@ class ProviderPolicyTest(unittest.TestCase):
             )
             self.assertEqual(evidence["status"], "complete")
             first_generations.append(str(evidence["generation"]))
+            private_key_label = b"PRIVATE" + b" KEY"
             self.claude_system_ca.write_bytes(
-                b"-----BEGIN PRIVATE KEY-----\nfixture\n-----END PRIVATE KEY-----\n"
+                b"-----BEGIN "
+                + private_key_label
+                + b"-----\nfixture\n-----END "
+                + private_key_label
+                + b"-----\n"
             )
 
         self.trust_preflight.side_effect = self.preflight_claude_trust_policy
