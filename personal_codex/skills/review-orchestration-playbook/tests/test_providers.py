@@ -1,14 +1,15 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 import contextlib
 import hashlib
 import json
 import os
 import pathlib
+import plistlib
 import socket
 import socketserver
 import ssl
-import subprocess
 import sys
 import tempfile
 import threading
@@ -19,6 +20,7 @@ from unittest import mock
 
 
 SCRIPTS = pathlib.Path(__file__).resolve().parents[1] / "scripts"
+FIXTURES = pathlib.Path(__file__).resolve().parent / "fixtures"
 sys.path.insert(0, str(SCRIPTS))
 
 from review_runtime import common, providers  # noqa: E402
@@ -69,18 +71,22 @@ class ProviderPolicyTest(unittest.TestCase):
         self.claude_broker.chmod(0o700)
         self.claude_keychain_client = root / "host-tools" / "security"
         self.claude_ripgrep = root / "host-tools" / "rg"
-        for fixture in (
-            self.claude_keychain_client,
-            self.claude_ripgrep,
-        ):
+        for fixture in (self.claude_keychain_client, self.claude_ripgrep):
             fixture.parent.mkdir(parents=True, exist_ok=True)
             fixture.write_bytes(b"fixture")
             fixture.chmod(0o700)
+        self.claude_system_ca = root / "host-tools" / "cert.pem"
+        self.claude_system_ca.write_bytes(self.sample_ca_certificate())
         self.host_dependency_patchers = (
             mock.patch.object(
                 providers,
                 "CLAUDE_KEYCHAIN_CLIENT",
                 self.claude_keychain_client,
+            ),
+            mock.patch.object(
+                providers,
+                "CLAUDE_SYSTEM_CA_FILE",
+                self.claude_system_ca,
             ),
             mock.patch.object(
                 providers,
@@ -90,6 +96,20 @@ class ProviderPolicyTest(unittest.TestCase):
         )
         for patcher in self.host_dependency_patchers:
             patcher.start()
+        self.preflight_claude_trust_policy = providers._preflight_claude_trust_policy
+        self.trust_preflight_patcher = mock.patch.object(
+            providers,
+            "_preflight_claude_trust_policy",
+        )
+        self.trust_preflight = self.trust_preflight_patcher.start()
+        self.trust_preflight.return_value = b""
+        self.read_claude_trust_certificates = providers._read_claude_trust_certificates
+        self.trust_patcher = mock.patch.object(
+            providers,
+            "_read_claude_trust_certificates",
+            return_value=b"",
+        )
+        self.trust = self.trust_patcher.start()
         self.native_macho_dependencies = providers._native_macho_dependencies
         self.native_dependency_patcher = mock.patch.object(
             providers,
@@ -105,9 +125,7 @@ class ProviderPolicyTest(unittest.TestCase):
             "_require_trusted_claude_digest",
         )
         self.trusted_digest = self.trusted_digest_patcher.start()
-        self.prepare_claude_keychain_broker = (
-            providers._prepare_claude_keychain_broker
-        )
+        self.prepare_claude_keychain_broker = providers._prepare_claude_keychain_broker
         self.keychain_broker_patcher = mock.patch.object(
             providers,
             "_prepare_claude_keychain_broker",
@@ -137,6 +155,8 @@ class ProviderPolicyTest(unittest.TestCase):
         self.keychain_broker_patcher.stop()
         self.trusted_digest_patcher.stop()
         self.native_dependency_patcher.stop()
+        self.trust_patcher.stop()
+        self.trust_preflight_patcher.stop()
         for patcher in reversed(self.host_dependency_patchers):
             patcher.stop()
         self.temporary.cleanup()
@@ -189,18 +209,72 @@ class ProviderPolicyTest(unittest.TestCase):
             stderr_path=str(self.review.container_dir / "stderr"),
         )
 
-    def sample_ca_certificate(self) -> bytes:
+    def logged_run_side_effect(
+        self,
+        *responses: Completed,
+    ) -> Callable[..., Completed]:
+        pending = iter(responses)
+
+        def run_with_logs(
+            _argv: tuple[str, ...] | list[str],
+            **kwargs: object,
+        ) -> Completed:
+            completed = next(pending)
+            stdout_path = kwargs.get("stdout_path")
+            stderr_path = kwargs.get("stderr_path")
+            if isinstance(stdout_path, pathlib.Path):
+                stdout_path.parent.mkdir(parents=True, exist_ok=True)
+                stdout_path.write_bytes(completed.stdout)
+            if isinstance(stderr_path, pathlib.Path):
+                stderr_path.parent.mkdir(parents=True, exist_ok=True)
+                stderr_path.write_bytes(completed.stderr)
+            return completed
+
+        return run_with_logs
+
+    def trust_export_help_capture(
+        self,
+        argv: tuple[str, ...],
+    ) -> common.BoundedCapture:
+        return common.BoundedCapture(
+            argv=argv,
+            returncode=0,
+            stdout=bytearray(
+                ("\n".join(providers.CLAUDE_TRUST_EXPORT_HELP_LINES) + "\n").encode()
+            ),
+            stderr=bytearray(),
+        )
+
+    def sample_ca_certificates(self, count: int) -> tuple[bytes, ...]:
         defaults = ssl.get_default_verify_paths()
-        for raw in (defaults.cafile, "/etc/ssl/cert.pem", "/etc/ssl/certs/ca-certificates.crt"):
+        certificates: list[bytes] = []
+        seen: set[bytes] = set()
+        for raw in (
+            defaults.cafile,
+            "/etc/ssl/cert.pem",
+            "/etc/ssl/certs/ca-certificates.crt",
+        ):
             if not raw:
                 continue
             path = pathlib.Path(raw)
             if not path.is_file():
                 continue
             blocks = providers.CLAUDE_CERTIFICATE_BLOCK.findall(path.read_bytes())
-            if blocks:
-                return blocks[0] + b"\n"
-        self.skipTest("no system PEM CA certificate is available")
+            for block in blocks:
+                certificate = block + b"\n"
+                if certificate in seen:
+                    continue
+                seen.add(certificate)
+                certificates.append(certificate)
+                if len(certificates) == count:
+                    return tuple(certificates)
+        self.skipTest(f"fewer than {count} system PEM CA certificates are available")
+
+    def sample_ca_certificate(self) -> bytes:
+        return self.sample_ca_certificates(1)[0]
+
+    def strict_root_certificate(self) -> bytes:
+        return (FIXTURES / "trust-root-valid.pem").read_bytes()
 
     def test_capacity_wins_over_unavailable_wording(self) -> None:
         category = providers.classify_failure(
@@ -211,7 +285,7 @@ class ProviderPolicyTest(unittest.TestCase):
 
     def test_native_macho_dependencies_rejects_interpreter_wrapper(self) -> None:
         wrapper = self.review.source_root / "rg-wrapper"
-        wrapper.write_text("#!/bin/sh\nexec /usr/bin/rg \"$@\"\n", encoding="utf-8")
+        wrapper.write_text('#!/bin/sh\nexec /usr/bin/rg "$@"\n', encoding="utf-8")
         wrapper.chmod(0o755)
 
         with self.assertRaisesRegex(
@@ -251,13 +325,16 @@ class ProviderPolicyTest(unittest.TestCase):
         executable = self.review.source_root / "claude"
         executable.write_bytes(b"untrusted native fixture")
 
-        with mock.patch.object(
-            providers,
-            "CLAUDE_TRUSTED_SHA256_BY_MACHINE",
-            {"arm64": "00" * 32, "x86_64": "11" * 32},
-        ), self.assertRaisesRegex(
-            providers.InvalidReviewerExecutable,
-            "trusted macOS release digests",
+        with (
+            mock.patch.object(
+                providers,
+                "CLAUDE_TRUSTED_SHA256_BY_MACHINE",
+                {"arm64": "00" * 32, "x86_64": "11" * 32},
+            ),
+            self.assertRaisesRegex(
+                providers.InvalidReviewerExecutable,
+                "trusted macOS release digests",
+            ),
         ):
             self.require_trusted_claude_digest(executable)
 
@@ -524,7 +601,7 @@ class ProviderPolicyTest(unittest.TestCase):
         self.assertEqual(credential, bytearray(len(credential)))
 
     @mock.patch.object(providers, "_read_claude_keychain_credential")
-    def test_keychain_preflight_requires_whole_model_chain_lifetime(
+    def test_keychain_preflight_budgets_only_the_next_model_attempt(
         self,
         read_credential: mock.Mock,
     ) -> None:
@@ -538,13 +615,21 @@ class ProviderPolicyTest(unittest.TestCase):
         )
         read_credential.return_value = credential
 
+        self.require_fresh_claude_keychain_credential(self.review)
+
+        self.assertEqual(credential, bytearray(len(credential)))
+
+        chain_credential = bytearray(
+            oauth_credential_fixture(expires_in_seconds=single_attempt_lifetime)
+        )
         with self.assertRaisesRegex(
             providers.ClaudeKeychainCredentialUnavailable,
             "cannot cover the isolated review window",
         ):
-            self.require_fresh_claude_keychain_credential(self.review)
-
-        self.assertEqual(credential, bytearray(len(credential)))
+            providers._validate_fresh_claude_keychain_credential(
+                chain_credential,
+                attempt_count=len(providers.CLAUDE_MODELS),
+            )
 
     def test_keychain_preflight_rejects_unbounded_integer_expiry(self) -> None:
         credential = bytearray(
@@ -597,7 +682,7 @@ class ProviderPolicyTest(unittest.TestCase):
         run_command.return_value = Completed(
             argv=("claude",),
             returncode=0,
-            stdout=b'OK',
+            stdout=b"OK",
             stderr=b"",
         )
         home = self.review.container_dir / "claude-home"
@@ -623,7 +708,9 @@ class ProviderPolicyTest(unittest.TestCase):
             argv[argv.index("--allowedTools") + 1],
             "Read(./__claude_auth_warmup_no_files__)",
         )
-        self.assertEqual(run_command.call_args.kwargs["stdin"], b"Reply with exactly OK.")
+        self.assertEqual(
+            run_command.call_args.kwargs["stdin"], b"Reply with exactly OK."
+        )
         self.assertEqual(
             run_command.call_args.kwargs["timeout_seconds"],
             providers.CLAUDE_AUTH_WARMUP_TIMEOUT_SECONDS,
@@ -633,11 +720,20 @@ class ProviderPolicyTest(unittest.TestCase):
             proxy.call_args.kwargs["allowed_targets"],
             providers.CLAUDE_AUTH_PROXY_TARGETS,
         )
-        self.assertTrue(
-            sandbox_profile.call_args.kwargs["allow_direct_keychain"]
-        )
-        self.assertFalse(
-            sandbox_profile.call_args.kwargs["allow_workspace_read"]
+        self.assertTrue(sandbox_profile.call_args.kwargs["allow_direct_keychain"])
+        self.assertFalse(sandbox_profile.call_args.kwargs["allow_workspace_read"])
+        self.assertEqual(
+            json.loads(
+                (self.review.container_dir / "claude-auth-warmup.json").read_text(
+                    encoding="utf-8"
+                )
+            ),
+            {
+                "category": "other",
+                "returncode": 0,
+                "stderr_bytes": 0,
+                "stdout_bytes": 2,
+            },
         )
 
     @mock.patch.object(providers, "_require_fresh_claude_keychain_credential")
@@ -689,19 +785,31 @@ class ProviderPolicyTest(unittest.TestCase):
         warmup.return_value = Completed(
             argv=("claude",),
             returncode=1,
-            stdout=b"",
-            stderr=b"authentication failed",
+            stdout=json.dumps(
+                {
+                    "type": "result",
+                    "subtype": "success",
+                    "is_error": True,
+                    "result": "Not logged in - Please run /login",
+                }
+            ).encode(),
+            stderr=b"",
         )
 
         with self.assertRaisesRegex(
             providers.ClaudeKeychainCredentialUnavailable,
-            "still stale",
+            "returncode=1, category=auth",
         ):
             self.warm_claude_local_login(
                 self.review,
                 pathlib.Path("/bin/claude"),
                 {},
             )
+        diagnostic = (self.review.container_dir / "claude-auth-warmup.json").read_text(
+            encoding="utf-8"
+        )
+        self.assertEqual(json.loads(diagnostic)["category"], "auth")
+        self.assertNotIn("Not logged in", diagnostic)
 
     @mock.patch.object(
         providers,
@@ -820,6 +928,50 @@ class ProviderPolicyTest(unittest.TestCase):
             providers.classify_failure("", "Authentication failed: invalid token"),
             "auth",
         )
+
+    def test_claude_error_result_can_report_auth_without_error_payload(self) -> None:
+        stdout = json.dumps(
+            {
+                "type": "result",
+                "subtype": "success",
+                "is_error": True,
+                "result": "Not logged in - Please run /login",
+            }
+        )
+
+        self.assertEqual(providers.classify_failure(stdout, ""), "auth")
+
+    def test_claude_partial_error_result_cannot_trigger_model_fallback(self) -> None:
+        stdout = json.dumps(
+            {
+                "type": "result",
+                "subtype": "error_during_execution",
+                "is_error": True,
+                "result": (
+                    "Partial review text says a model is not available for your "
+                    "account and mentions a timeout."
+                ),
+                "modelUsage": {"claude-opus-4-8": {}},
+            }
+        )
+
+        self.assertEqual(providers.classify_failure(stdout, ""), "other")
+
+    def test_claude_partial_error_result_cannot_trigger_auth_block(self) -> None:
+        stdout = json.dumps(
+            {
+                "type": "result",
+                "subtype": "error_during_execution",
+                "is_error": True,
+                "result": (
+                    "Partial findings discuss unauthorized users and invalid token "
+                    "handling."
+                ),
+                "modelUsage": {"claude-opus-4-8": {}},
+            }
+        )
+
+        self.assertEqual(providers.classify_failure(stdout, ""), "other")
 
     def test_auth_wins_over_entitlement_wording(self) -> None:
         self.assertEqual(
@@ -1085,805 +1237,6 @@ class ProviderPolicyTest(unittest.TestCase):
             (result, "claude-opus-4-8"),
         )
 
-    def test_copilot_requires_terminal_message_for_the_ended_turn(self) -> None:
-        stdout = "\n".join(
-            json.dumps(item)
-            for item in (
-                {
-                    "type": "assistant.turn_start",
-                    "data": {"turnId": "turn-1"},
-                },
-                {
-                    "type": "tool.execution_complete",
-                    "data": {
-                        "message": "LGTM",
-                        "model": "claude-opus-4.8",
-                    },
-                },
-                {
-                    "type": "assistant.turn_end",
-                    "data": {"turnId": "turn-1"},
-                },
-            )
-        ).encode()
-
-        self.assertEqual(providers._parse_copilot_output(stdout), (None, None))
-
-    def test_copilot_rejects_non_json_line_before_terminal_events(self) -> None:
-        stdout = (
-            "warning: degraded output\n"
-            + "\n".join(
-                json.dumps(item)
-                for item in (
-                    {
-                        "type": "assistant.turn_start",
-                        "data": {"turnId": "turn-1"},
-                    },
-                    {
-                        "type": "assistant.message",
-                        "data": {
-                            "content": "No findings.",
-                            "model": "claude-opus-4.8",
-                        },
-                    },
-                    {
-                        "type": "assistant.turn_end",
-                        "data": {"turnId": "turn-1"},
-                    },
-                )
-            )
-        ).encode()
-
-        self.assertEqual(providers._parse_copilot_output(stdout), (None, None))
-
-    def test_copilot_error_preserves_mismatched_effective_model(self) -> None:
-        stdout = "\n".join(
-            json.dumps(item)
-            for item in (
-                {
-                    "type": "session.start",
-                    "data": {"selectedModel": "claude-opus-4.7"},
-                },
-                {
-                    "type": "assistant.turn_start",
-                    "data": {"turnId": "turn-1"},
-                },
-                {
-                    "type": "turn.failed",
-                    "error": {"message": "Model is not available for your account"},
-                },
-            )
-        ).encode()
-
-        self.assertEqual(
-            providers._parse_copilot_output(
-                stdout, requested_model="claude-opus-4.8"
-            ),
-            (None, "claude-opus-4.7"),
-        )
-
-    def test_copilot_error_without_turn_is_unverifiable(self) -> None:
-        stdout = "\n".join(
-            json.dumps(item)
-            for item in (
-                {
-                    "type": "session.start",
-                    "data": {"selectedModel": "claude-opus-4.8"},
-                },
-                {
-                    "type": "turn.failed",
-                    "error": {"message": "Model is not available for your account"},
-                },
-            )
-        ).encode()
-
-        self.assertEqual(
-            providers._parse_copilot_output(
-                stdout, requested_model="claude-opus-4.8"
-            ),
-            (None, None),
-        )
-
-    def test_copilot_error_does_not_inherit_previous_session_model(self) -> None:
-        stdout = "\n".join(
-            json.dumps(item)
-            for item in (
-                {
-                    "type": "session.start",
-                    "data": {"selectedModel": "claude-opus-4.8"},
-                },
-                {
-                    "type": "assistant.turn_start",
-                    "data": {"turnId": "turn-1"},
-                },
-                {
-                    "type": "assistant.turn_end",
-                    "data": {"turnId": "turn-1"},
-                },
-                {"type": "session.start", "data": {}},
-                {
-                    "type": "assistant.turn_start",
-                    "data": {"turnId": "turn-2"},
-                },
-                {
-                    "type": "turn.failed",
-                    "error": {"message": "Model is not available for your account"},
-                },
-            )
-        ).encode()
-
-        self.assertEqual(
-            providers._parse_copilot_output(
-                stdout, requested_model="claude-opus-4.8"
-            ),
-            (None, None),
-        )
-
-    def test_copilot_error_rejects_malformed_model_evidence(self) -> None:
-        stdout = "\n".join(
-            json.dumps(item)
-            for item in (
-                {
-                    "type": "session.start",
-                    "data": {"selectedModel": "claude-opus-4.8"},
-                },
-                {
-                    "type": "assistant.message",
-                    "data": {"model": 123},
-                },
-                {
-                    "type": "turn.failed",
-                    "error": {"message": "Model is not available for your account"},
-                },
-            )
-        ).encode()
-
-        self.assertEqual(
-            providers._parse_copilot_output(
-                stdout, requested_model="claude-opus-4.8"
-            ),
-            (None, None),
-        )
-
-    def test_copilot_error_after_completed_turn_is_unverifiable(self) -> None:
-        stdout = "\n".join(
-            json.dumps(item)
-            for item in (
-                {
-                    "type": "session.start",
-                    "data": {"selectedModel": "claude-opus-4.8"},
-                },
-                {
-                    "type": "assistant.turn_start",
-                    "data": {"turnId": "turn-1"},
-                },
-                {
-                    "type": "assistant.message",
-                    "data": {
-                        "content": "No findings.",
-                        "model": "claude-opus-4.8",
-                    },
-                },
-                {
-                    "type": "assistant.turn_end",
-                    "data": {"turnId": "turn-1"},
-                },
-                {
-                    "type": "turn.failed",
-                    "error": {"message": "Model is not available for your account"},
-                },
-            )
-        ).encode()
-
-        self.assertEqual(
-            providers._parse_copilot_output(
-                stdout, requested_model="claude-opus-4.8"
-            ),
-            (None, None),
-        )
-
-    def test_copilot_error_cannot_be_hidden_by_empty_completed_turn(self) -> None:
-        stdout = "\n".join(
-            json.dumps(item)
-            for item in (
-                {
-                    "type": "session.start",
-                    "data": {"selectedModel": "claude-opus-4.8"},
-                },
-                {
-                    "type": "assistant.turn_start",
-                    "data": {"turnId": "turn-1"},
-                },
-                {
-                    "type": "assistant.turn_end",
-                    "data": {"turnId": "turn-1"},
-                },
-                {
-                    "type": "turn.failed",
-                    "error": {"message": "Model is not available for your account"},
-                },
-                {
-                    "type": "assistant.turn_start",
-                    "data": {"turnId": "turn-2"},
-                },
-                {
-                    "type": "assistant.turn_end",
-                    "data": {"turnId": "turn-2"},
-                },
-            )
-        ).encode()
-
-        self.assertEqual(
-            providers._parse_copilot_output(
-                stdout, requested_model="claude-opus-4.8"
-            ),
-            (None, None),
-        )
-
-    def test_copilot_error_in_open_turn_after_completed_turn_keeps_model(self) -> None:
-        stdout = "\n".join(
-            json.dumps(item)
-            for item in (
-                {
-                    "type": "session.start",
-                    "data": {"selectedModel": "claude-opus-4.8"},
-                },
-                {
-                    "type": "assistant.turn_start",
-                    "data": {"turnId": "turn-1"},
-                },
-                {
-                    "type": "assistant.turn_end",
-                    "data": {"turnId": "turn-1"},
-                },
-                {
-                    "type": "assistant.turn_start",
-                    "data": {"turnId": "turn-2"},
-                },
-                {
-                    "type": "turn.failed",
-                    "error": {"message": "Model is not available for your account"},
-                },
-            )
-        ).encode()
-
-        self.assertEqual(
-            providers._parse_copilot_output(
-                stdout, requested_model="claude-opus-4.8"
-            ),
-            (None, "claude-opus-4.8"),
-        )
-
-    def test_copilot_preserves_unicode_separators_at_content_edges(self) -> None:
-        content = "\u2028No findings.\u2029"
-        stdout = "\n".join(
-            json.dumps(item, ensure_ascii=False)
-            for item in (
-                {
-                    "type": "assistant.turn_start",
-                    "data": {"turnId": "turn-1"},
-                },
-                {
-                    "type": "assistant.message",
-                    "data": {
-                        "content": content,
-                        "model": "claude-opus-4.8",
-                    },
-                },
-                {
-                    "type": "assistant.turn_end",
-                    "data": {"turnId": "turn-1"},
-                },
-            )
-        ).encode()
-
-        self.assertEqual(
-            providers._parse_copilot_output(stdout),
-            (content, "claude-opus-4.8"),
-        )
-
-    def test_copilot_rejects_nonstandard_json_constant(self) -> None:
-        stdout = "\n".join(
-            (
-                '{"type":"assistant.turn_start","data":{"turnId":"turn-1"}}',
-                '{"type":"assistant.message","data":{"content":"No findings.",'
-                '"model":"claude-opus-4.8","metric":Infinity}}',
-                '{"type":"assistant.turn_end","data":{"turnId":"turn-1"}}',
-            )
-        ).encode()
-
-        self.assertEqual(providers._parse_copilot_output(stdout), (None, None))
-
-    def test_copilot_rejects_duplicate_json_object_key(self) -> None:
-        stdout = "\n".join(
-            (
-                '{"type":"assistant.turn_start","data":{"turnId":"turn-1"}}',
-                '{"type":"assistant.message","data":{"content":"No findings.",'
-                '"model":"claude-opus-4.7","model":"claude-opus-4.8"}}',
-                '{"type":"assistant.turn_end","data":{"turnId":"turn-1"}}',
-            )
-        ).encode()
-
-        self.assertEqual(providers._parse_copilot_output(stdout), (None, None))
-
-    def test_copilot_rejects_unicode_separator_only_record(self) -> None:
-        stdout = (
-            "\u2028\n"
-            + "\n".join(
-                json.dumps(item)
-                for item in (
-                    {
-                        "type": "assistant.turn_start",
-                        "data": {"turnId": "turn-1"},
-                    },
-                    {
-                        "type": "assistant.message",
-                        "data": {
-                            "content": "No findings.",
-                            "model": "claude-opus-4.8",
-                        },
-                    },
-                    {
-                        "type": "assistant.turn_end",
-                        "data": {"turnId": "turn-1"},
-                    },
-                )
-            )
-        ).encode()
-
-        self.assertEqual(providers._parse_copilot_output(stdout), (None, None))
-
-    def test_copilot_rejects_nested_or_interleaved_turn_boundaries(self) -> None:
-        stdout = "\n".join(
-            json.dumps(item)
-            for item in (
-                {
-                    "type": "assistant.turn_start",
-                    "data": {"turnId": "turn-a"},
-                },
-                {
-                    "type": "assistant.turn_start",
-                    "data": {"turnId": "turn-b"},
-                },
-                {
-                    "type": "assistant.message",
-                    "data": {
-                        "content": "No findings.",
-                        "model": "claude-opus-4.8",
-                    },
-                },
-                {
-                    "type": "assistant.turn_end",
-                    "data": {"turnId": "turn-b"},
-                },
-                {
-                    "type": "assistant.turn_end",
-                    "data": {"turnId": "turn-a"},
-                },
-            )
-        ).encode()
-
-        self.assertEqual(providers._parse_copilot_output(stdout), (None, None))
-
-    def test_copilot_rejects_unclosed_outer_turn_before_completed_inner(self) -> None:
-        stdout = "\n".join(
-            json.dumps(item)
-            for item in (
-                {
-                    "type": "assistant.turn_start",
-                    "data": {"turnId": "turn-a"},
-                },
-                {
-                    "type": "assistant.turn_start",
-                    "data": {"turnId": "turn-b"},
-                },
-                {
-                    "type": "assistant.message",
-                    "data": {
-                        "content": "No findings.",
-                        "model": "claude-opus-4.8",
-                    },
-                },
-                {
-                    "type": "assistant.turn_end",
-                    "data": {"turnId": "turn-b"},
-                },
-            )
-        ).encode()
-
-        self.assertEqual(providers._parse_copilot_output(stdout), (None, None))
-
-    def test_copilot_rejects_malformed_later_top_level_message(self) -> None:
-        stdout = "\n".join(
-            json.dumps(item)
-            for item in (
-                {
-                    "type": "assistant.turn_start",
-                    "data": {"turnId": "turn-1"},
-                },
-                {
-                    "type": "assistant.message",
-                    "data": {
-                        "content": "stale findings",
-                        "model": "claude-opus-4.8",
-                    },
-                },
-                {"type": "assistant.message", "data": None},
-                {
-                    "type": "assistant.turn_end",
-                    "data": {"turnId": "turn-1"},
-                },
-            )
-        ).encode()
-
-        self.assertEqual(providers._parse_copilot_output(stdout), (None, None))
-
-    def test_copilot_rejects_malformed_terminal_usage_event(self) -> None:
-        stdout = "\n".join(
-            json.dumps(item)
-            for item in (
-                {
-                    "type": "assistant.turn_start",
-                    "data": {"turnId": "turn-1"},
-                },
-                {
-                    "type": "assistant.message",
-                    "data": {
-                        "content": "No findings.",
-                        "model": "claude-opus-4.8",
-                    },
-                },
-                {"type": "assistant.usage", "data": {"model": None}},
-                {
-                    "type": "assistant.turn_end",
-                    "data": {"turnId": "turn-1"},
-                },
-            )
-        ).encode()
-
-        self.assertEqual(providers._parse_copilot_output(stdout), (None, None))
-
-    def test_copilot_accepts_only_tool_free_message_for_ended_turn(self) -> None:
-        stdout = "\n".join(
-            json.dumps(item)
-            for item in (
-                {
-                    "type": "assistant.turn_start",
-                    "data": {"turnId": "turn-1"},
-                },
-                {
-                    "type": "assistant.message",
-                    "data": {
-                        "content": "intermediate LGTM",
-                        "toolRequests": [{"name": "view"}],
-                    },
-                },
-                {
-                    "type": "assistant.message",
-                    "data": {
-                        "content": "No findings.",
-                    },
-                },
-                {
-                    "type": "assistant.usage",
-                    "data": {"model": "claude-opus-4.8"},
-                },
-                {
-                    "type": "assistant.turn_end",
-                    "data": {"turnId": "turn-1"},
-                },
-            )
-        ).encode()
-
-        self.assertEqual(
-            providers._parse_copilot_output(stdout),
-            ("No findings.", "claude-opus-4.8"),
-        )
-
-    def test_copilot_does_not_fall_back_past_terminal_tool_request(self) -> None:
-        stdout = "\n".join(
-            json.dumps(item)
-            for item in (
-                {
-                    "type": "assistant.turn_start",
-                    "data": {"turnId": "turn-1"},
-                },
-                {
-                    "type": "assistant.message",
-                    "data": {
-                        "content": "premature LGTM",
-                    },
-                },
-                {
-                    "type": "assistant.message",
-                    "data": {
-                        "content": "checking one more file",
-                        "toolRequests": [{"name": "view"}],
-                    },
-                },
-                {
-                    "type": "assistant.turn_end",
-                    "data": {"turnId": "turn-1"},
-                },
-            )
-        ).encode()
-
-        self.assertEqual(providers._parse_copilot_output(stdout), (None, None))
-
-    def test_copilot_accepts_current_cli_model_extension(self) -> None:
-        stdout = "\n".join(
-            json.dumps(item)
-            for item in (
-                {
-                    "type": "session.start",
-                    "data": {"selectedModel": "claude-opus-4.8"},
-                },
-                {
-                    "type": "assistant.turn_start",
-                    "data": {"turnId": "turn-1"},
-                },
-                {
-                    "type": "assistant.message",
-                    "data": {
-                        "messageId": "message-1",
-                        "content": "No findings.",
-                        "model": "claude-opus-4.8",
-                        "toolRequests": [],
-                    },
-                },
-                {
-                    "type": "assistant.turn_end",
-                    "data": {"turnId": "turn-1"},
-                },
-            )
-        ).encode()
-
-        self.assertEqual(
-            providers._parse_copilot_output(stdout),
-            ("No findings.", "claude-opus-4.8"),
-        )
-
-    def test_copilot_success_does_not_inherit_previous_session_model(self) -> None:
-        stdout = "\n".join(
-            json.dumps(item)
-            for item in (
-                {
-                    "type": "session.start",
-                    "data": {"selectedModel": "claude-opus-4.8"},
-                },
-                {
-                    "type": "assistant.turn_start",
-                    "data": {"turnId": "turn-1"},
-                },
-                {
-                    "type": "assistant.turn_end",
-                    "data": {"turnId": "turn-1"},
-                },
-                {"type": "session.start", "data": {}},
-                {
-                    "type": "assistant.turn_start",
-                    "data": {"turnId": "turn-2"},
-                },
-                {
-                    "type": "assistant.message",
-                    "data": {"content": "No findings.", "toolRequests": []},
-                },
-                {
-                    "type": "assistant.turn_end",
-                    "data": {"turnId": "turn-2"},
-                },
-            )
-        ).encode()
-
-        self.assertEqual(providers._parse_copilot_output(stdout), (None, None))
-
-    def test_copilot_streams_complete_jsonl_larger_than_memory_capture(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            stdout_path = pathlib.Path(temporary) / "copilot.stdout.log"
-            progress = json.dumps(
-                {"type": "progress", "data": {"padding": "x" * 4096}}
-            )
-            with stdout_path.open("w", encoding="utf-8") as handle:
-                while handle.tell() <= 4 * 1024 * 1024:
-                    handle.write(progress + "\n")
-                for item in (
-                    {
-                        "type": "session.start",
-                        "data": {"selectedModel": "claude-opus-4.8"},
-                    },
-                    {
-                        "type": "assistant.turn_start",
-                        "data": {"turnId": "turn-1"},
-                    },
-                    {
-                        "type": "assistant.message",
-                        "data": {
-                            "content": "No findings.",
-                            "model": "claude-opus-4.8",
-                        },
-                    },
-                    {
-                        "type": "assistant.turn_end",
-                        "data": {"turnId": "turn-1"},
-                    },
-                ):
-                    handle.write(json.dumps(item) + "\n")
-
-            result = providers._parse_copilot_output_file(stdout_path)
-
-        self.assertEqual(result, ("No findings.", "claude-opus-4.8"))
-
-    def test_copilot_rejects_malformed_terminal_message_model(self) -> None:
-        stdout = "\n".join(
-            json.dumps(item)
-            for item in (
-                {
-                    "type": "session.start",
-                    "data": {"selectedModel": "claude-opus-4.8"},
-                },
-                {
-                    "type": "assistant.turn_start",
-                    "data": {"turnId": "turn-1"},
-                },
-                {
-                    "type": "assistant.message",
-                    "data": {
-                        "content": "No findings.",
-                        "model": 123,
-                    },
-                },
-                {
-                    "type": "assistant.turn_end",
-                    "data": {"turnId": "turn-1"},
-                },
-            )
-        ).encode()
-
-        self.assertEqual(providers._parse_copilot_output(stdout), (None, None))
-
-    def test_copilot_rejects_conflicting_session_model(self) -> None:
-        stdout = "\n".join(
-            json.dumps(item)
-            for item in (
-                {
-                    "type": "session.start",
-                    "data": {"selectedModel": "claude-opus-4.7"},
-                },
-                {
-                    "type": "assistant.turn_start",
-                    "data": {"turnId": "turn-1"},
-                },
-                {
-                    "type": "assistant.message",
-                    "data": {
-                        "content": "No findings.",
-                        "model": "claude-opus-4.8",
-                    },
-                },
-                {
-                    "type": "assistant.turn_end",
-                    "data": {"turnId": "turn-1"},
-                },
-            )
-        ).encode()
-
-        self.assertEqual(providers._parse_copilot_output(stdout), (None, None))
-
-    def test_copilot_rejects_conflicting_usage_before_terminal_message(self) -> None:
-        stdout = "\n".join(
-            json.dumps(item)
-            for item in (
-                {
-                    "type": "assistant.turn_start",
-                    "data": {"turnId": "turn-1"},
-                },
-                {
-                    "type": "assistant.usage",
-                    "data": {"model": "claude-opus-4.7"},
-                },
-                {
-                    "type": "assistant.message",
-                    "data": {
-                        "content": "No findings.",
-                        "model": "claude-opus-4.8",
-                    },
-                },
-                {
-                    "type": "assistant.turn_end",
-                    "data": {"turnId": "turn-1"},
-                },
-            )
-        ).encode()
-
-        self.assertEqual(providers._parse_copilot_output(stdout), (None, None))
-
-    def test_copilot_rejects_conflicting_earlier_message_model(self) -> None:
-        stdout = "\n".join(
-            json.dumps(item)
-            for item in (
-                {
-                    "type": "assistant.turn_start",
-                    "data": {"turnId": "turn-1"},
-                },
-                {
-                    "type": "assistant.message",
-                    "data": {
-                        "content": "draft",
-                        "model": "claude-opus-4.7",
-                    },
-                },
-                {
-                    "type": "assistant.message",
-                    "data": {
-                        "content": "No findings.",
-                        "model": "claude-opus-4.8",
-                    },
-                },
-                {
-                    "type": "assistant.turn_end",
-                    "data": {"turnId": "turn-1"},
-                },
-            )
-        ).encode()
-
-        self.assertEqual(providers._parse_copilot_output(stdout), (None, None))
-
-    def test_copilot_rejects_conflicting_terminal_usage_model(self) -> None:
-        stdout = "\n".join(
-            json.dumps(item)
-            for item in (
-                {
-                    "type": "assistant.turn_start",
-                    "data": {"turnId": "turn-1"},
-                },
-                {
-                    "type": "assistant.message",
-                    "data": {
-                        "content": "No findings.",
-                        "model": "claude-opus-4.8",
-                    },
-                },
-                {
-                    "type": "assistant.usage",
-                    "data": {"model": "claude-opus-4.7"},
-                },
-                {
-                    "type": "assistant.turn_end",
-                    "data": {"turnId": "turn-1"},
-                },
-            )
-        ).encode()
-
-        self.assertEqual(providers._parse_copilot_output(stdout), (None, None))
-
-    def test_copilot_rejects_usage_after_turn_end(self) -> None:
-        stdout = "\n".join(
-            json.dumps(item)
-            for item in (
-                {
-                    "type": "assistant.turn_start",
-                    "data": {"turnId": "turn-1"},
-                },
-                {
-                    "type": "assistant.message",
-                    "data": {
-                        "content": "No findings.",
-                        "model": "claude-opus-4.8",
-                    },
-                },
-                {
-                    "type": "assistant.turn_end",
-                    "data": {"turnId": "turn-1"},
-                },
-                {
-                    "type": "assistant.usage",
-                    "data": {"model": "claude-opus-4.7"},
-                },
-            )
-        ).encode()
-
-        self.assertEqual(providers._parse_copilot_output(stdout), (None, None))
-
     @mock.patch.object(providers, "child_environment", return_value={})
     @mock.patch.object(providers, "_codex_attempt")
     def test_codex_falls_back_from_56_to_55_only_on_entitlement(
@@ -1978,6 +1331,18 @@ class ProviderPolicyTest(unittest.TestCase):
             final_text + "\n",
         )
 
+    def test_finish_marks_missing_unclassified_artifact_inconclusive(self) -> None:
+        attempt = self.attempt(
+            "claude",
+            providers.CLAUDE_MODELS[0],
+            "other",
+        )
+
+        outcome = providers._finish(self.review, [attempt], None)
+
+        self.assertEqual(outcome.returncode, 75)
+        self.assertIsNone(outcome.final_text)
+
     @mock.patch.object(providers, "child_environment", return_value={})
     @mock.patch.object(providers, "_codex_attempt")
     def test_codex_capacity_does_not_downgrade(
@@ -2020,812 +1385,183 @@ class ProviderPolicyTest(unittest.TestCase):
             ),
         )
 
-    @mock.patch.object(
-        providers,
-        "child_environment",
-        return_value={"ANTHROPIC_API_KEY": "secret"},
-    )
-    @mock.patch.object(
-        providers, "resolve_reviewer_executable", return_value=pathlib.Path("/bin/true")
-    )
-    @mock.patch.object(providers, "_copilot_attempt")
-    @mock.patch.object(providers, "_claude_attempt")
-    def test_claude_family_order_is_opus_4_8_then_4_7_on_both_runtimes(
-        self,
-        claude_attempt: mock.Mock,
-        copilot_attempt: mock.Mock,
-        _resolve: mock.Mock,
-        _environment: mock.Mock,
-    ) -> None:
-        claude_attempt.side_effect = tuple(
+    def test_missing_native_claude_runtime_stops_the_lane(self) -> None:
+        with (
+            mock.patch.object(
+                providers,
+                "child_environment",
+                return_value={"ANTHROPIC_API_KEY": "fixture-key"},
+            ),
+            mock.patch.object(
+                providers,
+                "_resolve_validated_claude_executable",
+                side_effect=providers.ClaudeExecutableUnavailable(
+                    "native runtime unavailable"
+                ),
+            ),
+            mock.patch.object(providers, "_claude_attempt") as claude_attempt,
+        ):
+            outcome = providers.run_review(
+                review=self.review,
+                reviewer="claude",
+                egress_consent="explicit-claude-review",
+            )
+
+        self.assertEqual(outcome.returncode, 2)
+        self.assertEqual(outcome.attempts, ())
+        claude_attempt.assert_not_called()
+        self.assertIn(
+            "no alternate provider is configured",
+            (self.review.container_dir / "runner-error.txt").read_text(
+                encoding="utf-8"
+            ),
+        )
+
+    def test_native_claude_auth_failure_does_not_change_provider(self) -> None:
+        claude_env = {"ANTHROPIC_API_KEY": "fixture-key"}
+        with (
+            mock.patch.object(
+                providers,
+                "child_environment",
+                return_value=claude_env,
+            ),
+            mock.patch.object(
+                providers,
+                "_resolve_validated_claude_executable",
+                return_value=(pathlib.Path("/fixture/claude"), claude_env),
+            ),
+            mock.patch.object(
+                providers,
+                "_with_claude_review_tool_path",
+                return_value=claude_env,
+            ),
+            mock.patch.object(
+                providers,
+                "_prepare_claude_tls_environment",
+                return_value=claude_env,
+            ),
+            mock.patch.object(
+                providers,
+                "_claude_attempt",
+                return_value=self.attempt(
+                    "claude",
+                    providers.CLAUDE_MODELS[0],
+                    "auth",
+                ),
+            ) as claude_attempt,
+        ):
+            outcome = providers.run_review(
+                review=self.review,
+                reviewer="claude",
+                egress_consent="explicit-claude-review",
+            )
+
+        self.assertEqual(outcome.returncode, 1)
+        self.assertEqual(len(outcome.attempts), 1)
+        self.assertEqual(outcome.attempts[0].runtime, "claude")
+        claude_attempt.assert_called_once()
+        self.assertIn(
+            "blocked (auth); no alternate provider is configured",
+            (self.review.container_dir / "runner-error.txt").read_text(
+                encoding="utf-8"
+            ),
+        )
+
+    def test_native_claude_entitlement_exhaustion_stops_the_lane(self) -> None:
+        claude_env = {"ANTHROPIC_API_KEY": "fixture-key"}
+        attempts = tuple(
             self.attempt("claude", model, "entitlement")
             for model in providers.CLAUDE_MODELS
         )
-        copilot_attempt.side_effect = tuple(
-            self.attempt("copilot", model, "entitlement")
-            for model in providers.COPILOT_MODELS[:-1]
-        ) + (
-            self.attempt(
-                "copilot",
-                providers.COPILOT_MODELS[-1],
-                "success",
-                final_text="No findings.",
+        with (
+            mock.patch.object(
+                providers,
+                "child_environment",
+                return_value=claude_env,
             ),
-        )
-        outcome = providers.run_review(
-            review=self.review,
-            reviewer="claude",
-            egress_consent="double-review",
-        )
-        self.assertEqual(outcome.returncode, 0)
-        self.assertEqual(
-            [(item.runtime, item.requested_model) for item in outcome.attempts],
-            [
-                ("claude", "claude-opus-4-8"),
-                ("claude", "claude-opus-4-7"),
-                ("copilot", "claude-opus-4.8"),
-                ("copilot", "claude-opus-4.7"),
-            ],
-        )
-        self.assertEqual(
-            [call.kwargs["passthrough_keys"] for call in _environment.call_args_list],
-            [providers.CLAUDE_ENV_KEYS, providers.COPILOT_ENV_KEYS],
-        )
-
-    @mock.patch.object(
-        providers,
-        "child_environment",
-        return_value={"HOME": "/Users/reviewer"},
-    )
-    @mock.patch.object(
-        providers,
-        "resolve_reviewer_executable",
-        return_value=pathlib.Path("/bin/claude"),
-    )
-    @mock.patch.object(providers, "_copilot_attempt")
-    @mock.patch.object(providers, "_claude_attempt")
-    def test_claude_local_login_is_default_without_api_key(
-        self,
-        claude_attempt: mock.Mock,
-        copilot_attempt: mock.Mock,
-        _resolve: mock.Mock,
-        _environment: mock.Mock,
-    ) -> None:
-        claude_attempt.return_value = self.attempt(
-            "claude",
-            providers.CLAUDE_MODELS[0],
-            "success",
-            final_text="No findings.",
-        )
-
-        outcome = providers.run_review(
-            review=self.review,
-            reviewer="claude",
-            egress_consent="double-review",
-        )
-
-        self.assertEqual(outcome.returncode, 0)
-        claude_attempt.assert_called_once()
-        self.assertEqual(
-            claude_attempt.call_args.kwargs["env"]["HOME"],
-            str(self.review.container_dir / "claude-home"),
-        )
-        self.assertNotIn(
-            "ANTHROPIC_API_KEY",
-            claude_attempt.call_args.kwargs["env"],
-        )
-        copilot_attempt.assert_not_called()
-
-    @mock.patch.object(providers, "child_environment", return_value={})
-    @mock.patch.object(
-        providers,
-        "_resolve_validated_claude_executable",
-        return_value=(None, {}),
-    )
-    @mock.patch.object(
-        providers,
-        "resolve_reviewer_executable",
-        return_value=pathlib.Path("/bin/copilot"),
-    )
-    @mock.patch.object(
-        providers,
-        "_copilot_attempt",
-        side_effect=providers.ReviewOutputLimitError("review output exceeded limit"),
-    )
-    def test_copilot_attempt_output_limit_is_inconclusive(
-        self,
-        copilot_attempt: mock.Mock,
-        _resolve: mock.Mock,
-        _resolve_claude: mock.Mock,
-        _environment: mock.Mock,
-    ) -> None:
-        outcome = providers.run_review(
-            review=self.review,
-            reviewer="claude",
-            egress_consent="double-review",
-        )
-
-        self.assertEqual(outcome.returncode, 75)
-        copilot_attempt.assert_called_once()
-        self.assertEqual(len(outcome.attempts), 1)
-        self.assertEqual(outcome.attempts[0].runtime, "copilot")
-        self.assertEqual(
-            outcome.attempts[0].requested_model,
-            providers.COPILOT_MODELS[0],
-        )
-        self.assertEqual(outcome.attempts[0].category, "inconclusive")
-        self.assertTrue(pathlib.Path(outcome.attempts[0].stderr_path).is_file())
-        self.assertIn(
-            "inconclusive",
-            (self.review.container_dir / "runner-error.txt").read_text(
-                encoding="utf-8"
+            mock.patch.object(
+                providers,
+                "_resolve_validated_claude_executable",
+                return_value=(pathlib.Path("/fixture/claude"), claude_env),
             ),
-        )
+            mock.patch.object(
+                providers,
+                "_with_claude_review_tool_path",
+                return_value=claude_env,
+            ),
+            mock.patch.object(
+                providers,
+                "_prepare_claude_tls_environment",
+                return_value=claude_env,
+            ),
+            mock.patch.object(
+                providers,
+                "_claude_attempt",
+                side_effect=attempts,
+            ) as claude_attempt,
+        ):
+            outcome = providers.run_review(
+                review=self.review,
+                reviewer="claude",
+                egress_consent="double-review",
+            )
 
-    @mock.patch.object(
-        providers,
-        "child_environment",
-        return_value={"ANTHROPIC_API_KEY": "secret"},
-    )
-    @mock.patch.object(
-        providers, "resolve_reviewer_executable", return_value=pathlib.Path("/bin/true")
-    )
-    @mock.patch.object(providers, "_copilot_attempt")
-    @mock.patch.object(providers, "_claude_attempt")
-    def test_claude_capacity_does_not_switch_model_or_backend(
-        self,
-        claude_attempt: mock.Mock,
-        copilot_attempt: mock.Mock,
-        _resolve: mock.Mock,
-        _environment: mock.Mock,
-    ) -> None:
-        claude_attempt.return_value = self.attempt(
-            "claude", providers.CLAUDE_MODELS[0], "transient"
-        )
-        outcome = providers.run_review(
-            review=self.review,
-            reviewer="claude",
-            egress_consent="triple-review",
-        )
-        self.assertEqual(outcome.returncode, 75)
-        self.assertEqual(claude_attempt.call_count, 1)
-        copilot_attempt.assert_not_called()
-
-    @mock.patch.object(
-        providers,
-        "child_environment",
-        return_value={"ANTHROPIC_API_KEY": "secret"},
-    )
-    @mock.patch.object(
-        providers, "resolve_reviewer_executable", return_value=pathlib.Path("/bin/true")
-    )
-    @mock.patch.object(providers, "_copilot_attempt")
-    @mock.patch.object(providers, "_claude_attempt")
-    def test_model_mismatch_does_not_switch_model_or_backend(
-        self,
-        claude_attempt: mock.Mock,
-        copilot_attempt: mock.Mock,
-        _resolve: mock.Mock,
-        _environment: mock.Mock,
-    ) -> None:
-        claude_attempt.return_value = self.attempt(
-            "claude",
-            "claude-opus-4-8",
-            "model-mismatch",
-        )
-        outcome = providers.run_review(
-            review=self.review,
-            reviewer="claude",
-            egress_consent="double-review",
-        )
         self.assertEqual(outcome.returncode, 1)
-        self.assertEqual(claude_attempt.call_count, 1)
-        copilot_attempt.assert_not_called()
-
-    @mock.patch.object(providers, "_copilot_attempt")
-    @mock.patch.object(
-        providers,
-        "resolve_reviewer_executable",
-        side_effect=ReviewError("Claude Code --version timed out"),
-    )
-    def test_claude_cli_validation_failure_refuses_copilot_fallback(
-        self,
-        _resolve: mock.Mock,
-        copilot_attempt: mock.Mock,
-    ) -> None:
-        outcome = providers.run_review(
-            review=self.review,
-            reviewer="claude",
-            egress_consent="double-review",
+        self.assertEqual(
+            [attempt.requested_model for attempt in outcome.attempts],
+            list(providers.CLAUDE_MODELS),
         )
-        self.assertEqual(outcome.returncode, 2)
-        copilot_attempt.assert_not_called()
+        self.assertEqual(
+            [call.kwargs["model"] for call in claude_attempt.call_args_list],
+            list(providers.CLAUDE_MODELS),
+        )
         self.assertIn(
-            "refusing Copilot fallback",
+            "blocked (entitlement); no alternate provider is configured",
             (self.review.container_dir / "runner-error.txt").read_text(
                 encoding="utf-8"
             ),
         )
 
-    @mock.patch.object(providers, "child_environment", return_value={})
-    @mock.patch.object(providers, "_copilot_attempt")
-    @mock.patch.object(
-        providers,
-        "resolve_reviewer_executable",
-        side_effect=providers.ClaudeExecutableInspectionInconclusive(
-            "Claude executable disappeared during inspection"
-        ),
-    )
-    def test_claude_inspection_race_refuses_copilot_fallback(
+    def test_claude_environment_excludes_github_credentials_and_legacy_path(
         self,
-        _resolve: mock.Mock,
-        copilot_attempt: mock.Mock,
-        _environment: mock.Mock,
     ) -> None:
-        outcome = providers.run_review(
-            review=self.review,
-            reviewer="claude",
-            egress_consent="double-review",
-        )
+        legacy_token = "COPI" + "LOT_GITHUB_TOKEN"
+        legacy_path = "CODEX_REVIEW_COPI" + "LOT_PATH"
+        host_values = {
+            "ANTHROPIC_API_KEY": "anthropic-fixture",
+            "GH_TOKEN": "github-fixture",
+            "GITHUB_TOKEN": "github-fixture",
+            legacy_token: "legacy-fixture",
+            legacy_path: "/tmp/legacy-provider",
+        }
+        with mock.patch.dict(os.environ, host_values, clear=True):
+            env = providers._review_environment(
+                review=self.review,
+                passthrough_keys=providers.CLAUDE_ENV_KEYS,
+            )
 
-        self.assertEqual(outcome.returncode, 75)
-        copilot_attempt.assert_not_called()
-        self.assertIn(
-            "inconclusive",
-            (self.review.container_dir / "runner-error.txt").read_text(
-                encoding="utf-8"
-            ),
-        )
+        self.assertEqual(env["ANTHROPIC_API_KEY"], "anthropic-fixture")
+        for key in ("GH_TOKEN", "GITHUB_TOKEN", legacy_token, legacy_path):
+            self.assertNotIn(key, env)
 
-    @mock.patch.object(
-        providers,
-        "child_environment",
-        return_value={"ANTHROPIC_API_KEY": "secret"},
-    )
-    @mock.patch.object(
-        providers,
-        "resolve_reviewer_executable",
-        side_effect=(pathlib.Path("/bin/claude"), pathlib.Path("/bin/copilot")),
-    )
-    @mock.patch.object(providers, "_copilot_attempt")
-    @mock.patch.object(providers, "_claude_attempt")
-    def test_claude_disappearance_is_inconclusive_not_fallback(
+    def test_trust_policy_preflight_propagates_deny_and_cleans_material(
         self,
-        claude_attempt: mock.Mock,
-        copilot_attempt: mock.Mock,
-        resolve: mock.Mock,
-        _environment: mock.Mock,
     ) -> None:
-        claude_attempt.side_effect = FileNotFoundError("claude disappeared")
-        outcome = providers.run_review(
-            review=self.review,
-            reviewer="claude",
-            egress_consent="double-review",
-        )
+        error = providers.ClaudeTrustSettingsDeny("explicit deny fixture")
+        with mock.patch.object(
+            providers,
+            "_read_claude_trust_certificates",
+            side_effect=error,
+        ) as read_trust:
+            with self.assertRaises(providers.ClaudeTrustSettingsDeny) as raised:
+                self.preflight_claude_trust_policy(self.review)
 
-        self.assertEqual(outcome.returncode, 75)
-        claude_attempt.assert_called_once()
-        copilot_attempt.assert_not_called()
-        self.assertEqual(resolve.call_count, 1)
-        self.assertIn(
-            "inconclusive",
-            (self.review.container_dir / "runner-error.txt").read_text(
-                encoding="utf-8"
-            ),
-        )
-
-    @mock.patch.object(providers, "child_environment", return_value={})
-    @mock.patch.object(
-        providers,
-        "_resolve_validated_claude_executable",
-        side_effect=providers.ClaudeProbeSandboxUnavailable("sandbox unavailable"),
-    )
-    @mock.patch.object(
-        providers,
-        "resolve_reviewer_executable",
-        return_value=pathlib.Path("/bin/copilot"),
-    )
-    @mock.patch.object(providers, "_copilot_attempt")
-    def test_missing_claude_probe_sandbox_allows_authorized_copilot_fallback(
-        self,
-        copilot_attempt: mock.Mock,
-        resolve: mock.Mock,
-        _resolve_claude: mock.Mock,
-        _environment: mock.Mock,
-    ) -> None:
-        copilot_attempt.return_value = self.attempt(
-            "copilot",
-            providers.COPILOT_MODELS[0],
-            "success",
-            final_text="No findings.",
-        )
-
-        outcome = providers.run_review(
-            review=self.review,
-            reviewer="claude",
-            egress_consent="triple-review",
-        )
-
-        self.assertEqual(outcome.returncode, 0)
-        copilot_attempt.assert_called_once()
-        resolve.assert_called_once_with("copilot")
-        self.assertIn(
-            "secure runtime is unavailable",
-            (self.review.container_dir / "claude-skip.txt").read_text(
-                encoding="utf-8"
-            ),
-        )
-
-    @mock.patch.object(providers, "child_environment", return_value={})
-    @mock.patch.object(
-        providers,
-        "_resolve_validated_claude_executable",
-        side_effect=providers.ClaudeExecutableUnavailable("only wrapper found"),
-    )
-    @mock.patch.object(
-        providers,
-        "resolve_reviewer_executable",
-        return_value=pathlib.Path("/bin/copilot"),
-    )
-    @mock.patch.object(providers, "_copilot_attempt")
-    def test_automatic_non_native_claude_allows_authorized_copilot_fallback(
-        self,
-        copilot_attempt: mock.Mock,
-        resolve: mock.Mock,
-        _resolve_claude: mock.Mock,
-        _environment: mock.Mock,
-    ) -> None:
-        copilot_attempt.return_value = self.attempt(
-            "copilot",
-            providers.COPILOT_MODELS[0],
-            "success",
-            final_text="No findings.",
-        )
-
-        outcome = providers.run_review(
-            review=self.review,
-            reviewer="claude",
-            egress_consent="double-review",
-        )
-
-        self.assertEqual(outcome.returncode, 0)
-        copilot_attempt.assert_called_once()
-        resolve.assert_called_once_with("copilot")
-        self.assertIn(
-            "only wrapper found",
-            (self.review.container_dir / "claude-skip.txt").read_text(
-                encoding="utf-8"
-            ),
-        )
-
-    @mock.patch.object(providers, "child_environment", return_value={})
-    @mock.patch.object(
-        providers,
-        "_resolve_validated_claude_executable",
-        return_value=(pathlib.Path("/bin/claude"), {}),
-    )
-    @mock.patch.object(
-        providers,
-        "resolve_reviewer_executable",
-        return_value=pathlib.Path("/bin/copilot"),
-    )
-    @mock.patch.object(providers, "_copilot_attempt")
-    def test_stale_claude_credential_allows_authorized_copilot_fallback(
-        self,
-        copilot_attempt: mock.Mock,
-        resolve: mock.Mock,
-        _resolve_claude: mock.Mock,
-        _environment: mock.Mock,
-    ) -> None:
-        self.warmup.side_effect = (
-            providers.ClaudeKeychainCredentialUnavailable("credential remains stale")
-        )
-        copilot_attempt.return_value = self.attempt(
-            "copilot",
-            providers.COPILOT_MODELS[0],
-            "success",
-            final_text="No findings.",
-        )
-
-        outcome = providers.run_review(
-            review=self.review,
-            reviewer="claude",
-            egress_consent="double-review",
-        )
-
-        self.assertEqual(outcome.returncode, 0)
-        copilot_attempt.assert_called_once()
-        resolve.assert_called_once_with("copilot")
-        self.assertIn(
-            "credential remains stale",
-            (self.review.container_dir / "claude-skip.txt").read_text(
-                encoding="utf-8"
-            ),
-        )
-
-    @mock.patch.object(providers, "child_environment", return_value={})
-    @mock.patch.object(
-        providers,
-        "_resolve_validated_claude_executable",
-        return_value=(pathlib.Path("/bin/claude"), {}),
-    )
-    @mock.patch.object(
-        providers,
-        "resolve_reviewer_executable",
-        return_value=pathlib.Path("/bin/copilot"),
-    )
-    @mock.patch.object(providers, "_copilot_attempt")
-    def test_transient_claude_warmup_failure_refuses_copilot_fallback(
-        self,
-        copilot_attempt: mock.Mock,
-        resolve: mock.Mock,
-        _resolve_claude: mock.Mock,
-        _environment: mock.Mock,
-    ) -> None:
-        self.warmup.side_effect = providers.ClaudeAuthWarmupInconclusive(
-            "transient refresh failure"
-        )
-
-        outcome = providers.run_review(
-            review=self.review,
-            reviewer="claude",
-            egress_consent="double-review",
-        )
-
-        self.assertEqual(outcome.returncode, 75)
-        copilot_attempt.assert_not_called()
-        resolve.assert_not_called()
-        self.assertIn(
-            "transient refresh failure",
-            (self.review.container_dir / "runner-error.txt").read_text(
-                encoding="utf-8"
-            ),
-        )
-
-    @mock.patch.object(providers, "child_environment", return_value={})
-    @mock.patch.object(
-        providers,
-        "_resolve_validated_claude_executable",
-        return_value=(pathlib.Path("/bin/claude"), {}),
-    )
-    @mock.patch.object(
-        providers,
-        "_with_claude_review_tool_path",
-        side_effect=providers.ClaudeReviewToolUnavailable("trusted rg unavailable"),
-    )
-    @mock.patch.object(
-        providers,
-        "resolve_reviewer_executable",
-        return_value=pathlib.Path("/bin/copilot"),
-    )
-    @mock.patch.object(providers, "_copilot_attempt")
-    def test_missing_trusted_rg_allows_authorized_copilot_fallback(
-        self,
-        copilot_attempt: mock.Mock,
-        resolve: mock.Mock,
-        _tools: mock.Mock,
-        _resolve_claude: mock.Mock,
-        _environment: mock.Mock,
-    ) -> None:
-        copilot_attempt.return_value = self.attempt(
-            "copilot",
-            providers.COPILOT_MODELS[0],
-            "success",
-            final_text="No findings.",
-        )
-
-        outcome = providers.run_review(
-            review=self.review,
-            reviewer="claude",
-            egress_consent="triple-review",
-        )
-
-        self.assertEqual(outcome.returncode, 0)
-        copilot_attempt.assert_called_once()
-        resolve.assert_called_once_with("copilot")
-        self.assertIn(
-            "trusted rg unavailable",
-            (self.review.container_dir / "claude-skip.txt").read_text(
-                encoding="utf-8"
-            ),
-        )
-
-    @mock.patch.object(providers, "child_environment", return_value={})
-    @mock.patch.object(
-        providers,
-        "_resolve_validated_claude_executable",
-        return_value=(pathlib.Path("/bin/claude"), {}),
-    )
-    @mock.patch.object(
-        providers,
-        "_with_claude_review_tool_path",
-        return_value={},
-    )
-    @mock.patch.object(
-        providers,
-        "resolve_reviewer_executable",
-        return_value=pathlib.Path("/bin/copilot"),
-    )
-    @mock.patch.object(providers, "_copilot_attempt")
-    @mock.patch.object(
-        providers,
-        "_claude_attempt",
-        side_effect=providers.ClaudeLoopbackUnavailable("loopback bind failed"),
-    )
-    def test_loopback_unavailable_allows_authorized_copilot_fallback(
-        self,
-        claude_attempt: mock.Mock,
-        copilot_attempt: mock.Mock,
-        resolve: mock.Mock,
-        _tools: mock.Mock,
-        _resolve_claude: mock.Mock,
-        _environment: mock.Mock,
-    ) -> None:
-        copilot_attempt.return_value = self.attempt(
-            "copilot",
-            providers.COPILOT_MODELS[0],
-            "success",
-            final_text="No findings.",
-        )
-
-        outcome = providers.run_review(
-            review=self.review,
-            reviewer="claude",
-            egress_consent="double-review",
-        )
-
-        self.assertEqual(outcome.returncode, 0)
-        claude_attempt.assert_called_once()
-        copilot_attempt.assert_called_once()
-        resolve.assert_called_once_with("copilot")
-        self.assertIn(
-            "loopback bind failed",
-            (self.review.container_dir / "claude-skip.txt").read_text(
-                encoding="utf-8"
-            ),
-        )
-
-    @mock.patch.object(providers, "child_environment", return_value={})
-    @mock.patch.object(
-        providers,
-        "resolve_reviewer_executable",
-        side_effect=(pathlib.Path("/bin/claude"), pathlib.Path("/bin/copilot")),
-    )
-    @mock.patch.object(providers, "_copilot_attempt")
-    @mock.patch.object(providers, "_claude_attempt")
-    def test_claude_without_usable_auth_uses_authorized_copilot_fallback(
-        self,
-        claude_attempt: mock.Mock,
-        copilot_attempt: mock.Mock,
-        resolve: mock.Mock,
-        _environment: mock.Mock,
-    ) -> None:
-        claude_attempt.return_value = self.attempt(
-            "claude",
-            providers.CLAUDE_MODELS[0],
-            "auth",
-        )
-        copilot_attempt.return_value = self.attempt(
-            "copilot",
-            providers.COPILOT_MODELS[0],
-            "success",
-            final_text="No findings.",
-        )
-
-        outcome = providers.run_review(
-            review=self.review,
-            reviewer="claude",
-            egress_consent="double-review",
-        )
-
-        self.assertEqual(outcome.returncode, 0)
-        claude_attempt.assert_called_once()
-        copilot_attempt.assert_called_once()
-        self.assertEqual(resolve.call_count, 2)
-
-    @mock.patch.object(providers, "child_environment", return_value={})
-    @mock.patch.object(providers, "resolve_reviewer_executable")
-    @mock.patch.object(providers, "_copilot_attempt")
-    def test_invalid_explicit_claude_override_blocks_without_fallback(
-        self,
-        copilot_attempt: mock.Mock,
-        resolve: mock.Mock,
-        _environment: mock.Mock,
-    ) -> None:
-        def reject_override(_name: str, **kwargs):
-            self.assertTrue(callable(kwargs["candidate_validator"]))
-            raise ReviewError("invalid explicit override")
-
-        resolve.side_effect = reject_override
-
-        outcome = providers.run_review(
-            review=self.review,
-            reviewer="claude",
-            egress_consent="double-review",
-        )
-
-        self.assertEqual(outcome.returncode, 2)
-        copilot_attempt.assert_not_called()
-        self.assertIn(
-            "refusing Copilot fallback",
-            (self.review.container_dir / "runner-error.txt").read_text(
-                encoding="utf-8"
-            ),
-        )
-
-    @mock.patch.object(providers, "child_environment", return_value={})
-    @mock.patch.object(providers, "resolve_reviewer_executable")
-    @mock.patch.object(providers, "_copilot_attempt")
-    def test_claude_probe_timeout_is_inconclusive_not_fallback(
-        self,
-        copilot_attempt: mock.Mock,
-        resolve: mock.Mock,
-        _environment: mock.Mock,
-    ) -> None:
-        resolve.side_effect = providers.ReviewTimeoutError("probe timed out")
-
-        outcome = providers.run_review(
-            review=self.review,
-            reviewer="claude",
-            egress_consent="triple-review",
-        )
-
-        self.assertEqual(outcome.returncode, 75)
-        copilot_attempt.assert_not_called()
-        self.assertIn(
-            "inconclusive",
-            (self.review.container_dir / "runner-error.txt").read_text(
-                encoding="utf-8"
-            ),
-        )
-
-    @mock.patch.object(providers, "child_environment", return_value={})
-    @mock.patch.object(providers, "resolve_reviewer_executable")
-    @mock.patch.object(providers, "_copilot_attempt")
-    def test_claude_probe_output_limit_is_inconclusive_not_fallback(
-        self,
-        copilot_attempt: mock.Mock,
-        resolve: mock.Mock,
-        _environment: mock.Mock,
-    ) -> None:
-        resolve.side_effect = providers.ReviewOutputLimitError(
-            "probe output exceeded limit"
-        )
-
-        outcome = providers.run_review(
-            review=self.review,
-            reviewer="claude",
-            egress_consent="triple-review",
-        )
-
-        self.assertEqual(outcome.returncode, 75)
-        copilot_attempt.assert_not_called()
-        self.assertIn(
-            "inconclusive",
-            (self.review.container_dir / "runner-error.txt").read_text(
-                encoding="utf-8"
-            ),
-        )
-
-    @mock.patch.object(providers, "child_environment", return_value={})
-    @mock.patch.object(providers, "resolve_reviewer_executable")
-    @mock.patch.object(providers, "_copilot_attempt")
-    def test_claude_probe_drain_failure_is_inconclusive_not_fallback(
-        self,
-        copilot_attempt: mock.Mock,
-        resolve: mock.Mock,
-        _environment: mock.Mock,
-    ) -> None:
-        resolve.side_effect = providers.ReviewOutputDrainError(
-            "probe output drain failed"
-        )
-
-        outcome = providers.run_review(
-            review=self.review,
-            reviewer="claude",
-            egress_consent="triple-review",
-        )
-
-        self.assertEqual(outcome.returncode, 75)
-        copilot_attempt.assert_not_called()
-        self.assertIn(
-            "inconclusive",
-            (self.review.container_dir / "runner-error.txt").read_text(
-                encoding="utf-8"
-            ),
-        )
-
-    @mock.patch.object(providers, "child_environment", return_value={})
-    @mock.patch.object(providers, "resolve_reviewer_executable")
-    @mock.patch.object(providers, "_copilot_attempt")
-    def test_claude_probe_process_leak_is_inconclusive_not_fallback(
-        self,
-        copilot_attempt: mock.Mock,
-        resolve: mock.Mock,
-        _environment: mock.Mock,
-    ) -> None:
-        resolve.side_effect = providers.ReviewProcessLeakError(
-            "probe left descendant process"
-        )
-
-        outcome = providers.run_review(
-            review=self.review,
-            reviewer="claude",
-            egress_consent="triple-review",
-        )
-
-        self.assertEqual(outcome.returncode, 75)
-        copilot_attempt.assert_not_called()
-        self.assertIn(
-            "inconclusive",
-            (self.review.container_dir / "runner-error.txt").read_text(
-                encoding="utf-8"
-            ),
-        )
-
-    @mock.patch.object(
-        providers,
-        "child_environment",
-        return_value={"ANTHROPIC_API_KEY": "secret"},
-    )
-    @mock.patch.object(
-        providers,
-        "resolve_reviewer_executable",
-        return_value=pathlib.Path("/bin/true"),
-    )
-    @mock.patch.object(providers, "_copilot_attempt")
-    @mock.patch.object(providers, "_claude_attempt")
-    def test_claude_attempt_validation_failure_still_blocks_copilot(
-        self,
-        claude_attempt: mock.Mock,
-        copilot_attempt: mock.Mock,
-        _resolve: mock.Mock,
-        _environment: mock.Mock,
-    ) -> None:
-        claude_attempt.side_effect = ReviewError("unsafe executable identity")
-
-        outcome = providers.run_review(
-            review=self.review,
-            reviewer="claude",
-            egress_consent="triple-review",
-        )
-
-        self.assertEqual(outcome.returncode, 2)
-        copilot_attempt.assert_not_called()
-        self.assertIn(
-            "refusing Copilot fallback",
-            (self.review.container_dir / "runner-error.txt").read_text(
-                encoding="utf-8"
-            ),
-        )
-
-    @mock.patch.object(providers, "_copilot_attempt")
-    @mock.patch.object(
-        providers,
-        "resolve_reviewer_executable",
-        return_value=None,
-    )
-    def test_explicit_claude_consent_does_not_authorize_copilot_fallback(
-        self,
-        resolve: mock.Mock,
-        copilot_attempt: mock.Mock,
-    ) -> None:
-        outcome = providers.run_review(
-            review=self.review,
-            reviewer="claude",
-            egress_consent="explicit-claude-review",
-        )
-        self.assertEqual(outcome.returncode, 2)
-        resolve.assert_called_once()
-        self.assertEqual(resolve.call_args.args, ("claude",))
-        self.assertTrue(callable(resolve.call_args.kwargs["candidate_validator"]))
-        copilot_attempt.assert_not_called()
-        self.assertIn(
-            "does not authorize GitHub Copilot",
-            (self.review.container_dir / "runner-error.txt").read_text(
-                encoding="utf-8"
-            ),
-        )
+        self.assertIs(raised.exception, error)
+        read_trust.assert_called_once()
+        preflight_root = read_trust.call_args.args[1]
+        self.assertEqual(read_trust.call_args.args[0], self.review)
+        self.assertFalse(preflight_root.exists())
+        self.assertTrue(preflight_root.name.startswith("claude-trust-preflight-"))
 
     def test_effective_model_substitution_does_not_infer_entitlement(self) -> None:
         completed = Completed(
@@ -2941,53 +1677,26 @@ class ProviderPolicyTest(unittest.TestCase):
         self.assertEqual(attempt.category, "runtime-unverified")
         self.assertIsNone(attempt.final_text)
 
-    def test_entitlement_without_verified_model_cannot_authorize_fallback(
-        self,
-    ) -> None:
-        completed = Completed(
-            argv=("copilot",),
-            returncode=1,
-            stdout=json.dumps(
-                {
-                    "type": "turn.failed",
-                    "error": {
-                        "message": "Model is not available for your account"
-                    },
-                }
-            ).encode(),
-            stderr=b"",
-        )
-        attempt = providers._record_attempt(
-            review=self.review,
-            index=1,
-            runtime="copilot",
-            model="claude-opus-4.8",
-            completed=completed,
-            final_text=None,
-            effective_model=None,
-            requested_effort="max",
-            effective_effort=None,
-            require_verified_model=True,
-        )
-
-        self.assertEqual(attempt.category, "runtime-unverified")
-        self.assertIsNone(attempt.final_text)
-
     @mock.patch.object(providers, "child_environment", return_value={})
     def test_claude_lane_requires_explicit_egress_consent(
         self,
         _environment: mock.Mock,
     ) -> None:
-        outcome = providers.run_review(
-            review=self.review,
-            reviewer="claude",
-        )
+        with mock.patch.object(providers, "resolve_reviewer_executable") as resolve:
+            outcome = providers.run_review(
+                review=self.review,
+                reviewer="claude",
+            )
         self.assertEqual(outcome.returncode, 2)
+        resolve.assert_not_called()
         self.assertIn(
             "explicit egress-consent",
             (self.review.container_dir / "runner-error.txt").read_text(
                 encoding="utf-8"
             ),
+        )
+        self.assertFalse(
+            (self.review.container_dir / "claude-unavailable.json").exists()
         )
 
     @mock.patch.object(providers, "resolve_reviewer_executable")
@@ -3009,6 +1718,9 @@ class ProviderPolicyTest(unittest.TestCase):
         resolve.assert_not_called()
         self.assertFalse((self.review.container_dir / "egress.json").exists())
         self.assertFalse((self.review.container_dir / "preflight.json").exists())
+        self.assertFalse(
+            (self.review.container_dir / "claude-unavailable.json").exists()
+        )
         error = (self.review.container_dir / "runner-error.txt").read_text(
             encoding="utf-8"
         )
@@ -3175,7 +1887,9 @@ class ProviderPolicyTest(unittest.TestCase):
                                     {
                                         "path": {
                                             "type": "path",
-                                            "path": str(self.review.workspace_root.resolve()),
+                                            "path": str(
+                                                self.review.workspace_root.resolve()
+                                            ),
                                         },
                                         "access": "read",
                                     },
@@ -3184,7 +1898,10 @@ class ProviderPolicyTest(unittest.TestCase):
                                             "path": {
                                                 "type": "path",
                                                 "path": str(
-                                                    (self.review.workspace_root / name).resolve()
+                                                    (
+                                                        self.review.workspace_root
+                                                        / name
+                                                    ).resolve()
                                                 ),
                                             },
                                             "access": "deny",
@@ -3241,7 +1958,9 @@ class ProviderPolicyTest(unittest.TestCase):
         self.assertIn('approval_policy="never"', configs)
         self.assertIn('default_permissions="isolated_review"', configs)
         permission_configs = [
-            value for value in configs if value.startswith("permissions.isolated_review=")
+            value
+            for value in configs
+            if value.startswith("permissions.isolated_review=")
         ]
         self.assertEqual(len(permission_configs), 1)
         permission_config = permission_configs[0]
@@ -3378,7 +2097,10 @@ class ProviderPolicyTest(unittest.TestCase):
                                 },
                                 "access": "read",
                             },
-                            {"path": {"type": "path", "path": str(root)}, "access": "read"},
+                            {
+                                "path": {"type": "path", "path": str(root)},
+                                "access": "read",
+                            },
                             *[
                                 {
                                     "path": {
@@ -3460,7 +2182,29 @@ class ProviderPolicyTest(unittest.TestCase):
             '(allow file-read-metadata (literal "/")',
             profile,
         )
+        deny_rule = '(deny file-read* (subpath "/System/Library/Keychains"))'
+        self.assertIn(deny_rule, profile)
+        self.assertGreater(
+            profile.index(deny_rule),
+            profile.index("(allow file-read* "),
+        )
         self.assertNotIn("/Users/joey", profile)
+
+    def test_claude_keychain_deny_overrides_runtime_ancestor_allow(self) -> None:
+        system_library = pathlib.Path("/System/Library")
+        keychain_root = pathlib.Path("/System/Library/Keychains")
+        system_roots = keychain_root / "SystemRootCertificates.keychain"
+        framework = system_library / "Frameworks/Security.framework"
+
+        self.assertTrue(providers.is_relative_to(system_roots, system_library))
+        self.assertTrue(providers.is_relative_to(framework, system_library))
+        self.assertTrue(providers.is_relative_to(system_roots, keychain_root))
+        self.assertFalse(providers.is_relative_to(framework, keychain_root))
+        self.assertFalse(providers.is_relative_to(system_library, keychain_root))
+        self.assertEqual(
+            providers.CLAUDE_SANDBOX_DENIED_KEYCHAIN_SUBPATHS,
+            (keychain_root,),
+        )
 
     def test_claude_probe_profile_rejects_overly_broad_dependency_roots(
         self,
@@ -3494,13 +2238,13 @@ class ProviderPolicyTest(unittest.TestCase):
         run_probe.return_value = Completed(
             argv=("claude", "--version"),
             returncode=0,
-            stdout=b"2.1.188 (Claude Code)\n",
+            stdout=b"2.1.203 (Claude Code)\n",
             stderr=b"",
         )
 
         with self.assertRaisesRegex(
             providers.InvalidReviewerExecutable,
-            "supported Claude Code 2.1.187",
+            "supported Claude Code 2.1.202",
         ):
             providers._require_claude_identity(
                 pathlib.Path("/bin/claude"),
@@ -3708,7 +2452,7 @@ class ProviderPolicyTest(unittest.TestCase):
             Completed(
                 argv=("claude", "--version"),
                 returncode=0,
-                stdout=b"2.1.187 (Claude Code)\n",
+                stdout=b"2.1.202 (Claude Code)\n",
                 stderr=b"",
             ),
             Completed(
@@ -3754,6 +2498,9 @@ class ProviderPolicyTest(unittest.TestCase):
         self.assertEqual(argv[:2], ("/usr/bin/true", "-p"))
         self.assertEqual(argv[3], "/bin/claude")
         review_profile = argv[2]
+        ca_bundle = (
+            self.review.container_dir / "claude-ca" / providers.CLAUDE_CA_BUNDLE_NAME
+        )
         self.assertIn("(deny default)", review_profile)
         self.assertIn(str(self.review.workspace_root), review_profile)
         self.assertNotIn("com.apple.securityd.xpc", review_profile)
@@ -3768,7 +2515,15 @@ class ProviderPolicyTest(unittest.TestCase):
         self.assertNotIn("mdsDirectory.db", review_profile)
         self.assertNotIn("mdsObject.db", review_profile)
         self.assertNotIn('(subpath "/private/etc/ssl")', review_profile)
-        self.assertIn('(literal "/private/etc/ssl/cert.pem")', review_profile)
+        self.assertNotIn("/private/etc/ssl/cert.pem", review_profile)
+        self.assertNotIn("/Library/Keychains/System.keychain", review_profile)
+        deny_rule = '(deny file-read* (subpath "/System/Library/Keychains"))'
+        self.assertIn(deny_rule, review_profile)
+        self.assertGreater(
+            review_profile.index(deny_rule),
+            review_profile.index("(allow file-read* "),
+        )
+        self.assertIn(f'(literal "{ca_bundle}")', review_profile)
         self.assertNotIn("/Users/reviewer", review_profile)
         self.assertIn("--safe-mode", argv)
         self.assertNotIn("--bare", argv)
@@ -3836,6 +2591,12 @@ class ProviderPolicyTest(unittest.TestCase):
         self.assertEqual(review_env["HTTP_PROXY"], review_env["HTTPS_PROXY"])
         self.assertEqual(review_env["ALL_PROXY"], review_env["HTTPS_PROXY"])
         self.assertEqual(review_env["NO_PROXY"], "")
+        self.assertEqual(review_env["SSL_CERT_FILE"], str(ca_bundle))
+        self.assertEqual(review_env["NODE_EXTRA_CA_CERTS"], str(ca_bundle))
+        self.assertEqual(
+            review_env[providers.CLAUDE_CERT_STORE_ENV],
+            providers.CLAUDE_CERT_STORE,
+        )
         self.assertEqual(
             run_command.call_args_list[2].kwargs["timeout_seconds"],
             providers.REVIEW_ATTEMPT_TIMEOUT_SECONDS,
@@ -3949,12 +2710,823 @@ class ProviderPolicyTest(unittest.TestCase):
 
         prepared_file = pathlib.Path(prepared_env["SSL_CERT_FILE"])
         prepared_dir = pathlib.Path(prepared_env["SSL_CERT_DIR"])
-        self.assertTrue(providers.is_relative_to(prepared_file, self.review.container_dir))
-        self.assertTrue(providers.is_relative_to(prepared_dir, self.review.container_dir))
+        self.assertTrue(
+            providers.is_relative_to(prepared_file, self.review.container_dir)
+        )
+        self.assertTrue(
+            providers.is_relative_to(prepared_dir, self.review.container_dir)
+        )
+        self.assertEqual(prepared_env["NODE_EXTRA_CA_CERTS"], str(prepared_file))
         self.assertIn(f'(literal "{prepared_file}")', profile)
         self.assertIn(f'(subpath "{prepared_dir}")', profile)
         self.assertNotIn(str(ca_file), profile)
         self.assertNotIn(str(ca_dir), profile)
+        self.assertNotIn(str(self.claude_system_ca), profile)
+        self.assertNotIn(str(providers.CLAUDE_SYSTEM_KEYCHAIN), profile)
+
+    def test_claude_tls_preparation_composes_default_admin_and_custom_ca(
+        self,
+    ) -> None:
+        system_certificate, custom_certificate, admin_certificate = (
+            self.sample_ca_certificates(3)
+        )
+        self.claude_system_ca.write_bytes(system_certificate)
+        self.trust.return_value = admin_certificate
+        custom_path = self.review.source_root / "caller-ca.pem"
+        custom_path.write_bytes(custom_certificate)
+
+        prepared = providers._prepare_claude_tls_environment(
+            self.review,
+            {"NODE_EXTRA_CA_CERTS": str(custom_path)},
+        )
+        bundle = pathlib.Path(prepared["SSL_CERT_FILE"])
+        first_content = bundle.read_bytes()
+        blocks = providers.CLAUDE_CERTIFICATE_BLOCK.findall(first_content)
+        actual = {
+            hashlib.sha256(
+                providers._canonical_ca_certificate(
+                    block,
+                    source="test bundle",
+                )[0]
+            ).hexdigest()
+            for block in blocks
+        }
+        expected = {
+            hashlib.sha256(
+                providers._canonical_ca_certificate(
+                    certificate,
+                    source="test fixture",
+                )[0]
+            ).hexdigest()
+            for certificate in (
+                system_certificate,
+                admin_certificate,
+                custom_certificate,
+            )
+        }
+
+        self.assertEqual(actual, expected)
+        self.assertEqual(len(blocks), 3)
+        self.assertTrue(providers.is_relative_to(bundle, self.review.container_dir))
+        self.assertEqual(
+            {prepared[key] for key in providers.CLAUDE_TLS_FILE_ENV_KEYS},
+            {str(bundle)},
+        )
+        self.assertEqual(
+            prepared[providers.CLAUDE_CERT_STORE_ENV],
+            providers.CLAUDE_CERT_STORE,
+        )
+        self.assertNotIn(str(custom_path), prepared.values())
+        self.assertNotIn(str(self.claude_system_ca), prepared.values())
+
+        repeated = providers._prepare_claude_tls_environment(self.review, prepared)
+        self.assertEqual(
+            pathlib.Path(repeated["SSL_CERT_FILE"]).read_bytes(), first_content
+        )
+
+    def test_claude_final_tls_environment_drops_removed_trust_root(self) -> None:
+        system_certificate, caller_certificate, removed_trust_certificate = (
+            self.sample_ca_certificates(3)
+        )
+        self.claude_system_ca.write_bytes(system_certificate)
+        caller_path = self.review.source_root / "caller-ca.pem"
+        caller_path.write_bytes(caller_certificate)
+        self.trust.side_effect = (removed_trust_certificate, b"")
+
+        prepared = providers._prepare_claude_tls_environment(
+            self.review,
+            {"NODE_EXTRA_CA_CERTS": str(caller_path)},
+        )
+        first_bundle_content = pathlib.Path(prepared["SSL_CERT_FILE"]).read_bytes()
+        final_env = providers._prepare_claude_tls_environment(
+            self.review,
+            prepared,
+        )
+
+        def fingerprints(data: bytes) -> set[str]:
+            return {
+                hashlib.sha256(
+                    providers._canonical_ca_certificate(
+                        block,
+                        source="prepared bundle",
+                    )[0]
+                ).hexdigest()
+                for block in providers.CLAUDE_CERTIFICATE_BLOCK.findall(data)
+            }
+
+        expected_system = hashlib.sha256(
+            providers._canonical_ca_certificate(
+                system_certificate,
+                source="system fixture",
+            )[0]
+        ).hexdigest()
+        expected_caller = hashlib.sha256(
+            providers._canonical_ca_certificate(
+                caller_certificate,
+                source="caller fixture",
+            )[0]
+        ).hexdigest()
+        removed_trust = hashlib.sha256(
+            providers._canonical_ca_certificate(
+                removed_trust_certificate,
+                source="trust fixture",
+            )[0]
+        ).hexdigest()
+        caller_snapshot = (
+            self.review.container_dir
+            / "claude-ca"
+            / providers.CLAUDE_CALLER_CA_SNAPSHOT_NAME
+        )
+        first_fingerprints = fingerprints(first_bundle_content)
+        final_fingerprints = fingerprints(
+            pathlib.Path(final_env["SSL_CERT_FILE"]).read_bytes()
+        )
+
+        self.assertIn(removed_trust, first_fingerprints)
+        self.assertEqual(
+            fingerprints(caller_snapshot.read_bytes()),
+            {expected_caller},
+        )
+        self.assertEqual(final_fingerprints, {expected_system, expected_caller})
+        self.assertNotIn(removed_trust, final_fingerprints)
+        self.assertEqual(
+            {final_env[key] for key in providers.CLAUDE_TLS_FILE_ENV_KEYS},
+            {final_env["SSL_CERT_FILE"]},
+        )
+
+    def test_claude_trust_accepts_unconditional_roots(self) -> None:
+        always_trusted = "A" * 40
+        explicitly_empty = "B" * 40
+        payload = plistlib.dumps(
+            {
+                "trustVersion": 1,
+                "trustList": {
+                    always_trusted: {},
+                    explicitly_empty: {"trustSettings": []},
+                },
+            },
+        )
+
+        self.assertEqual(
+            providers._unconditional_trust_fingerprints(
+                payload,
+                domain="admin",
+            ),
+            (always_trusted, explicitly_empty),
+        )
+
+    def test_claude_trust_rejects_bool_and_float_version_aliases(self) -> None:
+        for version in (True, 1.0):
+            with self.subTest(version=version):
+                payload = plistlib.dumps(
+                    {
+                        "trustVersion": version,
+                        "trustList": {},
+                    }
+                )
+
+                with self.assertRaisesRegex(ReviewError, "unsupported format"):
+                    providers._unconditional_trust_fingerprints(
+                        payload,
+                        domain="user",
+                    )
+
+    def test_claude_trust_classifies_user_and_system_policy_fixtures(
+        self,
+    ) -> None:
+        for domain, fixture, expected in (
+            (
+                "user",
+                "securitytool-user-deny.plist",
+                providers.ClaudeTrustSettingsDeny,
+            ),
+            (
+                "user",
+                "securitytool-user-constraint.plist",
+                providers.ClaudeTrustPolicyUnavailable,
+            ),
+            (
+                "system",
+                "securitytool-system-deny.plist",
+                providers.ClaudeTrustSettingsDeny,
+            ),
+            (
+                "system",
+                "securitytool-system-constraint.plist",
+                providers.ClaudeTrustPolicyUnavailable,
+            ),
+        ):
+            with self.subTest(domain=domain):
+                with self.assertRaises(expected):
+                    providers._unconditional_trust_fingerprints(
+                        (FIXTURES / fixture).read_bytes(),
+                        domain=domain,
+                    )
+
+    def test_claude_trust_explicit_deny_wins_over_other_constraints(self) -> None:
+        payload = plistlib.dumps(
+            {
+                "trustVersion": 1,
+                "trustList": {
+                    "A" * 40: {
+                        "trustSettings": [
+                            {
+                                "kSecTrustSettingsPolicyName": "sslServer",
+                                "kSecTrustSettingsPolicyString": "example.invalid",
+                            }
+                        ]
+                    },
+                    "B" * 40: {
+                        "trustSettings": [{providers.CLAUDE_TRUST_RESULT_KEY: 3}]
+                    },
+                },
+            },
+        )
+
+        with self.assertRaisesRegex(
+            providers.ClaudeTrustSettingsDeny,
+            "explicit deny",
+        ):
+            providers._unconditional_trust_fingerprints(payload, domain="admin")
+
+    def test_claude_trust_rejects_malformed_constraints(self) -> None:
+        payload = plistlib.dumps(
+            {
+                "trustVersion": 1,
+                "trustList": {"A" * 40: {"trustSettings": "always"}},
+            },
+        )
+
+        with self.assertRaisesRegex(ReviewError, "invalid constraints"):
+            providers._unconditional_trust_fingerprints(payload, domain="user")
+
+    def test_claude_trust_rejects_non_numeric_and_invalid_results(self) -> None:
+        for result in ("3", True, 0, 5):
+            with self.subTest(result=result):
+                payload = plistlib.dumps(
+                    {
+                        "trustVersion": 1,
+                        "trustList": {
+                            "A" * 40: {
+                                "trustSettings": [
+                                    {providers.CLAUDE_TRUST_RESULT_KEY: result}
+                                ]
+                            }
+                        },
+                    }
+                )
+                with self.assertRaisesRegex(ReviewError, "invalid constraints"):
+                    providers._unconditional_trust_fingerprints(
+                        payload,
+                        domain="user",
+                    )
+
+    def test_claude_trust_rejects_legacy_result_alias(self) -> None:
+        payload = plistlib.dumps(
+            {
+                "trustVersion": 1,
+                "trustList": {
+                    "A" * 40: {
+                        "trustSettings": [
+                            {
+                                providers.CLAUDE_TRUST_RESULT_KEY: 1,
+                                "result": 3,
+                            }
+                        ]
+                    }
+                },
+            }
+        )
+
+        with self.assertRaisesRegex(ReviewError, "ambiguous constraints"):
+            providers._unconditional_trust_fingerprints(payload, domain="user")
+
+    def test_claude_trust_rejects_duplicate_conflicting_result_keys(self) -> None:
+        payload = b"""<?xml version="1.0" encoding="UTF-8"?>
+<plist version="1.0"><dict>
+<key>trustVersion</key><integer>1</integer>
+<key>trustList</key><dict>
+<key>AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA</key><dict>
+<key>trustSettings</key><array><dict>
+<key>kSecTrustSettingsResult</key><integer>1</integer>
+<key>kSecTrustSettingsResult</key><integer>3</integer>
+</dict></array></dict></dict></dict></plist>"""
+
+        with self.assertRaisesRegex(ReviewError, "invalid"):
+            providers._unconditional_trust_fingerprints(payload, domain="user")
+
+    def test_claude_trust_selects_only_requested_certificates(self) -> None:
+        requested = self.strict_root_certificate()
+        ignored = self.sample_ca_certificate()
+        der, canonical = providers._canonical_ca_certificate(
+            requested,
+            source="requested fixture",
+        )
+        fingerprint = (
+            hashlib.sha1(
+                der,
+                usedforsecurity=False,
+            )
+            .hexdigest()
+            .upper()
+        )
+
+        selected = providers._select_trust_certificates(
+            ignored + requested,
+            (fingerprint,),
+            ca_root=self.review.container_dir,
+        )
+
+        self.assertEqual(selected, canonical)
+
+    def test_claude_trust_rejects_non_root_and_expired_certificates(self) -> None:
+        for fixture in (
+            "trust-root-non-ca.pem",
+            "trust-root-bad-key-usage.pem",
+            "trust-root-expired.pem",
+        ):
+            with self.subTest(fixture=fixture):
+                certificate = (FIXTURES / fixture).read_bytes()
+                der, _ = providers._canonical_ca_certificate(
+                    certificate,
+                    source=fixture,
+                )
+                fingerprint = (
+                    hashlib.sha1(
+                        der,
+                        usedforsecurity=False,
+                    )
+                    .hexdigest()
+                    .upper()
+                )
+
+                with self.assertRaisesRegex(
+                    ReviewError,
+                    "strict self-signed CA root|currently valid self-signed CA root",
+                ):
+                    providers._select_trust_certificates(
+                        certificate,
+                        (fingerprint,),
+                        ca_root=self.review.container_dir,
+                    )
+
+    def test_claude_trust_no_settings_error_is_exact(self) -> None:
+        for message in providers.CLAUDE_TRUST_NO_SETTINGS:
+            with self.subTest(message=message):
+                self.assertTrue(providers._is_no_trust_settings(message))
+                self.assertTrue(providers._is_no_trust_settings(f"security: {message}"))
+        for fixture in (
+            "securitytool-no-user-trust-settings.stderr",
+            "securitytool-no-trust-settings.stderr",
+            "securitytool-no-system-trust-settings.stderr",
+        ):
+            with self.subTest(fixture=fixture):
+                real_output = (FIXTURES / fixture).read_text(encoding="utf-8")
+                self.assertTrue(providers._is_no_trust_settings(real_output))
+        self.assertFalse(
+            providers._is_no_trust_settings(
+                "permission denied: No Trust Settings were found."
+            )
+        )
+
+    def test_claude_trust_missing_security_tool_is_capability_unavailable(
+        self,
+    ) -> None:
+        missing_security = self.review.container_dir / "missing-security"
+        ca_root = self.review.container_dir / "claude-ca"
+        ca_root.mkdir()
+
+        with (
+            mock.patch.object(
+                providers,
+                "CLAUDE_KEYCHAIN_CLIENT",
+                missing_security,
+            ),
+            self.assertRaisesRegex(
+                providers.ClaudeTrustToolUnavailable,
+                "trust export tool",
+            ),
+        ):
+            self.read_claude_trust_certificates(self.review, ca_root)
+
+        self.assertFalse(missing_security.exists())
+
+    @mock.patch.object(providers, "run_bounded_capture")
+    def test_claude_trust_queries_every_domain_with_exact_bounded_commands(
+        self,
+        run_command: mock.Mock,
+    ) -> None:
+        fixture_names = (
+            "securitytool-no-user-trust-settings.stderr",
+            "securitytool-no-trust-settings.stderr",
+            "securitytool-no-system-trust-settings.stderr",
+        )
+        completed: list[common.BoundedCapture] = []
+
+        def no_settings(
+            argv: tuple[str, ...],
+            **_kwargs: object,
+        ) -> common.BoundedCapture:
+            if argv[1:3] == ("help", "trust-settings-export"):
+                return self.trust_export_help_capture(argv)
+            output = (FIXTURES / fixture_names[len(completed)]).read_bytes()
+            result = common.BoundedCapture(
+                argv=argv,
+                returncode=1,
+                stdout=bytearray(),
+                stderr=bytearray(output),
+            )
+            completed.append(result)
+            return result
+
+        run_command.side_effect = no_settings
+        ca_root = self.review.container_dir / "claude-ca"
+        ca_root.mkdir()
+
+        material = self.read_claude_trust_certificates(
+            self.review,
+            ca_root,
+        )
+
+        self.assertEqual(material, b"")
+        self.assertEqual(
+            [call.args[0] for call in run_command.call_args_list],
+            [
+                (
+                    str(self.claude_keychain_client),
+                    "help",
+                    "trust-settings-export",
+                ),
+                (
+                    str(self.claude_keychain_client),
+                    "trust-settings-export",
+                    str(ca_root / ".user-trust.plist"),
+                ),
+                (
+                    str(self.claude_keychain_client),
+                    "trust-settings-export",
+                    "-d",
+                    str(ca_root / ".admin-trust.plist"),
+                ),
+                (
+                    str(self.claude_keychain_client),
+                    "trust-settings-export",
+                    "-s",
+                    str(ca_root / ".system-trust.plist"),
+                ),
+            ],
+        )
+        for call in run_command.call_args_list:
+            self.assertEqual(
+                call.kwargs["timeout_seconds"],
+                providers.CLAUDE_KEYCHAIN_QUERY_TIMEOUT_SECONDS,
+            )
+            self.assertEqual(
+                call.kwargs["stdout_limit_bytes"],
+                providers.CLAUDE_KEYCHAIN_BROKER_OUTPUT_LIMIT_BYTES,
+            )
+            self.assertEqual(
+                call.kwargs["stderr_limit_bytes"],
+                providers.CLAUDE_KEYCHAIN_BROKER_OUTPUT_LIMIT_BYTES,
+            )
+        for result in completed:
+            self.assertEqual(result.stdout, bytearray())
+            self.assertFalse(any(result.stderr))
+        for domain, _options in providers.CLAUDE_TRUST_DOMAINS:
+            self.assertFalse((ca_root / f".{domain}-trust.plist").exists())
+
+    def test_claude_trust_unlinks_raw_export_on_every_failure_stage(self) -> None:
+        raw_trust = b"private trust settings fixture"
+        cases = (
+            ("command", providers.ClaudeTrustToolUnavailable),
+            ("status", ReviewError),
+            ("parse", ReviewError),
+        )
+        for failure_stage, expected_error in cases:
+            with self.subTest(failure_stage=failure_stage):
+                ca_root = self.review.container_dir / f"claude-ca-{failure_stage}"
+                ca_root.mkdir()
+                trust_path = ca_root / ".user-trust.plist"
+
+                def fail_export(
+                    argv: tuple[str, ...],
+                    **_kwargs: object,
+                ) -> common.BoundedCapture:
+                    if argv[1:3] == ("help", "trust-settings-export"):
+                        return self.trust_export_help_capture(argv)
+                    pathlib.Path(argv[-1]).write_bytes(raw_trust)
+                    if failure_stage == "command":
+                        raise OSError("fixture process failure")
+                    return common.BoundedCapture(
+                        argv=argv,
+                        returncode=1 if failure_stage == "status" else 0,
+                        stdout=bytearray(),
+                        stderr=bytearray(b"private status detail"),
+                    )
+
+                with (
+                    mock.patch.object(
+                        providers,
+                        "run_bounded_capture",
+                        side_effect=fail_export,
+                    ),
+                    self.assertRaises(expected_error),
+                ):
+                    self.read_claude_trust_certificates(self.review, ca_root)
+
+                self.assertFalse(trust_path.exists())
+                retained = b"".join(
+                    path.read_bytes() for path in ca_root.rglob("*") if path.is_file()
+                )
+                self.assertNotIn(raw_trust, retained)
+
+    @mock.patch.object(providers, "run_bounded_capture")
+    def test_claude_trust_exports_certificates_only_after_all_domains_pass(
+        self,
+        run_command: mock.Mock,
+    ) -> None:
+        certificate = self.strict_root_certificate()
+        der, canonical = providers._canonical_ca_certificate(
+            certificate,
+            source="trusted fixture",
+        )
+        fingerprint = (
+            hashlib.sha1(
+                der,
+                usedforsecurity=False,
+            )
+            .hexdigest()
+            .upper()
+        )
+        user_settings = plistlib.dumps(
+            {
+                "trustVersion": 1,
+                "trustList": {fingerprint: {"trustSettings": []}},
+            }
+        )
+        empty_settings = plistlib.dumps(
+            {"trustVersion": 1, "trustList": {}},
+        )
+
+        def complete(
+            argv: tuple[str, ...],
+            **_kwargs: object,
+        ) -> common.BoundedCapture:
+            if argv[1:3] == ("help", "trust-settings-export"):
+                return self.trust_export_help_capture(argv)
+            if argv[1] == "trust-settings-export":
+                pathlib.Path(argv[-1]).write_bytes(
+                    user_settings
+                    if "-d" not in argv and "-s" not in argv
+                    else empty_settings
+                )
+                return common.BoundedCapture(
+                    argv=argv,
+                    returncode=0,
+                    stdout=bytearray(),
+                    stderr=bytearray(),
+                )
+            return common.BoundedCapture(
+                argv=argv,
+                returncode=0,
+                stdout=bytearray(certificate),
+                stderr=bytearray(),
+            )
+
+        run_command.side_effect = complete
+        ca_root = self.review.container_dir / "claude-ca"
+        ca_root.mkdir()
+
+        material = self.read_claude_trust_certificates(self.review, ca_root)
+
+        self.assertEqual(material, canonical)
+        self.assertEqual(
+            run_command.call_args_list[-2].args[0],
+            (
+                str(self.claude_keychain_client),
+                "find-certificate",
+                "-a",
+                "-p",
+            ),
+        )
+        self.assertEqual(
+            run_command.call_args_list[-2].kwargs["stdout_limit_bytes"],
+            providers.CLAUDE_CA_FILE_LIMIT_BYTES,
+        )
+        self.assertEqual(
+            tuple(run_command.call_args_list[-1].args[0])[:4],
+            (
+                str(providers.CLAUDE_OPENSSL_CLIENT),
+                "verify",
+                "-x509_strict",
+                "-check_ss_sig",
+            ),
+        )
+
+    @mock.patch.object(providers, "run_bounded_capture")
+    def test_claude_user_deny_stops_before_other_domains_or_certificate_export(
+        self,
+        run_command: mock.Mock,
+    ) -> None:
+        def denied(
+            argv: tuple[str, ...],
+            **_kwargs: object,
+        ) -> common.BoundedCapture:
+            if argv[1:3] == ("help", "trust-settings-export"):
+                return self.trust_export_help_capture(argv)
+            pathlib.Path(argv[-1]).write_bytes(
+                (FIXTURES / "securitytool-user-deny.plist").read_bytes()
+            )
+            return common.BoundedCapture(
+                argv=argv,
+                returncode=0,
+                stdout=bytearray(),
+                stderr=bytearray(),
+            )
+
+        run_command.side_effect = denied
+        ca_root = self.review.container_dir / "claude-ca"
+        ca_root.mkdir()
+
+        with self.assertRaisesRegex(
+            providers.ClaudeTrustSettingsDeny,
+            "Claude user trust settings.*explicit deny",
+        ):
+            self.read_claude_trust_certificates(self.review, ca_root)
+
+        self.assertEqual(run_command.call_count, 2)
+
+    @mock.patch.object(providers, "run_bounded_capture")
+    def test_claude_system_constraint_stops_before_certificate_export(
+        self,
+        run_command: mock.Mock,
+    ) -> None:
+        no_settings = (
+            FIXTURES / "securitytool-no-user-trust-settings.stderr"
+        ).read_bytes()
+
+        def constrained(
+            argv: tuple[str, ...],
+            **_kwargs: object,
+        ) -> common.BoundedCapture:
+            if argv[1:3] == ("help", "trust-settings-export"):
+                return self.trust_export_help_capture(argv)
+            if "-s" in argv:
+                pathlib.Path(argv[-1]).write_bytes(
+                    (FIXTURES / "securitytool-system-constraint.plist").read_bytes()
+                )
+                return common.BoundedCapture(
+                    argv=argv,
+                    returncode=0,
+                    stdout=bytearray(),
+                    stderr=bytearray(),
+                )
+            return common.BoundedCapture(
+                argv=argv,
+                returncode=1,
+                stdout=bytearray(),
+                stderr=bytearray(no_settings),
+            )
+
+        run_command.side_effect = constrained
+        ca_root = self.review.container_dir / "claude-ca"
+        ca_root.mkdir()
+
+        with self.assertRaisesRegex(
+            providers.ClaudeTrustPolicyUnavailable,
+            "Claude trust settings.*cannot be represented",
+        ):
+            self.read_claude_trust_certificates(self.review, ca_root)
+
+        self.assertEqual(run_command.call_count, 4)
+
+    @mock.patch.object(providers, "run_bounded_capture")
+    def test_claude_constraint_cannot_hide_deny_in_later_trust_domain(
+        self,
+        run_command: mock.Mock,
+    ) -> None:
+        def constrained_then_denied(
+            argv: tuple[str, ...],
+            **_kwargs: object,
+        ) -> common.BoundedCapture:
+            if argv[1:3] == ("help", "trust-settings-export"):
+                return self.trust_export_help_capture(argv)
+            fixture = (
+                "securitytool-user-constraint.plist"
+                if "-d" not in argv
+                else "securitytool-system-deny.plist"
+            )
+            pathlib.Path(argv[-1]).write_bytes((FIXTURES / fixture).read_bytes())
+            return common.BoundedCapture(
+                argv=argv,
+                returncode=0,
+                stdout=bytearray(),
+                stderr=bytearray(),
+            )
+
+        run_command.side_effect = constrained_then_denied
+        ca_root = self.review.container_dir / "claude-ca"
+        ca_root.mkdir()
+
+        with self.assertRaisesRegex(
+            providers.ClaudeTrustSettingsDeny,
+            "explicit deny",
+        ):
+            self.read_claude_trust_certificates(self.review, ca_root)
+
+        self.assertEqual(run_command.call_count, 3)
+
+    def test_claude_tls_rejects_admin_deny_present_in_system_bundle(self) -> None:
+        certificate = self.sample_ca_certificate()
+        der, _ = providers._canonical_ca_certificate(
+            certificate,
+            source="denied system fixture",
+        )
+        fingerprint = hashlib.sha1(der, usedforsecurity=False).hexdigest().upper()
+        payload = plistlib.dumps(
+            {
+                "trustVersion": 1,
+                "trustList": {
+                    fingerprint: {
+                        "trustSettings": [{providers.CLAUDE_TRUST_RESULT_KEY: 3}]
+                    },
+                },
+            },
+        )
+        self.claude_system_ca.write_bytes(certificate)
+        self.trust.side_effect = lambda *_args: (
+            providers._unconditional_trust_fingerprints(
+                payload,
+                domain="admin",
+            ),
+            b"",
+        )[1]
+
+        with self.assertRaisesRegex(
+            providers.ClaudeTrustSettingsDeny,
+            "explicit deny",
+        ):
+            providers._prepare_claude_tls_environment(self.review, {})
+
+        self.assertFalse(
+            (
+                self.review.container_dir
+                / "claude-ca"
+                / providers.CLAUDE_CA_BUNDLE_NAME
+            ).exists()
+        )
+
+    def test_claude_tls_rejects_admin_constraint_present_in_custom_bundle(
+        self,
+    ) -> None:
+        system_certificate, custom_certificate = self.sample_ca_certificates(2)
+        der, _ = providers._canonical_ca_certificate(
+            custom_certificate,
+            source="constrained custom fixture",
+        )
+        fingerprint = hashlib.sha1(der, usedforsecurity=False).hexdigest().upper()
+        payload = plistlib.dumps(
+            {
+                "trustVersion": 1,
+                "trustList": {
+                    fingerprint: {
+                        "trustSettings": [
+                            {
+                                "kSecTrustSettingsPolicyName": "sslServer",
+                                "kSecTrustSettingsPolicyString": "example.com",
+                            }
+                        ]
+                    },
+                },
+            },
+        )
+        self.claude_system_ca.write_bytes(system_certificate)
+        custom_path = self.review.source_root / "caller-ca.pem"
+        custom_path.write_bytes(custom_certificate)
+        self.trust.side_effect = lambda *_args: (
+            providers._unconditional_trust_fingerprints(
+                payload,
+                domain="admin",
+            ),
+            b"",
+        )[1]
+
+        with self.assertRaisesRegex(
+            providers.ClaudeTrustPolicyUnavailable,
+            "cannot be represented by a PEM bundle",
+        ):
+            providers._prepare_claude_tls_environment(
+                self.review,
+                {"SSL_CERT_FILE": str(custom_path)},
+            )
+
+        self.assertFalse(
+            (
+                self.review.container_dir
+                / "claude-ca"
+                / providers.CLAUDE_CA_BUNDLE_NAME
+            ).exists()
+        )
 
     @mock.patch.object(
         providers,
@@ -4051,6 +3623,30 @@ class ProviderPolicyTest(unittest.TestCase):
                 proxy_port=43210,
             )
 
+    @mock.patch.object(
+        providers,
+        "_trusted_claude_ripgrep",
+        return_value=pathlib.Path("/bin/echo"),
+    )
+    def test_claude_review_sandbox_rejects_host_node_extra_ca(
+        self,
+        _rg: mock.Mock,
+    ) -> None:
+        with self.assertRaisesRegex(
+            ReviewError,
+            "helper-owned NODE_EXTRA_CA_CERTS",
+        ):
+            providers._claude_review_sandbox_profile(
+                pathlib.Path("/bin/true"),
+                self.review,
+                {
+                    "HOME": str(self.review.container_dir / "claude-home"),
+                    "TMPDIR": str(self.review.container_dir / "tmp"),
+                    "NODE_EXTRA_CA_CERTS": str(self.claude_system_ca),
+                },
+                proxy_port=43210,
+            )
+
     def test_claude_tls_preparation_rejects_non_certificate_file(self) -> None:
         source = self.review.source_root / ".netrc"
         source.write_text(
@@ -4077,6 +3673,7 @@ class ProviderPolicyTest(unittest.TestCase):
                 self.review,
                 {"SSL_CERT_FILE": str(source)},
             )
+        self.trust.assert_not_called()
 
     def test_claude_tls_preparation_preserves_same_named_ca_entries(self) -> None:
         certificate = self.sample_ca_certificate()
@@ -4305,9 +3902,12 @@ class ProviderPolicyTest(unittest.TestCase):
             "http://corporate-proxy:0",
             "http://corporate-proxy:99999",
         ):
-            with self.subTest(value=value), self.assertRaisesRegex(
-                ReviewError,
-                "upstream proxy .* invalid",
+            with (
+                self.subTest(value=value),
+                self.assertRaisesRegex(
+                    ReviewError,
+                    "upstream proxy .* invalid",
+                ),
             ):
                 with providers._claude_connect_proxy({"https_proxy": value}):
                     self.fail("invalid upstream proxy unexpectedly started")
@@ -4415,7 +4015,7 @@ class ProviderPolicyTest(unittest.TestCase):
             Completed(
                 argv=("claude", "--version"),
                 returncode=0,
-                stdout=b"2.1.187 (Claude Code)\n",
+                stdout=b"2.1.202 (Claude Code)\n",
                 stderr=b"",
             ),
             Completed(
@@ -4491,7 +4091,9 @@ class ProviderPolicyTest(unittest.TestCase):
                     stderr=b"",
                 )
 
-                with self.assertRaisesRegex(ReviewError, "uniquely verifiable --safe-mode"):
+                with self.assertRaisesRegex(
+                    ReviewError, "uniquely verifiable --safe-mode"
+                ):
                     providers._require_claude_safe_mode(
                         pathlib.Path("/bin/claude"),
                         {"HOME": str(self.review.container_dir)},
@@ -4525,141 +4127,13 @@ class ProviderPolicyTest(unittest.TestCase):
                     stderr=b"",
                 )
 
-                with self.assertRaisesRegex(ReviewError, "uniquely verifiable --safe-mode"):
+                with self.assertRaisesRegex(
+                    ReviewError, "uniquely verifiable --safe-mode"
+                ):
                     providers._require_claude_safe_mode(
                         pathlib.Path("/bin/claude"),
                         {"HOME": str(self.review.container_dir)},
                     )
-
-    @mock.patch.object(
-        providers,
-        "resolve_reviewer_executable",
-        return_value=pathlib.Path("/bin/copilot"),
-    )
-    @mock.patch.object(providers, "run")
-    def test_copilot_command_pins_opus_and_max(
-        self,
-        run_command: mock.Mock,
-        _resolve: mock.Mock,
-    ) -> None:
-        payload = "\n".join(
-            json.dumps(item)
-            for item in (
-                {
-                    "type": "session.start",
-                    "data": {"selectedModel": "claude-opus-4.8"},
-                },
-                {
-                    "type": "assistant.turn_start",
-                    "data": {"turnId": "turn-1"},
-                },
-                {
-                    "type": "assistant.message",
-                    "data": {
-                        "messageId": "message-1",
-                        "content": "No findings.",
-                        "model": "claude-opus-4.8",
-                        "toolRequests": [],
-                    },
-                },
-                {
-                    "type": "assistant.turn_end",
-                    "data": {"turnId": "turn-1"},
-                },
-            )
-        )
-        permission_help = " ".join(providers.COPILOT_PERMISSION_HELP_FRAGMENTS)
-        run_command.side_effect = (
-            Completed(
-                argv=("copilot", "help", "permissions"),
-                returncode=0,
-                stdout=permission_help.encode(),
-                stderr=b"",
-            ),
-            Completed(
-                argv=("copilot",),
-                returncode=0,
-                stdout=payload.encode(),
-                stderr=b"",
-            ),
-        )
-        providers._copilot_attempt(
-            review=self.review,
-            model="claude-opus-4.8",
-            index=1,
-            env={"GH_TOKEN": "secret"},
-        )
-        argv = run_command.call_args_list[1].args[0]
-        self.assertEqual(argv[argv.index("-C") + 1], str(self.review.workspace_root))
-        self.assertEqual(
-            argv[argv.index("--prompt") + 1],
-            "Review this diff.\n",
-        )
-        self.assertIn("claude-opus-4.8", argv)
-        self.assertEqual(argv[argv.index("--reasoning-effort") + 1], "max")
-        self.assertEqual(argv[argv.index("--mode") + 1], "plan")
-        self.assertIn("--available-tools=view,glob,grep", argv)
-        self.assertIn("--disable-builtin-mcps", argv)
-        self.assertIn("--no-custom-instructions", argv)
-        self.assertIn("--deny-tool=write", argv)
-        self.assertIn("--deny-tool=shell", argv)
-        self.assertIn("--deny-tool=url", argv)
-        self.assertIn("--disallow-temp-dir", argv)
-        self.assertNotIn("--allow-all-paths", argv)
-        self.assertNotIn("--add-dir", argv)
-        self.assertIn("--no-auto-update", argv)
-        self.assertIn("--secret-env-vars=GH_TOKEN", argv)
-        self.assertEqual(
-            run_command.call_args_list[1].kwargs["env"]["COPILOT_HOME"],
-            str(self.review.container_dir / "copilot-home"),
-        )
-        self.assertTrue((self.review.container_dir / "copilot-home").is_dir())
-        self.assertEqual(
-            run_command.call_args_list[0].kwargs["timeout_seconds"],
-            providers.COPILOT_PROBE_TIMEOUT_SECONDS,
-        )
-        self.assertEqual(
-            run_command.call_args_list[0].kwargs["capture_limit_bytes"],
-            providers.COPILOT_PROBE_OUTPUT_LIMIT_BYTES,
-        )
-        self.assertEqual(
-            run_command.call_args_list[0].kwargs["output_file_limit_bytes"],
-            providers.COPILOT_PROBE_OUTPUT_LIMIT_BYTES,
-        )
-        self.assertEqual(
-            run_command.call_args_list[1].kwargs["timeout_seconds"],
-            providers.REVIEW_ATTEMPT_TIMEOUT_SECONDS,
-        )
-        self.assertEqual(
-            run_command.call_args_list[1].kwargs["output_file_limit_bytes"],
-            providers.REVIEW_ATTEMPT_OUTPUT_LIMIT_BYTES,
-        )
-
-    @mock.patch.object(
-        providers,
-        "resolve_reviewer_executable",
-        return_value=pathlib.Path("/bin/copilot"),
-    )
-    @mock.patch.object(providers, "run")
-    def test_copilot_refuses_unverified_path_permission_semantics(
-        self,
-        run_command: mock.Mock,
-        _resolve: mock.Mock,
-    ) -> None:
-        run_command.return_value = Completed(
-            argv=("copilot", "help", "permissions"),
-            returncode=0,
-            stdout=b"generic help",
-            stderr=b"",
-        )
-        with self.assertRaisesRegex(ReviewError, "cwd-only path verifier"):
-            providers._copilot_attempt(
-                review=self.review,
-                model="claude-opus-4.8",
-                index=1,
-                env={"GH_TOKEN": "secret"},
-            )
-        self.assertEqual(run_command.call_count, 1)
 
 
 if __name__ == "__main__":

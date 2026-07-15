@@ -29,7 +29,7 @@ Use this reference after the local delivery gate has produced a reviewable commi
 ## Review Counting
 
 - The pinned Codex helper or clean-context `reviewer` fallback is one logical Codex lane.
-- Claude Code and its Copilot runtime/model fallbacks are one logical Claude-family lane.
+- Native Claude Code is one logical Claude-family lane; an unavailable or blocked native runtime does not change provider.
 - GitHub Codex review is the third logical lane only for triple review.
 - `independent-codex-pr-review` and `offline-frozen-diff-review` are separate full-PR-readiness evidence gates. They do not redefine what a standalone double/triple-review request means.
 - CI, comments, branch status, model retries, and helper fallback implementations do not increase the named review shape.

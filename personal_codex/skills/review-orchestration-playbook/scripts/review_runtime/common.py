@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import io
 import json
 import os
 import pathlib
@@ -854,12 +853,6 @@ def resolve_reviewer_executable(
             ("/opt/homebrew/bin/claude", "/usr/local/bin/claude"),
             ("claude code",),
             True,
-        ),
-        "copilot": (
-            "CODEX_REVIEW_COPILOT_PATH",
-            ("/opt/homebrew/bin/copilot", "/usr/local/bin/copilot"),
-            ("github copilot cli",),
-            False,
         ),
     }
     if name not in specs:
