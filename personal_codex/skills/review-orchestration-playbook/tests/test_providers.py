@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Callable
 import contextlib
+from dataclasses import replace
 import hashlib
 import json
 import os
@@ -103,7 +104,19 @@ class ProviderPolicyTest(unittest.TestCase):
         )
         for patcher in self.host_dependency_patchers:
             patcher.start()
-        self.preflight_claude_trust_policy = providers._preflight_claude_trust_policy
+        preflight_claude_trust_policy = providers._preflight_claude_trust_policy
+
+        def run_preflight_claude_trust_policy(
+            review: ReviewWorkspace,
+            *,
+            bundled_root_sha256_fingerprints: frozenset[bytes] = frozenset(),
+        ) -> providers.ClaudeTrustMaterial:
+            return preflight_claude_trust_policy(
+                review,
+                bundled_root_sha256_fingerprints=(bundled_root_sha256_fingerprints),
+            )
+
+        self.preflight_claude_trust_policy = run_preflight_claude_trust_policy
         self.trust_preflight_patcher = mock.patch.object(
             providers,
             "_preflight_claude_trust_policy",
@@ -112,14 +125,20 @@ class ProviderPolicyTest(unittest.TestCase):
         self.trust_preflight.return_value = providers.ClaudeTrustMaterial(
             certificates=b"",
             excluded_sha1_fingerprints=frozenset(),
+            bundled_root_sha256_fingerprints=frozenset(),
         )
-        self.read_claude_trust_certificates = providers._read_claude_trust_certificates
+        read_claude_trust_certificates = providers._read_claude_trust_certificates
+        self.read_claude_trust_certificates = lambda *args, **kwargs: replace(
+            read_claude_trust_certificates(*args, **kwargs),
+            bundled_root_sha256_fingerprints=frozenset(),
+        )
         self.trust_patcher = mock.patch.object(
             providers,
             "_read_claude_trust_certificates",
             return_value=providers.ClaudeTrustMaterial(
                 certificates=b"",
                 excluded_sha1_fingerprints=frozenset(),
+                bundled_root_sha256_fingerprints=frozenset(),
             ),
         )
         self.trust = self.trust_patcher.start()
@@ -138,6 +157,7 @@ class ProviderPolicyTest(unittest.TestCase):
             "_require_trusted_claude_digest",
         )
         self.trusted_digest = self.trusted_digest_patcher.start()
+        self.trusted_digest.return_value = frozenset()
         self.prepare_claude_keychain_broker = providers._prepare_claude_keychain_broker
         self.keychain_broker_patcher = mock.patch.object(
             providers,
@@ -287,6 +307,14 @@ class ProviderPolicyTest(unittest.TestCase):
         return self.sample_ca_certificates(1)[0]
 
     @staticmethod
+    def ca_sha256_fingerprint(certificate: bytes) -> bytes:
+        der, _ = providers._canonical_ca_certificate(
+            certificate,
+            source="test fixture",
+        )
+        return hashlib.sha256(der).digest()
+
+    @staticmethod
     def synthetic_private_key_pem(payload: bytes = b"fixture") -> bytes:
         label = b"PRIVATE" + b" KEY"
         return (
@@ -305,6 +333,7 @@ class ProviderPolicyTest(unittest.TestCase):
         return providers.ClaudeTrustMaterial(
             certificates=b"",
             excluded_sha1_fingerprints=frozenset(),
+            bundled_root_sha256_fingerprints=frozenset(),
             system_certificates=self.sample_ca_certificate(),
             evidence=evidence,
         )
@@ -346,16 +375,35 @@ class ProviderPolicyTest(unittest.TestCase):
         self,
     ) -> None:
         executable = self.review.source_root / "claude"
-        payload = b"trusted Claude release fixture"
+        certificate = self.sample_ca_certificate()
+        der, _ = providers._canonical_ca_certificate(
+            certificate,
+            source="bundled fixture",
+        )
+        fingerprint = hashlib.sha256(der).digest()
+        root_set_digest = hashlib.sha256(fingerprint).hexdigest()
+        payload = (
+            b"ignored -----BEGIN CERTIFICATE----- fragment"
+            + certificate
+            + b"ignored -----END CERTIFICATE----- fragment"
+        )
         executable.write_bytes(payload)
         expected = hashlib.sha256(payload).hexdigest()
 
-        with mock.patch.object(
-            providers,
-            "CLAUDE_TRUSTED_SHA256_BY_MACHINE",
-            {"arm64": "00" * 32, "x86_64": expected},
+        with (
+            mock.patch.object(
+                providers,
+                "CLAUDE_BUNDLED_ROOT_METADATA_BY_DIGEST",
+                {
+                    "00" * 32: (1, "11" * 32),
+                    expected: (1, root_set_digest),
+                },
+            ),
+            mock.patch.object(providers, "CLAUDE_TRUSTED_HASH_CHUNK_BYTES", 17),
         ):
-            self.require_trusted_claude_digest(executable)
+            actual = self.require_trusted_claude_digest(executable)
+
+        self.assertEqual(actual, frozenset({fingerprint}))
 
     def test_claude_digest_rejects_unpinned_native_binary(self) -> None:
         executable = self.review.source_root / "claude"
@@ -364,12 +412,31 @@ class ProviderPolicyTest(unittest.TestCase):
         with (
             mock.patch.object(
                 providers,
-                "CLAUDE_TRUSTED_SHA256_BY_MACHINE",
-                {"arm64": "00" * 32, "x86_64": "11" * 32},
+                "CLAUDE_BUNDLED_ROOT_METADATA_BY_DIGEST",
+                {"00" * 32: (1, "11" * 32)},
             ),
             self.assertRaisesRegex(
                 providers.InvalidReviewerExecutable,
                 "trusted macOS release digests",
+            ),
+        ):
+            self.require_trusted_claude_digest(executable)
+
+    def test_claude_digest_rejects_mismatched_bundled_root_set(self) -> None:
+        executable = self.review.source_root / "claude"
+        certificate = self.sample_ca_certificate()
+        executable.write_bytes(certificate)
+        expected = hashlib.sha256(certificate).hexdigest()
+
+        with (
+            mock.patch.object(
+                providers,
+                "CLAUDE_BUNDLED_ROOT_METADATA_BY_DIGEST",
+                {expected: (2, "00" * 32)},
+            ),
+            self.assertRaisesRegex(
+                providers.InvalidReviewerExecutable,
+                "bundled root evidence",
             ),
         ):
             self.require_trusted_claude_digest(executable)
@@ -847,9 +914,7 @@ class ProviderPolicyTest(unittest.TestCase):
         )
         self.assertEqual(json.loads(diagnostic)["category"], "auth")
         self.assertTrue(
-            json.loads(diagnostic)["output_shape"][
-                "result_matches_known_auth_message"
-            ]
+            json.loads(diagnostic)["output_shape"]["result_matches_known_auth_message"]
         )
         self.assertEqual(
             json.loads(diagnostic)["output_shape"]["result_signal_categories"],
@@ -895,9 +960,9 @@ class ProviderPolicyTest(unittest.TestCase):
                 {},
             )
 
-        diagnostic = (
-            self.review.container_dir / "claude-auth-warmup.json"
-        ).read_text(encoding="utf-8")
+        diagnostic = (self.review.container_dir / "claude-auth-warmup.json").read_text(
+            encoding="utf-8"
+        )
         self.assertEqual(json.loads(diagnostic)["category"], "auth")
         self.assertNotIn(raw_message, diagnostic)
 
@@ -994,9 +1059,9 @@ class ProviderPolicyTest(unittest.TestCase):
                     )
 
                 diagnostic = json.loads(
-                    (
-                        self.review.container_dir / "claude-auth-warmup.json"
-                    ).read_text(encoding="utf-8")
+                    (self.review.container_dir / "claude-auth-warmup.json").read_text(
+                        encoding="utf-8"
+                    )
                 )
                 shape = diagnostic["output_shape"]
                 self.assertEqual(diagnostic["category"], "other")
@@ -1047,9 +1112,9 @@ class ProviderPolicyTest(unittest.TestCase):
                 {},
             )
 
-        diagnostic = (
-            self.review.container_dir / "claude-auth-warmup.json"
-        ).read_text(encoding="utf-8")
+        diagnostic = (self.review.container_dir / "claude-auth-warmup.json").read_text(
+            encoding="utf-8"
+        )
         payload = json.loads(diagnostic)
         self.assertEqual(payload["category"], "other")
         self.assertEqual(
@@ -1097,9 +1162,9 @@ class ProviderPolicyTest(unittest.TestCase):
                 {},
             )
 
-        diagnostic = (
-            self.review.container_dir / "claude-auth-warmup.json"
-        ).read_text(encoding="utf-8")
+        diagnostic = (self.review.container_dir / "claude-auth-warmup.json").read_text(
+            encoding="utf-8"
+        )
         payload = json.loads(diagnostic)
         self.assertEqual(payload["category"], "entitlement")
         self.assertEqual(
@@ -1373,9 +1438,7 @@ class ProviderPolicyTest(unittest.TestCase):
                 json.dumps(
                     {
                         "type": "turn.failed",
-                        "error": {
-                            "message": "Model is not available for your account"
-                        },
+                        "error": {"message": "Model is not available for your account"},
                     }
                 ),
             )
@@ -1501,6 +1564,7 @@ class ProviderPolicyTest(unittest.TestCase):
                 side_effect=lambda *, review, env: (
                     pathlib.Path("/fixture/claude"),
                     dict(env),
+                    frozenset(),
                 ),
             ),
             mock.patch.object(
@@ -1557,9 +1621,7 @@ class ProviderPolicyTest(unittest.TestCase):
                     self.assertIsNone(attempt.final_text)
                     self.assertEqual(outcome.returncode, 1)
                     self.assertNotEqual(outcome.returncode, 75)
-                    self.assertFalse(
-                        (self.review.container_dir / "final.txt").exists()
-                    )
+                    self.assertFalse((self.review.container_dir / "final.txt").exists())
 
     def test_claude_rejects_success_with_nonempty_errors(self) -> None:
         stdout = json.dumps(
@@ -1878,7 +1940,10 @@ class ProviderPolicyTest(unittest.TestCase):
             }
         )
 
-        def reject_malformed(_review: ReviewWorkspace) -> bytes:
+        def reject_malformed(
+            _review: ReviewWorkspace,
+            **_kwargs: object,
+        ) -> bytes:
             providers._classify_trust_fingerprints(malformed, domain="user")
             self.fail("malformed trust settings unexpectedly passed")
 
@@ -1891,7 +1956,11 @@ class ProviderPolicyTest(unittest.TestCase):
             mock.patch.object(
                 providers,
                 "_resolve_validated_claude_executable",
-                return_value=(pathlib.Path("/fixture/claude"), claude_env),
+                return_value=(
+                    pathlib.Path("/fixture/claude"),
+                    claude_env,
+                    frozenset(),
+                ),
             ),
             mock.patch.object(
                 providers,
@@ -1939,7 +2008,11 @@ class ProviderPolicyTest(unittest.TestCase):
             mock.patch.object(
                 providers,
                 "_resolve_validated_claude_executable",
-                return_value=(pathlib.Path("/fixture/claude"), claude_env),
+                return_value=(
+                    pathlib.Path("/fixture/claude"),
+                    claude_env,
+                    frozenset(),
+                ),
             ),
             mock.patch.object(
                 providers,
@@ -2019,7 +2092,11 @@ class ProviderPolicyTest(unittest.TestCase):
             mock.patch.object(
                 providers,
                 "_resolve_validated_claude_executable",
-                return_value=(pathlib.Path("/fixture/claude"), claude_env),
+                return_value=(
+                    pathlib.Path("/fixture/claude"),
+                    claude_env,
+                    frozenset(),
+                ),
             ),
             mock.patch.object(
                 providers,
@@ -2080,7 +2157,11 @@ class ProviderPolicyTest(unittest.TestCase):
             mock.patch.object(
                 providers,
                 "_resolve_validated_claude_executable",
-                return_value=(pathlib.Path("/fixture/claude"), claude_env),
+                return_value=(
+                    pathlib.Path("/fixture/claude"),
+                    claude_env,
+                    frozenset(),
+                ),
             ),
             mock.patch.object(
                 providers,
@@ -2143,6 +2224,7 @@ class ProviderPolicyTest(unittest.TestCase):
                 side_effect=lambda *, review, env: (
                     pathlib.Path("/fixture/claude"),
                     dict(env),
+                    frozenset(),
                 ),
             ),
             mock.patch.object(
@@ -2190,7 +2272,10 @@ class ProviderPolicyTest(unittest.TestCase):
         self.assertFalse(
             (self.review.container_dir / "claude-unavailable.json").exists()
         )
-        self.trust_preflight.assert_called_once_with(self.review)
+        self.trust_preflight.assert_called_once_with(
+            self.review,
+            bundled_root_sha256_fingerprints=frozenset(),
+        )
         prepare_tls.assert_called_once()
         claude_attempt.assert_not_called()
 
@@ -2202,6 +2287,7 @@ class ProviderPolicyTest(unittest.TestCase):
 
         def fresh_trust_material(
             _review: ReviewWorkspace,
+            **_kwargs: object,
         ) -> providers.ClaudeTrustMaterial:
             material = self.pending_claude_trust_material()
             trust_materials.append(material)
@@ -2241,6 +2327,7 @@ class ProviderPolicyTest(unittest.TestCase):
                 side_effect=lambda *, review, env: (
                     pathlib.Path("/fixture/claude"),
                     dict(env),
+                    frozenset(),
                 ),
             ),
             mock.patch.object(
@@ -2286,9 +2373,7 @@ class ProviderPolicyTest(unittest.TestCase):
             )
         )
         persisted_attempts = json.loads(
-            (self.review.container_dir / "attempts.json").read_text(
-                encoding="utf-8"
-            )
+            (self.review.container_dir / "attempts.json").read_text(encoding="utf-8")
         )
         self.assertEqual(outcome.returncode, 2)
         self.assertEqual(len(outcome.attempts), 1)
@@ -2307,12 +2392,7 @@ class ProviderPolicyTest(unittest.TestCase):
         self.assertEqual(run_command.call_count, 1)
         self.assertEqual(len(trust_materials), 3)
         self.assertEqual(
-            len(
-                {
-                    str(material.evidence["generation"])
-                    for material in trust_materials
-                }
-            ),
+            len({str(material.evidence["generation"]) for material in trust_materials}),
             3,
         )
 
@@ -2326,13 +2406,13 @@ class ProviderPolicyTest(unittest.TestCase):
             *,
             review: ReviewWorkspace,
             env: dict[str, str],
-        ) -> tuple[pathlib.Path, dict[str, str]]:
+        ) -> tuple[pathlib.Path, dict[str, str], frozenset[bytes]]:
             resolve_calls.append("resolve")
             if len(resolve_calls) == 3:
                 raise providers.ClaudeProbeSandboxUnavailable(
                     "fixture fallback probe sandbox unavailable"
                 )
-            return pathlib.Path("/fixture/claude"), dict(env)
+            return pathlib.Path("/fixture/claude"), dict(env), frozenset()
 
         entitlement = Completed(
             argv=("claude",),
@@ -2398,9 +2478,7 @@ class ProviderPolicyTest(unittest.TestCase):
         self.assertTrue((self.review.container_dir / "claude-skip.txt").is_file())
         self.assertIn(
             "secure runtime became unavailable",
-            (self.review.container_dir / "claude-skip.txt").read_text(
-                encoding="utf-8"
-            ),
+            (self.review.container_dir / "claude-skip.txt").read_text(encoding="utf-8"),
         )
         self.assertFalse((self.review.container_dir / "claude-blocked.json").exists())
         self.assertFalse(
@@ -2413,9 +2491,7 @@ class ProviderPolicyTest(unittest.TestCase):
             ),
         )
         persisted_attempts = json.loads(
-            (self.review.container_dir / "attempts.json").read_text(
-                encoding="utf-8"
-            )
+            (self.review.container_dir / "attempts.json").read_text(encoding="utf-8")
         )
         self.assertEqual(persisted_attempts[0]["category"], "entitlement")
 
@@ -2444,6 +2520,7 @@ class ProviderPolicyTest(unittest.TestCase):
                 side_effect=lambda *, review, env: (
                     pathlib.Path("/fixture/claude"),
                     dict(env),
+                    frozenset(),
                 ),
             ),
             mock.patch.object(
@@ -2508,9 +2585,7 @@ class ProviderPolicyTest(unittest.TestCase):
         self.assertTrue((self.review.container_dir / "claude-skip.txt").is_file())
         self.assertIn(
             "secure runtime became unavailable",
-            (self.review.container_dir / "claude-skip.txt").read_text(
-                encoding="utf-8"
-            ),
+            (self.review.container_dir / "claude-skip.txt").read_text(encoding="utf-8"),
         )
         self.assertFalse((self.review.container_dir / "claude-blocked.json").exists())
         self.assertFalse(
@@ -2523,9 +2598,7 @@ class ProviderPolicyTest(unittest.TestCase):
             ),
         )
         persisted_attempts = json.loads(
-            (self.review.container_dir / "attempts.json").read_text(
-                encoding="utf-8"
-            )
+            (self.review.container_dir / "attempts.json").read_text(encoding="utf-8")
         )
         self.assertEqual(persisted_attempts[0]["category"], "entitlement")
 
@@ -2540,7 +2613,11 @@ class ProviderPolicyTest(unittest.TestCase):
             mock.patch.object(
                 providers,
                 "_resolve_validated_claude_executable",
-                return_value=(pathlib.Path("/fixture/claude"), claude_env),
+                return_value=(
+                    pathlib.Path("/fixture/claude"),
+                    claude_env,
+                    frozenset(),
+                ),
             ),
             mock.patch.object(
                 providers,
@@ -2580,6 +2657,7 @@ class ProviderPolicyTest(unittest.TestCase):
         warmup_material = providers.ClaudeTrustMaterial(
             certificates=self.sample_ca_certificate(),
             excluded_sha1_fingerprints=frozenset(),
+            bundled_root_sha256_fingerprints=frozenset(),
         )
         warmup_env = {"TLS_PHASE": "warmup"}
         self.trust_preflight.return_value = warmup_material
@@ -2592,7 +2670,11 @@ class ProviderPolicyTest(unittest.TestCase):
             mock.patch.object(
                 providers,
                 "_resolve_validated_claude_executable",
-                return_value=(pathlib.Path("/fixture/claude"), claude_env),
+                return_value=(
+                    pathlib.Path("/fixture/claude"),
+                    claude_env,
+                    frozenset(),
+                ),
             ),
             mock.patch.object(
                 providers,
@@ -2622,7 +2704,10 @@ class ProviderPolicyTest(unittest.TestCase):
             )
 
         self.assertEqual(outcome.returncode, 0)
-        self.trust_preflight.assert_called_once_with(self.review)
+        self.trust_preflight.assert_called_once_with(
+            self.review,
+            bundled_root_sha256_fingerprints=frozenset(),
+        )
         self.warmup.assert_called_once_with(
             self.review,
             pathlib.Path("/fixture/claude"),
@@ -2646,6 +2731,7 @@ class ProviderPolicyTest(unittest.TestCase):
 
         def fresh_trust_material(
             _review: ReviewWorkspace,
+            **_kwargs: object,
         ) -> providers.ClaudeTrustMaterial:
             material = self.pending_claude_trust_material()
             trust_materials.append(material)
@@ -2691,6 +2777,7 @@ class ProviderPolicyTest(unittest.TestCase):
                 side_effect=lambda *, review, env: (
                     pathlib.Path("/fixture/claude"),
                     dict(env),
+                    frozenset(),
                 ),
             ),
             mock.patch.object(
@@ -2755,8 +2842,7 @@ class ProviderPolicyTest(unittest.TestCase):
             self.assertIs(call.kwargs["trust_material"], material)
         evidence = json.loads(
             (
-                self.review.container_dir
-                / providers.CLAUDE_TRUST_POLICY_EVIDENCE_NAME
+                self.review.container_dir / providers.CLAUDE_TRUST_POLICY_EVIDENCE_NAME
             ).read_text(encoding="utf-8")
         )
         self.assertEqual(evidence["status"], "complete")
@@ -2768,6 +2854,7 @@ class ProviderPolicyTest(unittest.TestCase):
         excluded = providers.ClaudeTrustMaterial(
             certificates=b"",
             excluded_sha1_fingerprints=frozenset({"A" * 40}),
+            bundled_root_sha256_fingerprints=frozenset(),
         )
         self.trust_preflight.side_effect = self.preflight_claude_trust_policy
         self.trust.side_effect = self.read_claude_trust_certificates
@@ -2780,7 +2867,11 @@ class ProviderPolicyTest(unittest.TestCase):
             mock.patch.object(
                 providers,
                 "_resolve_validated_claude_executable",
-                return_value=(pathlib.Path("/fixture/claude"), claude_env),
+                return_value=(
+                    pathlib.Path("/fixture/claude"),
+                    claude_env,
+                    frozenset(),
+                ),
             ),
             mock.patch.object(
                 providers,
@@ -2801,15 +2892,14 @@ class ProviderPolicyTest(unittest.TestCase):
 
         evidence = json.loads(
             (
-                self.review.container_dir
-                / providers.CLAUDE_TRUST_POLICY_EVIDENCE_NAME
+                self.review.container_dir / providers.CLAUDE_TRUST_POLICY_EVIDENCE_NAME
             ).read_text(encoding="utf-8")
         )
         self.assertEqual(outcome.returncode, 2)
         self.assertEqual(evidence["status"], "blocked")
         self.assertEqual(
             evidence["policy"],
-            "block-unenforceable-excluded-roots",
+            "require-bundled-root-subset",
         )
         self.assertTrue((self.review.container_dir / "claude-blocked.json").is_file())
         self.warmup.assert_not_called()
@@ -2819,10 +2909,12 @@ class ProviderPolicyTest(unittest.TestCase):
         initial = providers.ClaudeTrustMaterial(
             certificates=b"",
             excluded_sha1_fingerprints=frozenset(),
+            bundled_root_sha256_fingerprints=frozenset(),
         )
         excluded = providers.ClaudeTrustMaterial(
             certificates=b"",
             excluded_sha1_fingerprints=frozenset({"B" * 40}),
+            bundled_root_sha256_fingerprints=frozenset(),
         )
         self.trust_preflight.side_effect = self.preflight_claude_trust_policy
         self.trust.side_effect = self.read_claude_trust_certificates
@@ -2835,7 +2927,11 @@ class ProviderPolicyTest(unittest.TestCase):
             mock.patch.object(
                 providers,
                 "_resolve_validated_claude_executable",
-                return_value=(pathlib.Path("/fixture/claude"), claude_env),
+                return_value=(
+                    pathlib.Path("/fixture/claude"),
+                    claude_env,
+                    frozenset(),
+                ),
             ),
             mock.patch.object(
                 providers,
@@ -2856,8 +2952,7 @@ class ProviderPolicyTest(unittest.TestCase):
 
         evidence = json.loads(
             (
-                self.review.container_dir
-                / providers.CLAUDE_TRUST_POLICY_EVIDENCE_NAME
+                self.review.container_dir / providers.CLAUDE_TRUST_POLICY_EVIDENCE_NAME
             ).read_text(encoding="utf-8")
         )
         self.assertEqual(outcome.returncode, 2)
@@ -2865,7 +2960,7 @@ class ProviderPolicyTest(unittest.TestCase):
         self.assertEqual(evidence["status"], "blocked")
         self.assertEqual(
             evidence["policy"],
-            "block-unenforceable-excluded-roots",
+            "require-bundled-root-subset",
         )
         self.warmup.assert_called_once()
 
@@ -2876,6 +2971,7 @@ class ProviderPolicyTest(unittest.TestCase):
         initial = providers.ClaudeTrustMaterial(
             certificates=b"",
             excluded_sha1_fingerprints=frozenset(),
+            bundled_root_sha256_fingerprints=frozenset(),
         )
         first_generations: list[str] = []
 
@@ -2889,9 +2985,7 @@ class ProviderPolicyTest(unittest.TestCase):
             self.assertEqual(evidence["status"], "complete")
             first_generations.append(str(evidence["generation"]))
             self.claude_system_ca.write_bytes(
-                b"-----BEGIN PRIVATE "
-                b"KEY-----\nfixture\n-----END PRIVATE "
-                b"KEY-----\n"
+                b"-----BEGIN PRIVATE KEY-----\nfixture\n-----END PRIVATE KEY-----\n"
             )
 
         self.trust_preflight.side_effect = self.preflight_claude_trust_policy
@@ -2906,7 +3000,11 @@ class ProviderPolicyTest(unittest.TestCase):
             mock.patch.object(
                 providers,
                 "_resolve_validated_claude_executable",
-                return_value=(pathlib.Path("/fixture/claude"), claude_env),
+                return_value=(
+                    pathlib.Path("/fixture/claude"),
+                    claude_env,
+                    frozenset(),
+                ),
             ),
             mock.patch.object(
                 providers,
@@ -2927,8 +3025,7 @@ class ProviderPolicyTest(unittest.TestCase):
 
         evidence = json.loads(
             (
-                self.review.container_dir
-                / providers.CLAUDE_TRUST_POLICY_EVIDENCE_NAME
+                self.review.container_dir / providers.CLAUDE_TRUST_POLICY_EVIDENCE_NAME
             ).read_text(encoding="utf-8")
         )
         runner_error = (self.review.container_dir / "runner-error.txt").read_text(
@@ -2958,7 +3055,11 @@ class ProviderPolicyTest(unittest.TestCase):
             mock.patch.object(
                 providers,
                 "_resolve_validated_claude_executable",
-                return_value=(pathlib.Path("/fixture/claude"), claude_env),
+                return_value=(
+                    pathlib.Path("/fixture/claude"),
+                    claude_env,
+                    frozenset(),
+                ),
             ),
             mock.patch.object(
                 providers,
@@ -4150,7 +4251,10 @@ class ProviderPolicyTest(unittest.TestCase):
         self.assertEqual(attempt.category, "success")
         self.assertEqual(attempt.effective_model, "claude-opus-4-8")
         self.assertEqual(attempt.effective_effort, "max")
-        self.trust_preflight.assert_called_once_with(self.review)
+        self.trust_preflight.assert_called_once_with(
+            self.review,
+            bundled_root_sha256_fingerprints=frozenset(),
+        )
         argv = run_command.call_args_list[2].args[0]
         self.assertIn("claude-opus-4-8", argv)
         self.assertEqual(argv[argv.index("--effort") + 1], "max")
@@ -4298,6 +4402,7 @@ class ProviderPolicyTest(unittest.TestCase):
                 side_effect=lambda *, review, env: (
                     pathlib.Path("/bin/claude"),
                     dict(env),
+                    frozenset(),
                 ),
             ),
             mock.patch.object(
@@ -4321,6 +4426,7 @@ class ProviderPolicyTest(unittest.TestCase):
                 return_value=providers.ClaudeTrustMaterial(
                     certificates=b"",
                     excluded_sha1_fingerprints=frozenset(),
+                    bundled_root_sha256_fingerprints=frozenset(),
                 ),
             ),
             mock.patch.object(
@@ -4346,8 +4452,7 @@ class ProviderPolicyTest(unittest.TestCase):
 
         evidence = json.loads(
             (
-                self.review.container_dir
-                / providers.CLAUDE_TRUST_POLICY_EVIDENCE_NAME
+                self.review.container_dir / providers.CLAUDE_TRUST_POLICY_EVIDENCE_NAME
             ).read_text(encoding="utf-8")
         )
         self.assertEqual(attempt.category, "success")
@@ -4485,6 +4590,12 @@ class ProviderPolicyTest(unittest.TestCase):
         self.trust.return_value = providers.ClaudeTrustMaterial(
             certificates=admin_certificate,
             excluded_sha1_fingerprints=frozenset(),
+            bundled_root_sha256_fingerprints=frozenset(
+                {
+                    self.ca_sha256_fingerprint(system_certificate),
+                    self.ca_sha256_fingerprint(admin_certificate),
+                }
+            ),
         )
         custom_path = self.review.source_root / "caller-ca.pem"
         custom_path.write_bytes(custom_certificate)
@@ -4536,6 +4647,38 @@ class ProviderPolicyTest(unittest.TestCase):
         repeated = providers._prepare_claude_tls_environment(self.review, prepared)
         self.assertEqual(
             pathlib.Path(repeated["SSL_CERT_FILE"]).read_bytes(), first_content
+        )
+
+    def test_claude_tls_scrubs_hidden_root_bypass_environment(self) -> None:
+        system_certificate = self.sample_ca_certificate()
+        self.claude_system_ca.write_bytes(system_certificate)
+        trust_material = providers.ClaudeTrustMaterial(
+            certificates=b"",
+            excluded_sha1_fingerprints=frozenset(),
+            bundled_root_sha256_fingerprints=frozenset(
+                {self.ca_sha256_fingerprint(system_certificate)}
+            ),
+        )
+
+        prepared = providers._prepare_claude_tls_environment(
+            self.review,
+            {
+                providers.CLAUDE_CERT_STORE_ENV: "bundled,system",
+                "NODE_OPTIONS": "--use-system-ca --use-openssl-ca",
+                "NODE_TLS_REJECT_UNAUTHORIZED": "0",
+            },
+            trust_material=trust_material,
+        )
+
+        self.assertEqual(
+            prepared[providers.CLAUDE_CERT_STORE_ENV],
+            providers.CLAUDE_CERT_STORE,
+        )
+        for key in providers.CLAUDE_TLS_BYPASS_ENV_KEYS:
+            self.assertNotIn(key, prepared)
+        self.assertEqual(
+            {prepared[key] for key in providers.CLAUDE_TLS_FILE_ENV_KEYS},
+            {prepared["SSL_CERT_FILE"]},
         )
 
     def test_claude_prepared_bundle_uses_complete_bundle_limit(self) -> None:
@@ -4659,14 +4802,13 @@ class ProviderPolicyTest(unittest.TestCase):
                 trust_material=providers.ClaudeTrustMaterial(
                     certificates=b"",
                     excluded_sha1_fingerprints=frozenset(),
+                    bundled_root_sha256_fingerprints=frozenset(),
                 ),
             )
 
         ca_root = self.review.container_dir / "claude-ca"
         self.assertFalse((ca_root / providers.CLAUDE_CA_BUNDLE_NAME).exists())
-        self.assertFalse(
-            (ca_root / providers.CLAUDE_CALLER_CA_SNAPSHOT_NAME).exists()
-        )
+        self.assertFalse((ca_root / providers.CLAUDE_CALLER_CA_SNAPSHOT_NAME).exists())
 
     def test_claude_tls_preparation_converts_input_memory_exhaustion(self) -> None:
         caller_path = self.review.source_root / "caller.pem"
@@ -4685,6 +4827,7 @@ class ProviderPolicyTest(unittest.TestCase):
                 trust_material=providers.ClaudeTrustMaterial(
                     certificates=b"",
                     excluded_sha1_fingerprints=frozenset(),
+                    bundled_root_sha256_fingerprints=frozenset(),
                 ),
             )
 
@@ -4701,8 +4844,7 @@ class ProviderPolicyTest(unittest.TestCase):
         directory_path = caller_dir / "b-certificate.pem"
         directory_path.write_bytes(directory_certificate)
         raw_size = sum(
-            path.stat().st_size
-            for path in (caller_path, ignored_path, directory_path)
+            path.stat().st_size for path in (caller_path, ignored_path, directory_path)
         )
 
         with (
@@ -4722,22 +4864,19 @@ class ProviderPolicyTest(unittest.TestCase):
                 trust_material=providers.ClaudeTrustMaterial(
                     certificates=b"",
                     excluded_sha1_fingerprints=frozenset(),
+                    bundled_root_sha256_fingerprints=frozenset(),
                 ),
             )
 
         ca_root = self.review.container_dir / "claude-ca"
         self.assertFalse((ca_root / providers.CLAUDE_CA_BUNDLE_NAME).exists())
-        self.assertFalse(
-            (ca_root / providers.CLAUDE_CALLER_CA_SNAPSHOT_NAME).exists()
-        )
+        self.assertFalse((ca_root / providers.CLAUDE_CALLER_CA_SNAPSHOT_NAME).exists())
 
     def test_claude_preflight_records_blocked_system_private_key_before_exclusions(
         self,
     ) -> None:
         self.claude_system_ca.write_bytes(
-            b"-----BEGIN PRIVATE "
-            b"KEY-----\nfixture\n-----END PRIVATE "
-            b"KEY-----\n"
+            b"-----BEGIN PRIVATE KEY-----\nfixture\n-----END PRIVATE KEY-----\n"
         )
         with (
             mock.patch.object(
@@ -4754,8 +4893,7 @@ class ProviderPolicyTest(unittest.TestCase):
         read_impl.assert_not_called()
         evidence = json.loads(
             (
-                self.review.container_dir
-                / providers.CLAUDE_TRUST_POLICY_EVIDENCE_NAME
+                self.review.container_dir / providers.CLAUDE_TRUST_POLICY_EVIDENCE_NAME
             ).read_text(encoding="utf-8")
         )
         self.assertEqual(evidence["status"], "blocked")
@@ -4771,6 +4909,7 @@ class ProviderPolicyTest(unittest.TestCase):
             return_value=providers.ClaudeTrustMaterial(
                 certificates=b"",
                 excluded_sha1_fingerprints=frozenset(),
+                bundled_root_sha256_fingerprints=frozenset(),
             ),
         ):
             trust_material = self.preflight_claude_trust_policy(self.review)
@@ -4803,6 +4942,7 @@ class ProviderPolicyTest(unittest.TestCase):
             return_value=providers.ClaudeTrustMaterial(
                 certificates=b"",
                 excluded_sha1_fingerprints=frozenset(),
+                bundled_root_sha256_fingerprints=frozenset(),
             ),
         ):
             trust_material = self.preflight_claude_trust_policy(self.review)
@@ -4818,8 +4958,7 @@ class ProviderPolicyTest(unittest.TestCase):
 
         evidence = json.loads(
             (
-                self.review.container_dir
-                / providers.CLAUDE_TRUST_POLICY_EVIDENCE_NAME
+                self.review.container_dir / providers.CLAUDE_TRUST_POLICY_EVIDENCE_NAME
             ).read_text(encoding="utf-8")
         )
         self.assertEqual(evidence["status"], "blocked")
@@ -4842,6 +4981,7 @@ class ProviderPolicyTest(unittest.TestCase):
                 return_value=providers.ClaudeTrustMaterial(
                     certificates=b"",
                     excluded_sha1_fingerprints=frozenset(),
+                    bundled_root_sha256_fingerprints=frozenset(),
                 ),
             ),
             mock.patch.object(
@@ -4855,8 +4995,7 @@ class ProviderPolicyTest(unittest.TestCase):
 
         evidence = json.loads(
             (
-                self.review.container_dir
-                / providers.CLAUDE_TRUST_POLICY_EVIDENCE_NAME
+                self.review.container_dir / providers.CLAUDE_TRUST_POLICY_EVIDENCE_NAME
             ).read_text(encoding="utf-8")
         )
         self.assertEqual(evidence["status"], "inconclusive")
@@ -4883,8 +5022,7 @@ class ProviderPolicyTest(unittest.TestCase):
 
         evidence = json.loads(
             (
-                self.review.container_dir
-                / providers.CLAUDE_TRUST_POLICY_EVIDENCE_NAME
+                self.review.container_dir / providers.CLAUDE_TRUST_POLICY_EVIDENCE_NAME
             ).read_text(encoding="utf-8")
         )
         self.assertIs(raised.exception, forwarded)
@@ -4966,6 +5104,7 @@ class ProviderPolicyTest(unittest.TestCase):
         trust_material = providers.ClaudeTrustMaterial(
             certificates=trust_certificate,
             excluded_sha1_fingerprints=frozenset(),
+            bundled_root_sha256_fingerprints=frozenset(),
         )
         ca_root = self.review.container_dir / "claude-ca"
         snapshot = ca_root / providers.CLAUDE_CALLER_CA_SNAPSHOT_NAME
@@ -5055,10 +5194,12 @@ class ProviderPolicyTest(unittest.TestCase):
             providers.ClaudeTrustMaterial(
                 certificates=removed_trust_certificate,
                 excluded_sha1_fingerprints=frozenset(),
+                bundled_root_sha256_fingerprints=frozenset(),
             ),
             providers.ClaudeTrustMaterial(
                 certificates=b"",
                 excluded_sha1_fingerprints=frozenset(),
+                bundled_root_sha256_fingerprints=frozenset(),
             ),
         )
 
@@ -5618,8 +5759,7 @@ class ProviderPolicyTest(unittest.TestCase):
                     stdout=bytearray(
                         b"CN=Verification Fixture\n"
                         + (
-                            f"error {error_code} at 0 depth lookup: "
-                            f"{error_reason}\n"
+                            f"error {error_code} at 0 depth lookup: {error_reason}\n"
                         ).encode()
                     ),
                     stderr=bytearray(
@@ -5677,8 +5817,7 @@ class ProviderPolicyTest(unittest.TestCase):
                 },
             )
             diagnostic = (
-                f"{argv[-1]}: verification failed: "
-                "10 (certificate has expired)\n"
+                f"{argv[-1]}: verification failed: 10 (certificate has expired)\n"
             ).encode()
             capture = common.BoundedCapture(
                 argv=argv,
@@ -5739,8 +5878,7 @@ class ProviderPolicyTest(unittest.TestCase):
                 if case == "non-two-exact-diagnostic":
                     returncode = 1
                     diagnostic = (
-                        f"{path}: verification failed: "
-                        "10 (certificate has expired)\n"
+                        f"{path}: verification failed: 10 (certificate has expired)\n"
                     ).encode()
                 elif case == "wrong-path":
                     returncode = 2
@@ -5845,17 +5983,14 @@ class ProviderPolicyTest(unittest.TestCase):
                     b""
                     if error_code is None
                     else (
-                        f"error {error_code} at 0 depth lookup: "
-                        f"{error_reason}\n"
+                        f"error {error_code} at 0 depth lookup: {error_reason}\n"
                     ).encode()
                 )
                 capture = common.BoundedCapture(
                     argv=argv,
                     returncode=2,
                     stdout=bytearray(code_line),
-                    stderr=bytearray(
-                        f"error {path}: verification failed\n".encode()
-                    ),
+                    stderr=bytearray(f"error {path}: verification failed\n".encode()),
                 )
                 captures.append(capture)
                 return capture
@@ -5986,8 +6121,7 @@ class ProviderPolicyTest(unittest.TestCase):
             returncode=0,
             stdout=bytearray(
                 (
-                    "\n".join(providers.CLAUDE_TRUST_EXPORT_PUBLISHED_HELP_LINES)
-                    + "\n"
+                    "\n".join(providers.CLAUDE_TRUST_EXPORT_PUBLISHED_HELP_LINES) + "\n"
                 ).encode()
             ),
             stderr=bytearray(),
@@ -6014,7 +6148,12 @@ class ProviderPolicyTest(unittest.TestCase):
         ca_root.mkdir()
         published = providers.CLAUDE_TRUST_EXPORT_PUBLISHED_HELP_LINES
         cases = (
-            ("mutated", tuple(line.replace("Export admin", "Import admin") for line in published)),
+            (
+                "mutated",
+                tuple(
+                    line.replace("Export admin", "Import admin") for line in published
+                ),
+            ),
             ("extra", (*published, "-x Unknown future behavior")),
             ("duplicate", (published[0], *published)),
             (
@@ -6094,6 +6233,7 @@ class ProviderPolicyTest(unittest.TestCase):
             providers.ClaudeTrustMaterial(
                 certificates=b"",
                 excluded_sha1_fingerprints=frozenset(),
+                bundled_root_sha256_fingerprints=frozenset(),
             ),
         )
         self.assertEqual(
@@ -6159,7 +6299,7 @@ class ProviderPolicyTest(unittest.TestCase):
         )
         self.assertEqual(
             evidence["policy"],
-            "block-unenforceable-excluded-roots",
+            "require-bundled-root-subset",
         )
         self.assertEqual(evidence["distinct_constrained_omitted_count"], 0)
         self.assertEqual(
@@ -6245,8 +6385,7 @@ class ProviderPolicyTest(unittest.TestCase):
 
         evidence = json.loads(
             (
-                self.review.container_dir
-                / providers.CLAUDE_TRUST_POLICY_EVIDENCE_NAME
+                self.review.container_dir / providers.CLAUDE_TRUST_POLICY_EVIDENCE_NAME
             ).read_text(encoding="utf-8")
         )
         self.assertEqual(evidence["status"], "blocked")
@@ -6299,8 +6438,7 @@ class ProviderPolicyTest(unittest.TestCase):
 
         evidence = json.loads(
             (
-                self.review.container_dir
-                / providers.CLAUDE_TRUST_POLICY_EVIDENCE_NAME
+                self.review.container_dir / providers.CLAUDE_TRUST_POLICY_EVIDENCE_NAME
             ).read_text(encoding="utf-8")
         )
         self.assertEqual(evidence["status"], "blocked")
@@ -6924,6 +7062,7 @@ class ProviderPolicyTest(unittest.TestCase):
         self.trust.return_value = providers.ClaudeTrustMaterial(
             certificates=b"",
             excluded_sha1_fingerprints=frozenset({fingerprint}),
+            bundled_root_sha256_fingerprints=frozenset(),
         )
 
         with self.assertRaisesRegex(
@@ -6940,9 +7079,67 @@ class ProviderPolicyTest(unittest.TestCase):
 
         ca_root = self.review.container_dir / "claude-ca"
         self.assertFalse((ca_root / providers.CLAUDE_CA_BUNDLE_NAME).exists())
-        self.assertFalse(
-            (ca_root / providers.CLAUDE_CALLER_CA_SNAPSHOT_NAME).exists()
+        self.assertFalse((ca_root / providers.CLAUDE_CALLER_CA_SNAPSHOT_NAME).exists())
+
+    def test_claude_tls_blocks_extra_bundled_only_root(self) -> None:
+        system_certificate, bundled_only_certificate = self.sample_ca_certificates(2)
+        self.claude_system_ca.write_bytes(system_certificate)
+        evidence = providers._new_claude_trust_policy_evidence()
+        evidence["bundled_root_count"] = 2
+        evidence["bundled_root_resolution"] = "pending"
+        providers._write_claude_trust_policy_evidence(self.review, evidence)
+        trust_material = providers.ClaudeTrustMaterial(
+            certificates=b"",
+            excluded_sha1_fingerprints=frozenset(),
+            bundled_root_sha256_fingerprints=frozenset(
+                {
+                    self.ca_sha256_fingerprint(system_certificate),
+                    self.ca_sha256_fingerprint(bundled_only_certificate),
+                }
+            ),
+            system_certificates=system_certificate,
+            evidence=evidence,
         )
+
+        with self.assertRaisesRegex(
+            providers.ClaudeTrustPolicyUnavailable,
+            "bundled certificate store contains roots outside",
+        ):
+            providers._prepare_claude_tls_environment(
+                self.review,
+                {},
+                trust_material=trust_material,
+            )
+
+        ca_root = self.review.container_dir / "claude-ca"
+        self.assertFalse((ca_root / providers.CLAUDE_CA_BUNDLE_NAME).exists())
+        self.assertFalse((ca_root / providers.CLAUDE_CALLER_CA_SNAPSHOT_NAME).exists())
+        retained = json.loads(
+            (
+                self.review.container_dir / providers.CLAUDE_TRUST_POLICY_EVIDENCE_NAME
+            ).read_text(encoding="utf-8")
+        )
+        self.assertEqual(retained["status"], "blocked")
+        self.assertEqual(retained["bundled_root_count"], 2)
+        self.assertEqual(retained["bundled_root_extra_count"], 1)
+        self.assertEqual(retained["bundled_root_resolution"], "blocked")
+
+    def test_claude_tls_blocks_missing_bundled_root_evidence(self) -> None:
+        with self.assertRaisesRegex(
+            providers.ClaudeTrustPolicyUnavailable,
+            "bundled root evidence is unavailable",
+        ):
+            providers._prepare_claude_tls_environment(
+                self.review,
+                {},
+                trust_material=providers.ClaudeTrustMaterial(
+                    certificates=b"",
+                    excluded_sha1_fingerprints=frozenset(),
+                ),
+            )
+
+        ca_root = self.review.container_dir / "claude-ca"
+        self.assertFalse((ca_root / providers.CLAUDE_CA_BUNDLE_NAME).exists())
 
     @mock.patch.object(
         providers,
