@@ -500,9 +500,23 @@ class PrivateOverlaySyncTests(unittest.TestCase):
         self.assertEqual(manifest_sources - private_only_sources, manifest_sources & sync_targets)
         self.assertTrue(manifest_sources.isdisjoint(retired_targets))
         self.assertTrue(sync_targets.isdisjoint(retired_targets))
+        self.assertIn("personal_codex/skills/bounded-command-output", manifest_sources)
+        self.assertIn("skills/bounded-command-output", manifest_targets)
+        self.assertIn("personal_codex/skills/bounded-command-output", sync_targets)
         self.assertIn("personal_codex/skills/codex-session-retrospective", manifest_sources)
         self.assertIn("skills/codex-session-retrospective", manifest_targets)
         self.assertIn("personal_codex/skills/codex-session-retrospective", sync_targets)
+
+    def test_bounded_command_output_is_installed_and_routed(self) -> None:
+        agents = (REPO_ROOT / "personal_codex" / "AGENTS.md").read_text(encoding="utf-8")
+        skill_root = REPO_ROOT / "personal_codex" / "skills" / "bounded-command-output"
+        skill = (skill_root / "SKILL.md").read_text(encoding="utf-8")
+        interface = (skill_root / "agents" / "openai.yaml").read_text(encoding="utf-8")
+
+        self.assertIn("Use `$bounded-command-output` before broad searches", agents)
+        self.assertIn("apply it alongside the task's domain skill", agents)
+        self.assertIn("spinner-heavy container builds", skill)
+        self.assertIn("allow_implicit_invocation: true", interface)
 
     def test_scheduled_workflow_opens_pr_for_sync_changes(self) -> None:
         workflow = (

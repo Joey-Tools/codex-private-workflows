@@ -153,6 +153,11 @@ SYNC_RULES = (
     ),
     _rule(
         "codex-workflow-hygiene",
+        "skills/bounded-command-output",
+        "personal_codex/skills/bounded-command-output",
+    ),
+    _rule(
+        "codex-workflow-hygiene",
         "skills/codex-rules-hygiene",
         "personal_codex/skills/codex-rules-hygiene",
         (
