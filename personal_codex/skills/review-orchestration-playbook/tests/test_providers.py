@@ -1683,7 +1683,7 @@ class ProviderPolicyTest(unittest.TestCase):
         claude_env = {"ANTHROPIC_API_KEY": "fixture-key"}
         trust_material = providers.ClaudeTrustMaterial(
             certificates=self.sample_ca_certificate(),
-            excluded_sha1_fingerprints=frozenset({"A" * 40}),
+            excluded_sha1_fingerprints=frozenset(),
         )
         self.trust_preflight.return_value = trust_material
         with (
@@ -1739,8 +1739,8 @@ class ProviderPolicyTest(unittest.TestCase):
             excluded_sha1_fingerprints=frozenset(),
         )
         refreshed_material = providers.ClaudeTrustMaterial(
-            certificates=b"",
-            excluded_sha1_fingerprints=frozenset({"B" * 40}),
+            certificates=self.sample_ca_certificate(),
+            excluded_sha1_fingerprints=frozenset(),
         )
         warmup_env = {"TLS_PHASE": "warmup"}
         review_env = {"TLS_PHASE": "review"}
@@ -1806,6 +1806,118 @@ class ProviderPolicyTest(unittest.TestCase):
             ],
         )
         self.assertEqual(claude_attempt.call_args.kwargs["env"], review_env)
+
+    def test_run_review_blocks_first_preflight_exclusion_with_terminal_evidence(
+        self,
+    ) -> None:
+        claude_env = {"ANTHROPIC_API_KEY": "fixture-key"}
+        excluded = providers.ClaudeTrustMaterial(
+            certificates=b"",
+            excluded_sha1_fingerprints=frozenset({"A" * 40}),
+        )
+        self.trust_preflight.side_effect = self.preflight_claude_trust_policy
+        self.trust.side_effect = self.read_claude_trust_certificates
+        with (
+            mock.patch.object(
+                providers,
+                "child_environment",
+                return_value=claude_env,
+            ),
+            mock.patch.object(
+                providers,
+                "_resolve_validated_claude_executable",
+                return_value=(pathlib.Path("/fixture/claude"), claude_env),
+            ),
+            mock.patch.object(
+                providers,
+                "_with_claude_review_tool_path",
+                return_value=claude_env,
+            ),
+            mock.patch.object(
+                providers,
+                "_read_claude_trust_certificates_impl",
+                return_value=excluded,
+            ),
+            mock.patch.object(providers, "_claude_attempt") as claude_attempt,
+        ):
+            outcome = providers.run_review(
+                review=self.review,
+                reviewer="claude",
+                egress_consent="triple-review",
+            )
+
+        evidence = json.loads(
+            (
+                self.review.container_dir
+                / providers.CLAUDE_TRUST_POLICY_EVIDENCE_NAME
+            ).read_text(encoding="utf-8")
+        )
+        self.assertEqual(outcome.returncode, 2)
+        self.assertEqual(evidence["status"], "blocked")
+        self.assertEqual(
+            evidence["policy"],
+            "block-unenforceable-excluded-roots",
+        )
+        self.assertTrue((self.review.container_dir / "claude-blocked.json").is_file())
+        self.warmup.assert_not_called()
+        claude_attempt.assert_not_called()
+
+    def test_run_review_blocks_refreshed_exclusion_after_warmup(self) -> None:
+        claude_env: dict[str, str] = {}
+        initial = providers.ClaudeTrustMaterial(
+            certificates=b"",
+            excluded_sha1_fingerprints=frozenset(),
+        )
+        excluded = providers.ClaudeTrustMaterial(
+            certificates=b"",
+            excluded_sha1_fingerprints=frozenset({"B" * 40}),
+        )
+        self.trust_preflight.side_effect = self.preflight_claude_trust_policy
+        self.trust.side_effect = self.read_claude_trust_certificates
+        with (
+            mock.patch.object(
+                providers,
+                "child_environment",
+                return_value=claude_env,
+            ),
+            mock.patch.object(
+                providers,
+                "_resolve_validated_claude_executable",
+                return_value=(pathlib.Path("/fixture/claude"), claude_env),
+            ),
+            mock.patch.object(
+                providers,
+                "_with_claude_review_tool_path",
+                return_value=claude_env,
+            ),
+            mock.patch.object(
+                providers,
+                "_read_claude_trust_certificates_impl",
+                side_effect=(initial, excluded),
+            ) as read_impl,
+            mock.patch.object(providers, "_claude_attempt") as claude_attempt,
+        ):
+            outcome = providers.run_review(
+                review=self.review,
+                reviewer="claude",
+                egress_consent="triple-review",
+            )
+
+        evidence = json.loads(
+            (
+                self.review.container_dir
+                / providers.CLAUDE_TRUST_POLICY_EVIDENCE_NAME
+            ).read_text(encoding="utf-8")
+        )
+        self.assertEqual(outcome.returncode, 2)
+        self.assertEqual(read_impl.call_count, 2)
+        self.assertEqual(evidence["status"], "blocked")
+        self.assertEqual(
+            evidence["policy"],
+            "block-unenforceable-excluded-roots",
+        )
+        self.warmup.assert_called_once()
+        claude_attempt.assert_not_called()
 
     def test_native_claude_entitlement_exhaustion_stops_the_lane(self) -> None:
         claude_env = {"ANTHROPIC_API_KEY": "fixture-key"}
@@ -3235,6 +3347,10 @@ class ProviderPolicyTest(unittest.TestCase):
 
     def test_claude_ca_output_budgets_cover_pem_normalization(self) -> None:
         self.assertEqual(
+            providers.CLAUDE_CALLER_CA_INPUT_LIMIT_BYTES,
+            8 * 1024 * 1024,
+        )
+        self.assertEqual(
             providers.CLAUDE_CALLER_CA_SNAPSHOT_LIMIT_BYTES,
             providers.CLAUDE_CALLER_CA_INPUT_LIMIT_BYTES
             + (providers.CLAUDE_CALLER_CA_INPUT_LIMIT_BYTES + 31) // 32,
@@ -3243,6 +3359,154 @@ class ProviderPolicyTest(unittest.TestCase):
             providers.CLAUDE_CA_BUNDLE_LIMIT_BYTES,
             providers.CLAUDE_CA_BUNDLE_INPUT_LIMIT_BYTES
             + (providers.CLAUDE_CA_BUNDLE_INPUT_LIMIT_BYTES + 31) // 32,
+        )
+        self.assertLess(providers.CLAUDE_CA_BUNDLE_LIMIT_BYTES, 32 * 1024 * 1024)
+
+    def test_claude_ca_merge_converts_memory_exhaustion_to_review_error(
+        self,
+    ) -> None:
+        with (
+            mock.patch.object(
+                providers,
+                "_extract_ca_certificates",
+                side_effect=MemoryError("fixture exhaustion"),
+            ),
+            self.assertRaisesRegex(ReviewError, "bounded memory budget"),
+        ):
+            providers._merge_ca_certificates(
+                (("fixture", self.sample_ca_certificate()),),
+                limit_bytes=providers.CLAUDE_CA_BUNDLE_LIMIT_BYTES,
+                label="Claude review CA bundle",
+            )
+
+    def test_claude_tls_preparation_bounds_aggregate_caller_material(self) -> None:
+        first, second = self.sample_ca_certificates(2)
+        first_path = self.review.source_root / "first-caller.pem"
+        second_path = self.review.source_root / "second-caller.pem"
+        first_path.write_bytes(first + b"\n" + b"first-padding" * 512)
+        second_path.write_bytes(second + b"\n" + b"second-padding" * 512)
+        canonical_size = sum(
+            len(
+                providers._canonical_ca_certificate(
+                    certificate,
+                    source="caller fixture",
+                )[1]
+            )
+            for certificate in (first, second)
+        )
+        raw_size = first_path.stat().st_size + second_path.stat().st_size
+        self.assertLess(canonical_size, raw_size - 1)
+
+        with (
+            mock.patch.object(
+                providers,
+                "CLAUDE_CALLER_CA_INPUT_LIMIT_BYTES",
+                raw_size - 1,
+            ),
+            self.assertRaisesRegex(ReviewError, "aggregate limit"),
+        ):
+            providers._prepare_claude_tls_environment(
+                self.review,
+                {
+                    "CURL_CA_BUNDLE": str(first_path),
+                    "GIT_SSL_CAINFO": str(second_path),
+                },
+                trust_material=providers.ClaudeTrustMaterial(
+                    certificates=b"",
+                    excluded_sha1_fingerprints=frozenset(),
+                ),
+            )
+
+        ca_root = self.review.container_dir / "claude-ca"
+        self.assertFalse((ca_root / providers.CLAUDE_CA_BUNDLE_NAME).exists())
+        self.assertFalse(
+            (ca_root / providers.CLAUDE_CALLER_CA_SNAPSHOT_NAME).exists()
+        )
+
+    def test_claude_tls_preparation_converts_input_memory_exhaustion(self) -> None:
+        caller_path = self.review.source_root / "caller.pem"
+        caller_path.write_bytes(self.sample_ca_certificate())
+        with (
+            mock.patch.object(
+                providers,
+                "_read_ca_source_with_size",
+                side_effect=MemoryError("fixture exhaustion"),
+            ),
+            self.assertRaisesRegex(ReviewError, "bounded memory budget"),
+        ):
+            providers._prepare_claude_tls_environment(
+                self.review,
+                {"SSL_CERT_FILE": str(caller_path)},
+                trust_material=providers.ClaudeTrustMaterial(
+                    certificates=b"",
+                    excluded_sha1_fingerprints=frozenset(),
+                ),
+            )
+
+    def test_claude_tls_aggregate_counts_non_certificate_directory_bytes(
+        self,
+    ) -> None:
+        file_certificate, directory_certificate = self.sample_ca_certificates(2)
+        caller_path = self.review.source_root / "caller.pem"
+        caller_path.write_bytes(file_certificate + b"\n" + b"file-padding" * 128)
+        caller_dir = self.review.source_root / "caller-ca"
+        caller_dir.mkdir()
+        ignored_path = caller_dir / "a-ignored.txt"
+        ignored_path.write_bytes(b"not-a-certificate" * 256)
+        directory_path = caller_dir / "b-certificate.pem"
+        directory_path.write_bytes(directory_certificate)
+        raw_size = sum(
+            path.stat().st_size
+            for path in (caller_path, ignored_path, directory_path)
+        )
+
+        with (
+            mock.patch.object(
+                providers,
+                "CLAUDE_CALLER_CA_INPUT_LIMIT_BYTES",
+                raw_size - 1,
+            ),
+            self.assertRaisesRegex(ReviewError, "aggregate limit"),
+        ):
+            providers._prepare_claude_tls_environment(
+                self.review,
+                {
+                    "SSL_CERT_FILE": str(caller_path),
+                    "SSL_CERT_DIR": str(caller_dir),
+                },
+                trust_material=providers.ClaudeTrustMaterial(
+                    certificates=b"",
+                    excluded_sha1_fingerprints=frozenset(),
+                ),
+            )
+
+        ca_root = self.review.container_dir / "claude-ca"
+        self.assertFalse((ca_root / providers.CLAUDE_CA_BUNDLE_NAME).exists())
+        self.assertFalse(
+            (ca_root / providers.CLAUDE_CALLER_CA_SNAPSHOT_NAME).exists()
+        )
+
+    def test_claude_preflight_rejects_system_private_key_before_exclusions(
+        self,
+    ) -> None:
+        self.claude_system_ca.write_bytes(
+            b"-----BEGIN PRIVATE KEY-----\nfixture\n-----END PRIVATE KEY-----\n"
+        )
+        with (
+            mock.patch.object(
+                providers,
+                "_read_claude_trust_certificates_impl",
+            ) as read_impl,
+            self.assertRaisesRegex(ReviewError, "contains a private key"),
+        ):
+            self.preflight_claude_trust_policy(self.review)
+
+        read_impl.assert_not_called()
+        self.assertFalse(
+            (
+                self.review.container_dir
+                / providers.CLAUDE_TRUST_POLICY_EVIDENCE_NAME
+            ).exists()
         )
 
     def test_claude_tls_preparation_enforces_canonical_output_budgets(self) -> None:
@@ -4475,7 +4739,10 @@ class ProviderPolicyTest(unittest.TestCase):
                 self.review.container_dir / providers.CLAUDE_TRUST_POLICY_EVIDENCE_NAME
             ).read_text(encoding="utf-8")
         )
-        self.assertEqual(evidence["policy"], "omit-positive-constrained-roots")
+        self.assertEqual(
+            evidence["policy"],
+            "block-unenforceable-excluded-roots",
+        )
         self.assertEqual(evidence["distinct_constrained_omitted_count"], 0)
         self.assertEqual(
             [item["status"] for item in evidence["domains"]],
@@ -4883,7 +5150,7 @@ class ProviderPolicyTest(unittest.TestCase):
         self.assertEqual(run_command.call_count, 2)
 
     @mock.patch.object(providers, "run_bounded_capture")
-    def test_claude_system_constraint_is_omitted_without_certificate_export(
+    def test_claude_system_constraint_blocks_without_certificate_export(
         self,
         run_command: mock.Mock,
     ) -> None:
@@ -4918,19 +5185,19 @@ class ProviderPolicyTest(unittest.TestCase):
         ca_root = self.review.container_dir / "claude-ca"
         ca_root.mkdir()
 
-        material = self.read_claude_trust_certificates(self.review, ca_root)
+        with self.assertRaisesRegex(
+            providers.ClaudeTrustPolicyUnavailable,
+            "cannot enforce excluded trust roots",
+        ):
+            self.read_claude_trust_certificates(self.review, ca_root)
 
-        self.assertEqual(material.certificates, b"")
-        self.assertEqual(
-            material.excluded_sha1_fingerprints,
-            frozenset({"B" * 40}),
-        )
         self.assertEqual(run_command.call_count, 4)
         evidence_path = (
             self.review.container_dir / providers.CLAUDE_TRUST_POLICY_EVIDENCE_NAME
         )
         evidence_text = evidence_path.read_text(encoding="utf-8")
         evidence = json.loads(evidence_text)
+        self.assertEqual(evidence["status"], "blocked")
         self.assertEqual(evidence["distinct_constrained_omitted_count"], 1)
         self.assertEqual(evidence["additional_unconditional_candidate_count"], 0)
         self.assertNotIn("B" * 40, evidence_text)
@@ -5126,7 +5393,7 @@ class ProviderPolicyTest(unittest.TestCase):
             ).exists()
         )
 
-    def test_claude_tls_omits_constrained_root_from_every_ca_source(
+    def test_claude_tls_blocks_exclusions_unenforceable_by_bundled_store(
         self,
     ) -> None:
         (
@@ -5152,69 +5419,23 @@ class ProviderPolicyTest(unittest.TestCase):
             excluded_sha1_fingerprints=frozenset({fingerprint}),
         )
 
-        prepared = providers._prepare_claude_tls_environment(
-            self.review,
-            {
-                "SSL_CERT_FILE": str(custom_path),
-                "SSL_CERT_DIR": str(custom_dir),
-            },
-        )
-
-        def fingerprints(data: bytes) -> set[str]:
-            return {
-                hashlib.sha1(
-                    providers._canonical_ca_certificate(
-                        block,
-                        source="filtered bundle",
-                    )[0],
-                    usedforsecurity=False,
-                )
-                .hexdigest()
-                .upper()
-                for block in providers.CLAUDE_CERTIFICATE_BLOCK.findall(data)
-            }
-
-        expected = {
-            hashlib.sha1(
-                providers._canonical_ca_certificate(
-                    certificate,
-                    source="allowed fixture",
-                )[0],
-                usedforsecurity=False,
+        with self.assertRaisesRegex(
+            providers.ClaudeTrustPolicyUnavailable,
+            "bundled certificate store cannot enforce excluded trust roots",
+        ):
+            providers._prepare_claude_tls_environment(
+                self.review,
+                {
+                    "SSL_CERT_FILE": str(custom_path),
+                    "SSL_CERT_DIR": str(custom_dir),
+                },
             )
-            .hexdigest()
-            .upper()
-            for certificate in (
-                system_certificate,
-                custom_certificate,
-                directory_certificate,
-            )
-        }
-        bundle = pathlib.Path(prepared["SSL_CERT_FILE"])
-        snapshot = (
-            self.review.container_dir
-            / "claude-ca"
-            / providers.CLAUDE_CALLER_CA_SNAPSHOT_NAME
+
+        ca_root = self.review.container_dir / "claude-ca"
+        self.assertFalse((ca_root / providers.CLAUDE_CA_BUNDLE_NAME).exists())
+        self.assertFalse(
+            (ca_root / providers.CLAUDE_CALLER_CA_SNAPSHOT_NAME).exists()
         )
-        self.assertEqual(fingerprints(bundle.read_bytes()), expected)
-        self.assertEqual(
-            fingerprints(snapshot.read_bytes()),
-            expected
-            - {
-                hashlib.sha1(
-                    providers._canonical_ca_certificate(
-                        system_certificate,
-                        source="system fixture",
-                    )[0],
-                    usedforsecurity=False,
-                )
-                .hexdigest()
-                .upper()
-            },
-        )
-        self.assertNotIn(fingerprint, fingerprints(bundle.read_bytes()))
-        self.assertNotIn(fingerprint, fingerprints(snapshot.read_bytes()))
-        self.assertNotIn("SSL_CERT_DIR", prepared)
 
     @mock.patch.object(
         providers,

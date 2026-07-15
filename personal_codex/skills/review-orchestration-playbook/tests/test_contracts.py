@@ -88,8 +88,11 @@ class RepositoryContractTest(unittest.TestCase):
         self.assertIn("localhost CONNECT proxy", helper_contract)
         self.assertIn("verifies unconditional roots", helper_contract)
         self.assertIn("Every non-empty non-deny array", helper_contract)
-        self.assertIn("conservatively omitted rather than flattened", helper_contract)
-        self.assertIn("excluded from additional roots", helper_contract)
+        self.assertIn(
+            "conservatively treated as an exclusion rather than flattened",
+            helper_contract,
+        )
+        self.assertIn("any non-empty exclusion set blocks", helper_contract)
         self.assertIn("fixed system baseline", helper_contract)
         self.assertIn("not exposed through `SSL_CERT_DIR`", helper_contract)
         self.assertIn("`keyUsage` with `keyCertSign`", helper_contract)

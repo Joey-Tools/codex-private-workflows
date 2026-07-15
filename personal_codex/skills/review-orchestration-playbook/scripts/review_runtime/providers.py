@@ -213,13 +213,10 @@ CLAUDE_TLS_FILE_ENV_KEYS = (
     "SSL_CERT_FILE",
 )
 CLAUDE_TLS_DIR_ENV_KEYS = ("SSL_CERT_DIR",)
-CLAUDE_CA_FILE_LIMIT_BYTES = 16 * 1024 * 1024
-CLAUDE_CA_DIR_LIMIT_BYTES = 64 * 1024 * 1024
+CLAUDE_CA_FILE_LIMIT_BYTES = 4 * 1024 * 1024
+CLAUDE_CA_DIR_LIMIT_BYTES = 8 * 1024 * 1024
 CLAUDE_CA_DIR_ENTRY_LIMIT = 4096
-CLAUDE_CALLER_CA_INPUT_LIMIT_BYTES = (
-    CLAUDE_CA_DIR_LIMIT_BYTES
-    + CLAUDE_CA_FILE_LIMIT_BYTES * len(CLAUDE_TLS_FILE_ENV_KEYS)
-)
+CLAUDE_CALLER_CA_INPUT_LIMIT_BYTES = 8 * 1024 * 1024
 # Canonical PEM adds at most one line feed per 64 base64 bytes. A 1/32
 # allowance leaves more than twice that expansion while preserving a hard cap.
 CLAUDE_CALLER_CA_SNAPSHOT_LIMIT_BYTES = CLAUDE_CALLER_CA_INPUT_LIMIT_BYTES + math.ceil(
@@ -443,6 +440,7 @@ class ClaudeTrustFingerprints:
 class ClaudeTrustMaterial:
     certificates: bytes
     excluded_sha1_fingerprints: frozenset[str]
+    system_certificates: bytes = b""
 
 
 @dataclass(frozen=True)
@@ -819,6 +817,7 @@ def _read_bounded_regular_file(
     source: str,
     limit_bytes: int,
     label: str = "Claude review CA source",
+    limit_error_message: str | None = None,
 ) -> bytearray:
     flags = os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK
     try:
@@ -833,7 +832,10 @@ def _read_bounded_regular_file(
         if not stat.S_ISREG(metadata.st_mode):
             raise ReviewError(f"{label} is not a regular file: {source}")
         if metadata.st_size > limit_bytes:
-            raise ReviewError(f"{label} exceeds the size limit: {source}")
+            raise ReviewError(
+                limit_error_message
+                or f"{label} exceeds the size limit: {source}"
+            )
         data = bytearray()
         try:
             while len(data) <= limit_bytes:
@@ -852,7 +854,10 @@ def _read_bounded_regular_file(
             raise ReviewError(f"cannot read {label}: {source}") from error
         if len(data) > limit_bytes:
             data[:] = b"\x00" * len(data)
-            raise ReviewError(f"{label} exceeds the size limit: {source}")
+            raise ReviewError(
+                limit_error_message
+                or f"{label} exceeds the size limit: {source}"
+            )
         return data
     finally:
         os.close(fd)
@@ -862,11 +867,17 @@ def _read_ca_source_with_size(
     path: pathlib.Path,
     *,
     source: str,
+    limit_bytes: int | None = None,
+    limit_error_message: str | None = None,
 ) -> tuple[bytes, int]:
+    effective_limit = (
+        CLAUDE_CA_FILE_LIMIT_BYTES if limit_bytes is None else limit_bytes
+    )
     data = _read_bounded_regular_file(
         path,
         source=source,
-        limit_bytes=CLAUDE_CA_FILE_LIMIT_BYTES,
+        limit_bytes=effective_limit,
+        limit_error_message=limit_error_message,
     )
     try:
         return _extract_ca_certificates(bytes(data), source=source), len(data)
@@ -1228,27 +1239,32 @@ def _merge_ca_certificates(
     if limit_bytes < 0:
         raise ValueError("CA merge byte limit must not be negative")
     merged = bytearray()
-    seen: set[bytes] = set()
-    excluded = {fingerprint.upper() for fingerprint in excluded_sha1_fingerprints}
-    for source, data in materials:
-        normalized = _extract_ca_certificates(data, source=source)
-        for block in CLAUDE_CERTIFICATE_BLOCK.findall(normalized):
-            der, canonical = _canonical_ca_certificate(block, source=source)
-            sha1_fingerprint = (
-                hashlib.sha1(der, usedforsecurity=False).hexdigest().upper()
-            )
-            if sha1_fingerprint in excluded:
-                continue
-            fingerprint = hashlib.sha256(der).digest()
-            if fingerprint in seen:
-                continue
-            seen.add(fingerprint)
-            if len(merged) + len(canonical) > limit_bytes:
-                raise ReviewError(f"{label} exceeds the size limit")
-            merged.extend(canonical)
-    if not merged and not allow_empty:
-        raise ReviewError("Claude review CA bundle contains no PEM certificate")
-    return bytes(merged)
+    try:
+        seen: set[bytes] = set()
+        excluded = {
+            fingerprint.upper() for fingerprint in excluded_sha1_fingerprints
+        }
+        for source, data in materials:
+            normalized = _extract_ca_certificates(data, source=source)
+            for block in CLAUDE_CERTIFICATE_BLOCK.findall(normalized):
+                der, canonical = _canonical_ca_certificate(block, source=source)
+                sha1_fingerprint = (
+                    hashlib.sha1(der, usedforsecurity=False).hexdigest().upper()
+                )
+                if sha1_fingerprint in excluded:
+                    continue
+                fingerprint = hashlib.sha256(der).digest()
+                if fingerprint in seen:
+                    continue
+                seen.add(fingerprint)
+                if len(merged) + len(canonical) > limit_bytes:
+                    raise ReviewError(f"{label} exceeds the size limit")
+                merged.extend(canonical)
+        if not merged and not allow_empty:
+            raise ReviewError("Claude review CA bundle contains no PEM certificate")
+        return bytes(merged)
+    except MemoryError as error:
+        raise ReviewError(f"{label} exceeded the bounded memory budget") from error
 
 
 def _classify_trust_fingerprints(
@@ -1475,7 +1491,7 @@ def _new_claude_trust_policy_evidence() -> dict[str, object]:
     return {
         "schema_version": 1,
         "generation": secrets.token_hex(16),
-        "policy": "omit-positive-constrained-roots",
+        "policy": "block-unenforceable-excluded-roots",
         "status": "checking",
         "domains": [],
         "distinct_unconditional_count": 0,
@@ -1523,6 +1539,10 @@ def _read_claude_trust_certificates(
             ca_root,
             evidence,
         )
+        if material.excluded_sha1_fingerprints:
+            raise ClaudeTrustPolicyUnavailable(
+                "Claude bundled certificate store cannot enforce excluded trust roots"
+            )
     except ClaudeTrustSettingsDeny:
         _terminalize_claude_trust_policy_evidence(
             review,
@@ -1568,6 +1588,16 @@ def _read_claude_trust_certificates(
             unresolved_resolution="blocked",
         )
         raise
+    except MemoryError as error:
+        _terminalize_claude_trust_policy_evidence(
+            review,
+            evidence,
+            status="blocked",
+            unresolved_resolution="blocked",
+        )
+        raise ReviewError(
+            "Claude trust policy exceeded the bounded memory budget"
+        ) from error
     except BaseException:
         _terminalize_claude_trust_policy_evidence(
             review,
@@ -1814,14 +1844,24 @@ def _read_claude_trust_certificates_impl(
 def _preflight_claude_trust_policy(
     review: ReviewWorkspace,
 ) -> ClaudeTrustMaterial:
-    with tempfile.TemporaryDirectory(
-        prefix="claude-trust-preflight-",
-        dir=review.container_dir,
-    ) as temporary:
-        return _read_claude_trust_certificates(
-            review,
-            pathlib.Path(temporary),
+    try:
+        system_material = _read_ca_source(
+            CLAUDE_SYSTEM_CA_FILE,
+            source="system CA bundle",
         )
+        with tempfile.TemporaryDirectory(
+            prefix="claude-trust-preflight-",
+            dir=review.container_dir,
+        ) as temporary:
+            trust_material = _read_claude_trust_certificates(
+                review,
+                pathlib.Path(temporary),
+            )
+        return replace(trust_material, system_certificates=system_material)
+    except MemoryError as error:
+        raise ReviewError(
+            "Claude trust preflight exceeded the bounded memory budget"
+        ) from error
 
 
 def _read_claude_caller_ca_snapshot(path: pathlib.Path) -> bytes:
@@ -1848,6 +1888,24 @@ def _prepare_claude_tls_environment(
     *,
     trust_material: ClaudeTrustMaterial | None = None,
 ) -> dict[str, str]:
+    try:
+        return _prepare_claude_tls_environment_impl(
+            review,
+            env,
+            trust_material=trust_material,
+        )
+    except MemoryError as error:
+        raise ReviewError(
+            "Claude caller CA processing exceeded the bounded memory budget"
+        ) from error
+
+
+def _prepare_claude_tls_environment_impl(
+    review: ReviewWorkspace,
+    env: dict[str, str],
+    *,
+    trust_material: ClaudeTrustMaterial | None = None,
+) -> dict[str, str]:
     result = dict(env)
     ca_root = review.container_dir / "claude-ca"
     ca_root.mkdir(mode=0o700, exist_ok=True)
@@ -1856,10 +1914,25 @@ def _prepare_claude_tls_environment(
     caller_snapshot = ca_root / CLAUDE_CALLER_CA_SNAPSHOT_NAME
     snapshot_initialized = caller_snapshot.exists() or caller_snapshot.is_symlink()
     custom_materials: list[tuple[str, bytes]] = []
+    custom_material_bytes = 0
+
+    def consume_custom_input(input_bytes: int, *, limit_bytes: int) -> None:
+        nonlocal custom_material_bytes
+        custom_material_bytes += input_bytes
+        if custom_material_bytes > limit_bytes:
+            raise ReviewError("Claude caller CA material exceeds the aggregate limit")
+
+    def append_custom_material(source: str, material: bytes) -> None:
+        custom_materials.append((source, material))
+
     if snapshot_initialized:
         snapshot_material = _read_claude_caller_ca_snapshot(caller_snapshot)
         if snapshot_material:
-            custom_materials.append(("caller CA snapshot", snapshot_material))
+            consume_custom_input(
+                len(snapshot_material),
+                limit_bytes=CLAUDE_CALLER_CA_SNAPSHOT_LIMIT_BYTES,
+            )
+            append_custom_material("caller CA snapshot", snapshot_material)
     else:
         for key in CLAUDE_TLS_FILE_ENV_KEYS:
             raw = result.get(key)
@@ -1868,7 +1941,24 @@ def _prepare_claude_tls_environment(
             source_path = pathlib.Path(raw)
             if not source_path.is_absolute() or not source_path.is_file():
                 raise ReviewError(f"Claude review requires valid absolute {key}")
-            custom_materials.append((key, _read_ca_source(source_path, source=key)))
+            remaining_input = (
+                CLAUDE_CALLER_CA_INPUT_LIMIT_BYTES - custom_material_bytes
+            )
+            material, source_size = _read_ca_source_with_size(
+                source_path,
+                source=key,
+                limit_bytes=min(CLAUDE_CA_FILE_LIMIT_BYTES, remaining_input),
+                limit_error_message=(
+                    "Claude caller CA material exceeds the aggregate limit"
+                    if remaining_input < CLAUDE_CA_FILE_LIMIT_BYTES
+                    else None
+                ),
+            )
+            consume_custom_input(
+                source_size,
+                limit_bytes=CLAUDE_CALLER_CA_INPUT_LIMIT_BYTES,
+            )
+            append_custom_material(key, material)
 
         for key in CLAUDE_TLS_DIR_ENV_KEYS:
             raw_entries = [
@@ -1895,10 +1985,29 @@ def _prepare_claude_tls_environment(
                 for source_path in sorted(source_paths, key=lambda path: path.name):
                     if not source_path.is_file():
                         continue
+                    remaining_input = (
+                        CLAUDE_CALLER_CA_INPUT_LIMIT_BYTES - custom_material_bytes
+                    )
+                    remaining_directory = CLAUDE_CA_DIR_LIMIT_BYTES - total_size
+                    read_limit = min(
+                        CLAUDE_CA_FILE_LIMIT_BYTES,
+                        remaining_input,
+                        remaining_directory,
+                    )
+                    limit_error_message = None
+                    if remaining_input == read_limit:
+                        limit_error_message = (
+                            "Claude caller CA material exceeds the aggregate limit"
+                        )
+                    elif remaining_directory == read_limit:
+                        limit_error_message = (
+                            "Claude review CA directory exceeds the size limit"
+                        )
                     source_data = _read_bounded_regular_file(
                         source_path,
                         source=key,
-                        limit_bytes=CLAUDE_CA_FILE_LIMIT_BYTES,
+                        limit_bytes=read_limit,
+                        limit_error_message=limit_error_message,
                     )
                     source_size = len(source_data)
                     total_size += source_size
@@ -1907,6 +2016,10 @@ def _prepare_claude_tls_environment(
                             raise ReviewError(
                                 "Claude review CA directory exceeds the size limit"
                             )
+                        consume_custom_input(
+                            source_size,
+                            limit_bytes=CLAUDE_CALLER_CA_INPUT_LIMIT_BYTES,
+                        )
                         material = _extract_ca_certificates(
                             bytes(source_data),
                             source=key,
@@ -1917,19 +2030,27 @@ def _prepare_claude_tls_environment(
                         raise
                     finally:
                         source_data[:] = b"\x00" * len(source_data)
-                    custom_materials.append((f"{key}:{source_path.name}", material))
+                    append_custom_material(f"{key}:{source_path.name}", material)
                     found_certificate = True
             if not found_certificate:
                 raise ReviewError(
                     "Claude review CA directory contains no PEM certificates"
                 )
 
-    system_material = _read_ca_source(
-        CLAUDE_SYSTEM_CA_FILE,
-        source="system CA bundle",
+    system_material = (
+        trust_material.system_certificates
+        if trust_material is not None and trust_material.system_certificates
+        else _read_ca_source(
+            CLAUDE_SYSTEM_CA_FILE,
+            source="system CA bundle",
+        )
     )
     if trust_material is None:
         trust_material = _read_claude_trust_certificates(review, ca_root)
+    if trust_material.excluded_sha1_fingerprints:
+        raise ClaudeTrustPolicyUnavailable(
+            "Claude bundled certificate store cannot enforce excluded trust roots"
+        )
     materials = [("system CA bundle", system_material)]
     if trust_material.certificates:
         materials.append(("unconditional trust roots", trust_material.certificates))
@@ -3624,8 +3745,9 @@ def _write_claude_trust_policy_blocked(review: ReviewWorkspace) -> None:
     )
     write_text_atomic(
         review.container_dir / "runner-error.txt",
-        "Host trust policy contains malformed or unsupported trust settings; "
-        "native Claude review is blocked.\n",
+        "Host trust policy cannot be represented by Claude's additive certificate "
+        "stores or contains malformed or unsupported trust settings; native Claude "
+        "review is blocked.\n",
     )
 
 
