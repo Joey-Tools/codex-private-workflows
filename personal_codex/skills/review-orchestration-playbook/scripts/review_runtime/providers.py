@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import binascii
 import contextlib
+import errno
 import hashlib
 import hmac
 import itertools
@@ -19,11 +20,14 @@ import socketserver
 import ssl
 import stat
 import struct
+import sys
 import tempfile
 import threading
 import time
+import unicodedata
 import urllib.parse
 import urllib.request
+import uuid
 from dataclasses import dataclass, field, replace
 from typing import Any, Callable, Iterable, Iterator
 
@@ -129,6 +133,18 @@ CLAUDE_KEYCHAIN_BROKER_SOURCE = pathlib.Path(__file__).with_name(
 )
 CLAUDE_KEYCHAIN_ACCOUNT = re.compile(r"^[A-Za-z0-9._-]+$")
 CLAUDE_KEYCHAIN_SERVICE = "Claude Code-credentials"
+CLAUDE_AUTH_CONFIG_NAME = ".claude.json"
+CLAUDE_AUTH_CONFIG_LIMIT_BYTES = 1024 * 1024
+CLAUDE_AUTH_METADATA_ENV_KEYS = (
+    "CLAUDE_CODE_ACCOUNT_UUID",
+    "CLAUDE_CODE_USER_EMAIL",
+    "CLAUDE_CODE_ORGANIZATION_UUID",
+)
+CLAUDE_AUTH_METADATA_FIELDS = (
+    ("accountUuid", "CLAUDE_CODE_ACCOUNT_UUID", "uuid"),
+    ("emailAddress", "CLAUDE_CODE_USER_EMAIL", "email"),
+    ("organizationUuid", "CLAUDE_CODE_ORGANIZATION_UUID", "uuid"),
+)
 CLAUDE_SYSTEM_CA_FILE = pathlib.Path("/private/etc/ssl/cert.pem")
 CLAUDE_SYSTEM_KEYCHAIN = pathlib.Path("/Library/Keychains/System.keychain")
 CLAUDE_SYSTEM_ROOT_KEYCHAIN = pathlib.Path(
@@ -420,6 +436,10 @@ class ClaudeKeychainCredentialUnavailable(ReviewError):
     """The local Claude credential cannot be refreshed without argv exposure."""
 
 
+class ClaudeKeychainCredentialRefreshRequired(ClaudeKeychainCredentialUnavailable):
+    """The local Claude credential is valid but expires before the review window."""
+
+
 class ClaudeAuthWarmupInconclusive(ReviewError):
     """Claude login refresh failed for a reason that must not trigger fallback."""
 
@@ -495,10 +515,18 @@ class ClaudeTrustFingerprints:
 
 
 @dataclass(frozen=True)
+class ClaudeBundledRoots:
+    certificates: bytes
+    sha256_fingerprints: frozenset[bytes]
+    executable_sha256: str = ""
+
+
+@dataclass(frozen=True)
 class ClaudeTrustMaterial:
     certificates: bytes
     excluded_sha1_fingerprints: frozenset[str]
     bundled_root_sha256_fingerprints: frozenset[bytes] | None = None
+    bundled_root_certificates: bytes = b""
     system_certificates: bytes = b""
     evidence: dict[str, object] | None = field(
         default=None,
@@ -534,10 +562,10 @@ def _native_macho_dependencies(
     return tuple(dict.fromkeys(candidates))
 
 
-def _require_trusted_claude_digest(path: pathlib.Path) -> frozenset[bytes]:
+def _require_trusted_claude_digest(path: pathlib.Path) -> ClaudeBundledRoots:
     digest = hashlib.sha256()
     certificate_count = 0
-    certificate_fingerprints: set[bytes] = set()
+    certificates_by_fingerprint: dict[bytes, bytes] = {}
     begin_marker = b"-----BEGIN CERTIFICATE-----"
     end_marker = b"-----END CERTIFICATE-----"
     pending = bytearray()
@@ -573,14 +601,20 @@ def _require_trusted_claude_digest(path: pathlib.Path) -> frozenset[bytes]:
             if len(block) > CLAUDE_BUNDLED_CERTIFICATE_LIMIT_BYTES:
                 continue
             try:
-                der, _ = _canonical_ca_certificate(
+                der, canonical = _canonical_ca_certificate(
                     block,
                     source="pinned Claude Code bundled roots",
                 )
             except ReviewError:
                 continue
             certificate_count += 1
-            certificate_fingerprints.add(hashlib.sha256(der).digest())
+            fingerprint = hashlib.sha256(der).digest()
+            existing = certificates_by_fingerprint.get(fingerprint)
+            if existing is not None and existing != canonical:
+                raise InvalidReviewerExecutable(
+                    "Claude Code bundled roots contain a fingerprint collision"
+                )
+            certificates_by_fingerprint[fingerprint] = canonical
             if certificate_count > CLAUDE_BUNDLED_ROOT_LIMIT:
                 raise InvalidReviewerExecutable(
                     "Claude Code bundled root count exceeds the inspection limit"
@@ -638,6 +672,7 @@ def _require_trusted_claude_digest(path: pathlib.Path) -> frozenset[bytes]:
             "macOS release digests"
         )
     expected_count, expected_set_digest = metadata
+    certificate_fingerprints = frozenset(certificates_by_fingerprint)
     root_set_digest = hashlib.sha256(
         b"".join(sorted(certificate_fingerprints))
     ).hexdigest()
@@ -650,7 +685,114 @@ def _require_trusted_claude_digest(path: pathlib.Path) -> frozenset[bytes]:
             f"Claude Code {CLAUDE_SUPPORTED_VERSION} bundled root evidence "
             "does not match the trusted release"
         )
-    return frozenset(certificate_fingerprints)
+    return ClaudeBundledRoots(
+        certificates=b"".join(
+            certificates_by_fingerprint[fingerprint]
+            for fingerprint in sorted(certificate_fingerprints)
+        ),
+        sha256_fingerprints=certificate_fingerprints,
+        executable_sha256=actual,
+    )
+
+
+def _materialize_validated_claude_executable(
+    review: ReviewWorkspace,
+    candidate: pathlib.Path,
+    expected_roots: ClaudeBundledRoots,
+) -> tuple[pathlib.Path, ClaudeBundledRoots]:
+    runtime_dir = review.container_dir / "claude-runtime" / "validated-executable"
+    runtime_dir.mkdir(parents=True, exist_ok=True)
+    runtime_dir.chmod(0o700)
+    source_path = candidate.resolve()
+    source_fd: int | None = None
+    target_fd: int | None = None
+    snapshot_path: pathlib.Path | None = None
+    try:
+        source_fd = os.open(
+            source_path,
+            os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK,
+        )
+        before = os.fstat(source_fd)
+        if (
+            not stat.S_ISREG(before.st_mode)
+            or before.st_size <= 0
+            or before.st_size > CLAUDE_EXECUTABLE_LIMIT_BYTES
+        ):
+            raise InvalidReviewerExecutable(
+                "Claude Code executable exceeds the materialization limit"
+            )
+        target_fd, raw_snapshot_path = tempfile.mkstemp(
+            prefix="claude-",
+            dir=runtime_dir,
+        )
+        snapshot_path = pathlib.Path(raw_snapshot_path)
+        copied = 0
+        while chunk := os.read(source_fd, CLAUDE_TRUSTED_HASH_CHUNK_BYTES):
+            copied += len(chunk)
+            if copied > CLAUDE_EXECUTABLE_LIMIT_BYTES:
+                raise InvalidReviewerExecutable(
+                    "Claude Code executable exceeds the materialization limit"
+                )
+            view = memoryview(chunk)
+            while view:
+                written = os.write(target_fd, view)
+                if written <= 0:
+                    raise OSError("short write while materializing Claude Code")
+                view = view[written:]
+        after = os.fstat(source_fd)
+        if (
+            before.st_dev,
+            before.st_ino,
+            before.st_size,
+            before.st_mtime_ns,
+        ) != (
+            after.st_dev,
+            after.st_ino,
+            after.st_size,
+            after.st_mtime_ns,
+        ) or copied != before.st_size:
+            raise ClaudeExecutableInspectionInconclusive(
+                "Claude Code executable changed during materialization"
+            )
+        os.fsync(target_fd)
+        os.fchmod(target_fd, 0o500)
+        os.close(target_fd)
+        target_fd = None
+        os.close(source_fd)
+        source_fd = None
+        snapshot_roots = _require_trusted_claude_digest(snapshot_path)
+        if snapshot_roots != expected_roots:
+            raise ClaudeExecutableInspectionInconclusive(
+                "Claude Code executable trust evidence changed during materialization"
+            )
+        _native_macho_dependencies(snapshot_path, label="Claude Code")
+        return snapshot_path, snapshot_roots
+    except OSError as error:
+        if snapshot_path is not None:
+            snapshot_path.unlink(missing_ok=True)
+        raise ClaudeExecutableInspectionInconclusive(
+            f"cannot materialize Claude Code executable: {error}"
+        ) from error
+    except BaseException:
+        if snapshot_path is not None:
+            snapshot_path.unlink(missing_ok=True)
+        raise
+    finally:
+        if target_fd is not None:
+            os.close(target_fd)
+        if source_fd is not None:
+            os.close(source_fd)
+
+
+def _require_matching_claude_executable_snapshot(
+    executable: pathlib.Path,
+    expected_roots: ClaudeBundledRoots,
+) -> None:
+    current_roots = _require_trusted_claude_digest(executable)
+    if current_roots != expected_roots:
+        raise ClaudeExecutableInspectionInconclusive(
+            "validated Claude Code executable snapshot changed"
+        )
 
 
 def _claude_keychain_account() -> str:
@@ -667,6 +809,100 @@ def _claude_keychain_account() -> str:
     return account
 
 
+def _claude_host_home() -> pathlib.Path:
+    try:
+        import pwd
+
+        raw_home = pwd.getpwuid(os.getuid()).pw_dir
+    except (ImportError, KeyError, OSError) as error:
+        raise ClaudeKeychainCredentialUnavailable(
+            "Claude local-login metadata home is unavailable"
+        ) from error
+    home = pathlib.Path(raw_home)
+    if not home.is_absolute():
+        raise ClaudeKeychainCredentialUnavailable(
+            "Claude local-login metadata home is unavailable"
+        )
+    try:
+        return home.resolve()
+    except OSError as error:
+        raise ClaudeKeychainCredentialUnavailable(
+            "Claude local-login metadata home is unavailable"
+        ) from error
+
+
+def _read_claude_auth_metadata_environment() -> dict[str, str]:
+    source = _claude_host_home() / CLAUDE_AUTH_CONFIG_NAME
+    try:
+        raw = _read_bounded_regular_file(
+            source,
+            source="Claude local-login metadata",
+            limit_bytes=CLAUDE_AUTH_CONFIG_LIMIT_BYTES,
+            label="Claude local-login metadata",
+            required_owner=os.geteuid(),
+            require_single_link=True,
+            require_owner_only=True,
+        )
+    except ReviewError as error:
+        raise ClaudeKeychainCredentialUnavailable(
+            "Claude local-login metadata is unavailable or unsafe"
+        ) from error
+    try:
+        try:
+            config = _strict_json_object(bytes(raw))
+        except MemoryError as error:
+            raise ClaudeKeychainCredentialUnavailable(
+                "Claude local-login metadata exceeded the memory budget"
+            ) from error
+    finally:
+        raw[:] = b"\x00" * len(raw)
+    oauth_account = config.get("oauthAccount") if config is not None else None
+    if not isinstance(oauth_account, dict):
+        raise ClaudeKeychainCredentialUnavailable(
+            "Claude local-login metadata is missing its OAuth account"
+        )
+
+    result: dict[str, str] = {}
+    for source_field, env_key, kind in CLAUDE_AUTH_METADATA_FIELDS:
+        value = oauth_account.get(source_field)
+        if not isinstance(value, str) or not value:
+            raise ClaudeKeychainCredentialUnavailable(
+                "Claude local-login metadata is incomplete"
+            )
+        if kind == "uuid":
+            try:
+                canonical = str(uuid.UUID(value))
+            except (AttributeError, ValueError) as error:
+                raise ClaudeKeychainCredentialUnavailable(
+                    "Claude local-login metadata contains an invalid identifier"
+                ) from error
+            if value.lower() != canonical:
+                raise ClaudeKeychainCredentialUnavailable(
+                    "Claude local-login metadata contains an invalid identifier"
+                )
+            result[env_key] = canonical
+            continue
+        try:
+            value.encode("utf-8", errors="strict")
+        except UnicodeEncodeError as error:
+            raise ClaudeKeychainCredentialUnavailable(
+                "Claude local-login metadata contains an invalid email address"
+            ) from error
+        if (
+            len(value) > 320
+            or value.count("@") != 1
+            or any(
+                character.isspace() or unicodedata.category(character).startswith("C")
+                for character in value
+            )
+        ):
+            raise ClaudeKeychainCredentialUnavailable(
+                "Claude local-login metadata contains an invalid email address"
+            )
+        result[env_key] = value
+    return result
+
+
 def _prepare_claude_keychain_broker(
     review: ReviewWorkspace,
     env: dict[str, str],
@@ -674,6 +910,7 @@ def _prepare_claude_keychain_broker(
     result = dict(env)
     if result.get("ANTHROPIC_API_KEY"):
         return result
+    result.update(_read_claude_auth_metadata_environment())
     if not CLAUDE_KEYCHAIN_CLIENT.is_file() or not os.access(
         CLAUDE_KEYCHAIN_CLIENT, os.X_OK
     ):
@@ -795,10 +1032,13 @@ def _validate_fresh_claude_keychain_credential(
             or not isinstance(expires_at, (int, float))
             or isinstance(expires_at, bool)
             or (isinstance(expires_at, float) and not math.isfinite(expires_at))
-            or expires_at <= required_expiry
             or expires_at > maximum_expiry
         ):
             raise ClaudeKeychainCredentialUnavailable(
+                "Claude local-login credential is malformed"
+            )
+        if expires_at <= required_expiry:
+            raise ClaudeKeychainCredentialRefreshRequired(
                 "Claude local-login access token cannot cover the isolated review window"
             )
     except (
@@ -813,19 +1053,62 @@ def _validate_fresh_claude_keychain_credential(
         ) from error
 
 
-def _require_fresh_claude_keychain_credential(review: ReviewWorkspace) -> None:
+def _require_fresh_claude_keychain_credential(
+    review: ReviewWorkspace,
+    *,
+    env: dict[str, str] | None = None,
+) -> None:
+    if env is not None:
+        credential = _read_stable_claude_local_login_credential(review, env)
+    else:
+        credential = _read_claude_keychain_credential(review)
+        if credential is None:
+            raise ClaudeKeychainCredentialUnavailable(
+                "Claude local-login credential is unavailable"
+            )
+    try:
+        if env is None:
+            _validate_fresh_claude_keychain_credential(
+                credential,
+                attempt_count=1,
+            )
+    finally:
+        credential[:] = b"\x00" * len(credential)
+
+
+def _require_matching_claude_auth_metadata(env: dict[str, str]) -> None:
+    current = _read_claude_auth_metadata_environment()
+    if any(env.get(key) != current[key] for key in CLAUDE_AUTH_METADATA_ENV_KEYS):
+        raise ClaudeKeychainCredentialUnavailable(
+            "Claude local-login account metadata changed during review"
+        )
+
+
+def _read_stable_claude_local_login_credential(
+    review: ReviewWorkspace,
+    env: dict[str, str],
+) -> bytearray:
     credential = _read_claude_keychain_credential(review)
     if credential is None:
         raise ClaudeKeychainCredentialUnavailable(
             "Claude local-login credential is unavailable"
         )
+    comparison: bytearray | None = None
     try:
-        _validate_fresh_claude_keychain_credential(
-            credential,
-            attempt_count=1,
-        )
-    finally:
+        _require_matching_claude_auth_metadata(env)
+        comparison = _read_claude_keychain_credential(review)
+        if comparison is None or not hmac.compare_digest(credential, comparison):
+            raise ClaudeKeychainCredentialUnavailable(
+                "Claude local-login credential changed during account validation"
+            )
+        _validate_fresh_claude_keychain_credential(credential)
+        return credential
+    except BaseException:
         credential[:] = b"\x00" * len(credential)
+        raise
+    finally:
+        if comparison is not None:
+            comparison[:] = b"\x00" * len(comparison)
 
 
 def _recv_exact(sock: socket.socket, length: int) -> bytes | None:
@@ -943,13 +1226,8 @@ def _claude_keychain_runtime(
     if result.get("ANTHROPIC_API_KEY"):
         yield result
         return
-    credential = _read_claude_keychain_credential(review)
-    if credential is None:
-        raise ClaudeKeychainCredentialUnavailable(
-            "Claude local-login credential is unavailable"
-        )
+    credential = _read_stable_claude_local_login_credential(review, result)
     try:
-        _validate_fresh_claude_keychain_credential(credential)
         capability = secrets.token_bytes(CLAUDE_KEYCHAIN_BROKER_CAPABILITY_BYTES)
         with _claude_keychain_credential_server(
             credential,
@@ -980,6 +1258,9 @@ def _read_bounded_regular_file(
     limit_bytes: int,
     label: str = "Claude review CA source",
     limit_error_message: str | None = None,
+    required_owner: int | None = None,
+    require_single_link: bool = False,
+    require_owner_only: bool = False,
 ) -> bytearray:
     flags = os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK
     try:
@@ -993,6 +1274,14 @@ def _read_bounded_regular_file(
             raise ReviewError(f"cannot inspect {label}: {source}") from error
         if not stat.S_ISREG(metadata.st_mode):
             raise ReviewError(f"{label} is not a regular file: {source}")
+        if required_owner is not None and metadata.st_uid != required_owner:
+            raise ReviewError(f"{label} has an unexpected owner: {source}")
+        if require_single_link and metadata.st_nlink != 1:
+            raise ReviewError(f"{label} has an unexpected link count: {source}")
+        if require_owner_only and metadata.st_mode & 0o077:
+            raise ReviewError(f"{label} is not owner-only: {source}")
+        if require_owner_only:
+            _require_no_extended_acl(fd, label=label)
         if metadata.st_size > limit_bytes:
             raise ReviewError(
                 limit_error_message or f"{label} exceeds the size limit: {source}"
@@ -1021,6 +1310,33 @@ def _read_bounded_regular_file(
         return data
     finally:
         os.close(fd)
+
+
+def _require_no_extended_acl(fd: int, *, label: str) -> None:
+    if sys.platform != "darwin":
+        return
+    try:
+        import ctypes
+
+        libc = ctypes.CDLL(None, use_errno=True)
+        acl_get_fd = libc.acl_get_fd
+        acl_get_fd.argtypes = [ctypes.c_int]
+        acl_get_fd.restype = ctypes.c_void_p
+        acl_free = libc.acl_free
+        acl_free.argtypes = [ctypes.c_void_p]
+        acl_free.restype = ctypes.c_int
+    except (AttributeError, OSError) as error:
+        raise ReviewError(f"cannot inspect {label} access controls") from error
+    ctypes.set_errno(0)
+    acl = acl_get_fd(fd)
+    if not acl:
+        if ctypes.get_errno() == errno.ENOENT:
+            return
+        raise ReviewError(f"cannot inspect {label} access controls")
+    try:
+        raise ReviewError(f"{label} has an extended access control list")
+    finally:
+        acl_free(acl)
 
 
 def _read_ca_source_with_size(
@@ -1652,7 +1968,7 @@ def _new_claude_trust_policy_evidence() -> dict[str, object]:
     return {
         "schema_version": 1,
         "generation": secrets.token_hex(16),
-        "policy": "require-bundled-root-subset",
+        "policy": "require-pinned-bundled-root-subset",
         "status": "checking",
         "bundled_root_count": 0,
         "bundled_root_extra_count": 0,
@@ -1708,10 +2024,6 @@ def _read_claude_trust_certificates(
             ca_root,
             evidence,
         )
-        if material.excluded_sha1_fingerprints:
-            raise ClaudeTrustPolicyUnavailable(
-                "Claude bundled certificate store cannot enforce excluded trust roots"
-            )
     except ClaudeTrustSettingsDeny:
         _terminalize_claude_trust_policy_evidence(
             review,
@@ -2038,17 +2350,17 @@ def _read_claude_trust_certificates_impl(
 def _preflight_claude_trust_policy(
     review: ReviewWorkspace,
     *,
-    bundled_root_sha256_fingerprints: frozenset[bytes],
+    bundled_roots: ClaudeBundledRoots,
 ) -> ClaudeTrustMaterial:
     evidence = _new_claude_trust_policy_evidence()
-    evidence["bundled_root_count"] = len(bundled_root_sha256_fingerprints)
+    evidence["bundled_root_count"] = len(bundled_roots.sha256_fingerprints)
     evidence["bundled_root_resolution"] = "pending"
     try:
         _write_claude_trust_policy_evidence(review, evidence)
         return _preflight_claude_trust_policy_impl(
             review,
             evidence,
-            bundled_root_sha256_fingerprints=bundled_root_sha256_fingerprints,
+            bundled_roots=bundled_roots,
         )
     except BaseException:
         if evidence.get("status") == "checking":
@@ -2065,7 +2377,7 @@ def _preflight_claude_trust_policy_impl(
     review: ReviewWorkspace,
     evidence: dict[str, object],
     *,
-    bundled_root_sha256_fingerprints: frozenset[bytes],
+    bundled_roots: ClaudeBundledRoots,
 ) -> ClaudeTrustMaterial:
     try:
         system_material = _read_ca_source(
@@ -2122,7 +2434,8 @@ def _preflight_claude_trust_policy_impl(
     try:
         return replace(
             trust_material,
-            bundled_root_sha256_fingerprints=bundled_root_sha256_fingerprints,
+            bundled_root_sha256_fingerprints=bundled_roots.sha256_fingerprints,
+            bundled_root_certificates=bundled_roots.certificates,
             system_certificates=system_material,
         )
     except MemoryError as error:
@@ -2434,6 +2747,23 @@ def _prepare_claude_tls_environment_impl(
         raise ClaudeTrustPolicyUnavailable(
             "Claude bundled root evidence is unavailable"
         )
+    bundled_root_certificates = trust_material.bundled_root_certificates
+    if bundled_root_fingerprints and not bundled_root_certificates:
+        raise ClaudeTrustPolicyUnavailable(
+            "Claude bundled root certificate evidence is unavailable"
+        )
+    actual_bundled_root_fingerprints = (
+        _ca_sha256_fingerprints(
+            bundled_root_certificates,
+            source="pinned Claude Code bundled roots",
+        )
+        if bundled_root_certificates
+        else frozenset()
+    )
+    if actual_bundled_root_fingerprints != bundled_root_fingerprints:
+        raise ClaudeTrustPolicyUnavailable(
+            "Claude bundled root certificate evidence does not match its fingerprints"
+        )
     system_material = (
         trust_material.system_certificates
         if trust_material.system_certificates
@@ -2442,11 +2772,11 @@ def _prepare_claude_tls_environment_impl(
             source="system CA bundle",
         )
     )
-    if trust_material.excluded_sha1_fingerprints:
-        raise ClaudeTrustPolicyUnavailable(
-            "Claude bundled certificate store cannot enforce excluded trust roots"
-        )
     materials = [("system CA bundle", system_material)]
+    if bundled_root_certificates:
+        materials.append(
+            ("pinned Claude Code bundled roots", bundled_root_certificates)
+        )
     if trust_material.certificates:
         materials.append(("unconditional trust roots", trust_material.certificates))
     materials.extend(custom_materials)
@@ -2873,9 +3203,9 @@ def _warm_claude_local_login(
     env: dict[str, str],
 ) -> None:
     try:
-        _require_fresh_claude_keychain_credential(review)
+        _require_fresh_claude_keychain_credential(review, env=env)
         return
-    except ClaudeKeychainCredentialUnavailable:
+    except ClaudeKeychainCredentialRefreshRequired:
         pass
     warmup = _run_claude_auth_warmup(review, executable, env)
     category = classify_failure(warmup.stdout, warmup.stderr)
@@ -2908,8 +3238,8 @@ def _warm_claude_local_login(
         },
     )
     try:
-        _require_fresh_claude_keychain_credential(review)
-    except ClaudeKeychainCredentialUnavailable as error:
+        _require_fresh_claude_keychain_credential(review, env=env)
+    except ClaudeKeychainCredentialRefreshRequired as error:
         if category == "auth":
             raise ClaudeKeychainCredentialUnavailable(
                 "Claude authentication warmup could not obtain a fresh local "
@@ -3570,7 +3900,7 @@ def _strict_json_object(stdout: bytes) -> dict[str, Any] | None:
             parse_constant=_reject_nonstandard_json_constant,
             object_pairs_hook=_strict_json_object_from_pairs,
         )
-    except (UnicodeDecodeError, ValueError):
+    except (UnicodeDecodeError, ValueError, RecursionError):
         return None
     return parsed if isinstance(parsed, dict) else None
 
@@ -4091,7 +4421,7 @@ def _resolve_validated_claude_executable(
     *,
     review: ReviewWorkspace,
     env: dict[str, str],
-) -> tuple[pathlib.Path | None, dict[str, str], frozenset[bytes] | None]:
+) -> tuple[pathlib.Path | None, dict[str, str], ClaudeBundledRoots | None]:
     claude_home = review.container_dir / "claude-home"
     claude_home.mkdir(parents=True, exist_ok=True)
     prepared_env = dict(env)
@@ -4109,6 +4439,7 @@ def _resolve_validated_claude_executable(
         key: value
         for key, value in prepared_env.items()
         if key != "ANTHROPIC_API_KEY"
+        and key not in CLAUDE_AUTH_METADATA_ENV_KEYS
         and key not in CLAUDE_TLS_FILE_ENV_KEYS
         and key not in CLAUDE_TLS_DIR_ENV_KEYS
         and key not in CLAUDE_TLS_BYPASS_ENV_KEYS
@@ -4118,21 +4449,29 @@ def _resolve_validated_claude_executable(
     probe_env["HOME"] = str(probe_home)
     probe_env.pop("XDG_CONFIG_HOME", None)
 
-    bundled_roots_by_path: dict[pathlib.Path, frozenset[bytes]] = {}
+    validated_candidates_by_path: dict[
+        pathlib.Path,
+        tuple[pathlib.Path, ClaudeBundledRoots],
+    ] = {}
 
     def validate_candidate(candidate: pathlib.Path) -> None:
-        candidate_env = dict(probe_env)
-        candidate_env["PATH"] = reviewer_executable_path(candidate)
         _native_macho_dependencies(candidate, label="Claude Code")
         bundled_roots = _require_trusted_claude_digest(candidate)
+        snapshot, snapshot_roots = _materialize_validated_claude_executable(
+            review,
+            candidate,
+            bundled_roots,
+        )
+        candidate_env = dict(probe_env)
+        candidate_env["PATH"] = reviewer_executable_path(snapshot)
         for candidate_path in (
             candidate,
             candidate.absolute(),
             candidate.resolve(),
         ):
-            bundled_roots_by_path[candidate_path] = bundled_roots
-        _require_claude_identity(candidate, candidate_env)
-        _require_claude_safe_mode(candidate, candidate_env)
+            validated_candidates_by_path[candidate_path] = (snapshot, snapshot_roots)
+        _require_claude_identity(snapshot, candidate_env)
+        _require_claude_safe_mode(snapshot, candidate_env)
 
     try:
         executable = resolve_reviewer_executable(
@@ -4142,25 +4481,26 @@ def _resolve_validated_claude_executable(
         raise ClaudeExecutableUnavailable(str(error)) from error
     if executable is None:
         return None, prepared_env, None
-    bundled_roots = next(
+    validated_candidate = next(
         (
-            bundled_roots_by_path[candidate]
+            validated_candidates_by_path[candidate]
             for candidate in (
                 executable,
                 executable.absolute(),
                 executable.resolve(),
             )
-            if candidate in bundled_roots_by_path
+            if candidate in validated_candidates_by_path
         ),
         None,
     )
-    if bundled_roots is None:
+    if validated_candidate is None:
         raise ClaudeExecutableInspectionInconclusive(
-            "validated Claude bundled root evidence is unavailable"
+            "validated Claude executable snapshot is unavailable"
         )
+    snapshot, bundled_roots = validated_candidate
     return (
-        executable,
-        _with_executable_path(prepared_env, executable),
+        snapshot,
+        _with_executable_path(prepared_env, snapshot),
         bundled_roots,
     )
 
@@ -4171,11 +4511,23 @@ def _claude_attempt(
     model: str,
     index: int,
     env: dict[str, str],
+    validated_executable: pathlib.Path | None = None,
+    validated_bundled_roots: ClaudeBundledRoots | None = None,
 ) -> Attempt:
-    executable, env, bundled_roots = _resolve_validated_claude_executable(
-        review=review,
-        env=env,
-    )
+    executable = validated_executable
+    bundled_roots = validated_bundled_roots
+    if executable is None:
+        executable, env, bundled_roots = _resolve_validated_claude_executable(
+            review=review,
+            env=env,
+        )
+    elif bundled_roots is None:
+        raise ClaudeExecutableInspectionInconclusive(
+            "validated Claude bundled root evidence is unavailable"
+        )
+    else:
+        _require_matching_claude_executable_snapshot(executable, bundled_roots)
+        env = _with_executable_path(env, executable)
     if executable is None or bundled_roots is None:
         raise FileNotFoundError(
             "claude is not available in a validated executable path"
@@ -4183,7 +4535,7 @@ def _claude_attempt(
     env = _with_claude_review_tool_path(review, env)
     trust_material = _preflight_claude_trust_policy(
         review,
-        bundled_root_sha256_fingerprints=bundled_roots,
+        bundled_roots=bundled_roots,
     )
     env = _prepare_claude_tls_environment(
         review,
@@ -4487,12 +4839,14 @@ def run_review(
                     "tracked blobs materialized from the frozen head commit",
                     "the generated frozen diff",
                     "the review prompt and result",
+                    "when local login is used, the validated account UUID, "
+                    "organization UUID, and email address needed for account discovery",
                 ],
                 "excluded": [
                     "credential paths and high-confidence secrets blocked by preflight",
                     "untracked files",
                     "unrelated repositories",
-                    "broad workspace or home-directory content",
+                    "broad workspace or other home-directory content",
                 ],
                 "preflight": "sensitive-content and escaping-symlink checks passed",
             },
@@ -4555,12 +4909,16 @@ def run_review(
         if not claude_env.get("ANTHROPIC_API_KEY"):
             trust_material = _preflight_claude_trust_policy(
                 review,
-                bundled_root_sha256_fingerprints=bundled_roots,
+                bundled_roots=bundled_roots,
             )
             warmup_env = _prepare_claude_tls_environment(
                 review,
                 claude_env,
                 trust_material=trust_material,
+            )
+            _require_matching_claude_executable_snapshot(
+                claude_executable,
+                bundled_roots,
             )
             _warm_claude_local_login(
                 review,
@@ -4625,11 +4983,19 @@ def run_review(
         write_json(review.container_dir / "attempts.json", [])
         return Outcome(2, None, tuple(attempts))
     if claude_executable is not None:
+
+        def run_validated_claude_attempt(**kwargs: object) -> Attempt:
+            return _claude_attempt(
+                **kwargs,
+                validated_executable=claude_executable,
+                validated_bundled_roots=bundled_roots,
+            )
+
         try:
             category, final_text = _run_model_chain(
                 review=review,
                 models=CLAUDE_MODELS,
-                runner=_claude_attempt,
+                runner=run_validated_claude_attempt,
                 runtime="claude",
                 requested_effort=CLAUDE_REASONING_EFFORT,
                 env=claude_env,
