@@ -3147,6 +3147,42 @@ class ProviderPolicyTest(unittest.TestCase):
                 providers._is_claude_tls_environment_prepared(self.review, env)
             )
 
+    def test_claude_ca_merge_counts_canonical_pem_bytes(self) -> None:
+        certificate = self.sample_ca_certificate()
+        lines = certificate.strip().splitlines()
+        compact = b"\n".join((lines[0], b"".join(lines[1:-1]), lines[-1])) + b"\n"
+        canonical = providers._canonical_ca_certificate(
+            compact,
+            source="compact fixture",
+        )[1]
+        self.assertGreater(len(canonical), len(compact))
+
+        with self.assertRaisesRegex(ReviewError, "exceeds the size limit"):
+            providers._merge_ca_certificates(
+                (("compact fixture", compact),),
+                limit_bytes=len(canonical) - 1,
+                label="Claude caller CA snapshot",
+            )
+
+        self.assertEqual(
+            providers._merge_ca_certificates(
+                (("compact fixture", compact),),
+                limit_bytes=len(canonical),
+                label="Claude caller CA snapshot",
+            ),
+            canonical,
+        )
+
+    def test_claude_ca_output_budgets_cover_pem_normalization(self) -> None:
+        self.assertGreater(
+            providers.CLAUDE_CALLER_CA_SNAPSHOT_LIMIT_BYTES,
+            providers.CLAUDE_CALLER_CA_INPUT_LIMIT_BYTES,
+        )
+        self.assertGreater(
+            providers.CLAUDE_CA_BUNDLE_LIMIT_BYTES,
+            providers.CLAUDE_CA_BUNDLE_INPUT_LIMIT_BYTES,
+        )
+
     def test_claude_final_tls_environment_drops_removed_trust_root(self) -> None:
         system_certificate, caller_certificate, removed_trust_certificate = (
             self.sample_ca_certificates(3)

@@ -186,13 +186,21 @@ CLAUDE_TLS_DIR_ENV_KEYS = ("SSL_CERT_DIR",)
 CLAUDE_CA_FILE_LIMIT_BYTES = 16 * 1024 * 1024
 CLAUDE_CA_DIR_LIMIT_BYTES = 64 * 1024 * 1024
 CLAUDE_CA_DIR_ENTRY_LIMIT = 4096
-CLAUDE_CALLER_CA_SNAPSHOT_LIMIT_BYTES = (
+CLAUDE_CALLER_CA_INPUT_LIMIT_BYTES = (
     CLAUDE_CA_DIR_LIMIT_BYTES
     + CLAUDE_CA_FILE_LIMIT_BYTES * len(CLAUDE_TLS_FILE_ENV_KEYS)
 )
-CLAUDE_CA_BUNDLE_LIMIT_BYTES = (
-    CLAUDE_CALLER_CA_SNAPSHOT_LIMIT_BYTES
+# Canonical PEM adds at most one line feed per 64 base64 bytes. A 1/32
+# allowance leaves more than twice that expansion while preserving a hard cap.
+CLAUDE_CALLER_CA_SNAPSHOT_LIMIT_BYTES = CLAUDE_CALLER_CA_INPUT_LIMIT_BYTES + math.ceil(
+    CLAUDE_CALLER_CA_INPUT_LIMIT_BYTES / 32
+)
+CLAUDE_CA_BUNDLE_INPUT_LIMIT_BYTES = (
+    CLAUDE_CALLER_CA_INPUT_LIMIT_BYTES
     + CLAUDE_CA_FILE_LIMIT_BYTES * (1 + len(CLAUDE_TRUST_CERTIFICATE_SOURCES))
+)
+CLAUDE_CA_BUNDLE_LIMIT_BYTES = CLAUDE_CA_BUNDLE_INPUT_LIMIT_BYTES + math.ceil(
+    CLAUDE_CA_BUNDLE_INPUT_LIMIT_BYTES / 32
 )
 CLAUDE_TRUST_SETTINGS_LIMIT_BYTES = 1024 * 1024
 CLAUDE_TRUST_ENTRY_LIMIT = 4096
@@ -1146,8 +1154,12 @@ def _merge_ca_certificates(
     *,
     excluded_sha1_fingerprints: Iterable[str] = (),
     allow_empty: bool = False,
+    limit_bytes: int,
+    label: str,
 ) -> bytes:
-    merged: list[bytes] = []
+    if limit_bytes < 0:
+        raise ValueError("CA merge byte limit must not be negative")
+    merged = bytearray()
     seen: set[bytes] = set()
     excluded = {fingerprint.upper() for fingerprint in excluded_sha1_fingerprints}
     for source, data in materials:
@@ -1163,10 +1175,12 @@ def _merge_ca_certificates(
             if fingerprint in seen:
                 continue
             seen.add(fingerprint)
-            merged.append(canonical)
+            if len(merged) + len(canonical) > limit_bytes:
+                raise ReviewError(f"{label} exceeds the size limit")
+            merged.extend(canonical)
     if not merged and not allow_empty:
         raise ReviewError("Claude review CA bundle contains no PEM certificate")
-    return b"".join(merged)
+    return bytes(merged)
 
 
 def _classify_trust_fingerprints(
@@ -1850,11 +1864,15 @@ def _prepare_claude_tls_environment(
     merged_bundle = _merge_ca_certificates(
         materials,
         excluded_sha1_fingerprints=trust_material.excluded_sha1_fingerprints,
+        limit_bytes=CLAUDE_CA_BUNDLE_LIMIT_BYTES,
+        label="Claude review CA bundle",
     )
     snapshot_material = _merge_ca_certificates(
         custom_materials,
         excluded_sha1_fingerprints=trust_material.excluded_sha1_fingerprints,
         allow_empty=True,
+        limit_bytes=CLAUDE_CALLER_CA_SNAPSHOT_LIMIT_BYTES,
+        label="Claude caller CA snapshot",
     )
     if snapshot_initialized:
         _write_private_ca_file(caller_snapshot, snapshot_material)
