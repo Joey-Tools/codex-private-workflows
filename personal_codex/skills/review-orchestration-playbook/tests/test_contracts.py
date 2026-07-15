@@ -86,9 +86,12 @@ class RepositoryContractTest(unittest.TestCase):
         self.assertIn("separate default-deny `sandbox-exec` profile", helper_contract)
         self.assertIn("ordinary macOS OAuth/keychain login", helper_contract)
         self.assertIn("localhost CONNECT proxy", helper_contract)
-        self.assertIn("unconditional root trust", helper_contract)
-        self.assertIn("Any non-empty array", helper_contract)
-        self.assertIn("aborts native Claude TLS setup", helper_contract)
+        self.assertIn("verifies unconditional roots", helper_contract)
+        self.assertIn("Every non-empty non-deny array", helper_contract)
+        self.assertIn("conservatively omitted rather than flattened", helper_contract)
+        self.assertIn("excluded from additional roots", helper_contract)
+        self.assertIn("fixed system baseline", helper_contract)
+        self.assertIn("not exposed through `SSL_CERT_DIR`", helper_contract)
         self.assertIn("`keyUsage` with `keyCertSign`", helper_contract)
         self.assertIn(
             "`/usr/bin/openssl verify -x509_strict -check_ss_sig`", helper_contract
@@ -96,6 +99,21 @@ class RepositoryContractTest(unittest.TestCase):
         self.assertIn("trust-policy-unrepresentable", helper_contract)
         self.assertIn("Any explicit deny is a distinct hard stop", helper_contract)
         self.assertIn("checks later trust domains", helper_contract)
+        self.assertIn("`claude-trust-policy.json`", helper_contract)
+        self.assertIn("never retains fingerprints", helper_contract)
+        self.assertIn("the default Keychain search list", helper_contract)
+        self.assertIn("`/Library/Keychains/System.keychain`", helper_contract)
+        self.assertIn(
+            "`/System/Library/Keychains/SystemRootCertificates.keychain`",
+            helper_contract,
+        )
+        self.assertIn("more than 4,096 entries", helper_contract)
+        self.assertIn("At most 256 distinct additional roots", helper_contract)
+        self.assertIn("30-second deadline", helper_contract)
+        self.assertIn("recognizable exact Deny takes precedence", helper_contract)
+        self.assertIn("anchored to one file descriptor", helper_contract)
+        self.assertIn("fresh generation in `checking` state", helper_contract)
+        self.assertIn("`complete`, `denied`, `blocked`", helper_contract)
         self.assertIn("one model attempt at a time", helper_contract)
         self.assertIn("`claude-auth-warmup.json`", helper_contract)
         self.assertIn("`SSL_CERT_FILE` and `NODE_EXTRA_CA_CERTS`", helper_contract)
