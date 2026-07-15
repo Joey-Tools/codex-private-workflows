@@ -117,8 +117,26 @@ class RepositoryContractTest(unittest.TestCase):
         self.assertIn("anchored to one file descriptor", helper_contract)
         self.assertIn("fresh generation in `checking` state", helper_contract)
         self.assertIn("`complete`, `denied`, `blocked`", helper_contract)
+        self.assertIn("final bundle has passed validation", helper_contract)
         self.assertIn("one model attempt at a time", helper_contract)
         self.assertIn("`claude-auth-warmup.json`", helper_contract)
+        self.assertIn("fixed-schema structural summary", helper_contract)
+        self.assertIn("never retains result/error text", helper_contract)
+        self.assertIn("attempt-local", helper_contract)
+        self.assertIn(
+            "fresh full trust-policy preflight",
+            helper_contract,
+        )
+        self.assertIn("4.8-to-4.7 entitlement fallback", helper_contract)
+        self.assertIn("terminalized as `inconclusive`", helper_contract)
+        self.assertIn("verified effective model from `modelUsage`", helper_contract)
+        self.assertIn("only an actually observed model substitution", helper_contract)
+        self.assertIn("present non-object usage is retained as `invalid`", helper_contract)
+        self.assertIn("`reason_category=authentication`", helper_contract)
+        self.assertIn(
+            "does not write `claude-skip.txt` or `claude-unavailable.json`",
+            helper_contract,
+        )
         self.assertIn("`SSL_CERT_FILE` and `NODE_EXTRA_CA_CERTS`", helper_contract)
         self.assertIn("one validated helper-owned bundle", helper_contract)
         self.assertIn("user, admin, and system trust domains", helper_contract)

@@ -24,7 +24,7 @@ import threading
 import time
 import urllib.parse
 import urllib.request
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from typing import Any, Callable, Iterable, Iterator
 
 from .common import (
@@ -347,6 +347,50 @@ AUTH_FAILURE_FRAGMENTS = (
     "status 401",
 )
 CLAUDE_RESULT_AUTH_MESSAGES = frozenset({"not logged in - please run /login"})
+CLAUDE_AUTH_WARMUP_SAFE_TYPES = frozenset({"api_error", "result", "turn.failed"})
+CLAUDE_AUTH_WARMUP_SAFE_SUBTYPES = frozenset(
+    {"error_during_execution", "interrupted", "success"}
+)
+CLAUDE_AUTH_WARMUP_ERROR_FIELDS = (
+    "api_error_status",
+    "code",
+    "detail",
+    "error",
+    "errors",
+    "message",
+    "reason",
+)
+CLAUDE_AUTH_WARMUP_RESULT_SIGNAL_TERMS = {
+    "auth": (
+        "api key",
+        "authentication",
+        "credential",
+        "log in",
+        "logged in",
+        "login",
+        "oauth",
+        "sign in",
+        "token",
+        "unauthorized",
+    ),
+    "entitlement": (
+        "account",
+        "billing",
+        "model is not available",
+        "organization policy",
+        "plan",
+        "subscription",
+    ),
+    "transient": (
+        "connection",
+        "network",
+        "overloaded",
+        "rate limit",
+        "temporarily",
+        "timeout",
+        "try again",
+    ),
+}
 CODEX_ARG_TRANSPORT_NAME = re.compile(r"codex-arg0[A-Za-z0-9]+")
 
 
@@ -441,6 +485,11 @@ class ClaudeTrustMaterial:
     certificates: bytes
     excluded_sha1_fingerprints: frozenset[str]
     system_certificates: bytes = b""
+    evidence: dict[str, object] | None = field(
+        default=None,
+        compare=False,
+        repr=False,
+    )
 
 
 @dataclass(frozen=True)
@@ -1570,10 +1619,19 @@ def _read_claude_trust_certificates(
             unresolved_resolution="unavailable",
         )
         raise
+    except ReviewOutputLimitError as error:
+        _terminalize_claude_trust_policy_evidence(
+            review,
+            evidence,
+            status="blocked",
+            unresolved_resolution="blocked",
+        )
+        raise ClaudeTrustPolicyUnavailable(
+            "Claude trust policy exceeds the inspection limit"
+        ) from error
     except (
         ReviewTimeoutError,
         ReviewOutputDrainError,
-        ReviewOutputLimitError,
         ReviewProcessLeakError,
     ):
         _terminalize_claude_trust_policy_evidence(
@@ -1609,9 +1667,8 @@ def _read_claude_trust_certificates(
             unresolved_resolution="inconclusive",
         )
         raise
-    evidence["status"] = "complete"
     _write_claude_trust_policy_evidence(review, evidence)
-    return material
+    return replace(material, evidence=evidence)
 
 
 def _read_claude_trust_certificates_impl(
@@ -1737,7 +1794,7 @@ def _read_claude_trust_certificates_impl(
             )
             refresh_evidence_counts()
             raise
-        except ClaudeTrustToolUnavailable:
+        except ClaudeTrustToolUnavailable as error:
             domain_evidence.append(
                 {
                     "domain": domain,
@@ -1747,13 +1804,28 @@ def _read_claude_trust_certificates_impl(
                 }
             )
             refresh_evidence_counts()
+            if deferred_error is not None:
+                raise deferred_error from error
             raise
+        except ReviewOutputLimitError:
+            domain_evidence.append(
+                {
+                    "domain": domain,
+                    "status": "blocked",
+                    "unconditional_count": 0,
+                    "constrained_omitted_count": 0,
+                }
+            )
+            refresh_evidence_counts()
+            if deferred_error is None:
+                deferred_error = ClaudeTrustPolicyUnavailable(
+                    f"Claude {domain} trust export exceeds the inspection limit"
+                )
         except (
             ReviewTimeoutError,
             ReviewOutputDrainError,
-            ReviewOutputLimitError,
             ReviewProcessLeakError,
-        ):
+        ) as error:
             domain_evidence.append(
                 {
                     "domain": domain,
@@ -1763,6 +1835,8 @@ def _read_claude_trust_certificates_impl(
                 }
             )
             refresh_evidence_counts()
+            if deferred_error is not None:
+                raise deferred_error from error
             raise
         except ReviewError as error:
             domain_evidence.append(
@@ -1848,7 +1922,24 @@ def _preflight_claude_trust_policy(
     review: ReviewWorkspace,
 ) -> ClaudeTrustMaterial:
     evidence = _new_claude_trust_policy_evidence()
-    _write_claude_trust_policy_evidence(review, evidence)
+    try:
+        _write_claude_trust_policy_evidence(review, evidence)
+        return _preflight_claude_trust_policy_impl(review, evidence)
+    except BaseException:
+        if evidence.get("status") == "checking":
+            _terminalize_claude_trust_policy_evidence(
+                review,
+                evidence,
+                status="inconclusive",
+                unresolved_resolution="inconclusive",
+            )
+        raise
+
+
+def _preflight_claude_trust_policy_impl(
+    review: ReviewWorkspace,
+    evidence: dict[str, object],
+) -> ClaudeTrustMaterial:
     try:
         system_material = _read_ca_source(
             CLAUDE_SYSTEM_CA_FILE,
@@ -1941,23 +2032,135 @@ def _prepare_claude_tls_environment(
     *,
     trust_material: ClaudeTrustMaterial | None = None,
 ) -> dict[str, str]:
+    prepared_trust_material = trust_material
+
+    def load_trust_material(ca_root: pathlib.Path) -> ClaudeTrustMaterial:
+        nonlocal prepared_trust_material
+        if prepared_trust_material is None:
+            system_material = _read_ca_source(
+                CLAUDE_SYSTEM_CA_FILE,
+                source="system CA bundle",
+            )
+            prepared_trust_material = _read_claude_trust_certificates(
+                review,
+                ca_root,
+            )
+            prepared_trust_material = replace(
+                prepared_trust_material,
+                system_certificates=system_material,
+            )
+        return prepared_trust_material
+
     try:
-        return _prepare_claude_tls_environment_impl(
+        prepared = _prepare_claude_tls_environment_impl(
             review,
             env,
-            trust_material=trust_material,
+            load_trust_material=load_trust_material,
         )
+    except ClaudeTrustSettingsDeny:
+        _terminalize_claude_tls_preparation_evidence(
+            review,
+            prepared_trust_material,
+            status="denied",
+            unresolved_resolution="blocked",
+        )
+        raise
+    except ClaudeTrustPolicyUnavailable:
+        _terminalize_claude_tls_preparation_evidence(
+            review,
+            prepared_trust_material,
+            status="blocked",
+            unresolved_resolution="blocked",
+        )
+        raise
+    except ClaudeTrustToolUnavailable:
+        _terminalize_claude_tls_preparation_evidence(
+            review,
+            prepared_trust_material,
+            status="unavailable",
+            unresolved_resolution="unavailable",
+        )
+        raise
+    except (
+        ReviewTimeoutError,
+        ReviewOutputDrainError,
+        ReviewOutputLimitError,
+        ReviewProcessLeakError,
+    ):
+        _terminalize_claude_tls_preparation_evidence(
+            review,
+            prepared_trust_material,
+            status="inconclusive",
+            unresolved_resolution="inconclusive",
+        )
+        raise
+    except ReviewError:
+        _terminalize_claude_tls_preparation_evidence(
+            review,
+            prepared_trust_material,
+            status="blocked",
+            unresolved_resolution="blocked",
+        )
+        raise
     except MemoryError as error:
+        _terminalize_claude_tls_preparation_evidence(
+            review,
+            prepared_trust_material,
+            status="blocked",
+            unresolved_resolution="blocked",
+        )
         raise ReviewError(
             "Claude caller CA processing exceeded the bounded memory budget"
         ) from error
+    except OSError as error:
+        _terminalize_claude_tls_preparation_evidence(
+            review,
+            prepared_trust_material,
+            status="unavailable",
+            unresolved_resolution="unavailable",
+        )
+        raise ClaudeTrustToolUnavailable(
+            "Claude TLS preparation is unavailable"
+        ) from error
+    except BaseException:
+        _terminalize_claude_tls_preparation_evidence(
+            review,
+            prepared_trust_material,
+            status="inconclusive",
+            unresolved_resolution="inconclusive",
+        )
+        raise
+    _terminalize_claude_tls_preparation_evidence(
+        review,
+        prepared_trust_material,
+        status="complete",
+        unresolved_resolution="complete",
+    )
+    return prepared
+
+
+def _terminalize_claude_tls_preparation_evidence(
+    review: ReviewWorkspace,
+    trust_material: ClaudeTrustMaterial | None,
+    *,
+    status: str,
+    unresolved_resolution: str,
+) -> None:
+    if trust_material is None or trust_material.evidence is None:
+        return
+    _terminalize_claude_trust_policy_evidence(
+        review,
+        trust_material.evidence,
+        status=status,
+        unresolved_resolution=unresolved_resolution,
+    )
 
 
 def _prepare_claude_tls_environment_impl(
     review: ReviewWorkspace,
     env: dict[str, str],
     *,
-    trust_material: ClaudeTrustMaterial | None = None,
+    load_trust_material: Callable[[pathlib.Path], ClaudeTrustMaterial],
 ) -> dict[str, str]:
     result = dict(env)
     ca_root = review.container_dir / "claude-ca"
@@ -2090,16 +2293,15 @@ def _prepare_claude_tls_environment_impl(
                     "Claude review CA directory contains no PEM certificates"
                 )
 
+    trust_material = load_trust_material(ca_root)
     system_material = (
         trust_material.system_certificates
-        if trust_material is not None and trust_material.system_certificates
+        if trust_material.system_certificates
         else _read_ca_source(
             CLAUDE_SYSTEM_CA_FILE,
             source="system CA bundle",
         )
     )
-    if trust_material is None:
-        trust_material = _read_claude_trust_certificates(review, ca_root)
     if trust_material.excluded_sha1_fingerprints:
         raise ClaudeTrustPolicyUnavailable(
             "Claude bundled certificate store cannot enforce excluded trust roots"
@@ -2521,10 +2723,29 @@ def _warm_claude_local_login(
         pass
     warmup = _run_claude_auth_warmup(review, executable, env)
     category = classify_failure(warmup.stdout, warmup.stderr)
+    output_shape = _claude_auth_warmup_output_shape(warmup.stdout)
+    result_signal_categories = output_shape.get("result_signal_categories")
+    if (
+        category == "other"
+        and warmup.returncode != 0
+        and output_shape.get("json_shape") == "object"
+        and output_shape.get("is_error") is True
+        and (
+            output_shape.get("model_usage_shape") == "missing"
+            or (
+                output_shape.get("model_usage_shape") == "object"
+                and output_shape.get("model_usage_entry_count") == 0
+            )
+        )
+        and output_shape.get("api_error_status_shape") in {"missing", "null"}
+        and result_signal_categories == ["auth"]
+    ):
+        category = "auth"
     write_json(
         review.container_dir / "claude-auth-warmup.json",
         {
             "category": category,
+            "output_shape": output_shape,
             "returncode": warmup.returncode,
             "stderr_bytes": len(warmup.stderr),
             "stdout_bytes": len(warmup.stdout),
@@ -2542,6 +2763,95 @@ def _warm_claude_local_login(
             "Claude authentication warmup did not produce a fresh credential "
             f"(returncode={warmup.returncode}, category={category})"
         ) from error
+
+
+def _safe_claude_auth_warmup_enum(value: Any, allowed: frozenset[str]) -> str:
+    if value is None:
+        return "missing"
+    if not isinstance(value, str):
+        return "invalid"
+    return value if value in allowed else "other"
+
+
+def _claude_auth_warmup_output_shape(stdout: bytes) -> dict[str, object]:
+    result = _strict_json_object(stdout)
+    if result is None:
+        return {"json_shape": "invalid-or-non-object"}
+    api_error_status = result.get("api_error_status")
+    safe_api_error_status = (
+        api_error_status
+        if type(api_error_status) is int and 100 <= api_error_status <= 599
+        else None
+    )
+    raw_result = result.get("result")
+    normalized_result = (
+        " ".join(raw_result.lower().split())
+        if isinstance(raw_result, str)
+        else None
+    )
+    model_usage = result.get("modelUsage")
+    return {
+        "api_error_status": safe_api_error_status,
+        "api_error_status_present": "api_error_status" in result,
+        "api_error_status_shape": (
+            "missing"
+            if "api_error_status" not in result
+            else "null"
+            if api_error_status is None
+            else "status"
+            if safe_api_error_status is not None
+            else "invalid"
+        ),
+        "is_error": (
+            result["is_error"]
+            if type(result.get("is_error")) is bool
+            else None
+        ),
+        "json_shape": "object",
+        "known_error_fields_present": [
+            key for key in CLAUDE_AUTH_WARMUP_ERROR_FIELDS if key in result
+        ],
+        "model_usage_entry_count": (
+            min(len(model_usage), 256) if isinstance(model_usage, dict) else None
+        ),
+        "model_usage_present": "modelUsage" in result,
+        "model_usage_shape": (
+            "missing"
+            if "modelUsage" not in result
+            else "object"
+            if isinstance(model_usage, dict)
+            else "invalid"
+        ),
+        "result_matches_known_auth_message": (
+            normalized_result in CLAUDE_RESULT_AUTH_MESSAGES
+            if normalized_result is not None
+            else False
+        ),
+        "result_signal_categories": (
+            [
+                category
+                for category, terms in CLAUDE_AUTH_WARMUP_RESULT_SIGNAL_TERMS.items()
+                if any(term in normalized_result for term in terms)
+            ]
+            if normalized_result is not None
+            else []
+        ),
+        "result_shape": (
+            "missing"
+            if "result" not in result
+            else "string"
+            if isinstance(raw_result, str)
+            else "non-string"
+        ),
+        "subtype": _safe_claude_auth_warmup_enum(
+            result.get("subtype"),
+            CLAUDE_AUTH_WARMUP_SAFE_SUBTYPES,
+        ),
+        "type": _safe_claude_auth_warmup_enum(
+            result.get("type"),
+            CLAUDE_AUTH_WARMUP_SAFE_TYPES,
+        ),
+    }
 
 
 def _review_environment(
@@ -3185,14 +3495,15 @@ def _parse_claude_output(
     if result.get("type") != "result":
         return None, None
     model_usage = result.get("modelUsage")
-    if not isinstance(model_usage, dict) or not model_usage:
-        return None, None
-    if any(
-        not isinstance(key, str) or not key or not isinstance(value, dict)
-        for key, value in model_usage.items()
-    ):
-        return None, None
-    candidates = list(model_usage)
+    model_usage_valid = (
+        isinstance(model_usage, dict)
+        and bool(model_usage)
+        and all(
+            isinstance(key, str) and key and isinstance(value, dict)
+            for key, value in model_usage.items()
+        )
+    )
+    candidates = list(model_usage) if model_usage_valid else []
     effective_model = None
     if requested_model is not None:
         effective_model = next(
@@ -3223,7 +3534,7 @@ def _parse_claude_output(
         if value is not None and not (isinstance(value, str) and not value.strip()):
             return None, effective_model
     final_text = result.get("result")
-    if not isinstance(final_text, str) or not final_text.strip() or not candidates:
+    if not isinstance(final_text, str) or not final_text.strip():
         return None, effective_model
     if _structured_error_text(stdout).strip():
         return None, effective_model
@@ -3440,7 +3751,7 @@ def _record_attempt(
         stdout_path=str(stdout_path),
         stderr_path=str(stderr_path),
     )
-    if attempt.category in {"success", "entitlement"} and (
+    if attempt.category == "success" and (
         (require_verified_model and effective_model is None)
         or (
             require_verified_effort
@@ -3467,7 +3778,7 @@ def _record_attempt(
         attempt = replace(
             attempt,
             returncode=65,
-            category="model-mismatch",
+            category="runtime-unverified",
             final_text=None,
         )
     if effective_effort and effective_effort.lower() != requested_effort.lower():
@@ -3673,8 +3984,12 @@ def _claude_attempt(
             "claude is not available in a validated executable path"
         )
     env = _with_claude_review_tool_path(review, env)
-    if not _is_claude_tls_environment_prepared(review, env):
-        env = _prepare_claude_tls_environment(review, env)
+    trust_material = _preflight_claude_trust_policy(review)
+    env = _prepare_claude_tls_environment(
+        review,
+        env,
+        trust_material=trust_material,
+    )
     stdout_path, stderr_path = _attempt_paths(review, index, "claude", model)
     settings = json.dumps(
         {
@@ -3757,8 +4072,9 @@ def _claude_attempt(
         final_text=final_text if completed.returncode == 0 else None,
         effective_model=effective_model,
         requested_effort=CLAUDE_REASONING_EFFORT,
-        effective_effort=None,
+        effective_effort=CLAUDE_REASONING_EFFORT,
         require_verified_model=True,
+        require_verified_effort=True,
     )
 
 
@@ -3801,6 +4117,21 @@ def _write_claude_trust_policy_blocked(review: ReviewWorkspace) -> None:
         "Host trust policy cannot be represented by Claude's additive certificate "
         "stores or contains malformed or unsupported trust settings; native Claude "
         "review is blocked.\n",
+    )
+
+
+def _write_claude_authentication_blocked(review: ReviewWorkspace) -> None:
+    write_json(
+        review.container_dir / "claude-blocked.json",
+        {
+            "reason_category": "authentication",
+            "runtime": "claude",
+            "status": "blocked",
+        },
+    )
+    write_text_atomic(
+        review.container_dir / "runner-error.txt",
+        "Claude authentication is unavailable; native Claude review is blocked.\n",
     )
 
 
@@ -4020,23 +4351,17 @@ def run_review(
             )
         claude_env = _prepare_claude_keychain_broker(review, claude_env)
         claude_env = _with_claude_review_tool_path(review, claude_env)
-        trust_material = _preflight_claude_trust_policy(review)
-        claude_env = _prepare_claude_tls_environment(
-            review,
-            claude_env,
-            trust_material=trust_material,
-        )
         if not claude_env.get("ANTHROPIC_API_KEY"):
-            _warm_claude_local_login(
-                review,
-                claude_executable,
-                claude_env,
-            )
             trust_material = _preflight_claude_trust_policy(review)
-            claude_env = _prepare_claude_tls_environment(
+            warmup_env = _prepare_claude_tls_environment(
                 review,
                 claude_env,
                 trust_material=trust_material,
+            )
+            _warm_claude_local_login(
+                review,
+                claude_executable,
+                warmup_env,
             )
     except ClaudeTrustSettingsDeny:
         _write_claude_trust_deny(review)
@@ -4046,10 +4371,13 @@ def run_review(
         _write_claude_trust_policy_blocked(review)
         write_json(review.container_dir / "attempts.json", [])
         return Outcome(2, None, tuple(attempts))
+    except ClaudeKeychainCredentialUnavailable:
+        _write_claude_authentication_blocked(review)
+        write_json(review.container_dir / "attempts.json", [])
+        return Outcome(2, None, tuple(attempts))
     except (
         ClaudeProbeSandboxUnavailable,
         ClaudeKeychainBrokerUnavailable,
-        ClaudeKeychainCredentialUnavailable,
         ClaudeReviewToolUnavailable,
         ClaudeLoopbackUnavailable,
         ClaudeExecutableUnavailable,
@@ -4125,8 +4453,13 @@ def run_review(
             _write_claude_trust_policy_blocked(review)
             _write_attempts(review, attempts)
             return Outcome(2, None, tuple(attempts))
+        except ClaudeKeychainCredentialUnavailable:
+            _write_claude_authentication_blocked(review)
+            _write_attempts(review, attempts)
+            return Outcome(2, None, tuple(attempts))
         except (
-            ClaudeKeychainCredentialUnavailable,
+            ClaudeProbeSandboxUnavailable,
+            ClaudeKeychainBrokerUnavailable,
             ClaudeReviewToolUnavailable,
             ClaudeLoopbackUnavailable,
             ClaudeExecutableUnavailable,
@@ -4139,7 +4472,7 @@ def run_review(
             else:
                 write_text_atomic(
                     review.container_dir / "claude-skip.txt",
-                    f"Claude Code local authentication became unavailable: {error}\n",
+                    f"Claude Code secure runtime became unavailable: {error}\n",
                 )
             write_text_atomic(
                 review.container_dir / "runner-error.txt",
@@ -4157,7 +4490,9 @@ def run_review(
             return Outcome(2, None, tuple(attempts))
         if final_text:
             return _finish(review, attempts, final_text)
-        if category in {"auth", "entitlement", "unavailable"}:
+        if category == "auth":
+            _write_claude_authentication_blocked(review)
+        elif category in {"entitlement", "unavailable"}:
             write_text_atomic(
                 review.container_dir / "runner-error.txt",
                 f"Native Claude review is blocked ({category}); no alternate "
