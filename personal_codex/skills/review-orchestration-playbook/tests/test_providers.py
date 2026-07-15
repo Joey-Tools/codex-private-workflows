@@ -1270,6 +1270,25 @@ class ProviderPolicyTest(unittest.TestCase):
 
         self.assertEqual(providers.classify_failure(stdout, ""), "auth")
 
+    def test_claude_error_result_ignores_empty_error_payloads_for_auth(self) -> None:
+        for key, value in (
+            ("error", None),
+            ("errors", []),
+            ("message", ""),
+        ):
+            with self.subTest(key=key):
+                stdout = json.dumps(
+                    {
+                        "type": "result",
+                        "subtype": "error_during_execution",
+                        "is_error": True,
+                        "result": "Not logged in - Please run /login",
+                        key: value,
+                    }
+                )
+
+                self.assertEqual(providers.classify_failure(stdout, ""), "auth")
+
     def test_claude_partial_error_result_cannot_trigger_model_fallback(self) -> None:
         stdout = json.dumps(
             {
@@ -1345,6 +1364,23 @@ class ProviderPolicyTest(unittest.TestCase):
                 "error": {"message": "Model is not available for your account"},
             }
         )
+        self.assertEqual(providers.classify_failure(stdout, ""), "entitlement")
+
+    def test_strict_jsonl_error_event_can_trigger_entitlement_fallback(self) -> None:
+        stdout = "\n".join(
+            (
+                json.dumps({"type": "thread.started", "thread_id": "fixture"}),
+                json.dumps(
+                    {
+                        "type": "turn.failed",
+                        "error": {
+                            "message": "Model is not available for your account"
+                        },
+                    }
+                ),
+            )
+        )
+
         self.assertEqual(providers.classify_failure(stdout, ""), "entitlement")
 
     def test_structured_api_error_event_can_trigger_entitlement_fallback(self) -> None:
@@ -1624,6 +1660,16 @@ class ProviderPolicyTest(unittest.TestCase):
         )
 
         self.assertEqual(providers._parse_claude_output(stdout), (None, None))
+
+    def test_duplicate_error_json_cannot_trigger_model_fallback(self) -> None:
+        stdout = (
+            b'{"type":"result","subtype":"error_during_execution",'
+            b'"is_error":true,"error":{"message":"request failed"},'
+            b'"error":{"message":"Model is not available for your account"}}'
+        )
+
+        self.assertEqual(providers._parse_claude_output(stdout), (None, None))
+        self.assertEqual(providers.classify_failure(stdout, ""), "other")
 
     def test_claude_preserves_unicode_separator_at_result_edges(self) -> None:
         result = "\u2028No findings.\u2029"
@@ -7192,6 +7238,33 @@ class ProviderPolicyTest(unittest.TestCase):
         )
 
         self.assertNotIn("SSL_CERT_DIR", prepared)
+        bundle = pathlib.Path(prepared["SSL_CERT_FILE"]).read_bytes()
+        expected_der = providers._canonical_ca_certificate(
+            certificate,
+            source="directory fixture",
+        )[0]
+        actual = [
+            providers._canonical_ca_certificate(
+                block,
+                source="prepared bundle",
+            )[0]
+            for block in providers.CLAUDE_CERTIFICATE_BLOCK.findall(bundle)
+        ]
+        self.assertEqual(actual.count(expected_der), 1)
+
+    def test_claude_tls_preparation_skips_ca_directory_symlinks(self) -> None:
+        certificate = self.sample_ca_certificate()
+        source_dir = self.review.source_root / "ca-dir-with-links"
+        source_dir.mkdir()
+        certificate_path = source_dir / "certificate.pem"
+        certificate_path.write_bytes(certificate)
+        (source_dir / "deadbeef.0").symlink_to(certificate_path.name)
+
+        prepared = providers._prepare_claude_tls_environment(
+            self.review,
+            {"SSL_CERT_DIR": str(source_dir)},
+        )
+
         bundle = pathlib.Path(prepared["SSL_CERT_FILE"]).read_bytes()
         expected_der = providers._canonical_ca_certificate(
             certificate,

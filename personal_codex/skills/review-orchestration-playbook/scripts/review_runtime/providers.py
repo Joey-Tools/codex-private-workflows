@@ -2239,7 +2239,13 @@ def _prepare_claude_tls_environment_impl(
                     raise ReviewError("Claude review CA directory has too many entries")
                 entry_count += len(source_paths)
                 for source_path in sorted(source_paths, key=lambda path: path.name):
-                    if not source_path.is_file():
+                    try:
+                        source_mode = source_path.lstat().st_mode
+                    except OSError as error:
+                        raise ReviewError(
+                            f"Claude review cannot inspect {key} entry"
+                        ) from error
+                    if stat.S_ISLNK(source_mode) or not stat.S_ISREG(source_mode):
                         continue
                     remaining_input = (
                         CLAUDE_CALLER_CA_INPUT_LIMIT_BYTES - custom_material_bytes
@@ -3368,24 +3374,36 @@ def _model_matches(requested: str, effective: str) -> bool:
 
 
 def _json_objects(stdout: bytes) -> list[dict[str, Any]]:
-    text = stdout.decode("utf-8", errors="replace").strip()
+    try:
+        text = stdout.decode("utf-8").strip()
+    except UnicodeDecodeError:
+        return []
     if not text:
         return []
-    values: list[dict[str, Any]] = []
-    try:
-        parsed = json.loads(text)
-    except json.JSONDecodeError:
-        parsed = None
-    if isinstance(parsed, dict):
-        values.append(parsed)
-        return values
-    for line in text.split("\n"):
+
+    def parse_object(value: str) -> dict[str, Any] | None:
         try:
-            parsed_line = json.loads(line)
-        except json.JSONDecodeError:
+            parsed = json.loads(
+                value,
+                parse_constant=_reject_nonstandard_json_constant,
+                object_pairs_hook=_strict_json_object_from_pairs,
+            )
+        except ValueError:
+            return None
+        return parsed if isinstance(parsed, dict) else None
+
+    parsed = parse_object(text)
+    if parsed is not None:
+        return [parsed]
+
+    values: list[dict[str, Any]] = []
+    for line in text.split("\n"):
+        if not line.strip():
             continue
-        if isinstance(parsed_line, dict):
-            values.append(parsed_line)
+        parsed_line = parse_object(line)
+        if parsed_line is None:
+            return []
+        values.append(parsed_line)
     return values
 
 
@@ -3465,10 +3483,15 @@ def _structured_error_item_text(item: dict[str, Any]) -> str:
     payload_found = False
     for key in ("error", "errors", "message", "reason", "detail", "code"):
         if key in item:
-            payload_found = True
-            messages.extend(_error_payload_text(item[key]))
+            payload_messages = _error_payload_text(item[key])
+            if payload_messages:
+                payload_found = True
+                messages.extend(payload_messages)
     api_error_status = item.get("api_error_status")
-    if isinstance(api_error_status, (int, str)):
+    if (
+        isinstance(api_error_status, int)
+        and not isinstance(api_error_status, bool)
+    ) or (isinstance(api_error_status, str) and api_error_status.strip()):
         payload_found = True
         messages.append(f"status {api_error_status}")
     if not payload_found and isinstance(item.get("result"), str):
