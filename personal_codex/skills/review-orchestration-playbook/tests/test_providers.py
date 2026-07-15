@@ -3068,6 +3068,52 @@ class ProviderPolicyTest(unittest.TestCase):
         )
         self.assertEqual(claude_attempt.call_args.kwargs["env"], claude_env)
 
+    def test_model_stage_snapshot_drift_is_inconclusive(self) -> None:
+        claude_env = {"ANTHROPIC_API_KEY": "fixture-key"}
+        with (
+            mock.patch.object(
+                providers,
+                "child_environment",
+                return_value=claude_env,
+            ),
+            mock.patch.object(
+                providers,
+                "_resolve_validated_claude_executable",
+                return_value=(
+                    pathlib.Path("/fixture/claude"),
+                    claude_env,
+                    self.empty_bundled_roots,
+                ),
+            ),
+            mock.patch.object(
+                providers,
+                "_with_claude_review_tool_path",
+                return_value=claude_env,
+            ),
+            mock.patch.object(
+                providers,
+                "_require_matching_claude_executable_snapshot",
+                side_effect=providers.ClaudeExecutableInspectionInconclusive(
+                    "validated Claude Code executable snapshot changed"
+                ),
+            ),
+        ):
+            outcome = providers.run_review(
+                review=self.review,
+                reviewer="claude",
+                egress_consent="triple-review",
+            )
+
+        self.assertEqual(outcome.returncode, 75)
+        self.assertEqual(outcome.attempts, ())
+        self.assertFalse((self.review.container_dir / "claude-blocked.json").exists())
+        self.assertIn(
+            "validation was inconclusive",
+            (self.review.container_dir / "runner-error.txt").read_text(
+                encoding="utf-8"
+            ),
+        )
+
     def test_real_claude_model_chain_rebuilds_tls_before_each_attempt(self) -> None:
         claude_env = {"ANTHROPIC_API_KEY": "fixture-key"}
         trust_materials: list[providers.ClaudeTrustMaterial] = []
