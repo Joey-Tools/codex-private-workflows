@@ -186,12 +186,12 @@ SYNC_RULES = (
             ),
             Replacement(
                 "If the task might depend on remote-host evidence, let an environment-specific remote evidence workflow materialize remote rollout candidates locally before concluding that local history is complete.",
-                "If the task might depend on work done on `miku-bot-dev` or `hoteng-srv-01`, use `$remote-host-context` before concluding the local machine is complete.\n"
+                "If the task might depend on a host in `$remote-host-context`'s default evidence scope, use `$remote-host-context` before concluding the local machine is complete.\n"
                 "- When remote-host coverage is needed, let `remote-host-context` own the remote access step. Use its helper to materialize remote rollout candidates locally, then continue the actual mining here.",
             ),
             Replacement(
                 "If the task might depend on remote-host evidence",
-                "If the task might depend on work done on `miku-bot-dev` or `hoteng-srv-01`",
+                "If the task might depend on a host in `$remote-host-context`'s default evidence scope",
                 required=False,
             ),
             Replacement(
@@ -215,9 +215,13 @@ SYNC_RULES = (
             ),
             Replacement(
                 "If the user is asking for a work summary, activity audit, or session recovery that may include remote hosts, use an environment-specific remote evidence workflow before concluding that the local `~/.codex` tree is complete.",
-                "If the user is asking for a work summary, activity audit, or session recovery that may include `miku-bot-dev` or `hoteng-srv-01`, use `$remote-host-context` before concluding that the local `~/.codex` tree is complete.",
+                "If the user is asking for a work summary, activity audit, or session recovery that may include a host in `$remote-host-context`'s default evidence scope, use `$remote-host-context` before concluding that the local `~/.codex` tree is complete.",
             ),
-            Replacement("remote hosts", "`miku-bot-dev` or `hoteng-srv-01`", required=False),
+            Replacement(
+                "remote hosts",
+                "hosts in `$remote-host-context`'s default evidence scope",
+                required=False,
+            ),
         ),
         common_joey_text=True,
         forbidden_residuals=(
@@ -229,6 +233,56 @@ SYNC_RULES = (
         "codex-workflow-hygiene",
         "skills/codex-session-retrospective",
         "personal_codex/skills/codex-session-retrospective",
+        (
+            Replacement(
+                "Default host scope follows `$remote-host-context`: local machine, `miku-bot-dev`, and `hoteng-srv-01`.",
+                "Default host scope follows `$remote-host-context`: local machine, `BL-mac-mini-m4-hoteng`, `miku-bot-dev`, `hoteng-srv-01`, and `codex-hoteng-srv-01`.",
+            ),
+            Replacement(
+                'DEFAULT_REMOTE_HOSTS = ("miku-bot-dev", "hoteng-srv-01")',
+                'DEFAULT_REMOTE_HOSTS = ("BL-mac-mini-m4-hoteng", "miku-bot-dev", "hoteng-srv-01", "codex-hoteng-srv-01")',
+            ),
+            Replacement(
+                'help="Source in HOST=PATH form. Defaults to local=~/.codex plus materialized miku-bot-dev and hoteng-srv-01 sources."',
+                'help="Source in HOST=PATH form. Defaults to local=~/.codex plus materialized BL-mac-mini-m4-hoteng, miku-bot-dev, hoteng-srv-01, and codex-hoteng-srv-01 sources."',
+            ),
+            Replacement(
+                "Retained host labels are restricted to `local`, the two default remote hosts, and `custom_source`",
+                "Retained host labels are restricted to `local`, the four default remote hosts, and `custom_source`",
+            ),
+            Replacement(
+                '    "local": {"kind": "local", "label": "local", "codex_root": "~/.codex"},\n'
+                '    "miku-bot-dev": {',
+                '    "local": {"kind": "local", "label": "local", "codex_root": "~/.codex"},\n'
+                '    "BL-mac-mini-m4-hoteng": {\n'
+                '        "kind": "ssh",\n'
+                '        "label": "BL-mac-mini-m4-hoteng",\n'
+                '        "ssh_target": "BL-mac-mini-m4-hoteng",\n'
+                '        "codex_root": "/Users/hoteng/.codex",\n'
+                '    },\n'
+                '    "miku-bot-dev": {',
+            ),
+            Replacement(
+                '    "hoteng-srv-01": {\n'
+                '        "kind": "ssh",\n'
+                '        "label": "hoteng-srv-01",\n'
+                '        "ssh_target": "hoteng-srv-01",\n'
+                '        "codex_root": "/home/hoteng/.codex",\n'
+                '    },',
+                '    "hoteng-srv-01": {\n'
+                '        "kind": "ssh",\n'
+                '        "label": "hoteng-srv-01",\n'
+                '        "ssh_target": "hoteng-srv-01",\n'
+                '        "codex_root": "/home/hoteng/.codex",\n'
+                '    },\n'
+                '    "codex-hoteng-srv-01": {\n'
+                '        "kind": "ssh",\n'
+                '        "label": "codex-hoteng-srv-01",\n'
+                '        "ssh_target": "codex-hoteng-srv-01",\n'
+                '        "codex_root": "/home/codex/.codex",\n'
+                '    },',
+            ),
+        ),
     ),
     _rule(
         "codex-workflow-hygiene",

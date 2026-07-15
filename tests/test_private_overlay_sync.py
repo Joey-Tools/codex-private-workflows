@@ -214,12 +214,68 @@ class PrivateOverlaySyncTests(unittest.TestCase):
             / "workflow.md"
         ).read_text(encoding="utf-8")
         self.assertIn("pair with `$remote-host-context`", synced_skill)
-        self.assertIn("miku-bot-dev", synced_skill)
-        self.assertIn("hoteng-srv-01", synced_skill)
-        self.assertNotIn("codex-hoteng-srv-01", synced_skill)
+        self.assertIn("`$remote-host-context`'s default evidence scope", synced_skill)
         self.assertIn("Remote access belongs to `remote-host-context`", synced_skill)
         self.assertNotIn("environment-specific remote evidence workflow", synced_skill)
         self.assertIn("$remote-host-context", synced_reference)
+        self.assertIn("default evidence scope", synced_reference)
+
+    def test_session_retrospective_sync_rule_adds_private_default_hosts(self) -> None:
+        source = (
+            self.source_root
+            / "codex-workflow-hygiene"
+            / "skills"
+            / "codex-session-retrospective"
+        )
+        scripts = source / "scripts"
+        scripts.mkdir(parents=True)
+        (source / "SKILL.md").write_text(
+            "- Default host scope follows `$remote-host-context`: local machine, `miku-bot-dev`, and `hoteng-srv-01`.\n"
+            "Retained host labels are restricted to `local`, the two default remote hosts, and `custom_source`.\n",
+            encoding="utf-8",
+        )
+        (scripts / "session_retrospective.py").write_text(
+            'DEFAULT_REMOTE_HOSTS = ("miku-bot-dev", "hoteng-srv-01")\n'
+            'help="Source in HOST=PATH form. Defaults to local=~/.codex plus materialized miku-bot-dev and hoteng-srv-01 sources."\n',
+            encoding="utf-8",
+        )
+        (scripts / "remote_codex_probe.py").write_text(
+            "HOSTS = {\n"
+            '    "local": {"kind": "local", "label": "local", "codex_root": "~/.codex"},\n'
+            '    "miku-bot-dev": {\n'
+            '        "kind": "ssh",\n'
+            '        "label": "miku-bot-dev",\n'
+            '        "ssh_target": "miku-bot-dev",\n'
+            '        "codex_root": "/home/hoteng/.codex",\n'
+            "    },\n"
+            '    "hoteng-srv-01": {\n'
+            '        "kind": "ssh",\n'
+            '        "label": "hoteng-srv-01",\n'
+            '        "ssh_target": "hoteng-srv-01",\n'
+            '        "codex_root": "/home/hoteng/.codex",\n'
+            "    },\n"
+            "}\n",
+            encoding="utf-8",
+        )
+        rule = next(
+            rule
+            for rule in SYNC_MODULE.SYNC_RULES
+            if rule.target == Path("personal_codex/skills/codex-session-retrospective")
+        )
+
+        SYNC_MODULE.sync_sources(self.repo_root, self.source_root, (rule,))
+
+        target = self.repo_root / rule.target
+        synced_skill = (target / "SKILL.md").read_text(encoding="utf-8")
+        synced_script = (target / "scripts/session_retrospective.py").read_text(encoding="utf-8")
+        synced_probe = (target / "scripts/remote_codex_probe.py").read_text(encoding="utf-8")
+        for host in ("BL-mac-mini-m4-hoteng", "codex-hoteng-srv-01"):
+            self.assertIn(host, synced_skill)
+            self.assertIn(host, synced_script)
+            self.assertIn(host, synced_probe)
+        self.assertIn("the four default remote hosts", synced_skill)
+        self.assertIn('"codex_root": "/Users/hoteng/.codex"', synced_probe)
+        self.assertIn('"codex_root": "/home/codex/.codex"', synced_probe)
 
     def test_session_mining_sync_rule_rejects_remote_host_residuals(self) -> None:
         source = self.source_root / "codex-workflow-hygiene" / "skills" / "codex-session-mining"
