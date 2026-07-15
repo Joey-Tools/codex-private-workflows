@@ -4894,6 +4894,7 @@ def run_review(
             "CLAUDE_CODE_SUBPROCESS_ENV_SCRUB": "1",
         },
     )
+    warmup_env: dict[str, str] | None = None
     try:
         (
             claude_executable,
@@ -4984,9 +4985,28 @@ def run_review(
         return Outcome(2, None, tuple(attempts))
     if claude_executable is not None:
 
-        def run_validated_claude_attempt(**kwargs: object) -> Attempt:
+        def run_validated_claude_attempt(
+            *,
+            review: ReviewWorkspace,
+            model: str,
+            index: int,
+            env: dict[str, str],
+        ) -> Attempt:
+            if warmup_env is not None and index > 1:
+                _require_matching_claude_executable_snapshot(
+                    claude_executable,
+                    bundled_roots,
+                )
+                _warm_claude_local_login(
+                    review,
+                    claude_executable,
+                    warmup_env,
+                )
             return _claude_attempt(
-                **kwargs,
+                review=review,
+                model=model,
+                index=index,
+                env=env,
                 validated_executable=claude_executable,
                 validated_bundled_roots=bundled_roots,
             )
@@ -5003,6 +5023,7 @@ def run_review(
             )
         except (
             FileNotFoundError,
+            ClaudeAuthWarmupInconclusive,
             ClaudeExecutableInspectionInconclusive,
             ReviewTimeoutError,
             ReviewOutputDrainError,

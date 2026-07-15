@@ -3600,6 +3600,120 @@ class ProviderPolicyTest(unittest.TestCase):
             ),
         )
 
+    def test_native_claude_rechecks_warmup_before_entitlement_fallback(self) -> None:
+        claude_env: dict[str, str] = {}
+        attempts = (
+            self.attempt("claude", providers.CLAUDE_MODELS[0], "entitlement"),
+            self.attempt(
+                "claude",
+                providers.CLAUDE_MODELS[1],
+                "success",
+                final_text="No findings.",
+            ),
+        )
+        with (
+            mock.patch.object(
+                providers,
+                "child_environment",
+                return_value=claude_env,
+            ),
+            mock.patch.object(
+                providers,
+                "_resolve_validated_claude_executable",
+                return_value=(
+                    pathlib.Path("/fixture/claude"),
+                    claude_env,
+                    self.empty_bundled_roots,
+                ),
+            ),
+            mock.patch.object(
+                providers,
+                "_with_claude_review_tool_path",
+                return_value=claude_env,
+            ),
+            mock.patch.object(
+                providers,
+                "_prepare_claude_tls_environment",
+                return_value=claude_env,
+            ),
+            mock.patch.object(
+                providers,
+                "_claude_attempt",
+                side_effect=attempts,
+            ) as claude_attempt,
+        ):
+            outcome = providers.run_review(
+                review=self.review,
+                reviewer="claude",
+                egress_consent="double-review",
+            )
+
+        self.assertEqual(outcome.returncode, 0)
+        self.assertEqual(outcome.final_text, "No findings.")
+        self.assertEqual(self.warmup.call_count, 2)
+        self.assertEqual(
+            [call.kwargs["model"] for call in claude_attempt.call_args_list],
+            list(providers.CLAUDE_MODELS),
+        )
+
+    def test_native_claude_fallback_warmup_inconclusive_preserves_attempt(self) -> None:
+        claude_env: dict[str, str] = {}
+        self.warmup.side_effect = (
+            None,
+            providers.ClaudeAuthWarmupInconclusive("refresh did not settle"),
+        )
+        with (
+            mock.patch.object(
+                providers,
+                "child_environment",
+                return_value=claude_env,
+            ),
+            mock.patch.object(
+                providers,
+                "_resolve_validated_claude_executable",
+                return_value=(
+                    pathlib.Path("/fixture/claude"),
+                    claude_env,
+                    self.empty_bundled_roots,
+                ),
+            ),
+            mock.patch.object(
+                providers,
+                "_with_claude_review_tool_path",
+                return_value=claude_env,
+            ),
+            mock.patch.object(
+                providers,
+                "_prepare_claude_tls_environment",
+                return_value=claude_env,
+            ),
+            mock.patch.object(
+                providers,
+                "_claude_attempt",
+                return_value=self.attempt(
+                    "claude",
+                    providers.CLAUDE_MODELS[0],
+                    "entitlement",
+                ),
+            ),
+        ):
+            outcome = providers.run_review(
+                review=self.review,
+                reviewer="claude",
+                egress_consent="double-review",
+            )
+
+        self.assertEqual(outcome.returncode, 75)
+        self.assertEqual(len(outcome.attempts), 1)
+        self.assertEqual(outcome.attempts[0].category, "entitlement")
+        self.assertEqual(self.warmup.call_count, 2)
+        self.assertIn(
+            "validation was inconclusive",
+            (self.review.container_dir / "runner-error.txt").read_text(
+                encoding="utf-8"
+            ),
+        )
+
     def test_claude_environment_excludes_github_credentials_and_legacy_path(
         self,
     ) -> None:
