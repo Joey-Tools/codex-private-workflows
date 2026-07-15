@@ -3490,7 +3490,9 @@ class ProviderPolicyTest(unittest.TestCase):
         self,
     ) -> None:
         self.claude_system_ca.write_bytes(
-            b"-----BEGIN PRIVATE KEY-----\nfixture\n-----END PRIVATE KEY-----\n"
+            b"-----BEGIN PRIVATE "
+            b"KEY-----\nfixture\n-----END PRIVATE "
+            b"KEY-----\n"
         )
         with (
             mock.patch.object(
