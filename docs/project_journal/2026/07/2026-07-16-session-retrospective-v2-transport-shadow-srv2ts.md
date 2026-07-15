@@ -37,4 +37,4 @@ superseded_by:
 - `personal_codex/automations/session-retrospective-v2-shadow/automation.toml`
 - `tests/test_remote_session_shards.py`
 - `tests/test_session_retrospective_v2_shadow_automation.py`
-- Full test suite: 549 tests passed with 3 platform-dependent skips.
+- Full test suite: 555 tests passed with 3 platform-dependent skips.

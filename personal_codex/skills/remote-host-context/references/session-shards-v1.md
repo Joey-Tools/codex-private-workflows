@@ -172,6 +172,10 @@ the run-local shadow artifact root or a system temporary root, and the existing
 parent must already be mode `0700`. `--create-shadow-identity` fails if the
 identity exists; `--require-existing-shadow-identity` never creates or repairs
 it. Symlink components fail closed.
+When the shadow runner launches the helper, it supplies the owner-only
+invocation directory as `CODEX_SESSION_SHARDS_SHADOW_ROOT`; that explicit root
+is authoritative even though the capture subprocess uses the invocation
+directory as its cwd. The helper does not append another `.codex-local` suffix.
 
 The receipt binds the canonical host, exact `[window_start, window_end)` UTC
 day, source kind, and status-issued source lease ref. `holdout_ref` is the
@@ -195,8 +199,10 @@ The v2 shadow automation routes every coordinator invocation through
 `scripts/session_retrospective_v2_shadow_runner.py`. The runner, rather than
 prompt text, enforces these boundaries before execution:
 
-- only `doctor`, `start`, `status`, `accept-source`, `accept-agent-result`,
-  `advance`, `export`, and `finalize` are accepted;
+- no-argument `help` and one-time `identity --create-identity ... --shadow`
+  bootstrap a fresh invocation without bypassing the runner;
+- only `help`, `identity`, `doctor`, `start`, `status`, `accept-source`,
+  `accept-agent-result`, `advance`, `export`, and `finalize` are accepted;
 - `finalize` requires `--shadow` and one allowlisted shadow phase;
 - provider, cursor, retained, publication, push, send, and production-state
   options are rejected;
@@ -248,10 +254,11 @@ UTF-8 bytes.
 ## Exact Frame Schemas
 
 The remote transport uses a closed field schema. Missing fields, unknown fields,
-wrong types, duplicate metadata/terminal frames, unsupported reasons, and
-request-binding mismatches are fatal. The field sets below are exact before CLI
-decoration. `cmd_session_shards` adds exactly `host` and `rollout` to each JSON
-object printed to stdout for descriptor and record streams.
+wrong types, duplicate JSON object fields, duplicate metadata/terminal frames,
+unsupported reasons, and request-binding mismatches are fatal. The field sets
+below are exact before CLI decoration. `cmd_session_shards` adds exactly `host`
+and `rollout` to each JSON object printed to stdout for descriptor and record
+streams.
 
 `holdout-receipt` is deliberately separate from those stream frames. It emits
 exactly one JSON object and does not receive `host`/`rollout` decoration because
@@ -450,6 +457,10 @@ A dropped or failed SSH channel therefore cannot expose a visible
 
 The v2 shadow runner executes each status-authenticated `session-shards`
 capture and its matching `accept-source` action under the same per-host mutex.
+Before capture, it verifies the lease's `sha256:<digest>` transport program
+commitment against the installed helper and executes an owner-only run-local
+snapshot of exactly those verified bytes, so path replacement cannot change the
+program after validation.
 Capture stdout is written to a fresh owner-only temporary file inside the
 invocation directory, published atomically to the authenticated stream path,
 and removed after acceptance. The capture sandbox permits the exact installed
@@ -458,6 +469,10 @@ the invocation directory. The runner enforces a 90-second wall-clock limit and
 a lease-derived output limit capped at 512 MiB while capture is running. A
 capture failure, timeout, output-limit breach, retained descendant, command
 mismatch, or atomic-publication failure blocks acceptance.
+Coordinator status and action subprocesses run in supervised process groups
+with 30-second and 300-second limits respectively. Timeout, oversized status
+output, or a retained descendant terminates the complete process group and
+blocks the invocation without retaining the host mutex indefinitely.
 
 ## Recovery And Retention
 
@@ -489,9 +504,11 @@ with the partial run's exact run ref as its backfill lineage. Its source
 contract must select only the held-out host, preserve the same window and
 source kind, and carry the authenticated `holdout_ref` as the terminal receipt
 being replaced. The accepted real `session-shards` transport must match all of
-those bindings. The coordinator atomically marks the holdout replaced only
-after complete or genuine no-activity accounting for that real source; another
-holdout cannot satisfy backfill. Reuse across another partial run,
+those bindings. The authenticated partial coverage receipt and its sole gap
+must both name that exact `holdout_ref`; all other canonical hosts must be
+covered, and a second gap is fatal. The coordinator atomically marks the
+holdout replaced only after complete or genuine no-activity accounting for that
+real source; another holdout cannot satisfy backfill. Reuse across another partial run,
 host, window, source kind, identity/configuration root, or an already replaced
 receipt is rejected.
 

@@ -7,6 +7,7 @@ import contextlib
 import dataclasses
 import datetime as dt
 import fcntl
+import hashlib
 import importlib
 import importlib.util
 import json
@@ -29,6 +30,8 @@ AUTOMATION_ID = "session-retrospective-v2-shadow"
 CANONICAL_HOSTS = frozenset({"local", "miku-bot-dev", "hoteng-srv-01"})
 ALLOWED_COORDINATOR_COMMANDS = frozenset(
     (
+        "help",
+        "identity",
         "doctor",
         "start",
         "status",
@@ -58,6 +61,7 @@ SOURCE_TRANSPORT_LEASE_SCHEMA = "source_transport_lease_v2"
 SOURCE_TRANSPORT_LEASE_AUTH_RE = re.compile(
     r"^source_transport_lease_auth_v2:[0-9a-f]{64}$"
 )
+TRANSPORT_PROGRAM_COMMITMENT_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 RUN_REF_RE = re.compile(r"^run_ref_v2:[0-9a-f]{64}$")
 HOST_REF_RE = re.compile(r"^host_ref_v2:[0-9a-f]{64}$")
 SOURCE_SNAPSHOT_REF_RE = re.compile(r"^source_snapshot_v2:[0-9a-f]{64}$")
@@ -67,10 +71,18 @@ COORDINATOR_IDENTITY_RE = re.compile(r"^identity_key_v2:[0-9a-f]{64}$")
 COORDINATOR_COVERAGE_SCHEMA = "shadow_coverage_receipt_v2"
 SOURCE_CAPTURE_TIMEOUT_SECONDS = 90
 SOURCE_CAPTURE_POLL_SECONDS = 0.05
+COORDINATOR_STATUS_TIMEOUT_SECONDS = 30
+COORDINATOR_ACTION_TIMEOUT_SECONDS = 5 * 60
+MAX_COORDINATOR_STATUS_BYTES = 1024 * 1024
+MAX_COORDINATOR_DIAGNOSTIC_BYTES = 64 * 1024
 MIN_SOURCE_CAPTURE_BYTES = 4 * 1024 * 1024
 MAX_SOURCE_CAPTURE_BYTES = 512 * 1024 * 1024
 MAX_SOURCE_CAPTURE_ARGUMENTS = 128
 MAX_SOURCE_CAPTURE_ARGUMENT_BYTES = 64 * 1024
+MAX_TRANSPORT_PROGRAM_BYTES = 8 * 1024 * 1024
+_PROCESS_GROUP_SUPERVISOR = (
+    "import subprocess, sys\nraise SystemExit(subprocess.Popen(sys.argv[1:]).wait())\n"
+)
 _SOURCE_CAPTURE_OPTION_ARITY = {
     "--byte-end": 1,
     "--byte-start": 1,
@@ -132,6 +144,13 @@ class _ParsedCoordinatorCommand:
         return values[0][0]
 
 
+@dataclasses.dataclass(frozen=True)
+class _ValidatedSourceTransportCommand:
+    argv: tuple[str, ...]
+    script_index: int
+    commitment: str
+
+
 def _flag(*, required: bool = False) -> _OptionSpec:
     return _OptionSpec(arity=0, required=required)
 
@@ -157,6 +176,12 @@ _IDENTITY_OPTIONS = {
     "--require-existing-identity": _flag(required=True),
 }
 _COMMAND_OPTION_SCHEMAS: dict[str, dict[str, _OptionSpec]] = {
+    "help": {},
+    "identity": {
+        "--create-identity": _flag(required=True),
+        "--identity-path": _value("path", required=True),
+        "--shadow": _flag(required=True),
+    },
     "doctor": {
         **_IDENTITY_OPTIONS,
         "--history-repo": _value("path", required=True),
@@ -456,6 +481,14 @@ def _validate_command_relationships(
     *,
     invocation_dir: pathlib.Path,
 ) -> None:
+    if parsed.command == "identity":
+        identity_path = pathlib.Path(parsed.one("--identity-path")).resolve(
+            strict=False
+        )
+        _validate_owner_only_directory(identity_path.parent)
+        if identity_path.exists():
+            raise ShadowPolicyError("coordinator identity already exists")
+
     if parsed.command in {"doctor", "start", "finalize"}:
         history_repo = pathlib.Path(parsed.one("--history-repo")).resolve(strict=False)
         expected_history = (invocation_dir / "simulation-history").resolve(strict=False)
@@ -639,7 +672,6 @@ def _sandbox_profile(
 
 def _source_capture_sandbox_profile(invocation_dir: pathlib.Path) -> str:
     python_path = pathlib.Path(sys.executable).resolve(strict=True)
-    transport_path = TRANSPORT_PATH.resolve(strict=True)
     ssh_path = pathlib.Path("/usr/bin/ssh")
     lines = [
         "(version 1)",
@@ -652,7 +684,6 @@ def _source_capture_sandbox_profile(invocation_dir: pathlib.Path) -> str:
         "(allow sysctl-read)",
         "(allow mach-lookup)",
         f"(allow process-exec (literal {json.dumps(str(python_path))}))",
-        f"(allow process-exec (literal {json.dumps(str(transport_path))}))",
     ]
     if ssh_path.is_file():
         lines.append(f"(allow process-exec (literal {json.dumps(str(ssh_path))}))")
@@ -706,6 +737,7 @@ def _source_capture_environment(invocation_dir: pathlib.Path) -> dict[str, str]:
     temporary_directory = invocation_dir / "tmp"
     _ensure_owner_only_directory(temporary_directory)
     environment = {
+        "CODEX_SESSION_SHARDS_SHADOW_ROOT": str(invocation_dir),
         "HOME": str(pathlib.Path.home()),
         "LANG": "C",
         "LC_ALL": "C",
@@ -719,6 +751,161 @@ def _source_capture_environment(invocation_dir: pathlib.Path) -> dict[str, str]:
         if value:
             environment[key] = value
     return environment
+
+
+def _process_group_exists(process: subprocess.Popen[Any]) -> bool:
+    try:
+        os.killpg(process.pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return process.poll() is None
+    return True
+
+
+def _signal_process_group(
+    process: subprocess.Popen[Any],
+    signal_number: signal.Signals,
+) -> None:
+    try:
+        os.killpg(process.pid, signal_number)
+    except ProcessLookupError:
+        return
+    except PermissionError:
+        if process.poll() is None:
+            try:
+                process.send_signal(signal_number)
+            except ProcessLookupError:
+                pass
+
+
+def _supervised_command(command: Sequence[str]) -> tuple[str, ...]:
+    return (
+        str(pathlib.Path(sys.executable).resolve(strict=True)),
+        "-I",
+        "-c",
+        _PROCESS_GROUP_SUPERVISOR,
+        *command,
+    )
+
+
+def _terminate_process_group(process: subprocess.Popen[Any]) -> None:
+    if _process_group_exists(process):
+        _signal_process_group(process, signal.SIGTERM)
+    deadline = time.monotonic() + 2
+    while _process_group_exists(process) and time.monotonic() < deadline:
+        time.sleep(SOURCE_CAPTURE_POLL_SECONDS)
+    if _process_group_exists(process):
+        _signal_process_group(process, signal.SIGKILL)
+    if process.poll() is None:
+        try:
+            process.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait()
+
+
+def _run_supervised_process(
+    command: Sequence[str],
+    *,
+    cwd: pathlib.Path,
+    environment: Mapping[str, str],
+    capture_output: bool,
+    timeout_seconds: float,
+) -> subprocess.CompletedProcess[str]:
+    stdout_file: BinaryIO | None = None
+    stderr_file: BinaryIO | None = None
+    process: subprocess.Popen[bytes] | None = None
+    try:
+        if capture_output:
+            stdout_file = tempfile.NamedTemporaryFile(
+                mode="w+b",
+                prefix=".coordinator-stdout-",
+                suffix=".tmp",
+                dir=cwd,
+            )
+            stderr_file = tempfile.NamedTemporaryFile(
+                mode="w+b",
+                prefix=".coordinator-stderr-",
+                suffix=".tmp",
+                dir=cwd,
+            )
+        try:
+            process = subprocess.Popen(
+                _supervised_command(command),
+                cwd=cwd,
+                env=dict(environment),
+                stdout=stdout_file,
+                stderr=stderr_file,
+                start_new_session=True,
+            )
+        except OSError as exc:
+            raise ShadowPolicyError("coordinator process could not start") from exc
+
+        deadline = time.monotonic() + timeout_seconds
+        while process.poll() is None:
+            if capture_output:
+                assert stdout_file is not None
+                assert stderr_file is not None
+                if (
+                    os.fstat(stdout_file.fileno()).st_size
+                    > MAX_COORDINATOR_STATUS_BYTES
+                ):
+                    raise ShadowPolicyError(
+                        "coordinator status exceeded its output byte limit"
+                    )
+                if (
+                    os.fstat(stderr_file.fileno()).st_size
+                    > MAX_COORDINATOR_DIAGNOSTIC_BYTES
+                ):
+                    raise ShadowPolicyError(
+                        "coordinator status exceeded its diagnostic byte limit"
+                    )
+            if time.monotonic() >= deadline:
+                label = "status" if capture_output else "action"
+                raise ShadowPolicyError(f"coordinator {label} timed out")
+            time.sleep(SOURCE_CAPTURE_POLL_SECONDS)
+
+        if _process_group_exists(process):
+            raise ShadowPolicyError("coordinator retained a descendant process")
+        stdout_text: str | None = None
+        stderr_text: str | None = None
+        if capture_output:
+            assert stdout_file is not None
+            assert stderr_file is not None
+            if os.fstat(stdout_file.fileno()).st_size > MAX_COORDINATOR_STATUS_BYTES:
+                raise ShadowPolicyError(
+                    "coordinator status exceeded its output byte limit"
+                )
+            if (
+                os.fstat(stderr_file.fileno()).st_size
+                > MAX_COORDINATOR_DIAGNOSTIC_BYTES
+            ):
+                raise ShadowPolicyError(
+                    "coordinator status exceeded its diagnostic byte limit"
+                )
+            stdout_file.seek(0)
+            stderr_file.seek(0)
+            try:
+                stdout_text = stdout_file.read().decode("utf-8", errors="strict")
+                stderr_text = stderr_file.read().decode("utf-8", errors="strict")
+            except UnicodeDecodeError as exc:
+                raise ShadowPolicyError(
+                    "coordinator status output is not valid UTF-8"
+                ) from exc
+        return subprocess.CompletedProcess(
+            tuple(command),
+            int(process.returncode or 0),
+            stdout_text,
+            stderr_text,
+        )
+    finally:
+        if process is not None:
+            _terminate_process_group(process)
+        if stdout_file is not None:
+            stdout_file.close()
+        if stderr_file is not None:
+            stderr_file.close()
 
 
 def _run_sandboxed(
@@ -741,13 +928,16 @@ def _run_sandboxed(
         str(coordinator_path),
         *arguments,
     ]
-    return subprocess.run(
+    return _run_supervised_process(
         command,
         cwd=invocation_dir,
-        env=_sandbox_environment(invocation_dir),
-        text=True,
-        check=False,
+        environment=_sandbox_environment(invocation_dir),
         capture_output=capture_output,
+        timeout_seconds=(
+            COORDINATOR_STATUS_TIMEOUT_SECONDS
+            if capture_output
+            else COORDINATOR_ACTION_TIMEOUT_SECONDS
+        ),
     )
 
 
@@ -772,7 +962,6 @@ CaptureExecutor = Callable[
     subprocess.CompletedProcess[bytes],
 ]
 StatusQuery = Callable[[pathlib.Path, Sequence[str], pathlib.Path], dict[str, Any]]
-MAX_COORDINATOR_STATUS_BYTES = 1024 * 1024
 _SOURCE_ACTION_FIELDS = frozenset(
     {
         "category",
@@ -959,6 +1148,11 @@ def _authenticated_source_action(
         or HOST_REF_RE.fullmatch(host_ref) is None
         or not isinstance(lease.get("authentication_tag"), str)
         or SOURCE_TRANSPORT_LEASE_AUTH_RE.fullmatch(lease["authentication_tag"]) is None
+        or not isinstance(lease.get("transport_program_commitment"), str)
+        or TRANSPORT_PROGRAM_COMMITMENT_RE.fullmatch(
+            lease["transport_program_commitment"]
+        )
+        is None
         or not isinstance(command_argv, list)
         or command_argv != action.get("source_transport_command")
         or any(
@@ -1024,7 +1218,7 @@ def _validated_source_transport_command(
     *,
     host: str,
     invocation_dir: pathlib.Path,
-) -> tuple[str, ...]:
+) -> _ValidatedSourceTransportCommand:
     raw_command = action.get("source_transport_command")
     if not isinstance(raw_command, list) or not raw_command:
         raise ShadowPolicyError("source transport command is missing")
@@ -1095,7 +1289,100 @@ def _validated_source_transport_command(
             identity_path,
             invocation_dir=invocation_dir,
         )
-    return tuple(raw_command)
+    lease = action.get("transport_lease")
+    commitment = (
+        lease.get("transport_program_commitment")
+        if isinstance(lease, Mapping)
+        else None
+    )
+    if (
+        not isinstance(commitment, str)
+        or TRANSPORT_PROGRAM_COMMITMENT_RE.fullmatch(commitment) is None
+    ):
+        raise ShadowPolicyError("source transport program commitment is invalid")
+    return _ValidatedSourceTransportCommand(
+        argv=tuple(raw_command),
+        script_index=script_index,
+        commitment=commitment,
+    )
+
+
+def _materialize_transport_program(
+    validated: _ValidatedSourceTransportCommand,
+    *,
+    invocation_dir: pathlib.Path,
+) -> tuple[tuple[str, ...], pathlib.Path]:
+    source_path = TRANSPORT_PATH.resolve(strict=True)
+    source_flags = os.O_RDONLY | int(getattr(os, "O_CLOEXEC", 0))
+    source_flags |= int(getattr(os, "O_NOFOLLOW", 0))
+    try:
+        source_descriptor = os.open(source_path, source_flags)
+    except OSError as exc:
+        raise ShadowPolicyError("source transport program could not be opened") from exc
+    destination_descriptor = -1
+    destination_path: pathlib.Path | None = None
+    try:
+        source_metadata = os.fstat(source_descriptor)
+        if (
+            not stat.S_ISREG(source_metadata.st_mode)
+            or source_metadata.st_uid not in {0, os.getuid()}
+            or source_metadata.st_nlink != 1
+            or stat.S_IMODE(source_metadata.st_mode) & 0o022
+            or source_metadata.st_size < 1
+            or source_metadata.st_size > MAX_TRANSPORT_PROGRAM_BYTES
+        ):
+            raise ShadowPolicyError("source transport program is not trusted")
+        destination_descriptor, destination_name = tempfile.mkstemp(
+            prefix=".remote-codex-probe-",
+            suffix=".py",
+            dir=invocation_dir,
+        )
+        destination_path = pathlib.Path(destination_name)
+        os.fchmod(destination_descriptor, 0o600)
+        digest = hashlib.sha256()
+        copied = 0
+        with (
+            os.fdopen(source_descriptor, "rb") as source,
+            os.fdopen(destination_descriptor, "wb") as destination,
+        ):
+            source_descriptor = -1
+            destination_descriptor = -1
+            while chunk := source.read(64 * 1024):
+                copied += len(chunk)
+                if copied > MAX_TRANSPORT_PROGRAM_BYTES:
+                    raise ShadowPolicyError("source transport program is too large")
+                digest.update(chunk)
+                destination.write(chunk)
+            destination.flush()
+            os.fsync(destination.fileno())
+            destination_metadata = os.fstat(destination.fileno())
+            if (
+                not stat.S_ISREG(destination_metadata.st_mode)
+                or destination_metadata.st_uid != os.getuid()
+                or destination_metadata.st_nlink != 1
+                or stat.S_IMODE(destination_metadata.st_mode) != 0o600
+                or destination_metadata.st_size != copied
+            ):
+                raise ShadowPolicyError(
+                    "source transport program snapshot is not owner-only"
+                )
+        actual_commitment = f"sha256:{digest.hexdigest()}"
+        if actual_commitment != validated.commitment:
+            raise ShadowPolicyError(
+                "source transport program does not match its authenticated commitment"
+            )
+        argv = list(validated.argv)
+        argv[validated.script_index] = str(destination_path.resolve(strict=True))
+        return tuple(argv), destination_path
+    except Exception:
+        if destination_path is not None:
+            destination_path.unlink(missing_ok=True)
+        raise
+    finally:
+        if source_descriptor >= 0:
+            os.close(source_descriptor)
+        if destination_descriptor >= 0:
+            os.close(destination_descriptor)
 
 
 def _source_capture_byte_limit(action: Mapping[str, Any]) -> int:
@@ -1107,36 +1394,6 @@ def _source_capture_byte_limit(action: Mapping[str, Any]) -> int:
     frame_bytes = int(lease["frame_byte_limit"])
     estimated = source_bytes * 2 + record_limit * frame_bytes + 64 * 1024
     return min(MAX_SOURCE_CAPTURE_BYTES, max(MIN_SOURCE_CAPTURE_BYTES, estimated))
-
-
-def _capture_process_group_exists(process: subprocess.Popen[bytes]) -> bool:
-    try:
-        os.killpg(process.pid, 0)
-    except ProcessLookupError:
-        return False
-    return True
-
-
-def _terminate_capture_process(process: subprocess.Popen[bytes]) -> None:
-    if _capture_process_group_exists(process):
-        try:
-            os.killpg(process.pid, signal.SIGTERM)
-        except ProcessLookupError:
-            pass
-    deadline = time.monotonic() + 2
-    while _capture_process_group_exists(process) and time.monotonic() < deadline:
-        time.sleep(SOURCE_CAPTURE_POLL_SECONDS)
-    if _capture_process_group_exists(process):
-        try:
-            os.killpg(process.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
-    if process.poll() is None:
-        try:
-            process.wait(timeout=2)
-        except subprocess.TimeoutExpired:
-            process.kill()
-            process.wait()
 
 
 def _sandboxed_capture_executor(
@@ -1157,7 +1414,7 @@ def _sandboxed_capture_executor(
     ]
     try:
         process = subprocess.Popen(
-            sandboxed_command,
+            _supervised_command(sandboxed_command),
             cwd=invocation_dir,
             env=_source_capture_environment(invocation_dir),
             stdout=output,
@@ -1171,23 +1428,23 @@ def _sandboxed_capture_executor(
     try:
         while process.poll() is None:
             if os.fstat(output.fileno()).st_size > max_output_bytes:
-                _terminate_capture_process(process)
+                _terminate_process_group(process)
                 raise ShadowPolicyError(
                     "source transport capture exceeded its byte limit"
                 )
             if time.monotonic() >= deadline:
-                _terminate_capture_process(process)
+                _terminate_process_group(process)
                 raise ShadowPolicyError("source transport capture timed out")
             time.sleep(SOURCE_CAPTURE_POLL_SECONDS)
         if os.fstat(output.fileno()).st_size > max_output_bytes:
             raise ShadowPolicyError("source transport capture exceeded its byte limit")
-        if _capture_process_group_exists(process):
-            _terminate_capture_process(process)
+        if _process_group_exists(process):
+            _terminate_process_group(process)
             raise ShadowPolicyError(
                 "source transport capture retained a descendant process"
             )
     finally:
-        _terminate_capture_process(process)
+        _terminate_process_group(process)
     return subprocess.CompletedProcess(tuple(command), int(process.returncode or 0))
 
 
@@ -1198,7 +1455,7 @@ def _capture_source_transport(
     invocation_dir: pathlib.Path,
     capture_executor: CaptureExecutor,
 ) -> pathlib.Path:
-    command = _validated_source_transport_command(
+    validated_command = _validated_source_transport_command(
         action,
         host=host,
         invocation_dir=invocation_dir,
@@ -1222,8 +1479,13 @@ def _capture_source_transport(
         dir=output_path.parent,
     )
     temporary_path = pathlib.Path(temporary_name)
+    program_path: pathlib.Path | None = None
     published = False
     try:
+        command, program_path = _materialize_transport_program(
+            validated_command,
+            invocation_dir=invocation_dir,
+        )
         os.fchmod(descriptor, 0o600)
         with os.fdopen(descriptor, "w+b") as output:
             descriptor = -1
@@ -1277,6 +1539,8 @@ def _capture_source_transport(
         if descriptor >= 0:
             os.close(descriptor)
         temporary_path.unlink(missing_ok=True)
+        if program_path is not None:
+            program_path.unlink(missing_ok=True)
 
 
 def run_guarded_coordinator(
@@ -1300,6 +1564,14 @@ def run_guarded_coordinator(
         invocation_dir=invocation_dir,
     )
     coordinator_path = _validate_coordinator_path(coordinator_path)
+    if parsed.command == "identity":
+        result = executor(coordinator_path, tuple(arguments), invocation_dir)
+        if result.returncode == 0:
+            _read_private_json(
+                pathlib.Path(parsed.one("--identity-path")),
+                root=invocation_dir,
+            )
+        return result
     if parsed.command != "accept-source":
         return executor(coordinator_path, tuple(arguments), invocation_dir)
 
@@ -1605,10 +1877,38 @@ def _authenticated_backfill_result_from_status(
     backfill_configuration_root = backfill_coverage.get("configuration_root")
     partial_window = partial_status.get("window")
     backfill_window = backfill_status.get("window")
+    partial_hosts = partial_status.get("coverage", {}).get("hosts")
     backfill_hosts = backfill_status.get("coverage", {}).get("hosts")
+    partial_host_refs = (
+        {
+            name: value.get("host_ref")
+            for name, value in partial_hosts.items()
+            if isinstance(name, str) and isinstance(value, Mapping)
+        }
+        if isinstance(partial_hosts, Mapping)
+        else {}
+    )
+    partial_gaps = partial_status.get("gaps")
+    partial_gap = (
+        partial_gaps[0]
+        if isinstance(partial_gaps, list)
+        and len(partial_gaps) == 1
+        and isinstance(partial_gaps[0], Mapping)
+        else None
+    )
+    holdout_ref = receipt.get("holdout_ref")
+    expected_gap_binding = {
+        "host": host,
+        "host_ref": host_ref,
+        "lease_ref": partial_lease_ref,
+        "reason": module.SESSION_SHARDS_HOLDOUT_REASON,
+        "receipt_ref": holdout_ref,
+        "source_kind": source_kind,
+    }
     lineage = backfill_status.get("lineage")
     if (
-        partial_status.get("stage") != "export"
+        receipt.get("reason") != module.SESSION_SHARDS_HOLDOUT_REASON
+        or partial_status.get("stage") != "export"
         or backfill_status.get("stage") != "export"
         or partial_status.get("mode") != "daily"
         or backfill_status.get("mode") != "daily"
@@ -1619,6 +1919,23 @@ def _authenticated_backfill_result_from_status(
         or partial_host.get("status") != "gap"
         or partial_cell.get("status") != "gap"
         or partial_cell.get("lease_ref") != partial_lease_ref
+        or not isinstance(partial_hosts, Mapping)
+        or set(partial_hosts) != CANONICAL_HOSTS
+        or set(partial_host_refs) != CANONICAL_HOSTS
+        or len(set(partial_host_refs.values())) != len(CANONICAL_HOSTS)
+        or any(
+            not isinstance(value, str) or HOST_REF_RE.fullmatch(value) is None
+            for value in partial_host_refs.values()
+        )
+        or any(
+            not isinstance(partial_hosts.get(name), Mapping)
+            or partial_hosts[name].get("status") not in {"complete", "no_activity"}
+            for name in CANONICAL_HOSTS - {host}
+        )
+        or partial_gap is None
+        or any(
+            partial_gap.get(key) != value for key, value in expected_gap_binding.items()
+        )
         or not isinstance(backfill_hosts, Mapping)
         or set(backfill_hosts) != {host}
         or source_outcome not in {"complete", "no_activity"}
@@ -1628,14 +1945,18 @@ def _authenticated_backfill_result_from_status(
         or lineage.get("backfill_of") != partial_run_ref
         or partial_coverage.get("partial") is not True
         or partial_coverage.get("backfill_of") is not None
-        or host_ref not in partial_coverage.get("gap_host_refs", [])
+        or partial_coverage.get("configured_host_refs")
+        != sorted(partial_host_refs.values())
+        or partial_coverage.get("covered_host_refs")
+        != sorted(value for name, value in partial_host_refs.items() if name != host)
+        or partial_coverage.get("gap_host_refs") != [host_ref]
         or backfill_coverage.get("partial") is not False
         or backfill_coverage.get("backfill_of") != partial_run_ref
         or backfill_coverage.get("configured_host_refs") != [host_ref]
         or backfill_coverage.get("covered_host_refs") != [host_ref]
         or backfill_coverage.get("gap_host_refs") != []
-        or partial_coverage.get("controlled_gap_receipt_ref")
-        != backfill_coverage.get("controlled_gap_receipt_ref")
+        or partial_coverage.get("controlled_gap_receipt_ref") != holdout_ref
+        or backfill_coverage.get("controlled_gap_receipt_ref") != holdout_ref
         or not isinstance(partial_configuration_root, str)
         or CONFIGURATION_ROOT_RE.fullmatch(partial_configuration_root) is None
         or backfill_configuration_root != partial_configuration_root

@@ -1355,6 +1355,31 @@ class SessionShardsLocalTests(unittest.TestCase):
 
 
 class SessionShardsHoldoutReceiptTests(unittest.TestCase):
+    def test_explicit_runner_shadow_root_is_authoritative(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="session-shards-root.") as raw:
+            root = Path(raw)
+            root.chmod(0o700)
+            invocation_dir = root / "invocation"
+            invocation_dir.mkdir(mode=0o700)
+            inside = invocation_dir / "identity"
+            outside = root / "outside-identity"
+            with mock.patch.dict(
+                os.environ,
+                {"CODEX_SESSION_SHARDS_SHADOW_ROOT": str(invocation_dir)},
+            ):
+                self.assertEqual(
+                    inside.resolve(strict=False),
+                    MODULE._resolve_session_shards_shadow_identity_path(
+                        str(inside),
+                        creating=True,
+                    ),
+                )
+                with self.assertRaisesRegex(ValueError, "run-local shadow root"):
+                    MODULE._resolve_session_shards_shadow_identity_path(
+                        str(outside),
+                        creating=True,
+                    )
+
     def test_holdout_receipt_is_authenticated_terminal_and_content_free(
         self,
     ) -> None:
@@ -1957,6 +1982,29 @@ class SessionShardsRemoteTests(unittest.TestCase):
                             )
                         )
                 json_loads.assert_not_called()
+
+    def test_remote_parser_rejects_duplicate_json_object_fields(self) -> None:
+        request = remote_request(
+            "sessions/2026/07/14/rollout-a.jsonl",
+            max_shards=2,
+        )
+        output = "\n".join(
+            [
+                MODULE.REMOTE_SESSION_SHARDS_BEGIN,
+                '{"kind":"stream_meta","kind":"stream_end"}',
+                MODULE.REMOTE_SESSION_SHARDS_END,
+                "",
+            ]
+        )
+        fake = FakePopen(output, 0)
+        with mock.patch.object(MODULE.subprocess, "Popen", return_value=fake):
+            with self.assertRaisesRegex(RuntimeError, "invalid JSON frame"):
+                list(
+                    MODULE._iter_remote_session_shard_frames(
+                        "miku-bot-dev",
+                        request,
+                    )
+                )
 
     def test_remote_parser_normalizes_json_loads_recursion_error(self) -> None:
         request = remote_request(

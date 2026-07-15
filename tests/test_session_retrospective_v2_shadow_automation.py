@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 import datetime as dt
@@ -121,7 +122,9 @@ def source_status_result(
         "source_byte_limit": 1024,
         "source_cursor": None,
         "source_kind": "history",
-        "transport_program_commitment": "sha256:" + "b" * 64,
+        "transport_program_commitment": (
+            "sha256:" + hashlib.sha256(RUNNER.TRANSPORT_PATH.read_bytes()).hexdigest()
+        ),
         "window": window,
     }
     action = {
@@ -369,6 +372,96 @@ class SessionRetrospectiveV2ShadowAutomationTests(unittest.TestCase):
                     ["run", "--invocation-d", str(invocation_dir)]
                 )
 
+    def test_runner_help_and_identity_bootstrap_enable_a_fresh_doctor(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="shadow-runner-bootstrap.") as raw:
+            shadow_root = Path(raw) / "shadow"
+            invocation_dir, _ = RUNNER._prepare_invocation_directory(
+                shadow_root / "invocation",
+                shadow_root=shadow_root,
+            )
+            identity_path = invocation_dir / "identity-v2.json"
+            simulation_history = invocation_dir / "simulation-history"
+            simulation_history.mkdir(mode=0o700)
+            observed: list[str] = []
+
+            def executor(
+                _coordinator: Path,
+                arguments: tuple[str, ...],
+                _invocation_dir: Path,
+            ) -> subprocess.CompletedProcess[str]:
+                observed.append(arguments[0])
+                if arguments[0] == "identity":
+                    identity_path.write_text("{}", encoding="utf-8")
+                    identity_path.chmod(0o600)
+                return subprocess.CompletedProcess(arguments, 0)
+
+            help_result = RUNNER.run_guarded_coordinator(
+                ("help",),
+                invocation_dir=invocation_dir,
+                shadow_root=shadow_root,
+                coordinator_path=Path(sys.executable),
+                executor=executor,
+            )
+            identity_result = RUNNER.run_guarded_coordinator(
+                (
+                    "identity",
+                    "--create-identity",
+                    "--identity-path",
+                    str(identity_path),
+                    "--shadow",
+                ),
+                invocation_dir=invocation_dir,
+                shadow_root=shadow_root,
+                coordinator_path=Path(sys.executable),
+                executor=executor,
+            )
+            doctor_result = RUNNER.run_guarded_coordinator(
+                (
+                    "doctor",
+                    "--identity-path",
+                    str(identity_path),
+                    "--require-existing-identity",
+                    "--history-repo",
+                    str(simulation_history),
+                    "--history-target-ref",
+                    RUNNER.SHADOW_HISTORY_TARGET_REF,
+                    "--run-config",
+                    str(invocation_dir / "run-config.json"),
+                    "--shadow",
+                ),
+                invocation_dir=invocation_dir,
+                shadow_root=shadow_root,
+                coordinator_path=Path(sys.executable),
+                executor=executor,
+            )
+            capture_environment = RUNNER._source_capture_environment(invocation_dir)
+            with self.assertRaisesRegex(
+                RUNNER.ShadowPolicyError,
+                "identity already exists",
+            ):
+                RUNNER.validate_coordinator_command(
+                    (
+                        "identity",
+                        "--create-identity",
+                        "--identity-path",
+                        str(identity_path),
+                        "--shadow",
+                    ),
+                    invocation_dir=invocation_dir,
+                    host=None,
+                )
+            identity_mode = identity_path.stat().st_mode & 0o777
+
+        self.assertEqual(0, help_result.returncode)
+        self.assertEqual(0, identity_result.returncode)
+        self.assertEqual(0, doctor_result.returncode)
+        self.assertEqual(["help", "identity", "doctor"], observed)
+        self.assertEqual(0o600, identity_mode)
+        self.assertEqual(
+            str(invocation_dir),
+            capture_environment["CODEX_SESSION_SHARDS_SHADOW_ROOT"],
+        )
+
     @unittest.skipUnless(
         sys.platform == "darwin" and Path("/usr/bin/sandbox-exec").is_file(),
         "requires the macOS sandbox used by the automation host",
@@ -429,11 +522,76 @@ raise SystemExit(0 if not failures else 74)
                 invocation_dir=invocation_dir,
                 capture_output=True,
             )
+            self.assertEqual(0, denied.returncode, denied.stderr)
+            self.assertTrue(result_path.is_file(), denied.stderr)
             result_text = result_path.read_text(encoding="utf-8")
 
-        self.assertEqual(0, denied.returncode, denied.stderr)
         self.assertEqual("", result_text)
         self.assertFalse(outside_write.exists())
+
+    def test_runner_uses_python_39_compatible_process_group_creation(self) -> None:
+        module = ast.parse(RUNNER_PATH.read_text(encoding="utf-8"))
+        popen_calls = [
+            node
+            for node in ast.walk(module)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "Popen"
+        ]
+
+        self.assertEqual(2, len(popen_calls))
+        self.assertFalse(
+            any(
+                keyword.arg == "process_group"
+                for call in popen_calls
+                for keyword in call.keywords
+            )
+        )
+        for call in popen_calls:
+            start_new_session = next(
+                (
+                    keyword.value
+                    for keyword in call.keywords
+                    if keyword.arg == "start_new_session"
+                ),
+                None,
+            )
+            self.assertIsInstance(start_new_session, ast.Constant)
+            self.assertIs(True, start_new_session.value)
+
+    def test_runner_supervisor_times_out_and_cleans_process_group(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="shadow-runner-timeout.") as raw:
+            root = Path(raw)
+            pid_path = root / "coordinator.pid"
+            script = (
+                "import os, pathlib, time; "
+                f"pathlib.Path({str(pid_path)!r}).write_text(str(os.getpgrp())); "
+                "time.sleep(60)"
+            )
+            started = time.monotonic()
+            with self.assertRaisesRegex(
+                RUNNER.ShadowPolicyError,
+                "coordinator action timed out",
+            ):
+                RUNNER._run_supervised_process(
+                    (sys.executable, "-c", script),
+                    cwd=root,
+                    environment=os.environ,
+                    capture_output=False,
+                    timeout_seconds=0.2,
+                )
+            process_group = int(pid_path.read_text(encoding="utf-8"))
+            deadline = time.monotonic() + 3
+            while time.monotonic() < deadline:
+                try:
+                    os.killpg(process_group, 0)
+                except ProcessLookupError:
+                    break
+                time.sleep(0.05)
+            else:
+                self.fail("timed-out coordinator process group was retained")
+
+        self.assertLess(time.monotonic() - started, 5)
 
     def test_runner_serializes_capture_and_accept_for_each_host(
         self,
@@ -611,6 +769,56 @@ raise SystemExit(0 if not failures else 74)
                     invocation_dir=invocation_dir,
                 )
 
+    def test_runner_rejects_drifted_transport_program_commitment(self) -> None:
+        with tempfile.TemporaryDirectory(
+            prefix="shadow-runner-program-commitment."
+        ) as raw:
+            shadow_root = Path(raw) / "shadow"
+            invocation_dir, _ = RUNNER._prepare_invocation_directory(
+                shadow_root / "invocation",
+                shadow_root=shadow_root,
+            )
+            arguments = accept_source_arguments(invocation_dir)
+            status = source_status_result(invocation_dir, host="miku-bot-dev")
+            action = status["result"]["active_source_leases"][0]
+            action["transport_lease"]["transport_program_commitment"] = (
+                "sha256:" + "b" * 64
+            )
+            capture_called = False
+
+            def capture_executor(
+                command: tuple[str, ...],
+                output: object,
+                _invocation_dir: Path,
+                _max_output_bytes: int,
+            ) -> subprocess.CompletedProcess[bytes]:
+                nonlocal capture_called
+                capture_called = True
+                output.write(b"unexpected\n")  # type: ignore[attr-defined]
+                return subprocess.CompletedProcess(command, 0)
+
+            with self.assertRaisesRegex(
+                RUNNER.ShadowPolicyError,
+                "authenticated commitment",
+            ):
+                RUNNER.run_guarded_coordinator(
+                    arguments,
+                    invocation_dir=invocation_dir,
+                    host="miku-bot-dev",
+                    shadow_root=shadow_root,
+                    coordinator_path=Path(sys.executable),
+                    executor=lambda _path, argv, _cwd: subprocess.CompletedProcess(
+                        argv,
+                        0,
+                    ),
+                    capture_executor=capture_executor,
+                    status_query=lambda *_args: status,
+                )
+            snapshots = list(invocation_dir.glob(".remote-codex-probe-*.py"))
+
+        self.assertFalse(capture_called)
+        self.assertEqual([], snapshots)
+
     def test_runner_atomically_captures_then_accepts_and_cleans_stream(self) -> None:
         with tempfile.TemporaryDirectory(prefix="shadow-runner-capture.") as raw:
             shadow_root = Path(raw) / "shadow"
@@ -639,6 +847,17 @@ raise SystemExit(0 if not failures else 74)
                 self.assertFalse(output_path.exists())
                 payload = b'{"kind":"fresh-transport"}\n'
                 self.assertLess(len(payload), max_output_bytes)
+                script_index = 2 if command[1] == "-I" else 1
+                snapshot_path = Path(command[script_index])
+                self.assertNotEqual(
+                    RUNNER.TRANSPORT_PATH.resolve(),
+                    snapshot_path.resolve(),
+                )
+                self.assertEqual(
+                    RUNNER.TRANSPORT_PATH.read_bytes(),
+                    snapshot_path.read_bytes(),
+                )
+                self.assertEqual(0o600, snapshot_path.stat().st_mode & 0o777)
                 output.write(payload)  # type: ignore[attr-defined]
                 order.append("capture")
                 return subprocess.CompletedProcess(command, 0)
@@ -667,9 +886,11 @@ raise SystemExit(0 if not failures else 74)
                 status_query=status_query,
             )
             self.assertFalse(output_path.exists())
+            snapshots = list(invocation_dir.glob(".remote-codex-probe-*.py"))
 
         self.assertEqual(0, result.returncode)
         self.assertEqual(["capture", "accept"], order)
+        self.assertEqual([], snapshots)
 
     def test_runner_capture_failure_never_calls_accept_or_leaves_partial_stream(
         self,
@@ -849,7 +1070,7 @@ raise SystemExit(0 if not failures else 74)
                 "source_transport_receipt_v2:", "backfill"
             )
             configuration_root = hashlib.sha256(b"configuration").hexdigest()
-            controlled_gap_ref = protocol_ref("controlled_gap_receipt_v2:", "gap")
+            controlled_gap_ref = receipt["holdout_ref"]
 
             def coverage(*, partial: bool) -> dict[str, object]:
                 run_ref = partial_run_ref if partial else backfill_run_ref
@@ -937,6 +1158,20 @@ raise SystemExit(0 if not failures else 74)
                     "status": "gap" if partial else "complete",
                     "transport_receipt_ref": (None if partial else source_receipt_ref),
                 }
+                partial_hosts = {
+                    configured_host: {
+                        "cells": (
+                            {receipt["source_kind"]: cell}
+                            if configured_host == receipt["host"]
+                            else {}
+                        ),
+                        "host_ref": protocol_ref("host_ref_v2:", configured_host),
+                        "status": (
+                            "gap" if configured_host == receipt["host"] else "complete"
+                        ),
+                    }
+                    for configured_host in RUNNER.CANONICAL_HOSTS
+                }
                 result = {
                     "accepted_source_manifests": (
                         []
@@ -954,16 +1189,33 @@ raise SystemExit(0 if not failures else 74)
                     "active_source_leases": [],
                     "checkpoint_revision": 8,
                     "coverage": {
-                        "hosts": {
-                            receipt["host"]: {
-                                "cells": {receipt["source_kind"]: cell},
-                                "host_ref": host_ref,
-                                "status": "gap" if partial else "complete",
+                        "hosts": (
+                            partial_hosts
+                            if partial
+                            else {
+                                receipt["host"]: {
+                                    "cells": {receipt["source_kind"]: cell},
+                                    "host_ref": host_ref,
+                                    "status": "complete",
+                                }
                             }
-                        },
+                        ),
                         "status": "partial" if partial else "complete",
                     },
-                    "gaps": [] if not partial else [{"reason": "controlled"}],
+                    "gaps": (
+                        []
+                        if not partial
+                        else [
+                            {
+                                "host": receipt["host"],
+                                "host_ref": host_ref,
+                                "lease_ref": receipt["source_lease_ref"],
+                                "reason": receipt["reason"],
+                                "receipt_ref": receipt["holdout_ref"],
+                                "source_kind": receipt["source_kind"],
+                            }
+                        ]
+                    ),
                     "identity_key_id": coordinator_key_id,
                     "lineage": {"backfill_of": None if partial else partial_run_ref},
                     "mode": "daily",
@@ -1035,6 +1287,32 @@ raise SystemExit(0 if not failures else 74)
                 "now_utc": now_utc,
             }
 
+            synthetic_partial = json.loads(json.dumps(statuses[partial_run_dir]))
+            synthetic_partial["result"]["gaps"][0]["receipt_ref"] = (
+                "session_shards_holdout_v1:" + "f" * 64
+            )
+            statuses[partial_run_dir] = synthetic_partial
+            with self.assertRaisesRegex(
+                RUNNER.ShadowPolicyError,
+                "complete real backfill",
+            ):
+                RUNNER.record_backfill_replacement(**arguments)
+            ledger_path = shadow_root.resolve() / "campaign-ledger.sqlite3"
+            self.assertFalse(ledger_path.exists())
+
+            synthetic_partial = status(partial=True)
+            synthetic_partial["result"]["gaps"].append(
+                dict(synthetic_partial["result"]["gaps"][0])
+            )
+            statuses[partial_run_dir] = synthetic_partial
+            with self.assertRaisesRegex(
+                RUNNER.ShadowPolicyError,
+                "complete real backfill",
+            ):
+                RUNNER.record_backfill_replacement(**arguments)
+            self.assertFalse(ledger_path.exists())
+
+            statuses[partial_run_dir] = status(partial=True)
             synthetic = json.loads(json.dumps(statuses[backfill_run_dir]))
             synthetic["result"]["accepted_source_manifests"] = []
             statuses[backfill_run_dir] = synthetic
@@ -1043,7 +1321,6 @@ raise SystemExit(0 if not failures else 74)
                 "no unique accepted session-shards",
             ):
                 RUNNER.record_backfill_replacement(**arguments)
-            ledger_path = shadow_root.resolve() / "campaign-ledger.sqlite3"
             self.assertFalse(ledger_path.exists())
 
             statuses[backfill_run_dir] = status(partial=False)
@@ -1196,7 +1473,8 @@ raise SystemExit(0 if not failures else 74)
             "This automation is always non-publishing",
             "$HOME/.codex/skills/remote-host-context/scripts/session_retrospective_v2_shadow_runner.py",
             "The runner, not this prompt, is the enforcement authority",
-            "status-authenticated `session-shards` capture",
+            "status-authenticated transport-program SHA-256 commitment",
+            "owner-only snapshot of exactly those bytes",
             "atomically publish it to the authenticated stream path",
             "never pre-capture or replace that stream outside the runner",
             "unavailable pre-execution write sandbox",
@@ -1210,7 +1488,10 @@ raise SystemExit(0 if not failures else 74)
             "Never read or write any production retrospective history/state",
             "Do not initialize it as a Git repository",
             "no such ref may be created",
-            "explicit absolute run-local 0700 identity path",
+            "coordinator's no-argument `help` action through the runner",
+            "explicit absolute run-local coordinator identity file",
+            "`identity --create-identity --identity-path <path> --shadow`",
+            "separate source holdout identity",
             "`--create-shadow-identity`",
             "`--require-existing-shadow-identity`",
             "Never accept an implicit/default identity",

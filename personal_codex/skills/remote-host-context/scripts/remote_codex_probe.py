@@ -2341,16 +2341,42 @@ def _resolve_session_shards_shadow_identity_path(
     resolved = raw_path.resolve(strict=False)
 
     if creating:
-        tmp_root = pathlib.Path("/tmp").resolve()
-        runtime_tmp_root = pathlib.Path(tempfile.gettempdir()).resolve()
-        workspace_shadow_root = (
-            pathlib.Path.cwd().resolve()
-            / ".codex-local/session-retrospective-v2-shadow"
-        )
-        if not any(
-            _path_is_relative_to(resolved, root)
-            for root in (workspace_shadow_root, tmp_root, runtime_tmp_root)
-        ):
+        configured_root = os.environ.get("CODEX_SESSION_SHARDS_SHADOW_ROOT")
+        if configured_root:
+            shadow_root = pathlib.Path(configured_root).expanduser()
+            if not shadow_root.is_absolute() or any(
+                part == ".." for part in shadow_root.parts
+            ):
+                raise ValueError(
+                    "CODEX_SESSION_SHARDS_SHADOW_ROOT must be an absolute safe path"
+                )
+            for alias_root in system_alias_roots:
+                if _path_is_relative_to(shadow_root, alias_root):
+                    shadow_root = alias_root.resolve() / shadow_root.relative_to(
+                        alias_root
+                    )
+                    break
+            _reject_symlink_components(shadow_root)
+            shadow_root = shadow_root.resolve(strict=True)
+            root_metadata = shadow_root.lstat()
+            if (
+                stat.S_ISLNK(root_metadata.st_mode)
+                or not stat.S_ISDIR(root_metadata.st_mode)
+                or root_metadata.st_uid != os.getuid()
+                or stat.S_IMODE(root_metadata.st_mode) != 0o700
+            ):
+                raise ValueError(
+                    "CODEX_SESSION_SHARDS_SHADOW_ROOT must be owner-only mode 0700"
+                )
+            allowed_roots = (shadow_root,)
+        else:
+            allowed_roots = (
+                pathlib.Path.cwd().resolve()
+                / ".codex-local/session-retrospective-v2-shadow",
+                pathlib.Path("/tmp").resolve(),
+                pathlib.Path(tempfile.gettempdir()).resolve(),
+            )
+        if not any(_path_is_relative_to(resolved, root) for root in allowed_roots):
             raise ValueError(
                 "new shadow identity must stay under the run-local shadow root or /tmp"
             )
@@ -3409,6 +3435,17 @@ def _validate_session_shards_boundary(
 
 def _reject_nonstandard_json_constant(value: str) -> None:
     raise ValueError(f"non-standard JSON constant: {value}")
+
+
+def _reject_duplicate_json_object_fields(
+    pairs: list[tuple[str, Any]],
+) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f"duplicate JSON object field: {key}")
+        result[key] = value
+    return result
 
 
 def _iter_session_shard_records(
@@ -5441,6 +5478,7 @@ def _parse_remote_session_shards_frame(value: str) -> dict[str, Any]:
         validator.finish()
         item = json.loads(
             value,
+            object_pairs_hook=_reject_duplicate_json_object_fields,
             parse_constant=_reject_nonstandard_json_constant,
         )
     except (UnicodeEncodeError, ValueError, RecursionError) as exc:
