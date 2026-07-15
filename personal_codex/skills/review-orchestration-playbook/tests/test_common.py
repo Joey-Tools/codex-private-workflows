@@ -85,6 +85,131 @@ class ChildEnvironmentTest(unittest.TestCase):
                 stderr_limit_bytes=1024,
             )
 
+    @unittest.skipUnless(
+        hasattr(signal, "SIGXFSZ") and hasattr(os, "fork"),
+        "requires POSIX file-size limits",
+    )
+    def test_bounded_capture_enforces_regular_file_limit_during_process(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            output_path = pathlib.Path(temporary) / "export.bin"
+            with self.assertRaises(common.ReviewOutputLimitError):
+                common.run_bounded_capture(
+                    (
+                        sys.executable,
+                        "-c",
+                        (
+                            "import os,sys; "
+                            "fd=os.open(sys.argv[1], os.O_WRONLY|os.O_CREAT, 0o600); "
+                            "data=b'x' * 1048576; offset=0; "
+                            "exec('while offset < len(data):\\n "
+                            " offset += os.write(fd, data[offset:])')"
+                        ),
+                        str(output_path),
+                    ),
+                    timeout_seconds=5,
+                    stdout_limit_bytes=4096,
+                    stderr_limit_bytes=4096,
+                    regular_file_limit_bytes=1024,
+                    regular_file_limit_path=output_path,
+                )
+            output_size = output_path.stat().st_size
+
+        self.assertLessEqual(output_size, 1024)
+
+    @unittest.skipUnless(
+        hasattr(signal, "SIGXFSZ") and hasattr(os, "fork"),
+        "requires POSIX file-size limits",
+    )
+    def test_regular_file_limit_normalizes_efbig_to_output_limit(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            output_path = pathlib.Path(temporary) / "export.bin"
+            code = (
+                "import errno,os,signal,sys,time; "
+                "signal.signal(signal.SIGXFSZ, signal.SIG_IGN); "
+                "fd=os.open(sys.argv[1], os.O_WRONLY|os.O_CREAT, 0o600); "
+                "data=b'x' * 1048576; offset=0; "
+                "exec('while offset < len(data):\\n"
+                "  try:\\n"
+                "    offset += os.write(fd, data[offset:])\\n"
+                "  except OSError as error:\\n"
+                "    if error.errno != errno.EFBIG: sys.exit(24)\\n"
+                "    time.sleep(5)')"
+            )
+            started = time.monotonic()
+            with self.assertRaises(common.ReviewOutputLimitError):
+                common.run_bounded_capture(
+                    (sys.executable, "-c", code, str(output_path)),
+                    timeout_seconds=5,
+                    stdout_limit_bytes=4096,
+                    stderr_limit_bytes=4096,
+                    regular_file_limit_bytes=1024,
+                    regular_file_limit_path=output_path,
+                )
+
+            self.assertEqual(output_path.stat().st_size, 1024)
+            self.assertLess(time.monotonic() - started, 2)
+
+    @unittest.skipUnless(
+        hasattr(signal, "SIGXFSZ") and pathlib.Path("/bin/sh").is_file(),
+        "requires POSIX signal handling",
+    )
+    def test_regular_file_wrapper_restores_default_file_size_signal(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            output_path = pathlib.Path(temporary) / "unused.bin"
+            with self.assertRaises(common.ReviewOutputLimitError):
+                common.run_bounded_capture(
+                    (
+                        "/bin/sh",
+                        "-c",
+                        f"kill -{int(signal.SIGXFSZ)} $$; exit 0",
+                    ),
+                    timeout_seconds=5,
+                    stdout_limit_bytes=4096,
+                    stderr_limit_bytes=4096,
+                    regular_file_limit_bytes=1024,
+                    regular_file_limit_path=output_path,
+                )
+
+    @unittest.skipUnless(
+        hasattr(signal, "SIGXFSZ"),
+        "requires POSIX file-size signals",
+    )
+    def test_regular_file_limit_does_not_treat_shell_exit_code_as_signal(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            output_path = pathlib.Path(temporary) / "unused.bin"
+            completed = common.run_bounded_capture(
+                (
+                    sys.executable,
+                    "-c",
+                    f"raise SystemExit({128 + int(signal.SIGXFSZ)})",
+                ),
+                timeout_seconds=5,
+                stdout_limit_bytes=4096,
+                stderr_limit_bytes=4096,
+                regular_file_limit_bytes=1024,
+                regular_file_limit_path=output_path,
+            )
+
+            self.assertEqual(completed.returncode, 128 + int(signal.SIGXFSZ))
+            self.assertFalse(output_path.exists())
+
+    @unittest.skipUnless(os.name == "posix", "requires the POSIX wrapper")
+    def test_regular_file_limit_preserves_exec_oserror(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            missing = root / "missing-command"
+            with self.assertRaises(FileNotFoundError):
+                common.run_bounded_capture(
+                    (str(missing),),
+                    timeout_seconds=5,
+                    stdout_limit_bytes=4096,
+                    stderr_limit_bytes=4096,
+                    regular_file_limit_bytes=1024,
+                    regular_file_limit_path=root / "unused.bin",
+                )
+
     def test_output_limit_is_detected_while_stream_remains_open(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = pathlib.Path(temporary)

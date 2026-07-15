@@ -1468,8 +1468,8 @@ class ProviderPolicyTest(unittest.TestCase):
                 egress_consent="triple-review",
             )
 
-        unavailable = json.loads(
-            (self.review.container_dir / "claude-unavailable.json").read_text(
+        blocked = json.loads(
+            (self.review.container_dir / "claude-blocked.json").read_text(
                 encoding="utf-8"
             )
         )
@@ -1477,7 +1477,12 @@ class ProviderPolicyTest(unittest.TestCase):
             encoding="utf-8"
         )
         self.assertEqual(outcome.returncode, 2)
-        self.assertEqual(unavailable["reason_category"], "trust-policy-unrepresentable")
+        self.assertEqual(blocked["reason_category"], "trust-policy-unrepresentable")
+        self.assertEqual(blocked["status"], "blocked")
+        self.assertFalse(
+            (self.review.container_dir / "claude-unavailable.json").exists()
+        )
+        self.assertFalse((self.review.container_dir / "claude-skip.txt").exists())
         self.assertIn("malformed or unsupported trust settings", runner_error)
         self.assertNotIn("executable validation failed", runner_error)
 
@@ -3970,7 +3975,7 @@ class ProviderPolicyTest(unittest.TestCase):
                 ),
             ],
         )
-        for call in run_command.call_args_list:
+        for index, call in enumerate(run_command.call_args_list):
             self.assertEqual(
                 call.kwargs["timeout_seconds"],
                 providers.CLAUDE_KEYCHAIN_QUERY_TIMEOUT_SECONDS,
@@ -3983,6 +3988,17 @@ class ProviderPolicyTest(unittest.TestCase):
                 call.kwargs["stderr_limit_bytes"],
                 providers.CLAUDE_KEYCHAIN_BROKER_OUTPUT_LIMIT_BYTES,
             )
+            if index == 0:
+                self.assertNotIn("regular_file_limit_bytes", call.kwargs)
+            else:
+                self.assertEqual(
+                    call.kwargs["regular_file_limit_bytes"],
+                    providers.CLAUDE_TRUST_SETTINGS_LIMIT_BYTES,
+                )
+                self.assertEqual(
+                    call.kwargs["regular_file_limit_path"],
+                    pathlib.Path(call.args[0][-1]),
+                )
         for result in completed:
             self.assertEqual(result.stdout, bytearray())
             self.assertFalse(any(result.stderr))

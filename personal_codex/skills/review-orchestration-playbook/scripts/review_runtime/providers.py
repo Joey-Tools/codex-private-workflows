@@ -1558,6 +1558,8 @@ def _read_claude_trust_certificates_impl(
                     timeout_seconds=CLAUDE_KEYCHAIN_QUERY_TIMEOUT_SECONDS,
                     stdout_limit_bytes=CLAUDE_KEYCHAIN_BROKER_OUTPUT_LIMIT_BYTES,
                     stderr_limit_bytes=CLAUDE_KEYCHAIN_BROKER_OUTPUT_LIMIT_BYTES,
+                    regular_file_limit_bytes=CLAUDE_TRUST_SETTINGS_LIMIT_BYTES,
+                    regular_file_limit_path=trust_path,
                 )
             except OSError as error:
                 raise ClaudeTrustToolUnavailable(
@@ -3536,23 +3538,15 @@ def _write_attempts(review: ReviewWorkspace, attempts: Iterable[Attempt]) -> Non
     )
 
 
-def _write_claude_trust_policy_unavailable(review: ReviewWorkspace) -> None:
+def _write_claude_trust_policy_blocked(review: ReviewWorkspace) -> None:
     write_json(
-        review.container_dir / "claude-unavailable.json",
+        review.container_dir / "claude-blocked.json",
         {
             "reason_category": "trust-policy-unrepresentable",
             "runtime": "claude",
-            "status": "unavailable",
+            "status": "blocked",
         },
     )
-    write_text_atomic(
-        review.container_dir / "claude-skip.txt",
-        "Claude Code secure runtime is unavailable (trust-policy-unrepresentable).\n",
-    )
-
-
-def _write_claude_trust_policy_blocked(review: ReviewWorkspace) -> None:
-    _write_claude_trust_policy_unavailable(review)
     write_text_atomic(
         review.container_dir / "runner-error.txt",
         "Host trust policy contains malformed or unsupported trust settings; "
