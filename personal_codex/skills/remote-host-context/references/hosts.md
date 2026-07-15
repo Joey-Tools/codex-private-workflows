@@ -1,13 +1,25 @@
 # Verified Hosts
 
-Verified on 2026-03-10.
-`codex-hoteng-srv-01` was added and verified on 2026-06-19.
+The original hosts were verified on 2026-03-10.
+`codex-hoteng-srv-01` was added on 2026-06-19 and re-verified on 2026-07-15.
+`BL-mac-mini-m4-hoteng` was added and verified on 2026-07-15.
 Re-check these assumptions if a host starts returning stale or missing evidence.
 
 ## Local Machine
 
 - Primary evidence root: `~/.codex`
 - Use for local GUI state, Apple Notes, local repo worktrees, and the current desktop session.
+
+## BL-mac-mini-m4-hoteng
+
+- SSH alias: `BL-mac-mini-m4-hoteng`
+- Verified remote hostname on 2026-07-15: `mac-m4-bl-06.local`
+- Verified login user: `hoteng`
+- Verified login home: `/Users/hoteng`
+- Verified Codex root: `/Users/hoteng/.codex`
+- Verified tools:
+  - `rg`
+  - `python3`
 
 ## miku-bot-dev
 
@@ -48,7 +60,7 @@ Re-check these assumptions if a host starts returning stale or missing evidence.
   - `python3`
 - Host note:
   - this reaches the same machine hostname as `hoteng-srv-01`, but with a distinct login user and Codex evidence root
-  - treat it as an explicit optional alias, not part of the default evidence scope
+  - keep both aliases in the default evidence scope; do not deduplicate them by hostname
 
 ## Preflight Shape
 
@@ -68,7 +80,7 @@ If deeper remote reads start repeating across sessions, add a helper under `~/.c
 Current dedicated helper path for those repeated remote Codex reads:
 
 ```bash
-python3 "$HOME/.codex/skills/remote-host-context/scripts/remote_codex_probe.py" preflight --host local --host miku-bot-dev --host hoteng-srv-01
+python3 "$HOME/.codex/skills/remote-host-context/scripts/remote_codex_probe.py" preflight --host local --host BL-mac-mini-m4-hoteng --host miku-bot-dev --host hoteng-srv-01 --host codex-hoteng-srv-01
 ```
 
 Use `session-meta` only to enumerate canonical rollout candidates, then hand the copied rollout back to `codex-session-mining` locally for the actual transcript search and filtering.

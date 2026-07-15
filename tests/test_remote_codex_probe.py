@@ -40,11 +40,20 @@ class RemoteHostContextDocumentationTests(unittest.TestCase):
         skill = SKILL_PATH.read_text(encoding="utf-8")
 
         self.assertIn(
-            "preflight --host local --host miku-bot-dev --host hoteng-srv-01",
+            "preflight --host local --host BL-mac-mini-m4-hoteng "
+            "--host miku-bot-dev --host hoteng-srv-01 "
+            "--host codex-hoteng-srv-01",
             skill,
         )
         self.assertIn("do not pass positional host names", skill)
         self.assertIn("plural `--hosts` flag", skill)
+
+    def test_bl_mac_mini_uses_hoteng_macos_home(self) -> None:
+        host = MODULE.HOSTS["BL-mac-mini-m4-hoteng"]
+
+        self.assertEqual(host["label"], "BL-mac-mini-m4-hoteng")
+        self.assertEqual(host["ssh_target"], "BL-mac-mini-m4-hoteng")
+        self.assertEqual(host["codex_root"], "/Users/hoteng/.codex")
 
     def test_codex_hoteng_srv_uses_distinct_codex_home(self) -> None:
         host = MODULE.HOSTS["codex-hoteng-srv-01"]
@@ -52,6 +61,28 @@ class RemoteHostContextDocumentationTests(unittest.TestCase):
         self.assertEqual(host["label"], "codex-hoteng-srv-01")
         self.assertEqual(host["ssh_target"], "codex-hoteng-srv-01")
         self.assertEqual(host["codex_root"], "/home/codex/.codex")
+
+    def test_default_host_shape_keeps_distinct_server_accounts(self) -> None:
+        hosts = MODULE._resolve_hosts(
+            [
+                "local",
+                "BL-mac-mini-m4-hoteng",
+                "miku-bot-dev",
+                "hoteng-srv-01",
+                "codex-hoteng-srv-01",
+            ]
+        )
+
+        self.assertEqual(
+            hosts,
+            [
+                "local",
+                "BL-mac-mini-m4-hoteng",
+                "miku-bot-dev",
+                "hoteng-srv-01",
+                "codex-hoteng-srv-01",
+            ],
+        )
 
 
 class SizeGuardedBytesIO(io.BytesIO):

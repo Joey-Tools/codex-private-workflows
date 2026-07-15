@@ -95,6 +95,12 @@ REMOTE_CHUNKED_ROLLOUT_SUMMARY_END = "__REMOTE_CODEX_PROBE_CHUNKED_ROLLOUT_SUMMA
 
 HOSTS: dict[str, dict[str, str]] = {
     "local": {"kind": "local", "label": "local", "codex_root": "~/.codex"},
+    "BL-mac-mini-m4-hoteng": {
+        "kind": "ssh",
+        "label": "BL-mac-mini-m4-hoteng",
+        "ssh_target": "BL-mac-mini-m4-hoteng",
+        "codex_root": "/Users/hoteng/.codex",
+    },
     "miku-bot-dev": {
         "kind": "ssh",
         "label": "miku-bot-dev",
