@@ -11,6 +11,7 @@
 - For shell script edits, run `bash -n` and `shellcheck` when available before commit; if `shellcheck` is unavailable, state that and report the fallback validation you actually ran.
 - For non-trivial work, read the relevant code, docs, logs, or source material before proposing a concrete plan or making substantial edits.
 - For moderate or complex tasks, separate planning from implementation: align on the approach first, then execute, and avoid unnecessary clarification loops when reasonable assumptions are enough.
+- When asking Joey for input, omit auto-resolution timeouts and wait indefinitely for his response; never let a countdown select a default answer unless Joey explicitly requests timed auto-resolution.
 - Do not expand the scope into unrelated rewrites or side quests. Low-level fixes for mistakes introduced in the current task stay in scope and should be corrected directly.
 - Use `$joey-skill-authoring` when creating or revising skills, or when deciding whether guidance belongs in `AGENTS.md`, `SKILL.md`, or `references/`.
 - Use `$bounded-command-output` before broad searches or inventories, large log, artifact, or manual reads, process diagnostics, or verbose or spinner-heavy builds and tests; apply it alongside the task's domain skill.
