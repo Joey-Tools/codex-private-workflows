@@ -150,6 +150,61 @@ class ChildEnvironmentTest(unittest.TestCase):
         hasattr(signal, "SIGXFSZ") and hasattr(os, "fork"),
         "requires POSIX file-size limits",
     )
+    def test_inherited_soft_file_limit_does_not_shrink_logical_limit(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            output_path = pathlib.Path(temporary) / "export.bin"
+            with mock.patch("resource.getrlimit", return_value=(1024, 1025)):
+                completed = common.run_bounded_capture(
+                    (
+                        sys.executable,
+                        "-c",
+                        (
+                            "import os,sys; "
+                            "fd=os.open(sys.argv[1], os.O_WRONLY|os.O_CREAT, 0o600); "
+                            "os.write(fd, b'x' * 1024); os.close(fd)"
+                        ),
+                        str(output_path),
+                    ),
+                    timeout_seconds=5,
+                    stdout_limit_bytes=4096,
+                    stderr_limit_bytes=4096,
+                    regular_file_limit_bytes=1024,
+                    regular_file_limit_path=output_path,
+                )
+
+            self.assertEqual(completed.returncode, 0)
+            self.assertEqual(output_path.stat().st_size, 1024)
+
+    @unittest.skipUnless(os.name == "posix", "requires POSIX file-size limits")
+    @mock.patch.object(common.subprocess, "Popen")
+    def test_inherited_hard_file_limit_without_sentinel_blocks_before_launch(
+        self,
+        popen: mock.Mock,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            output_path = pathlib.Path(temporary) / "export.bin"
+            with (
+                mock.patch("resource.getrlimit", return_value=(1024, 1024)),
+                self.assertRaisesRegex(
+                    ReviewError,
+                    "hard limit cannot preserve an overflow sentinel",
+                ),
+            ):
+                common.run_bounded_capture(
+                    (sys.executable, "-c", "pass"),
+                    timeout_seconds=5,
+                    stdout_limit_bytes=4096,
+                    stderr_limit_bytes=4096,
+                    regular_file_limit_bytes=1024,
+                    regular_file_limit_path=output_path,
+                )
+
+        popen.assert_not_called()
+
+    @unittest.skipUnless(
+        hasattr(signal, "SIGXFSZ") and hasattr(os, "fork"),
+        "requires POSIX file-size limits",
+    )
     def test_regular_file_limit_normalizes_efbig_to_output_limit(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             output_path = pathlib.Path(temporary) / "export.bin"

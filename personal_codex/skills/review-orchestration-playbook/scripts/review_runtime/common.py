@@ -536,24 +536,19 @@ def _run_logged_process(
                 raise ReviewError(
                     "regular file limits are unavailable on this platform"
                 ) from error
-            soft_limit, hard_limit = posix_resource.getrlimit(
+            _soft_limit, hard_limit = posix_resource.getrlimit(
                 posix_resource.RLIMIT_FSIZE
             )
             kernel_regular_file_limit = regular_file_limit_bytes + 1
-            for inherited_limit in (soft_limit, hard_limit):
-                if inherited_limit != posix_resource.RLIM_INFINITY:
-                    kernel_regular_file_limit = min(
-                        kernel_regular_file_limit,
-                        int(inherited_limit),
-                    )
-            if kernel_regular_file_limit <= 1:
+            if (
+                hard_limit != posix_resource.RLIM_INFINITY
+                and int(hard_limit) < kernel_regular_file_limit
+            ):
                 raise ReviewError(
-                    "inherited regular file limit cannot preserve an overflow sentinel"
+                    "inherited regular file hard limit cannot preserve an overflow "
+                    "sentinel"
                 )
-            effective_regular_file_limit = min(
-                regular_file_limit_bytes,
-                kernel_regular_file_limit - 1,
-            )
+            effective_regular_file_limit = regular_file_limit_bytes
             exec_status_read_fd, exec_status_write_fd = os.pipe()
             pass_fds = (exec_status_write_fd,)
             popen_command = (
