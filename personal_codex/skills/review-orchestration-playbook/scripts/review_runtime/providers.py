@@ -1720,7 +1720,9 @@ def _read_claude_trust_certificates_impl(
             completed.stderr[:] = b"\x00" * len(completed.stderr)
 
 
-def _preflight_claude_trust_policy(review: ReviewWorkspace) -> bytes:
+def _preflight_claude_trust_policy(
+    review: ReviewWorkspace,
+) -> ClaudeTrustMaterial:
     with tempfile.TemporaryDirectory(
         prefix="claude-trust-preflight-",
         dir=review.container_dir,
@@ -1728,30 +1730,32 @@ def _preflight_claude_trust_policy(review: ReviewWorkspace) -> bytes:
         return _read_claude_trust_certificates(
             review,
             pathlib.Path(temporary),
-        ).certificates
+        )
 
 
 def _read_claude_caller_ca_snapshot(path: pathlib.Path) -> bytes:
-    if path.is_symlink() or not path.is_file():
-        raise ReviewError("Claude caller CA snapshot is not a regular file")
+    data = _read_bounded_regular_file(
+        path,
+        source="caller CA snapshot",
+        limit_bytes=CLAUDE_CALLER_CA_SNAPSHOT_LIMIT_BYTES,
+        label="Claude caller CA snapshot",
+    )
     try:
-        size = path.stat().st_size
-    except OSError as error:
-        raise ReviewError("cannot inspect Claude caller CA snapshot") from error
-    if size > CLAUDE_CALLER_CA_SNAPSHOT_LIMIT_BYTES:
-        raise ReviewError("Claude caller CA snapshot exceeds the size limit")
-    try:
-        data = path.read_bytes()
-    except OSError as error:
-        raise ReviewError("cannot read Claude caller CA snapshot") from error
-    if not data:
-        return b""
-    return _extract_ca_certificates(data, source="caller CA snapshot")
+        if not data:
+            return b""
+        return _extract_ca_certificates(
+            bytes(data),
+            source="caller CA snapshot",
+        )
+    finally:
+        data[:] = b"\x00" * len(data)
 
 
 def _prepare_claude_tls_environment(
     review: ReviewWorkspace,
     env: dict[str, str],
+    *,
+    trust_material: ClaudeTrustMaterial | None = None,
 ) -> dict[str, str]:
     result = dict(env)
     ca_root = review.container_dir / "claude-ca"
@@ -1833,7 +1837,8 @@ def _prepare_claude_tls_environment(
         CLAUDE_SYSTEM_CA_FILE,
         source="system CA bundle",
     )
-    trust_material = _read_claude_trust_certificates(review, ca_root)
+    if trust_material is None:
+        trust_material = _read_claude_trust_certificates(review, ca_root)
     materials = [("system CA bundle", system_material)]
     if trust_material.certificates:
         materials.append(("unconditional trust roots", trust_material.certificates))
@@ -1860,6 +1865,30 @@ def _prepare_claude_tls_environment(
         result[key] = str(bundle)
     result[CLAUDE_CERT_STORE_ENV] = CLAUDE_CERT_STORE
     return result
+
+
+def _is_claude_tls_environment_prepared(
+    review: ReviewWorkspace,
+    env: dict[str, str],
+) -> bool:
+    bundle = review.container_dir / "claude-ca" / CLAUDE_CA_BUNDLE_NAME
+    try:
+        metadata = bundle.lstat()
+    except OSError:
+        return False
+    if (
+        not stat.S_ISREG(metadata.st_mode)
+        or metadata.st_size <= 0
+        or metadata.st_size > CLAUDE_CALLER_CA_SNAPSHOT_LIMIT_BYTES
+        or metadata.st_mode & 0o077
+    ):
+        return False
+    expected_bundle = str(bundle)
+    return (
+        env.get(CLAUDE_CERT_STORE_ENV) == CLAUDE_CERT_STORE
+        and all(key not in env for key in CLAUDE_TLS_DIR_ENV_KEYS)
+        and all(env.get(key) == expected_bundle for key in CLAUDE_TLS_FILE_ENV_KEYS)
+    )
 
 
 def _read_proxy_headers(sock: socket.socket) -> bytes:
@@ -3364,7 +3393,8 @@ def _claude_attempt(
             "claude is not available in a validated executable path"
         )
     env = _with_claude_review_tool_path(review, env)
-    env = _prepare_claude_tls_environment(review, env)
+    if not _is_claude_tls_environment_prepared(review, env):
+        env = _prepare_claude_tls_environment(review, env)
     stdout_path, stderr_path = _attempt_paths(review, index, "claude", model)
     settings = json.dumps(
         {
@@ -3716,8 +3746,12 @@ def run_review(
             )
         claude_env = _prepare_claude_keychain_broker(review, claude_env)
         claude_env = _with_claude_review_tool_path(review, claude_env)
-        _preflight_claude_trust_policy(review)
-        claude_env = _prepare_claude_tls_environment(review, claude_env)
+        trust_material = _preflight_claude_trust_policy(review)
+        claude_env = _prepare_claude_tls_environment(
+            review,
+            claude_env,
+            trust_material=trust_material,
+        )
         if not claude_env.get("ANTHROPIC_API_KEY"):
             _warm_claude_local_login(
                 review,

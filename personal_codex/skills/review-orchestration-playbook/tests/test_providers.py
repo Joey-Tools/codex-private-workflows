@@ -102,7 +102,10 @@ class ProviderPolicyTest(unittest.TestCase):
             "_preflight_claude_trust_policy",
         )
         self.trust_preflight = self.trust_preflight_patcher.start()
-        self.trust_preflight.return_value = b""
+        self.trust_preflight.return_value = providers.ClaudeTrustMaterial(
+            certificates=b"",
+            excluded_sha1_fingerprints=frozenset(),
+        )
         self.read_claude_trust_certificates = providers._read_claude_trust_certificates
         self.trust_patcher = mock.patch.object(
             providers,
@@ -1665,6 +1668,59 @@ class ProviderPolicyTest(unittest.TestCase):
             ),
         )
 
+    def test_run_review_reuses_preflight_trust_material(self) -> None:
+        claude_env = {"ANTHROPIC_API_KEY": "fixture-key"}
+        trust_material = providers.ClaudeTrustMaterial(
+            certificates=self.sample_ca_certificate(),
+            excluded_sha1_fingerprints=frozenset({"A" * 40}),
+        )
+        self.trust_preflight.return_value = trust_material
+        with (
+            mock.patch.object(
+                providers,
+                "child_environment",
+                return_value=claude_env,
+            ),
+            mock.patch.object(
+                providers,
+                "_resolve_validated_claude_executable",
+                return_value=(pathlib.Path("/fixture/claude"), claude_env),
+            ),
+            mock.patch.object(
+                providers,
+                "_with_claude_review_tool_path",
+                return_value=claude_env,
+            ),
+            mock.patch.object(
+                providers,
+                "_prepare_claude_tls_environment",
+                return_value=claude_env,
+            ) as prepare_tls,
+            mock.patch.object(
+                providers,
+                "_claude_attempt",
+                return_value=self.attempt(
+                    "claude",
+                    providers.CLAUDE_MODELS[0],
+                    "success",
+                    final_text="No findings.",
+                ),
+            ),
+        ):
+            outcome = providers.run_review(
+                review=self.review,
+                reviewer="claude",
+                egress_consent="triple-review",
+            )
+
+        self.assertEqual(outcome.returncode, 0)
+        self.trust_preflight.assert_called_once_with(self.review)
+        prepare_tls.assert_called_once_with(
+            self.review,
+            claude_env,
+            trust_material=trust_material,
+        )
+
     def test_native_claude_entitlement_exhaustion_stops_the_lane(self) -> None:
         claude_env = {"ANTHROPIC_API_KEY": "fixture-key"}
         attempts = tuple(
@@ -2670,11 +2726,9 @@ class ProviderPolicyTest(unittest.TestCase):
                 stderr=b"",
             ),
         )
-        providers._claude_attempt(
-            review=self.review,
-            model="claude-opus-4-8",
-            index=1,
-            env={
+        attempt_env = providers._prepare_claude_tls_environment(
+            self.review,
+            {
                 "HOME": "/Users/reviewer",
                 "XDG_CONFIG_HOME": "/Users/reviewer/.config",
                 "TMPDIR": str(self.review.container_dir / "tmp"),
@@ -2682,6 +2736,17 @@ class ProviderPolicyTest(unittest.TestCase):
                 "CODEX_ISOLATED_REVIEW_RANGE": "base..head",
             },
         )
+        with mock.patch.object(
+            providers,
+            "_prepare_claude_tls_environment",
+        ) as prepare_tls:
+            providers._claude_attempt(
+                review=self.review,
+                model="claude-opus-4-8",
+                index=1,
+                env=attempt_env,
+            )
+        prepare_tls.assert_not_called()
         argv = run_command.call_args_list[2].args[0]
         self.assertIn("claude-opus-4-8", argv)
         self.assertEqual(argv[argv.index("--effort") + 1], "max")
@@ -3446,6 +3511,18 @@ class ProviderPolicyTest(unittest.TestCase):
                 ("A" * 40,) * (providers.CLAUDE_ADDITIONAL_TRUST_ROOT_LIMIT + 1),
                 ca_root=self.review.container_dir,
             )
+
+    def test_claude_trust_export_unavailable_matches_exact_diagnostic(self) -> None:
+        self.assertIsInstance(providers.CLAUDE_TRUST_EXPORT_UNAVAILABLE, tuple)
+        self.assertEqual(len(providers.CLAUDE_TRUST_EXPORT_UNAVAILABLE), 1)
+        diagnostic = providers.CLAUDE_TRUST_EXPORT_UNAVAILABLE[0]
+
+        self.assertTrue(providers._is_trust_export_unavailable(diagnostic))
+        self.assertFalse(
+            providers._is_trust_export_unavailable(
+                "SecTrustSettingsCreateExternalRepresentation: malformed fixture"
+            )
+        )
 
     def test_claude_trust_bounds_total_root_verification_time(self) -> None:
         certificate = self.strict_root_certificate()
@@ -4523,6 +4600,65 @@ class ProviderPolicyTest(unittest.TestCase):
 
         self.assertEqual(material, certificate)
         self.assertIn(b"PRIVATE KEY", source.read_bytes())
+
+    def test_claude_caller_snapshot_read_is_anchored_to_open_file_descriptor(
+        self,
+    ) -> None:
+        certificate = self.sample_ca_certificate()
+        source = self.review.source_root / "caller-snapshot.pem"
+        source.write_bytes(certificate)
+        replacement = self.review.source_root / "snapshot-replacement.pem"
+        replacement.write_bytes(
+            b"-----BEGIN " + b"PRIVATE KEY-----\nsecret\n-----END PRIVATE KEY-----\n"
+        )
+        real_open = os.open
+
+        def open_then_replace(path: os.PathLike[str], flags: int) -> int:
+            fd = real_open(path, flags)
+            replacement.replace(source)
+            return fd
+
+        with mock.patch.object(providers.os, "open", side_effect=open_then_replace):
+            material = providers._read_claude_caller_ca_snapshot(source)
+
+        self.assertEqual(material, certificate)
+        self.assertIn(b"PRIVATE KEY", source.read_bytes())
+
+    def test_claude_caller_snapshot_read_rejects_growth_after_fstat(self) -> None:
+        certificate = self.sample_ca_certificate()
+        source = self.review.source_root / "growing-snapshot.pem"
+        source.write_bytes(certificate)
+        real_read = os.read
+        read_count = 0
+
+        def read_then_grow(fd: int, size: int) -> bytes:
+            nonlocal read_count
+            chunk = real_read(fd, size)
+            if read_count == 0:
+                with source.open("ab") as handle:
+                    handle.write(b"x")
+            read_count += 1
+            return chunk
+
+        with (
+            mock.patch.object(
+                providers,
+                "CLAUDE_CALLER_CA_SNAPSHOT_LIMIT_BYTES",
+                len(certificate),
+            ),
+            mock.patch.object(providers.os, "read", side_effect=read_then_grow),
+            self.assertRaisesRegex(ReviewError, "exceeds the size limit"),
+        ):
+            providers._read_claude_caller_ca_snapshot(source)
+
+    def test_claude_caller_snapshot_read_rejects_symlink(self) -> None:
+        target = self.review.source_root / "snapshot-target.pem"
+        target.write_bytes(self.sample_ca_certificate())
+        source = self.review.source_root / "snapshot-link.pem"
+        source.symlink_to(target)
+
+        with self.assertRaisesRegex(ReviewError, "cannot open"):
+            providers._read_claude_caller_ca_snapshot(source)
 
     def test_claude_ca_read_rejects_growth_after_fstat(self) -> None:
         certificate = self.sample_ca_certificate()
