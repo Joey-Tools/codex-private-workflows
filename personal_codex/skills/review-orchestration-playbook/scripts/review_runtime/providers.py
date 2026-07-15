@@ -57,6 +57,7 @@ from .workspace import ReviewWorkspace, validate_external_workspace
 CODEX_MODELS = ("gpt-5.6-sol", "gpt-5.5")
 CODEX_REASONING_EFFORT = "xhigh"
 CLAUDE_MODELS = ("claude-opus-4-8", "claude-opus-4-7")
+REVIEWER_JSON_MAX_NESTING_DEPTH = 64
 CLAUDE_SUPPORTED_VERSION = "2.1.202"
 CLAUDE_TRUSTED_SHA256_BY_MACHINE = {
     # Homebrew Cask 2.1.202 points these digests at the corresponding
@@ -3211,9 +3212,8 @@ def _warm_claude_local_login(
     category = classify_failure(warmup.stdout, warmup.stderr)
     output_shape = _claude_auth_warmup_output_shape(warmup.stdout)
     result_signal_categories = output_shape.get("result_signal_categories")
-    if (
-        category == "other"
-        and warmup.returncode != 0
+    deterministic_auth_shape = (
+        warmup.returncode != 0
         and output_shape.get("json_shape") == "object"
         and output_shape.get("is_error") is True
         and (
@@ -3224,6 +3224,13 @@ def _warm_claude_local_login(
             )
         )
         and output_shape.get("api_error_status_shape") in {"missing", "null"}
+        and result_signal_categories in ([], ["auth"])
+    )
+    if category == "auth" and not deterministic_auth_shape:
+        category = "other"
+    elif (
+        category == "other"
+        and deterministic_auth_shape
         and result_signal_categories == ["auth"]
     ):
         category = "auth"
@@ -3849,6 +3856,32 @@ def _model_matches(requested: str, effective: str) -> bool:
     return effective_normalized == requested_normalized
 
 
+def _json_nesting_is_bounded(value: str) -> bool:
+    depth = 0
+    in_string = False
+    escaped = False
+    for character in value:
+        if in_string:
+            if escaped:
+                escaped = False
+            elif character == "\\":
+                escaped = True
+            elif character == '"':
+                in_string = False
+            continue
+        if character == '"':
+            in_string = True
+        elif character in "[{":
+            depth += 1
+            if depth > REVIEWER_JSON_MAX_NESTING_DEPTH:
+                return False
+        elif character in "]}":
+            depth -= 1
+            if depth < 0:
+                return False
+    return depth == 0
+
+
 def _json_objects(stdout: bytes) -> list[dict[str, Any]]:
     try:
         text = stdout.decode("utf-8").strip()
@@ -3858,13 +3891,15 @@ def _json_objects(stdout: bytes) -> list[dict[str, Any]]:
         return []
 
     def parse_object(value: str) -> dict[str, Any] | None:
+        if not _json_nesting_is_bounded(value):
+            return None
         try:
             parsed = json.loads(
                 value,
                 parse_constant=_reject_nonstandard_json_constant,
                 object_pairs_hook=_strict_json_object_from_pairs,
             )
-        except ValueError:
+        except (RecursionError, ValueError):
             return None
         return parsed if isinstance(parsed, dict) else None
 
@@ -4894,7 +4929,7 @@ def run_review(
             "CLAUDE_CODE_SUBPROCESS_ENV_SCRUB": "1",
         },
     )
-    warmup_env: dict[str, str] | None = None
+    local_login = False
     try:
         (
             claude_executable,
@@ -4907,7 +4942,8 @@ def run_review(
             )
         claude_env = _prepare_claude_keychain_broker(review, claude_env)
         claude_env = _with_claude_review_tool_path(review, claude_env)
-        if not claude_env.get("ANTHROPIC_API_KEY"):
+        local_login = not bool(claude_env.get("ANTHROPIC_API_KEY"))
+        if local_login:
             trust_material = _preflight_claude_trust_policy(
                 review,
                 bundled_roots=bundled_roots,
@@ -4992,7 +5028,16 @@ def run_review(
             index: int,
             env: dict[str, str],
         ) -> Attempt:
-            if warmup_env is not None and index > 1:
+            if local_login and index > 1:
+                trust_material = _preflight_claude_trust_policy(
+                    review,
+                    bundled_roots=bundled_roots,
+                )
+                fallback_warmup_env = _prepare_claude_tls_environment(
+                    review,
+                    env,
+                    trust_material=trust_material,
+                )
                 _require_matching_claude_executable_snapshot(
                     claude_executable,
                     bundled_roots,
@@ -5000,7 +5045,7 @@ def run_review(
                 _warm_claude_local_login(
                     review,
                     claude_executable,
-                    warmup_env,
+                    fallback_warmup_env,
                 )
             return _claude_attempt(
                 review=review,

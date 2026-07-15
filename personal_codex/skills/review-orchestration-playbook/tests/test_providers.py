@@ -1376,7 +1376,7 @@ class ProviderPolicyTest(unittest.TestCase):
                             "modelUsage": model_usage,
                         }
                     ).encode(),
-                    stderr=b"",
+                    stderr=b"Authentication failed: invalid token",
                 )
 
                 with self.assertRaisesRegex(
@@ -1700,6 +1700,16 @@ class ProviderPolicyTest(unittest.TestCase):
             }
         )
 
+        self.assertEqual(providers.classify_failure(stdout, ""), "other")
+
+    def test_deeply_nested_reviewer_json_is_rejected_without_recursion_error(
+        self,
+    ) -> None:
+        nested = "[" * 2_000 + "null" + "]" * 2_000
+        stdout = f'{{"type":"result","result":{nested}}}'.encode()
+
+        self.assertEqual(len(providers._json_objects(stdout)), 0)
+        self.assertEqual(providers._parse_claude_output(stdout), (None, None))
         self.assertEqual(providers.classify_failure(stdout, ""), "other")
 
     def test_claude_partial_error_result_cannot_trigger_auth_block(self) -> None:
@@ -2719,13 +2729,13 @@ class ProviderPolicyTest(unittest.TestCase):
             (self.review.container_dir / "claude-unavailable.json").exists()
         )
         self.assertEqual(runtime_calls, ["enter", "enter"])
-        self.assertEqual(self.trust_preflight.call_count, 3)
-        self.assertEqual(prepare_tls.call_count, 3)
+        self.assertEqual(self.trust_preflight.call_count, 4)
+        self.assertEqual(prepare_tls.call_count, 4)
         self.assertEqual(run_command.call_count, 1)
-        self.assertEqual(len(trust_materials), 3)
+        self.assertEqual(len(trust_materials), 4)
         self.assertEqual(
             len({str(material.evidence["generation"]) for material in trust_materials}),
-            3,
+            4,
         )
 
     def test_entitlement_fallback_probe_sandbox_unavailable_writes_skip(
@@ -2923,8 +2933,8 @@ class ProviderPolicyTest(unittest.TestCase):
         self.assertEqual(outcome.attempts[0].category, "entitlement")
         self.assertEqual(read_credential.call_count, 3)
         self.assertEqual(run_command.call_count, 1)
-        self.assertEqual(self.trust_preflight.call_count, 3)
-        self.assertEqual(prepare_tls.call_count, 3)
+        self.assertEqual(self.trust_preflight.call_count, 4)
+        self.assertEqual(prepare_tls.call_count, 4)
         self.assertTrue((self.review.container_dir / "claude-skip.txt").is_file())
         self.assertIn(
             "secure runtime became unavailable",
@@ -3635,7 +3645,7 @@ class ProviderPolicyTest(unittest.TestCase):
                 providers,
                 "_prepare_claude_tls_environment",
                 return_value=claude_env,
-            ),
+            ) as prepare_tls,
             mock.patch.object(
                 providers,
                 "_claude_attempt",
@@ -3651,6 +3661,8 @@ class ProviderPolicyTest(unittest.TestCase):
         self.assertEqual(outcome.returncode, 0)
         self.assertEqual(outcome.final_text, "No findings.")
         self.assertEqual(self.warmup.call_count, 2)
+        self.assertEqual(self.trust_preflight.call_count, 2)
+        self.assertEqual(prepare_tls.call_count, 2)
         self.assertEqual(
             [call.kwargs["model"] for call in claude_attempt.call_args_list],
             list(providers.CLAUDE_MODELS),
