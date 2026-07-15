@@ -1530,9 +1530,12 @@ def _terminalize_claude_trust_policy_evidence(
 def _read_claude_trust_certificates(
     review: ReviewWorkspace,
     ca_root: pathlib.Path,
+    *,
+    evidence: dict[str, object] | None = None,
 ) -> ClaudeTrustMaterial:
-    evidence = _new_claude_trust_policy_evidence()
-    _write_claude_trust_policy_evidence(review, evidence)
+    if evidence is None:
+        evidence = _new_claude_trust_policy_evidence()
+        _write_claude_trust_policy_evidence(review, evidence)
     try:
         material = _read_claude_trust_certificates_impl(
             review,
@@ -1844,11 +1847,42 @@ def _read_claude_trust_certificates_impl(
 def _preflight_claude_trust_policy(
     review: ReviewWorkspace,
 ) -> ClaudeTrustMaterial:
+    evidence = _new_claude_trust_policy_evidence()
+    _write_claude_trust_policy_evidence(review, evidence)
     try:
         system_material = _read_ca_source(
             CLAUDE_SYSTEM_CA_FILE,
             source="system CA bundle",
         )
+    except MemoryError as error:
+        _terminalize_claude_trust_policy_evidence(
+            review,
+            evidence,
+            status="blocked",
+            unresolved_resolution="blocked",
+        )
+        raise ClaudeTrustPolicyUnavailable(
+            "Claude system CA baseline exceeded the bounded memory budget"
+        ) from error
+    except ReviewError as error:
+        tooling_unavailable = isinstance(error.__cause__, OSError)
+        _terminalize_claude_trust_policy_evidence(
+            review,
+            evidence,
+            status="unavailable" if tooling_unavailable else "blocked",
+            unresolved_resolution=(
+                "unavailable" if tooling_unavailable else "blocked"
+            ),
+        )
+        if tooling_unavailable:
+            raise ClaudeTrustToolUnavailable(
+                "Claude system CA baseline is unavailable"
+            ) from error
+        raise ClaudeTrustPolicyUnavailable(
+            "Claude system CA baseline is invalid"
+        ) from error
+
+    try:
         with tempfile.TemporaryDirectory(
             prefix="claude-trust-preflight-",
             dir=review.container_dir,
@@ -1856,10 +1890,29 @@ def _preflight_claude_trust_policy(
             trust_material = _read_claude_trust_certificates(
                 review,
                 pathlib.Path(temporary),
+                evidence=evidence,
             )
+    except OSError as error:
+        _terminalize_claude_trust_policy_evidence(
+            review,
+            evidence,
+            status="unavailable",
+            unresolved_resolution="unavailable",
+        )
+        raise ClaudeTrustToolUnavailable(
+            "Claude trust preflight workspace is unavailable"
+        ) from error
+
+    try:
         return replace(trust_material, system_certificates=system_material)
     except MemoryError as error:
-        raise ReviewError(
+        _terminalize_claude_trust_policy_evidence(
+            review,
+            evidence,
+            status="blocked",
+            unresolved_resolution="blocked",
+        )
+        raise ClaudeTrustPolicyUnavailable(
             "Claude trust preflight exceeded the bounded memory budget"
         ) from error
 

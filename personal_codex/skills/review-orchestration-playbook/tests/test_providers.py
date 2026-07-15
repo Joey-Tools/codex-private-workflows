@@ -1919,6 +1919,82 @@ class ProviderPolicyTest(unittest.TestCase):
         self.warmup.assert_called_once()
         claude_attempt.assert_not_called()
 
+    def test_run_review_replaces_complete_evidence_when_refreshed_system_ca_fails(
+        self,
+    ) -> None:
+        claude_env: dict[str, str] = {}
+        initial = providers.ClaudeTrustMaterial(
+            certificates=b"",
+            excluded_sha1_fingerprints=frozenset(),
+        )
+        first_generations: list[str] = []
+
+        def corrupt_system_ca(*_args: object) -> None:
+            evidence = json.loads(
+                (
+                    self.review.container_dir
+                    / providers.CLAUDE_TRUST_POLICY_EVIDENCE_NAME
+                ).read_text(encoding="utf-8")
+            )
+            self.assertEqual(evidence["status"], "complete")
+            first_generations.append(str(evidence["generation"]))
+            self.claude_system_ca.write_bytes(
+                b"-----BEGIN PRIVATE "
+                b"KEY-----\nfixture\n-----END PRIVATE "
+                b"KEY-----\n"
+            )
+
+        self.trust_preflight.side_effect = self.preflight_claude_trust_policy
+        self.trust.side_effect = self.read_claude_trust_certificates
+        self.warmup.side_effect = corrupt_system_ca
+        with (
+            mock.patch.object(
+                providers,
+                "child_environment",
+                return_value=claude_env,
+            ),
+            mock.patch.object(
+                providers,
+                "_resolve_validated_claude_executable",
+                return_value=(pathlib.Path("/fixture/claude"), claude_env),
+            ),
+            mock.patch.object(
+                providers,
+                "_with_claude_review_tool_path",
+                return_value=claude_env,
+            ),
+            mock.patch.object(
+                providers,
+                "_read_claude_trust_certificates_impl",
+                return_value=initial,
+            ) as read_impl,
+            mock.patch.object(providers, "_claude_attempt") as claude_attempt,
+        ):
+            outcome = providers.run_review(
+                review=self.review,
+                reviewer="claude",
+                egress_consent="triple-review",
+            )
+
+        evidence = json.loads(
+            (
+                self.review.container_dir
+                / providers.CLAUDE_TRUST_POLICY_EVIDENCE_NAME
+            ).read_text(encoding="utf-8")
+        )
+        runner_error = (self.review.container_dir / "runner-error.txt").read_text(
+            encoding="utf-8"
+        )
+        self.assertEqual(outcome.returncode, 2)
+        self.assertEqual(read_impl.call_count, 1)
+        self.assertEqual(evidence["status"], "blocked")
+        self.assertNotEqual(evidence["generation"], first_generations[0])
+        self.assertTrue((self.review.container_dir / "claude-blocked.json").is_file())
+        self.assertIn("cannot be represented", runner_error)
+        self.assertNotIn("executable validation failed", runner_error)
+        self.warmup.assert_called_once()
+        claude_attempt.assert_not_called()
+
     def test_native_claude_entitlement_exhaustion_stops_the_lane(self) -> None:
         claude_env = {"ANTHROPIC_API_KEY": "fixture-key"}
         attempts = tuple(
@@ -3486,7 +3562,7 @@ class ProviderPolicyTest(unittest.TestCase):
             (ca_root / providers.CLAUDE_CALLER_CA_SNAPSHOT_NAME).exists()
         )
 
-    def test_claude_preflight_rejects_system_private_key_before_exclusions(
+    def test_claude_preflight_records_blocked_system_private_key_before_exclusions(
         self,
     ) -> None:
         self.claude_system_ca.write_bytes(
@@ -3499,17 +3575,22 @@ class ProviderPolicyTest(unittest.TestCase):
                 providers,
                 "_read_claude_trust_certificates_impl",
             ) as read_impl,
-            self.assertRaisesRegex(ReviewError, "contains a private key"),
+            self.assertRaisesRegex(
+                providers.ClaudeTrustPolicyUnavailable,
+                "system CA baseline is invalid",
+            ),
         ):
             self.preflight_claude_trust_policy(self.review)
 
         read_impl.assert_not_called()
-        self.assertFalse(
+        evidence = json.loads(
             (
                 self.review.container_dir
                 / providers.CLAUDE_TRUST_POLICY_EVIDENCE_NAME
-            ).exists()
+            ).read_text(encoding="utf-8")
         )
+        self.assertEqual(evidence["status"], "blocked")
+        self.assertEqual(evidence["additional_root_resolution"], "blocked")
 
     def test_claude_tls_preparation_enforces_canonical_output_budgets(self) -> None:
         system_certificate, caller_certificate, trust_certificate = (
