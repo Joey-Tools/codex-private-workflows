@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import pathlib
 import re
@@ -23,7 +24,6 @@ from .common import (
     is_relative_to,
     resolve_git,
     restore_signal_mask,
-    read_json,
     run,
     write_json,
     write_text_atomic,
@@ -123,6 +123,7 @@ MAX_CHANGED_METADATA_BYTES = 128 * 1024 * 1024
 MAX_CHANGED_ENTRIES = 100_000
 MAX_CHANGED_BLOB_SCAN_BYTES = 512 * 1024 * 1024
 MAX_REVIEW_PROMPT_BYTES = 64 * 1024
+MAX_SYNTHETIC_SECRET_EXEMPTIONS_BYTES = 64 * 1024
 LONG_ALPHANUMERIC_SECRET = re.compile(rb"[A-Za-z0-9]{24,512}")
 LONG_NUMERIC_SECRET = re.compile(rb"[0-9]{16,512}")
 SYNTHETIC_SECRET_EXEMPTIONS_FILE = "synthetic-secret-exemptions.json"
@@ -1158,12 +1159,84 @@ def validate_workspace_layout(review: ReviewWorkspace) -> None:
 def _load_synthetic_secret_exemptions(
     review: ReviewWorkspace,
 ) -> tuple[SyntheticSecretExemption, ...]:
-    manifest_path = (
-        review.workspace_root
-        / ".codex-review"
-        / SYNTHETIC_SECRET_EXEMPTIONS_FILE
-    )
-    manifest = read_json(manifest_path)
+    no_follow = getattr(os, "O_NOFOLLOW", None)
+    directory = getattr(os, "O_DIRECTORY", None)
+    nonblocking = getattr(os, "O_NONBLOCK", None)
+    if no_follow is None or directory is None or nonblocking is None:
+        raise ReviewError(
+            "secure synthetic secret exemption manifest reads are unavailable"
+        )
+
+    descriptors: list[int] = []
+    try:
+        directory_flags = os.O_RDONLY | directory | no_follow
+        workspace_fd = os.open(review.workspace_root, directory_flags)
+        descriptors.append(workspace_fd)
+        if not stat.S_ISDIR(os.fstat(workspace_fd).st_mode):
+            raise ReviewError("frozen review workspace is not a regular directory")
+
+        control_fd = os.open(
+            ".codex-review",
+            directory_flags,
+            dir_fd=workspace_fd,
+        )
+        descriptors.append(control_fd)
+        if not stat.S_ISDIR(os.fstat(control_fd).st_mode):
+            raise ReviewError("frozen review control path is not a regular directory")
+
+        manifest_fd = os.open(
+            SYNTHETIC_SECRET_EXEMPTIONS_FILE,
+            os.O_RDONLY | no_follow | nonblocking,
+            dir_fd=control_fd,
+        )
+        descriptors.append(manifest_fd)
+        manifest_status = os.fstat(manifest_fd)
+        if not stat.S_ISREG(manifest_status.st_mode):
+            raise ReviewError(
+                "synthetic secret exemption manifest must be a regular file"
+            )
+        if manifest_status.st_nlink != 1:
+            raise ReviewError(
+                "synthetic secret exemption manifest must have exactly one hard link"
+            )
+        if manifest_status.st_size > MAX_SYNTHETIC_SECRET_EXEMPTIONS_BYTES:
+            raise ReviewError(
+                "synthetic secret exemption manifest exceeds the "
+                f"{MAX_SYNTHETIC_SECRET_EXEMPTIONS_BYTES}-byte limit"
+            )
+        chunks: list[bytes] = []
+        remaining = MAX_SYNTHETIC_SECRET_EXEMPTIONS_BYTES + 1
+        while remaining:
+            chunk = os.read(manifest_fd, remaining)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        encoded = b"".join(chunks)
+    except OSError as error:
+        raise ReviewError(
+            "cannot securely open synthetic secret exemption manifest: "
+            f"{error}"
+        ) from error
+    finally:
+        for descriptor in reversed(descriptors):
+            os.close(descriptor)
+
+    if len(encoded) > MAX_SYNTHETIC_SECRET_EXEMPTIONS_BYTES:
+        raise ReviewError(
+            "synthetic secret exemption manifest exceeds the "
+            f"{MAX_SYNTHETIC_SECRET_EXEMPTIONS_BYTES}-byte limit"
+        )
+    try:
+        manifest = json.loads(encoded.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ReviewError(
+            f"synthetic secret exemption manifest is invalid JSON: {error}"
+        ) from error
+    if not isinstance(manifest, dict):
+        raise ReviewError(
+            "synthetic secret exemption manifest is not a JSON object"
+        )
     if manifest.get("version") != 1:
         raise ReviewError("synthetic secret exemption manifest has an invalid version")
     requested = manifest.get("requested")
@@ -1184,7 +1257,6 @@ def _load_synthetic_secret_exemptions(
 
 def validate_external_workspace(review: ReviewWorkspace) -> tuple[str, ...]:
     validate_workspace_layout(review)
-    synthetic_secret_exemptions = _load_synthetic_secret_exemptions(review)
     workspace_root = review.workspace_root.resolve(strict=True)
     for candidate in review.workspace_root.rglob("*"):
         if not candidate.is_symlink():
@@ -1206,6 +1278,8 @@ def validate_external_workspace(review: ReviewWorkspace) -> tuple[str, ...]:
                 "external review symlink escapes the frozen workspace: "
                 f"{candidate_display} -> {target_display}"
             )
+
+    synthetic_secret_exemptions = _load_synthetic_secret_exemptions(review)
 
     sensitive_findings: list[str] = []
     sensitive_finding_count = 0

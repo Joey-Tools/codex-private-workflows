@@ -25,6 +25,7 @@ superseded_by:
 - Domain skills remain responsible for debugging, delivery, and review decisions.
 - The exemption requires an explicit CLI ID and binds the fixture path, base-side blob OID, scanner rule, and exact value; drift or any additional secret still blocks review.
 - Successful helper preflight records the applied exemption ID without storing the synthetic value in audit evidence.
+- External validation performs the symlink prepass before reading the exemption manifest, then uses directory-fd-relative `O_NOFOLLOW`/`O_NONBLOCK` access with a 64 KiB cap and regular single-link-file requirement so symlink, FIFO, oversized-file, and path-swap attacks fail closed.
 
 ## Next Steps
 

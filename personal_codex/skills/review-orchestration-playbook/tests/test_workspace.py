@@ -1026,6 +1026,157 @@ class WorkspaceTest(unittest.TestCase):
         with self.assertRaisesRegex(ReviewError, "opaque.bin.*base-blob"):
             validate_external_workspace(review)
 
+    def test_synthetic_exemption_manifest_uses_secure_bounded_open(self) -> None:
+        review = prepare_workspace(
+            repo=self.repo,
+            base_ref=self.base,
+            head_ref=self.head,
+        )
+        self.reviews.append(review)
+        real_open = os.open
+
+        with mock.patch.object(
+            workspace_runtime.os,
+            "open",
+            wraps=real_open,
+        ) as opened:
+            self.assertEqual(
+                workspace_runtime._load_synthetic_secret_exemptions(review),
+                (),
+            )
+
+        manifest_call = next(
+            call
+            for call in opened.call_args_list
+            if call.args[0]
+            == workspace_runtime.SYNTHETIC_SECRET_EXEMPTIONS_FILE
+        )
+        manifest_flags = manifest_call.args[1]
+        self.assertTrue(manifest_flags & os.O_NOFOLLOW)
+        self.assertTrue(manifest_flags & os.O_NONBLOCK)
+        self.assertIsInstance(manifest_call.kwargs["dir_fd"], int)
+
+    def test_synthetic_exemption_manifest_symlink_is_not_followed(self) -> None:
+        review = prepare_workspace(
+            repo=self.repo,
+            base_ref=self.base,
+            head_ref=self.head,
+        )
+        self.reviews.append(review)
+        manifest = (
+            review.workspace_root
+            / ".codex-review"
+            / workspace_runtime.SYNTHETIC_SECRET_EXEMPTIONS_FILE
+        )
+        outside = pathlib.Path(self.temporary.name) / "outside-manifest.json"
+        outside.write_bytes(manifest.read_bytes())
+        manifest.unlink()
+        manifest.symlink_to(outside)
+
+        with self.assertRaisesRegex(
+            ReviewError,
+            "cannot securely open synthetic secret exemption manifest",
+        ):
+            workspace_runtime._load_synthetic_secret_exemptions(review)
+
+    def test_synthetic_exemption_manifest_must_be_bounded_regular_file(self) -> None:
+        review = prepare_workspace(
+            repo=self.repo,
+            base_ref=self.base,
+            head_ref=self.head,
+        )
+        self.reviews.append(review)
+        manifest = (
+            review.workspace_root
+            / ".codex-review"
+            / workspace_runtime.SYNTHETIC_SECRET_EXEMPTIONS_FILE
+        )
+        manifest.write_bytes(
+            b" "
+            * (workspace_runtime.MAX_SYNTHETIC_SECRET_EXEMPTIONS_BYTES + 1)
+        )
+        with self.assertRaisesRegex(ReviewError, "exceeds the .*byte limit"):
+            workspace_runtime._load_synthetic_secret_exemptions(review)
+
+        manifest.unlink()
+        manifest.mkdir()
+        with self.assertRaisesRegex(ReviewError, "must be a regular file"):
+            workspace_runtime._load_synthetic_secret_exemptions(review)
+
+    @unittest.skipUnless(
+        hasattr(os, "mkfifo") and hasattr(signal, "SIGALRM"),
+        "FIFO timeout probe requires POSIX signals",
+    )
+    def test_synthetic_exemption_manifest_fifo_fails_without_blocking(self) -> None:
+        review = prepare_workspace(
+            repo=self.repo,
+            base_ref=self.base,
+            head_ref=self.head,
+        )
+        self.reviews.append(review)
+        manifest = (
+            review.workspace_root
+            / ".codex-review"
+            / workspace_runtime.SYNTHETIC_SECRET_EXEMPTIONS_FILE
+        )
+        manifest.unlink()
+        os.mkfifo(manifest)
+
+        def fail_on_timeout(_signum, _frame):
+            raise AssertionError("FIFO manifest read blocked")
+
+        previous_handler = signal.signal(signal.SIGALRM, fail_on_timeout)
+        signal.alarm(2)
+        try:
+            with self.assertRaisesRegex(ReviewError, "must be a regular file"):
+                workspace_runtime._load_synthetic_secret_exemptions(review)
+        finally:
+            signal.alarm(0)
+            signal.signal(signal.SIGALRM, previous_handler)
+
+    def test_synthetic_exemption_manifest_path_swap_fails_closed(
+        self,
+    ) -> None:
+        review = prepare_workspace(
+            repo=self.repo,
+            base_ref=self.base,
+            head_ref=self.head,
+        )
+        self.reviews.append(review)
+        manifest = (
+            review.workspace_root
+            / ".codex-review"
+            / workspace_runtime.SYNTHETIC_SECRET_EXEMPTIONS_FILE
+        )
+        original_manifest = manifest.read_bytes()
+        outside = pathlib.Path(self.temporary.name) / "swapped-manifest.json"
+        outside.write_text('{"version": 999}\n', encoding="utf-8")
+        real_open = os.open
+        swapped = False
+
+        def open_then_swap(path, *args, **kwargs):
+            nonlocal swapped
+            descriptor = real_open(path, *args, **kwargs)
+            if (
+                path == workspace_runtime.SYNTHETIC_SECRET_EXEMPTIONS_FILE
+                and kwargs.get("dir_fd") is not None
+            ):
+                manifest.unlink()
+                manifest.symlink_to(outside)
+                swapped = True
+            return descriptor
+
+        with mock.patch.object(
+            workspace_runtime.os,
+            "open",
+            side_effect=open_then_swap,
+        ):
+            with self.assertRaisesRegex(ReviewError, "exactly one hard link"):
+                workspace_runtime._load_synthetic_secret_exemptions(review)
+        self.assertTrue(swapped)
+        manifest.unlink()
+        manifest.write_bytes(original_manifest)
+
     def test_named_synthetic_fixture_exemption_is_exact_and_auditable(self) -> None:
         synthetic = b"github_" + b"pat_abcdefghijklmnop1234567890"
         fixture = self.repo / "tests" / "test_session_retrospective.py"
