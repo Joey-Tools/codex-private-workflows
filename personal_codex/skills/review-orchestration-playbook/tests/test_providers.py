@@ -8,7 +8,6 @@ import pathlib
 import socket
 import socketserver
 import ssl
-import subprocess
 import sys
 import tempfile
 import threading
@@ -50,6 +49,10 @@ class ProviderPolicyTest(unittest.TestCase):
         diff_file.write_text("diff --git a/a b/a\n", encoding="utf-8")
         (control / "changed-paths.z").write_bytes(b"")
         (control / "changed-blob-findings.z").write_bytes(b"")
+        (control / "synthetic-secret-exemptions.json").write_text(
+            json.dumps({"version": 1, "requested": [], "applied": []}) + "\n",
+            encoding="utf-8",
+        )
         prompt_file = control / "review.prompt"
         prompt_file.write_text("Review this diff.\n", encoding="utf-8")
         self.review = ReviewWorkspace(
@@ -3055,6 +3058,7 @@ class ProviderPolicyTest(unittest.TestCase):
                 evidence["review_range"],
                 f"{self.review.base_ref}..{self.review.head_ref}",
             )
+            self.assertEqual(evidence["synthetic_secret_exemptions"], [])
             return "success", "No findings."
 
         run_model_chain.side_effect = inspect_preflight
@@ -3063,6 +3067,48 @@ class ProviderPolicyTest(unittest.TestCase):
             review=self.review,
             reviewer="codex",
         )
+
+        self.assertEqual(outcome.returncode, 0)
+        self.assertEqual(outcome.final_text, "No findings.")
+
+    def test_codex_preflight_records_applied_synthetic_fixture_exemption(
+        self,
+    ) -> None:
+        identifier = "synthetic-fixture-v1"
+
+        def inspect_preflight(**_kwargs):
+            evidence = json.loads(
+                (self.review.container_dir / "preflight.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertEqual(
+                evidence["synthetic_secret_exemptions"],
+                [identifier],
+            )
+            return "success", "No findings."
+
+        with (
+            mock.patch.object(
+                providers,
+                "validate_external_workspace",
+                return_value=(identifier,),
+            ),
+            mock.patch.object(
+                providers,
+                "_review_environment",
+                return_value={},
+            ),
+            mock.patch.object(
+                providers,
+                "_run_model_chain",
+                side_effect=inspect_preflight,
+            ),
+        ):
+            outcome = providers.run_review(
+                review=self.review,
+                reviewer="codex",
+            )
 
         self.assertEqual(outcome.returncode, 0)
         self.assertEqual(outcome.final_text, "No findings.")

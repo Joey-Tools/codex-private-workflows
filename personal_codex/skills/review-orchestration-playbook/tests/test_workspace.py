@@ -321,6 +321,32 @@ class WorkspaceTest(unittest.TestCase):
             "generic-secret-assignment",
         )
 
+    def test_exact_ignored_secret_value_does_not_hide_adjacent_or_other_secrets(
+        self,
+    ) -> None:
+        synthetic = b"github_" + b"pat_abcdefghijklmnop1234567890"
+
+        self.assertIsNone(
+            _value_secret_rule(
+                synthetic,
+                ignored_secret_values=(synthetic,),
+            )
+        )
+        self.assertEqual(
+            _value_secret_rule(
+                synthetic + b"A",
+                ignored_secret_values=(synthetic,),
+            ),
+            "github-token",
+        )
+        self.assertEqual(
+            _value_secret_rule(
+                synthetic + b"\nAKIA" + b"A" * 16,
+                ignored_secret_values=(synthetic,),
+            ),
+            "aws-access-key",
+        )
+
     def test_unquoted_secret_accepts_common_password_punctuation(self) -> None:
         credentials = (
             "".join(("StrongPass", "123456")),
@@ -999,6 +1025,121 @@ class WorkspaceTest(unittest.TestCase):
         self.assertNotIn(secret, findings)
         with self.assertRaisesRegex(ReviewError, "opaque.bin.*base-blob"):
             validate_external_workspace(review)
+
+    def test_named_synthetic_fixture_exemption_is_exact_and_auditable(self) -> None:
+        synthetic = b"github_" + b"pat_abcdefghijklmnop1234567890"
+        fixture = self.repo / "tests" / "test_session_retrospective.py"
+        fixture.parent.mkdir()
+        fixture.write_bytes(b'SENTINELS = [b"' + synthetic + b'"]\n')
+        git(self.repo, "add", str(fixture.relative_to(self.repo)))
+        git(self.repo, "commit", "-m", "Add synthetic GitHub token fixture")
+        fixture_base = git(self.repo, "rev-parse", "HEAD")
+        fixture_blob = git(
+            self.repo,
+            "rev-parse",
+            f"{fixture_base}:tests/test_session_retrospective.py",
+        )
+        fixture.write_text(
+            'SENTINELS = [b"github_" + b"pat_abcdefghijklmnop1234567890"]\n',
+            encoding="utf-8",
+        )
+        git(self.repo, "add", str(fixture.relative_to(self.repo)))
+        git(self.repo, "commit", "-m", "Construct synthetic token at runtime")
+        fixture_head = git(self.repo, "rev-parse", "HEAD")
+
+        blocked = prepare_workspace(
+            repo=self.repo,
+            base_ref=fixture_base,
+            head_ref=fixture_head,
+        )
+        self.reviews.append(blocked)
+        with self.assertRaisesRegex(
+            ReviewError,
+            r"test_session_retrospective\.py.*base-blob.*review\.diff",
+        ):
+            validate_external_workspace(blocked)
+
+        identifier = "test-session-retrospective-github-pat-v1"
+        exemption = workspace_runtime.SyntheticSecretExemption(
+            identifier=identifier,
+            path="tests/test_session_retrospective.py",
+            side="base",
+            blob_oid=fixture_blob,
+            rule="github-token",
+            value=synthetic,
+        )
+        with mock.patch.dict(
+            workspace_runtime.KNOWN_SYNTHETIC_SECRET_EXEMPTIONS,
+            {identifier: exemption},
+        ):
+            review = prepare_workspace(
+                repo=self.repo,
+                base_ref=fixture_base,
+                head_ref=fixture_head,
+                synthetic_secret_exemptions=(identifier,),
+            )
+            self.reviews.append(review)
+            self.assertEqual(validate_external_workspace(review), (identifier,))
+            manifest = (
+                review.workspace_root
+                / ".codex-review/synthetic-secret-exemptions.json"
+            ).read_bytes()
+            self.assertNotIn(synthetic, manifest)
+            evidence = json.loads(manifest)
+            self.assertEqual(evidence["requested"], [identifier])
+            self.assertEqual(evidence["applied"][0]["blob_oid"], fixture_blob)
+            evidence["applied"][0]["path"] = "tests/other_fixture.py"
+            (
+                review.workspace_root
+                / ".codex-review/synthetic-secret-exemptions.json"
+            ).write_text(json.dumps(evidence) + "\n", encoding="utf-8")
+            with self.assertRaisesRegex(
+                ReviewError,
+                "manifest failed verification",
+            ):
+                validate_external_workspace(review)
+
+    def test_named_synthetic_fixture_exemption_rejects_blob_drift(self) -> None:
+        synthetic = b"github_" + b"pat_abcdefghijklmnop1234567890"
+        fixture = self.repo / "tests" / "test_session_retrospective.py"
+        fixture.parent.mkdir()
+        fixture.write_bytes(b'SENTINELS = [b"' + synthetic + b'"]\n')
+        git(self.repo, "add", str(fixture.relative_to(self.repo)))
+        git(self.repo, "commit", "-m", "Add synthetic GitHub token fixture")
+        fixture_base = git(self.repo, "rev-parse", "HEAD")
+        fixture.write_text(
+            'SENTINELS = [b"github_" + b"pat_abcdefghijklmnop1234567890"]\n',
+            encoding="utf-8",
+        )
+        git(self.repo, "add", str(fixture.relative_to(self.repo)))
+        git(self.repo, "commit", "-m", "Construct synthetic token at runtime")
+        fixture_head = git(self.repo, "rev-parse", "HEAD")
+
+        identifier = "test-session-retrospective-github-pat-v1"
+        exemption = workspace_runtime.SyntheticSecretExemption(
+            identifier=identifier,
+            path="tests/test_session_retrospective.py",
+            side="base",
+            blob_oid="0" * 40,
+            rule="github-token",
+            value=synthetic,
+        )
+        with (
+            mock.patch.dict(
+                workspace_runtime.KNOWN_SYNTHETIC_SECRET_EXEMPTIONS,
+                {identifier: exemption},
+            ),
+            self.assertRaisesRegex(
+                ReviewError,
+                "did not match the exact configured fixture",
+            ),
+        ):
+            prepare_workspace(
+                repo=self.repo,
+                base_ref=fixture_base,
+                head_ref=fixture_head,
+                synthetic_secret_exemptions=(identifier,),
+            )
 
     def test_oauth_refresh_token_is_detected_in_head_content(self) -> None:
         credential = pathlib.Path(self.temporary.name) / "oauth.json"

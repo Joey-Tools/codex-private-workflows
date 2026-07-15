@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import os
 import pathlib
 import re
@@ -22,7 +23,9 @@ from .common import (
     is_relative_to,
     resolve_git,
     restore_signal_mask,
+    read_json,
     run,
+    write_json,
     write_text_atomic,
 )
 from .prompt import build_review_prompt
@@ -122,6 +125,66 @@ MAX_CHANGED_BLOB_SCAN_BYTES = 512 * 1024 * 1024
 MAX_REVIEW_PROMPT_BYTES = 64 * 1024
 LONG_ALPHANUMERIC_SECRET = re.compile(rb"[A-Za-z0-9]{24,512}")
 LONG_NUMERIC_SECRET = re.compile(rb"[0-9]{16,512}")
+SYNTHETIC_SECRET_EXEMPTIONS_FILE = "synthetic-secret-exemptions.json"
+
+
+@dataclass(frozen=True)
+class SyntheticSecretExemption:
+    identifier: str
+    path: str
+    side: str
+    blob_oid: str
+    rule: str
+    value: bytes
+
+
+KNOWN_SYNTHETIC_SECRET_EXEMPTIONS = {
+    "codex-workflow-hygiene-session-retrospective-github-pat-v1": (
+        SyntheticSecretExemption(
+            identifier=(
+                "codex-workflow-hygiene-session-retrospective-github-pat-v1"
+            ),
+            path="tests/test_session_retrospective.py",
+            side="base",
+            blob_oid="a7f3c30fad480a3c31b47a18acd2bd3afef08cc3",
+            rule="github-token",
+            value=b"github_" + b"pat_abcdefghijklmnop1234567890",
+        )
+    ),
+}
+
+
+def synthetic_secret_exemption_ids() -> tuple[str, ...]:
+    return tuple(sorted(KNOWN_SYNTHETIC_SECRET_EXEMPTIONS))
+
+
+def _resolve_synthetic_secret_exemptions(
+    identifiers: tuple[str, ...],
+) -> tuple[SyntheticSecretExemption, ...]:
+    if len(set(identifiers)) != len(identifiers):
+        raise ReviewError("synthetic secret exemption identifiers must be unique")
+    exemptions: list[SyntheticSecretExemption] = []
+    for identifier in identifiers:
+        try:
+            exemptions.append(KNOWN_SYNTHETIC_SECRET_EXEMPTIONS[identifier])
+        except KeyError as error:
+            raise ReviewError(
+                f"unknown synthetic secret exemption: {identifier}"
+            ) from error
+    return tuple(exemptions)
+
+
+def _synthetic_secret_exemption_evidence(
+    exemption: SyntheticSecretExemption,
+) -> dict[str, str]:
+    return {
+        "id": exemption.identifier,
+        "path": exemption.path,
+        "side": exemption.side,
+        "blob_oid": exemption.blob_oid,
+        "rule": exemption.rule,
+        "value_sha256": hashlib.sha256(exemption.value).hexdigest(),
+    }
 
 
 @dataclass(frozen=True)
@@ -899,6 +962,7 @@ def _scan_batch_blob(
     cat_output: BinaryIO,
     object_id: str,
     scanned_bytes: int,
+    ignored_secret_values: tuple[bytes, ...] = (),
 ) -> tuple[str | None, int]:
     cat_input.write(object_id.encode("ascii") + b"\n")
     cat_input.flush()
@@ -917,7 +981,11 @@ def _scan_batch_blob(
         raise ReviewError("changed Git blob exceeds the per-file review scan limit")
     if size > MAX_CHANGED_BLOB_SCAN_BYTES - scanned_bytes:
         raise ReviewError("changed Git blobs exceed the total review scan limit")
-    rule = _stream_secret_rule(cat_output, size=size)
+    rule = _stream_secret_rule(
+        cat_output,
+        size=size,
+        ignored_secret_values=ignored_secret_values,
+    )
     if cat_output.read(1) != b"\n":
         raise ReviewError("missing delimiter after scanned git cat-file blob")
     return rule, scanned_bytes + size
@@ -930,8 +998,10 @@ def _write_changed_blob_findings(
     base_sha: str,
     head_sha: str,
     destination: pathlib.Path,
-) -> None:
+    synthetic_secret_exemptions: tuple[SyntheticSecretExemption, ...],
+) -> tuple[str, ...]:
     environment = _git_environment(object_directory=object_directory)
+    applied_exemptions: set[str] = set()
     with (
         tempfile.TemporaryFile() as raw_output,
         tempfile.TemporaryFile() as raw_error,
@@ -994,12 +1064,38 @@ def _write_changed_blob_findings(
                         raise ReviewError(
                             f"invalid changed Git object id: {raw_object!r}"
                         ) from error
+                    matching_exemptions = tuple(
+                        exemption
+                        for exemption in synthetic_secret_exemptions
+                        if exemption.path == os.fsdecode(raw_path)
+                        and exemption.side == side
+                        and exemption.blob_oid == object_id
+                    )
+                    if len(matching_exemptions) > 1:
+                        raise ReviewError(
+                            "multiple synthetic secret exemptions match one Git blob"
+                        )
                     rule, scanned_bytes = _scan_batch_blob(
                         cat_input=cat_process.stdin,
                         cat_output=cat_process.stdout,
                         object_id=object_id,
                         scanned_bytes=scanned_bytes,
                     )
+                    if matching_exemptions:
+                        exemption = matching_exemptions[0]
+                        if rule != exemption.rule:
+                            raise ReviewError(
+                                "synthetic secret exemption no longer matches its "
+                                f"expected rule: {exemption.identifier}"
+                            )
+                        rule, scanned_bytes = _scan_batch_blob(
+                            cat_input=cat_process.stdin,
+                            cat_output=cat_process.stdout,
+                            object_id=object_id,
+                            scanned_bytes=scanned_bytes,
+                            ignored_secret_values=(exemption.value,),
+                        )
+                        applied_exemptions.add(exemption.identifier)
                     if rule:
                         findings_output.write(
                             side.encode("ascii")
@@ -1021,6 +1117,16 @@ def _write_changed_blob_findings(
             raise ReviewError(
                 f"cannot scan changed Git blobs: {_process_stderr(cat_error)}"
             )
+    requested_exemptions = {
+        exemption.identifier for exemption in synthetic_secret_exemptions
+    }
+    if applied_exemptions != requested_exemptions:
+        missing = ", ".join(sorted(requested_exemptions - applied_exemptions))
+        raise ReviewError(
+            "synthetic secret exemption did not match the exact configured fixture: "
+            f"{missing}"
+        )
+    return tuple(sorted(applied_exemptions))
 
 
 def validate_workspace_layout(review: ReviewWorkspace) -> None:
@@ -1049,8 +1155,36 @@ def validate_workspace_layout(review: ReviewWorkspace) -> None:
         )
 
 
-def validate_external_workspace(review: ReviewWorkspace) -> None:
+def _load_synthetic_secret_exemptions(
+    review: ReviewWorkspace,
+) -> tuple[SyntheticSecretExemption, ...]:
+    manifest_path = (
+        review.workspace_root
+        / ".codex-review"
+        / SYNTHETIC_SECRET_EXEMPTIONS_FILE
+    )
+    manifest = read_json(manifest_path)
+    if manifest.get("version") != 1:
+        raise ReviewError("synthetic secret exemption manifest has an invalid version")
+    requested = manifest.get("requested")
+    applied = manifest.get("applied")
+    if not isinstance(requested, list) or not all(
+        isinstance(identifier, str) for identifier in requested
+    ):
+        raise ReviewError("synthetic secret exemption manifest has invalid identifiers")
+    exemptions = _resolve_synthetic_secret_exemptions(tuple(requested))
+    expected_applied = [
+        _synthetic_secret_exemption_evidence(exemption)
+        for exemption in exemptions
+    ]
+    if applied != expected_applied:
+        raise ReviewError("synthetic secret exemption manifest failed verification")
+    return exemptions
+
+
+def validate_external_workspace(review: ReviewWorkspace) -> tuple[str, ...]:
     validate_workspace_layout(review)
+    synthetic_secret_exemptions = _load_synthetic_secret_exemptions(review)
     workspace_root = review.workspace_root.resolve(strict=True)
     for candidate in review.workspace_root.rglob("*"):
         if not candidate.is_symlink():
@@ -1159,7 +1293,17 @@ def validate_external_workspace(review: ReviewWorkspace) -> None:
             continue
         if not candidate.is_file():
             continue
-        secret_rule = _file_secret_rule(candidate)
+        ignored_secret_values = (
+            tuple(
+                exemption.value for exemption in synthetic_secret_exemptions
+            )
+            if relative == ".codex-review/review.diff"
+            else ()
+        )
+        secret_rule = _file_secret_rule(
+            candidate,
+            ignored_secret_values=ignored_secret_values,
+        )
         if secret_rule:
             record_finding(f"{path_display} ({secret_rule})")
     if sensitive_finding_count:
@@ -1170,6 +1314,9 @@ def validate_external_workspace(review: ReviewWorkspace) -> None:
             "sensitive content preflight blocked external review; remove or narrow "
             f"these paths before egress: {summary}"
         )
+    return tuple(
+        exemption.identifier for exemption in synthetic_secret_exemptions
+    )
 
 
 def _redact_secret_path(value: str, label: str) -> str:
@@ -1212,10 +1359,17 @@ def _sensitive_path_rule(relative: str) -> str | None:
     return None
 
 
-def _file_secret_rule(path: pathlib.Path) -> str | None:
+def _file_secret_rule(
+    path: pathlib.Path,
+    *,
+    ignored_secret_values: tuple[bytes, ...] = (),
+) -> str | None:
     try:
         with path.open("rb") as handle:
-            return _stream_secret_rule(handle)
+            return _stream_secret_rule(
+                handle,
+                ignored_secret_values=ignored_secret_values,
+            )
     except OSError as error:
         path_display = _redact_secret_path(os.fspath(path), "snapshot path")
         error_code = f" (errno {error.errno})" if error.errno is not None else ""
@@ -1224,7 +1378,12 @@ def _file_secret_rule(path: pathlib.Path) -> str | None:
         ) from error
 
 
-def _stream_secret_rule(stream: BinaryIO, *, size: int | None = None) -> str | None:
+def _stream_secret_rule(
+    stream: BinaryIO,
+    *,
+    size: int | None = None,
+    ignored_secret_values: tuple[bytes, ...] = (),
+) -> str | None:
     overlap = 4096
     pending = b""
     remaining = size
@@ -1239,12 +1398,36 @@ def _stream_secret_rule(stream: BinaryIO, *, size: int | None = None) -> str | N
         if remaining is not None:
             remaining -= len(chunk)
         if finding is None:
-            finding = _value_secret_rule(pending + chunk)
+            finding = _value_secret_rule(
+                pending + chunk,
+                ignored_secret_values=ignored_secret_values,
+            )
         pending = (pending + chunk)[-overlap:]
     return finding
 
 
-def _value_secret_rule(value: bytes) -> str | None:
+def _without_exact_secret_values(
+    value: bytes,
+    ignored_secret_values: tuple[bytes, ...],
+) -> bytes:
+    filtered = value
+    for ignored in ignored_secret_values:
+        if not ignored:
+            raise ReviewError("synthetic secret exemption value cannot be empty")
+        filtered = re.sub(
+            rb"(?<!\w)" + re.escape(ignored) + rb"(?!\w)",
+            b"",
+            filtered,
+        )
+    return filtered
+
+
+def _value_secret_rule(
+    value: bytes,
+    *,
+    ignored_secret_values: tuple[bytes, ...] = (),
+) -> str | None:
+    value = _without_exact_secret_values(value, ignored_secret_values)
     for rule, pattern in SECRET_PATTERNS:
         if pattern.search(value):
             return rule
@@ -1320,9 +1503,13 @@ def prepare_workspace(
     base_ref: str,
     head_ref: str,
     ownership_handoff: Callable[[ReviewWorkspace], None],
+    synthetic_secret_exemptions: tuple[str, ...] = (),
     prompt_override: pathlib.Path | None = None,
 ) -> ReviewWorkspace:
     source_root = resolve_repo_root(repo)
+    requested_synthetic_exemptions = _resolve_synthetic_secret_exemptions(
+        synthetic_secret_exemptions
+    )
     base_sha = resolve_commit(source_root, base_ref, label="base ref")
     head_sha = resolve_commit(source_root, head_ref, label="head ref")
     _require_ancestor_range(
@@ -1373,12 +1560,28 @@ def prepare_workspace(
             destination=changed_paths_file,
         )
         changed_blob_findings = control_dir / "changed-blob-findings.z"
-        _write_changed_blob_findings(
+        applied_synthetic_exemptions = _write_changed_blob_findings(
             git_view=git_view,
             object_directory=object_directory,
             base_sha=base_sha,
             head_sha=head_sha,
             destination=changed_blob_findings,
+            synthetic_secret_exemptions=requested_synthetic_exemptions,
+        )
+        write_json(
+            control_dir / SYNTHETIC_SECRET_EXEMPTIONS_FILE,
+            {
+                "version": 1,
+                "requested": [
+                    exemption.identifier
+                    for exemption in requested_synthetic_exemptions
+                ],
+                "applied": [
+                    _synthetic_secret_exemption_evidence(exemption)
+                    for exemption in requested_synthetic_exemptions
+                    if exemption.identifier in applied_synthetic_exemptions
+                ],
+            },
         )
         diff_file = control_dir / "review.diff"
         _write_frozen_diff(
