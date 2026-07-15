@@ -5,7 +5,7 @@ status: completed
 created: 2026-07-15
 updated: 2026-07-15
 branch: wip/remote-host-context-default-hosts
-pr:
+pr: https://github.com/Joey-Tools/codex-private-workflows/pull/83
 supersedes: []
 superseded_by:
 ---
@@ -32,3 +32,4 @@ superseded_by:
 - `personal_codex/skills/remote-host-context/`
 - `tests/test_remote_codex_probe.py`
 - Read-only SSH preflights completed on 2026-07-15.
+- `https://github.com/Joey-Tools/codex-private-workflows/pull/83`
