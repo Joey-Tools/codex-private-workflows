@@ -8,6 +8,7 @@ import os
 import pathlib
 import plistlib
 import signal
+import shutil
 import socket
 import socketserver
 import ssl
@@ -2935,6 +2936,12 @@ class ProviderPolicyTest(unittest.TestCase):
         probe_env = run_command.call_args_list[0].kwargs["env"]
         self.assertNotIn("ANTHROPIC_API_KEY", probe_env)
         self.assertNotIn("CODEX_ISOLATED_REVIEW_RANGE", probe_env)
+        for key in (
+            *providers.CLAUDE_TLS_FILE_ENV_KEYS,
+            *providers.CLAUDE_TLS_DIR_ENV_KEYS,
+            providers.CLAUDE_CERT_STORE_ENV,
+        ):
+            self.assertNotIn(key, probe_env)
         self.assertEqual(
             probe_env["HOME"],
             str(self.review.container_dir / "claude-probe-home"),
@@ -3773,6 +3780,34 @@ class ProviderPolicyTest(unittest.TestCase):
                     frozenset({fingerprint}),
                 )
 
+    def test_claude_trust_omits_expired_root_with_discovered_openssl(self) -> None:
+        executable = shutil.which("openssl", path=providers.TRUSTED_PATH)
+        if executable is None:
+            self.skipTest("requires an OpenSSL executable on the trusted path")
+        certificate = (FIXTURES / "trust-root-expired.pem").read_bytes()
+        der, _ = providers._canonical_ca_certificate(
+            certificate,
+            source="trust-root-expired.pem",
+        )
+        fingerprint = hashlib.sha1(der, usedforsecurity=False).hexdigest().upper()
+
+        with mock.patch.object(
+            providers,
+            "CLAUDE_OPENSSL_CLIENT",
+            pathlib.Path(executable),
+        ):
+            selected = providers._select_trust_certificates(
+                (("trust-root-expired.pem", certificate),),
+                (fingerprint,),
+                ca_root=self.review.container_dir,
+            )
+
+        self.assertEqual(selected.certificates, b"")
+        self.assertEqual(
+            selected.omitted_sha1_fingerprints,
+            frozenset({fingerprint}),
+        )
+
     def test_claude_trust_omits_missing_additional_certificate(self) -> None:
         fingerprint = "A" * 40
 
@@ -3873,6 +3908,63 @@ class ProviderPolicyTest(unittest.TestCase):
                 self.assertEqual(len(captures), 1)
                 self.assertFalse(any(captures[0].stdout))
                 self.assertFalse(any(captures[0].stderr))
+
+    def test_claude_trust_classifies_openssl_verify_failure_as_invalid(
+        self,
+    ) -> None:
+        certificate = self.strict_root_certificate()
+        der, canonical = providers._canonical_ca_certificate(
+            certificate,
+            source="verification fixture",
+        )
+
+        for error_code, error_reason in (
+            (10, "certificate has expired"),
+            (68, "CA signature digest algorithm too weak"),
+            (76, "unsupported signature algorithm"),
+            (94, "Certificate public key has explicit ECC parameters"),
+        ):
+            captures: list[common.BoundedCapture] = []
+
+            def explicit_failure(
+                argv: tuple[str, ...],
+                **_kwargs: object,
+            ) -> common.BoundedCapture:
+                capture = common.BoundedCapture(
+                    argv=argv,
+                    returncode=2,
+                    stdout=bytearray(
+                        b"CN=Verification Fixture\n"
+                        + (
+                            f"error {error_code} at 0 depth lookup: "
+                            f"{error_reason}\n"
+                        ).encode()
+                    ),
+                    stderr=bytearray(
+                        f"error {argv[-1]}: verification failed\n".encode()
+                    ),
+                )
+                captures.append(capture)
+                return capture
+
+            with (
+                self.subTest(error_code=error_code),
+                mock.patch.object(
+                    providers,
+                    "run_bounded_capture",
+                    side_effect=explicit_failure,
+                ),
+                self.assertRaises(providers.ClaudeTrustCertificateInvalid),
+            ):
+                providers._verify_unconditional_trust_root(
+                    der,
+                    canonical,
+                    ca_root=self.review.container_dir,
+                )
+
+            self.assertEqual(len(captures), 1)
+            self.assertFalse(any(captures[0].stdout))
+            self.assertFalse(any(captures[0].stderr))
 
     def test_claude_trust_verify_uses_safe_relative_certificate_path(self) -> None:
         certificate = self.strict_root_certificate()
@@ -4041,6 +4133,70 @@ class ProviderPolicyTest(unittest.TestCase):
             self.assertFalse(any(captures[0].stdout))
             self.assertFalse(any(captures[0].stderr))
 
+    def test_claude_trust_rejects_openssl_internal_or_unbound_failures(
+        self,
+    ) -> None:
+        certificate = self.strict_root_certificate()
+        der, canonical = providers._canonical_ca_certificate(
+            certificate,
+            source="verification fixture",
+        )
+        cases = (
+            ("unspecified", 1, "unspecified certificate verification error", "exact"),
+            ("out-of-memory", 17, "out of memory", "exact"),
+            ("application", 50, "application verification failure", "exact"),
+            ("invalid-call", 69, "invalid call", "exact"),
+            ("store-lookup", 70, "store lookup error", "exact"),
+            ("wrong-path", 10, "certificate has expired", "wrong"),
+            ("missing-code", None, "", "exact"),
+        )
+
+        for case, error_code, error_reason, path_kind in cases:
+            captures: list[common.BoundedCapture] = []
+
+            def tool_failure(
+                argv: tuple[str, ...],
+                **_kwargs: object,
+            ) -> common.BoundedCapture:
+                path = argv[-1] if path_kind == "exact" else f"{argv[-1]}.other"
+                code_line = (
+                    b""
+                    if error_code is None
+                    else (
+                        f"error {error_code} at 0 depth lookup: "
+                        f"{error_reason}\n"
+                    ).encode()
+                )
+                capture = common.BoundedCapture(
+                    argv=argv,
+                    returncode=2,
+                    stdout=bytearray(code_line),
+                    stderr=bytearray(
+                        f"error {path}: verification failed\n".encode()
+                    ),
+                )
+                captures.append(capture)
+                return capture
+
+            with (
+                self.subTest(case=case),
+                mock.patch.object(
+                    providers,
+                    "run_bounded_capture",
+                    side_effect=tool_failure,
+                ),
+                self.assertRaises(providers.ClaudeTrustToolUnavailable),
+            ):
+                providers._verify_unconditional_trust_root(
+                    der,
+                    canonical,
+                    ca_root=self.review.container_dir,
+                )
+
+            self.assertEqual(len(captures), 1)
+            self.assertFalse(any(captures[0].stdout))
+            self.assertFalse(any(captures[0].stderr))
+
     def test_claude_trust_bounds_additional_root_count(self) -> None:
         with self.assertRaisesRegex(
             providers.ClaudeTrustPolicyUnavailable,
@@ -4135,6 +4291,84 @@ class ProviderPolicyTest(unittest.TestCase):
             self.read_claude_trust_certificates(self.review, ca_root)
 
         self.assertFalse(missing_security.exists())
+
+    @mock.patch.object(providers, "run_bounded_capture")
+    def test_claude_trust_accepts_published_security_help(
+        self,
+        run_command: mock.Mock,
+    ) -> None:
+        ca_root = self.review.container_dir / "claude-ca"
+        ca_root.mkdir()
+        capture = common.BoundedCapture(
+            argv=(str(self.claude_keychain_client), "help", "trust-settings-export"),
+            returncode=0,
+            stdout=bytearray(
+                (
+                    "\n".join(providers.CLAUDE_TRUST_EXPORT_PUBLISHED_HELP_LINES)
+                    + "\n"
+                ).encode()
+            ),
+            stderr=bytearray(),
+        )
+        run_command.return_value = capture
+
+        client, environment = providers._require_claude_trust_export_tool(
+            self.review,
+            ca_root,
+        )
+
+        self.assertEqual(client, self.claude_keychain_client)
+        self.assertEqual(environment["LANG"], "C")
+        self.assertEqual(environment["LC_ALL"], "C")
+        self.assertFalse(any(capture.stdout))
+        self.assertFalse(any(capture.stderr))
+
+    @mock.patch.object(providers, "run_bounded_capture")
+    def test_claude_trust_rejects_non_exact_security_help(
+        self,
+        run_command: mock.Mock,
+    ) -> None:
+        ca_root = self.review.container_dir / "claude-ca"
+        ca_root.mkdir()
+        published = providers.CLAUDE_TRUST_EXPORT_PUBLISHED_HELP_LINES
+        cases = (
+            ("mutated", tuple(line.replace("Export admin", "Import admin") for line in published)),
+            ("extra", (*published, "-x Unknown future behavior")),
+            ("duplicate", (published[0], *published)),
+            (
+                "mixed",
+                (
+                    published[0],
+                    providers.CLAUDE_TRUST_EXPORT_HELP_LINES[1],
+                    published[2],
+                ),
+            ),
+        )
+
+        for case, lines in cases:
+            capture = common.BoundedCapture(
+                argv=(
+                    str(self.claude_keychain_client),
+                    "help",
+                    "trust-settings-export",
+                ),
+                returncode=0,
+                stdout=bytearray(("\n".join(lines) + "\n").encode()),
+                stderr=bytearray(),
+            )
+            run_command.return_value = capture
+
+            with (
+                self.subTest(case=case),
+                self.assertRaises(providers.ClaudeTrustToolUnavailable),
+            ):
+                providers._require_claude_trust_export_tool(
+                    self.review,
+                    ca_root,
+                )
+
+            self.assertFalse(any(capture.stdout))
+            self.assertFalse(any(capture.stderr))
 
     @mock.patch.object(providers, "run_bounded_capture")
     def test_claude_trust_queries_every_domain_with_exact_bounded_commands(

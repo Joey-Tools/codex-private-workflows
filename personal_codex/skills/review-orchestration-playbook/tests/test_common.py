@@ -116,7 +116,35 @@ class ChildEnvironmentTest(unittest.TestCase):
                 )
             output_size = output_path.stat().st_size
 
-        self.assertLessEqual(output_size, 1024)
+        self.assertLessEqual(output_size, 1025)
+
+    @unittest.skipUnless(
+        hasattr(signal, "SIGXFSZ") and hasattr(os, "fork"),
+        "requires POSIX file-size limits",
+    )
+    def test_bounded_capture_accepts_exact_regular_file_limit(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            output_path = pathlib.Path(temporary) / "export.bin"
+            completed = common.run_bounded_capture(
+                (
+                    sys.executable,
+                    "-c",
+                    (
+                        "import os,sys; "
+                        "fd=os.open(sys.argv[1], os.O_WRONLY|os.O_CREAT, 0o600); "
+                        "os.write(fd, b'x' * 1024); os.close(fd)"
+                    ),
+                    str(output_path),
+                ),
+                timeout_seconds=5,
+                stdout_limit_bytes=4096,
+                stderr_limit_bytes=4096,
+                regular_file_limit_bytes=1024,
+                regular_file_limit_path=output_path,
+            )
+
+            self.assertEqual(completed.returncode, 0)
+            self.assertEqual(output_path.stat().st_size, 1024)
 
     @unittest.skipUnless(
         hasattr(signal, "SIGXFSZ") and hasattr(os, "fork"),
@@ -148,7 +176,8 @@ class ChildEnvironmentTest(unittest.TestCase):
                     regular_file_limit_path=output_path,
                 )
 
-            self.assertEqual(output_path.stat().st_size, 1024)
+            self.assertGreater(output_path.stat().st_size, 1024)
+            self.assertLessEqual(output_path.stat().st_size, 1025)
             self.assertLess(time.monotonic() - started, 2)
 
     @unittest.skipUnless(

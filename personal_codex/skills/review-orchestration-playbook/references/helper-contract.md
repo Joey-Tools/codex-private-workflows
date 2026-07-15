@@ -114,6 +114,13 @@ Each attempt records runtime, requested/effective model, requested/effective eff
 
 Claude Code executable trust is anchored to the complete SHA-256 digests published by the official Homebrew Cask for the pinned `downloads.claude.ai` 2.1.202 macOS arm64 and x86_64 artifacts. A native binary that self-reports the expected version/help text but does not match either trusted artifact digest is rejected before any probe, Keychain warmup, or review process starts; digest acceptance does not depend on whether the helper itself runs natively or through Rosetta.
 
+## Boundary Semantics
+
+- A regular-file output whose size exactly equals its configured logical byte cap is accepted. The child receives a kernel file-size limit that reserves one additional sentinel byte when the inherited resource limits permit it; the sentinel is never accepted or consumed, and any observed byte beyond the logical cap is an overflow.
+- Claude executable identity and help probes remove every supported TLS CA file, CA directory, and certificate-store environment variable in addition to auth and review variables. Later review execution may use the helper-generated trust environment, but those values cannot influence executable discovery or identity verification.
+- Trust-settings export accepts only the normalized help text emitted by the two supported `security(1)` variants: the legacy positional syntax and the published `trust-settings-export [-s] [-d] settings_file` syntax. Similar or partially matching help text remains rejected.
+- Certificate-verification failure classification is bound to the selected certificate path, an implementation-specific allowlisted numeric certificate error, the expected nonzero exit status, and the exact diagnostic family. The helper recognizes the supported LibreSSL path-first form with LibreSSL's error map and the OpenSSL 3 depth-lookup plus terminal path form with OpenSSL 3's error map; internal/runtime error codes and diagnostics for another path remain tool failures.
+
 
 ## Deliberate Omissions
 

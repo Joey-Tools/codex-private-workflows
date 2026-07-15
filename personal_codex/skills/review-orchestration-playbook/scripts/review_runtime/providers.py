@@ -148,6 +148,15 @@ CLAUDE_TRUST_EXPORT_HELP_LINES = (
     "-s Export system trust settings (default is user)",
     "-d Export admin trust settings (default is user)",
 )
+CLAUDE_TRUST_EXPORT_PUBLISHED_HELP_LINES = (
+    "Usage: trust-settings-export [-s] [-d] settings_file",
+    "-s Export system Trust Settings; default is user.",
+    "-d Export admin Trust Settings; default is user.",
+)
+CLAUDE_TRUST_EXPORT_HELP_VARIANTS = (
+    CLAUDE_TRUST_EXPORT_HELP_LINES,
+    CLAUDE_TRUST_EXPORT_PUBLISHED_HELP_LINES,
+)
 CLAUDE_TRUST_EXPORT_UNAVAILABLE = (
     "SecTrustSettingsCreateExternalRepresentation: No keychain is available. "
     "You may need to restart your computer.",
@@ -156,7 +165,7 @@ CLAUDE_TRUST_FINGERPRINT = re.compile(r"^[0-9A-Fa-f]{40}$")
 CLAUDE_TRUST_RESULT_KEY = "kSecTrustSettingsResult"
 CLAUDE_TRUST_RESULT_DENY = 3
 CLAUDE_TRUST_RESULTS = frozenset({1, 2, 3, 4})
-CLAUDE_OPENSSL_CERTIFICATE_FAILURE_CODES = frozenset(
+CLAUDE_LIBRESSL_CERTIFICATE_FAILURE_CODES = frozenset(
     (
         *range(2, 17),
         *range(18, 50),
@@ -167,6 +176,14 @@ CLAUDE_OPENSSL_CERTIFICATE_FAILURE_CODES = frozenset(
         67,
         68,
         69,
+    )
+)
+CLAUDE_OPENSSL3_CERTIFICATE_FAILURE_CODES = frozenset(
+    (
+        *range(2, 17),
+        *range(18, 50),
+        *range(51, 69),
+        *range(71, 95),
     )
 )
 CLAUDE_KEYCHAIN_BROKER_PORT_ENV = "CODEX_CLAUDE_KEYCHAIN_BROKER_PORT"
@@ -1158,12 +1175,31 @@ def _verify_unconditional_trust_root(
                     + re.escape(os.fsencode(certificate_name))
                     + rb": verification failed: ([0-9]+) \([^\r\n]*\)"
                 )
+                openssl_diagnostic = re.compile(
+                    rb"error ([0-9]+) at [0-9]+ depth lookup: [^\r\n]*"
+                )
+                openssl_path_failure = (
+                    b"error "
+                    + os.fsencode(certificate_name)
+                    + b": verification failed"
+                )
                 explicit_verification_failure = completed.returncode == 2 and any(
                     (match := diagnostic.fullmatch(line)) is not None
                     and int(match.group(1))
-                    in CLAUDE_OPENSSL_CERTIFICATE_FAILURE_CODES
+                    in CLAUDE_LIBRESSL_CERTIFICATE_FAILURE_CODES
                     for line in lines
                 )
+                if (
+                    not explicit_verification_failure
+                    and completed.returncode == 2
+                    and openssl_path_failure in lines
+                ):
+                    explicit_verification_failure = any(
+                        (match := openssl_diagnostic.fullmatch(line)) is not None
+                        and int(match.group(1))
+                        in CLAUDE_OPENSSL3_CERTIFICATE_FAILURE_CODES
+                        for line in lines
+                    )
                 if explicit_verification_failure:
                     raise ClaudeTrustCertificateInvalid(
                         "Claude trust settings reference a certificate that is not a "
@@ -1415,17 +1451,20 @@ def _require_claude_trust_export_tool(
             "Claude TLS trust export tooling is unavailable"
         ) from error
     try:
-        detail = (bytes(completed.stdout) + bytes(completed.stderr)).decode(
+        detail = (bytes(completed.stdout) + b"\n" + bytes(completed.stderr)).decode(
             "utf-8",
             errors="replace",
         )
     finally:
         completed.stdout[:] = b"\x00" * len(completed.stdout)
         completed.stderr[:] = b"\x00" * len(completed.stderr)
-    normalized_lines = {" ".join(line.split()) for line in detail.splitlines()}
-    if completed.returncode != 0 or not all(
-        line in normalized_lines for line in CLAUDE_TRUST_EXPORT_HELP_LINES
-    ):
+    normalized_lines = tuple(
+        normalized
+        for line in detail.splitlines()
+        if (normalized := " ".join(line.split()))
+    )
+    supported_help = normalized_lines in CLAUDE_TRUST_EXPORT_HELP_VARIANTS
+    if completed.returncode != 0 or not supported_help:
         raise ClaudeTrustToolUnavailable(
             "Claude TLS trust export tooling is unavailable"
         )
@@ -3416,7 +3455,11 @@ def _resolve_validated_claude_executable(
     probe_env = {
         key: value
         for key, value in prepared_env.items()
-        if key != "ANTHROPIC_API_KEY" and not key.startswith("CODEX_ISOLATED_REVIEW_")
+        if key != "ANTHROPIC_API_KEY"
+        and key not in CLAUDE_TLS_FILE_ENV_KEYS
+        and key not in CLAUDE_TLS_DIR_ENV_KEYS
+        and key != CLAUDE_CERT_STORE_ENV
+        and not key.startswith("CODEX_ISOLATED_REVIEW_")
     }
     probe_env["HOME"] = str(probe_home)
     probe_env.pop("XDG_CONFIG_HOME", None)

@@ -505,6 +505,7 @@ def _run_logged_process(
     exec_status_read_fd: int | None = None
     exec_status_write_fd: int | None = None
     effective_regular_file_limit: int | None = None
+    kernel_regular_file_limit: int | None = None
     deadline: float | None = None
 
     def forward_signal(signum: int, _frame: object) -> None:
@@ -538,15 +539,21 @@ def _run_logged_process(
             soft_limit, hard_limit = posix_resource.getrlimit(
                 posix_resource.RLIMIT_FSIZE
             )
-            effective_regular_file_limit = regular_file_limit_bytes
-            if soft_limit != posix_resource.RLIM_INFINITY:
-                effective_regular_file_limit = min(
-                    effective_regular_file_limit, soft_limit
+            kernel_regular_file_limit = regular_file_limit_bytes + 1
+            for inherited_limit in (soft_limit, hard_limit):
+                if inherited_limit != posix_resource.RLIM_INFINITY:
+                    kernel_regular_file_limit = min(
+                        kernel_regular_file_limit,
+                        int(inherited_limit),
+                    )
+            if kernel_regular_file_limit <= 1:
+                raise ReviewError(
+                    "inherited regular file limit cannot preserve an overflow sentinel"
                 )
-            if hard_limit != posix_resource.RLIM_INFINITY:
-                effective_regular_file_limit = min(
-                    effective_regular_file_limit, hard_limit
-                )
+            effective_regular_file_limit = min(
+                regular_file_limit_bytes,
+                kernel_regular_file_limit - 1,
+            )
             exec_status_read_fd, exec_status_write_fd = os.pipe()
             pass_fds = (exec_status_write_fd,)
             popen_command = (
@@ -555,7 +562,7 @@ def _run_logged_process(
                 "-S",
                 "-c",
                 REGULAR_FILE_LIMIT_WRAPPER,
-                str(effective_regular_file_limit),
+                str(kernel_regular_file_limit),
                 str(exec_status_write_fd),
                 *command,
             )
@@ -631,14 +638,14 @@ def _run_logged_process(
         output_overflow = threading.Event()
         drain_errors: list[Exception] = []
 
-        def regular_file_target_reached_limit() -> bool:
+        def regular_file_target_exceeded_limit() -> bool:
             if effective_regular_file_limit is None:
                 return False
             assert regular_file_limit_path is not None
             try:
                 return (
                     regular_file_limit_path.stat().st_size
-                    >= effective_regular_file_limit
+                    > effective_regular_file_limit
                 )
             except FileNotFoundError:
                 return False
@@ -646,7 +653,7 @@ def _run_logged_process(
         def monitor_regular_file_limit() -> None:
             try:
                 while not stop_io.is_set():
-                    if regular_file_target_reached_limit():
+                    if regular_file_target_exceeded_limit():
                         regular_file_overflow.set()
                         signal_process_group(process, signal.SIGTERM)
                         return
@@ -748,7 +755,7 @@ def _run_logged_process(
         assert timeout_seconds is not None
         assert deadline is not None
         while True:
-            if regular_file_overflow.is_set() or regular_file_target_reached_limit():
+            if regular_file_overflow.is_set() or regular_file_target_exceeded_limit():
                 regular_file_overflow.set()
                 terminate_process_group(process)
                 break
@@ -806,7 +813,7 @@ def _run_logged_process(
             if (
                 signal_overflow
                 or regular_file_overflow.is_set()
-                or regular_file_target_reached_limit()
+                or regular_file_target_exceeded_limit()
             ):
                 raise ReviewOutputLimitError(
                     "command exceeded its regular-file output limit: "
