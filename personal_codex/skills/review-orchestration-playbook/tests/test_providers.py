@@ -1528,7 +1528,7 @@ class ProviderPolicyTest(unittest.TestCase):
         legacy_token = "COPI" + "LOT_GITHUB_TOKEN"
         legacy_path = "CODEX_REVIEW_COPI" + "LOT_PATH"
         host_values = {
-            "ANTHROPIC_API_KEY": "anthropic-fixture",
+            "ANTHROPIC_API_KEY": "placeholder-test-key",
             "GH_TOKEN": "github-fixture",
             "GITHUB_TOKEN": "github-fixture",
             legacy_token: "legacy-fixture",
@@ -1540,7 +1540,7 @@ class ProviderPolicyTest(unittest.TestCase):
                 passthrough_keys=providers.CLAUDE_ENV_KEYS,
             )
 
-        self.assertEqual(env["ANTHROPIC_API_KEY"], "anthropic-fixture")
+        self.assertEqual(env["ANTHROPIC_API_KEY"], "placeholder-test-key")
         for key in ("GH_TOKEN", "GITHUB_TOKEN", legacy_token, legacy_path):
             self.assertNotIn(key, env)
 
