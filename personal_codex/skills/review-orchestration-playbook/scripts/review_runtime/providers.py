@@ -4019,24 +4019,20 @@ def _structured_error_text(stdout: bytes) -> str:
     )
 
 
-def _parse_claude_output(
-    stdout: bytes, *, requested_model: str | None = None
-) -> tuple[str | None, str | None]:
-    result = _strict_json_object(stdout)
-    if result is None:
-        return None, None
-    if result.get("type") != "result":
-        return None, None
-    model_usage = result.get("modelUsage")
-    model_usage_valid = (
-        isinstance(model_usage, dict)
-        and bool(model_usage)
-        and all(
-            isinstance(key, str) and key and isinstance(value, dict)
-            for key, value in model_usage.items()
-        )
-    )
-    candidates = list(model_usage) if model_usage_valid else []
+def _claude_model_usage_evidence(
+    result: dict[str, Any],
+    *,
+    requested_model: str | None,
+) -> tuple[str | None, bool]:
+    if "modelUsage" not in result:
+        return None, True
+    model_usage = result["modelUsage"]
+    if not isinstance(model_usage, dict) or not all(
+        isinstance(key, str) and key and isinstance(value, dict)
+        for key, value in model_usage.items()
+    ):
+        return None, False
+    candidates = list(model_usage)
     effective_model = None
     if requested_model is not None:
         effective_model = next(
@@ -4049,8 +4045,23 @@ def _parse_claude_output(
         )
     if effective_model is None and candidates:
         effective_model = candidates[-1]
+    return effective_model, True
+
+
+def _parse_claude_output_evidence(
+    stdout: bytes, *, requested_model: str | None = None
+) -> tuple[str | None, str | None, bool]:
+    result = _strict_json_object(stdout)
+    if result is None:
+        return None, None, False
+    if result.get("type") != "result":
+        return None, None, False
+    effective_model, model_evidence_consistent = _claude_model_usage_evidence(
+        result,
+        requested_model=requested_model,
+    )
     if result.get("subtype") != "success" or result.get("is_error") is not False:
-        return None, effective_model
+        return None, effective_model, model_evidence_consistent
     for key in ("error", "errors"):
         if key not in result:
             continue
@@ -4061,16 +4072,25 @@ def _parse_claude_output(
             or (isinstance(value, (list, dict)) and not value)
         )
         if not explicitly_empty:
-            return None, effective_model
+            return None, effective_model, model_evidence_consistent
     if "api_error_status" in result:
         value = result["api_error_status"]
         if value is not None and not (isinstance(value, str) and not value.strip()):
-            return None, effective_model
+            return None, effective_model, model_evidence_consistent
     final_text = result.get("result")
     if not isinstance(final_text, str) or not final_text.strip():
-        return None, effective_model
+        return None, effective_model, model_evidence_consistent
     if _structured_error_text(stdout).strip():
-        return None, effective_model
+        return None, effective_model, model_evidence_consistent
+    return final_text, effective_model, model_evidence_consistent
+
+
+def _parse_claude_output(
+    stdout: bytes, *, requested_model: str | None = None
+) -> tuple[str | None, str | None]:
+    final_text, effective_model, _model_evidence_consistent = (
+        _parse_claude_output_evidence(stdout, requested_model=requested_model)
+    )
     return final_text, effective_model
 
 
@@ -4260,6 +4280,7 @@ def _record_attempt(
     effective_effort: str | None,
     require_verified_model: bool = False,
     require_verified_effort: bool = False,
+    model_evidence_consistent: bool = True,
     effort_evidence_consistent: bool = True,
 ) -> Attempt:
     stdout_path, stderr_path = _attempt_paths(review, index, runtime, model)
@@ -4284,7 +4305,19 @@ def _record_attempt(
         stdout_path=str(stdout_path),
         stderr_path=str(stderr_path),
     )
-    if attempt.category == "success" and (
+    if require_verified_model and not model_evidence_consistent:
+        detail = (
+            "reviewer result exposed malformed model verification metadata; "
+            "refusing to classify or accept the pinned lane result"
+        )
+        _append_attempt_diagnostic(stderr_path, detail)
+        attempt = replace(
+            attempt,
+            returncode=65,
+            category="runtime-unverified",
+            final_text=None,
+        )
+    elif attempt.category == "success" and (
         (require_verified_model and effective_model is None)
         or (
             require_verified_effort
@@ -4567,16 +4600,7 @@ def _claude_attempt(
         raise FileNotFoundError(
             "claude is not available in a validated executable path"
         )
-    env = _with_claude_review_tool_path(review, env)
-    trust_material = _preflight_claude_trust_policy(
-        review,
-        bundled_roots=bundled_roots,
-    )
-    env = _prepare_claude_tls_environment(
-        review,
-        env,
-        trust_material=trust_material,
-    )
+    base_env = _with_claude_review_tool_path(review, env)
     stdout_path, stderr_path = _attempt_paths(review, index, "claude", model)
     settings = json.dumps(
         {
@@ -4597,58 +4621,101 @@ def _claude_attempt(
         },
         separators=(",", ":"),
     )
-    with contextlib.ExitStack() as stack:
-        env = stack.enter_context(_claude_keychain_runtime(review, env))
-        proxy_port = stack.enter_context(_claude_connect_proxy(env))
-        review_env = _with_claude_proxy_environment(env, proxy_port)
-        completed = run(
-            (
-                str(CLAUDE_PROBE_SANDBOX),
-                "-p",
-                _claude_review_sandbox_profile(
-                    executable,
-                    review,
-                    review_env,
-                    proxy_port=proxy_port,
-                ),
-                str(executable),
-                "--print",
-                "--model",
-                model,
-                "--effort",
-                CLAUDE_REASONING_EFFORT,
-                "--permission-mode",
-                "default",
-                "--output-format",
-                "json",
-                "--no-session-persistence",
-                "--safe-mode",
-                "--no-chrome",
-                "--disable-slash-commands",
-                "--strict-mcp-config",
-                "--mcp-config",
-                '{"mcpServers":{}}',
-                "--setting-sources",
-                "",
-                "--settings",
-                settings,
-                "--tools",
-                "Read,Grep,Glob",
-                "--allowedTools",
-                "Read(./**)",
-                "--disallowedTools",
-                "Bash,Edit,Write,NotebookEdit,WebFetch,WebSearch,Task",
-            ),
-            cwd=review.workspace_root,
-            env=review_env,
-            stdin=review.prompt_file.read_bytes(),
-            stdout_path=stdout_path,
-            stderr_path=stderr_path,
-            timeout_seconds=REVIEW_ATTEMPT_TIMEOUT_SECONDS,
-            output_file_limit_bytes=REVIEW_ATTEMPT_OUTPUT_LIMIT_BYTES,
+    completed: Completed | None = None
+    for credential_round in range(2):
+        _require_matching_claude_executable_snapshot(executable, bundled_roots)
+        trust_material = _preflight_claude_trust_policy(
+            review,
+            bundled_roots=bundled_roots,
         )
-    final_text, effective_model = _parse_claude_output(
-        completed.stdout, requested_model=model
+        attempt_env = _prepare_claude_tls_environment(
+            review,
+            base_env,
+            trust_material=trust_material,
+        )
+        _require_matching_claude_executable_snapshot(executable, bundled_roots)
+        try:
+            with contextlib.ExitStack() as stack:
+                runtime_env = stack.enter_context(
+                    _claude_keychain_runtime(review, attempt_env)
+                )
+                proxy_port = stack.enter_context(_claude_connect_proxy(runtime_env))
+                review_env = _with_claude_proxy_environment(runtime_env, proxy_port)
+                _require_matching_claude_executable_snapshot(
+                    executable,
+                    bundled_roots,
+                )
+                completed = run(
+                    (
+                        str(CLAUDE_PROBE_SANDBOX),
+                        "-p",
+                        _claude_review_sandbox_profile(
+                            executable,
+                            review,
+                            review_env,
+                            proxy_port=proxy_port,
+                        ),
+                        str(executable),
+                        "--print",
+                        "--model",
+                        model,
+                        "--effort",
+                        CLAUDE_REASONING_EFFORT,
+                        "--permission-mode",
+                        "default",
+                        "--output-format",
+                        "json",
+                        "--no-session-persistence",
+                        "--safe-mode",
+                        "--no-chrome",
+                        "--disable-slash-commands",
+                        "--strict-mcp-config",
+                        "--mcp-config",
+                        '{"mcpServers":{}}',
+                        "--setting-sources",
+                        "",
+                        "--settings",
+                        settings,
+                        "--tools",
+                        "Read,Grep,Glob",
+                        "--allowedTools",
+                        "Read(./**)",
+                        "--disallowedTools",
+                        "Bash,Edit,Write,NotebookEdit,WebFetch,WebSearch,Task",
+                    ),
+                    cwd=review.workspace_root,
+                    env=review_env,
+                    stdin=review.prompt_file.read_bytes(),
+                    stdout_path=stdout_path,
+                    stderr_path=stderr_path,
+                    timeout_seconds=REVIEW_ATTEMPT_TIMEOUT_SECONDS,
+                    output_file_limit_bytes=REVIEW_ATTEMPT_OUTPUT_LIMIT_BYTES,
+                )
+            break
+        except ClaudeKeychainCredentialRefreshRequired as error:
+            if credential_round > 0:
+                raise ClaudeAuthWarmupInconclusive(
+                    "Claude credential freshness expired during repeated final-attempt "
+                    "preflight"
+                ) from error
+            _require_matching_claude_executable_snapshot(
+                executable,
+                bundled_roots,
+            )
+            _warm_claude_local_login(
+                review,
+                executable,
+                attempt_env,
+            )
+    if completed is None:
+        raise ClaudeAuthWarmupInconclusive(
+            "Claude final-attempt credential preflight did not complete"
+        )
+    final_text, effective_model, model_evidence_consistent = (
+        _parse_claude_output_evidence(
+            completed.stdout,
+            requested_model=model,
+        )
     )
     return _record_attempt(
         review=review,
@@ -4662,6 +4729,7 @@ def _claude_attempt(
         effective_effort=CLAUDE_REASONING_EFFORT,
         require_verified_model=True,
         require_verified_effort=True,
+        model_evidence_consistent=model_evidence_consistent,
     )
 
 

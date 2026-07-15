@@ -1965,6 +1965,160 @@ class ProviderPolicyTest(unittest.TestCase):
                     self.assertNotEqual(outcome.returncode, 75)
                     self.assertFalse((self.review.container_dir / "final.txt").exists())
 
+    def test_malformed_model_usage_cannot_trigger_entitlement_fallback(self) -> None:
+        claude_env = {"ANTHROPIC_API_KEY": "fixture-key"}
+        malformed_entitlement = Completed(
+            argv=("claude",),
+            returncode=1,
+            stdout=json.dumps(
+                {
+                    "type": "result",
+                    "subtype": "error_during_execution",
+                    "is_error": True,
+                    "error": {"code": "model_not_enabled"},
+                    "modelUsage": {providers.CLAUDE_MODELS[0]: None},
+                }
+            ).encode(),
+            stderr=b"",
+        )
+        with (
+            mock.patch.object(
+                providers,
+                "child_environment",
+                return_value=claude_env,
+            ),
+            mock.patch.object(
+                providers,
+                "_resolve_validated_claude_executable",
+                return_value=(
+                    pathlib.Path("/fixture/claude"),
+                    claude_env,
+                    self.empty_bundled_roots,
+                ),
+            ),
+            mock.patch.object(
+                providers,
+                "_with_claude_review_tool_path",
+                return_value=claude_env,
+            ),
+            mock.patch.object(
+                providers,
+                "_prepare_claude_tls_environment",
+                return_value=claude_env,
+            ),
+            mock.patch.object(
+                providers,
+                "_claude_connect_proxy",
+                return_value=contextlib.nullcontext(43210),
+            ),
+            mock.patch.object(
+                providers,
+                "_claude_review_sandbox_profile",
+                return_value="(version 1)(deny default)",
+            ),
+            mock.patch.object(
+                providers,
+                "run",
+                side_effect=self.logged_run_side_effect(malformed_entitlement),
+            ) as run_command,
+        ):
+            outcome = providers.run_review(
+                review=self.review,
+                reviewer="claude",
+                egress_consent="triple-review",
+            )
+
+        self.assertEqual(outcome.returncode, 1)
+        self.assertEqual(len(outcome.attempts), 1)
+        self.assertEqual(outcome.attempts[0].category, "runtime-unverified")
+        self.assertIsNone(outcome.attempts[0].effective_model)
+        self.assertEqual(run_command.call_count, 1)
+
+    def test_final_attempt_refreshes_if_freshness_expires_during_preflight(
+        self,
+    ) -> None:
+        claude_env: dict[str, str] = {}
+
+        @contextlib.contextmanager
+        def refresh_required():
+            raise providers.ClaudeKeychainCredentialRefreshRequired(
+                "freshness expired during trust preflight"
+            )
+            yield {}
+
+        success = Completed(
+            argv=("claude",),
+            returncode=0,
+            stdout=json.dumps(
+                {
+                    "type": "result",
+                    "subtype": "success",
+                    "is_error": False,
+                    "result": "No findings.",
+                    "modelUsage": {providers.CLAUDE_MODELS[0]: {}},
+                }
+            ).encode(),
+            stderr=b"",
+        )
+        with (
+            mock.patch.object(
+                providers,
+                "_resolve_validated_claude_executable",
+                return_value=(
+                    pathlib.Path("/fixture/claude"),
+                    claude_env,
+                    self.empty_bundled_roots,
+                ),
+            ),
+            mock.patch.object(
+                providers,
+                "_with_claude_review_tool_path",
+                return_value=claude_env,
+            ),
+            mock.patch.object(
+                providers,
+                "_prepare_claude_tls_environment",
+                side_effect=lambda _review, env, **_kwargs: dict(env),
+            ) as prepare_tls,
+            mock.patch.object(
+                providers,
+                "_claude_keychain_runtime",
+                side_effect=(
+                    refresh_required(),
+                    contextlib.nullcontext(claude_env),
+                ),
+            ) as keychain_runtime,
+            mock.patch.object(
+                providers,
+                "_claude_connect_proxy",
+                return_value=contextlib.nullcontext(43210),
+            ),
+            mock.patch.object(
+                providers,
+                "_claude_review_sandbox_profile",
+                return_value="(version 1)(deny default)",
+            ),
+            mock.patch.object(
+                providers,
+                "run",
+                side_effect=self.logged_run_side_effect(success),
+            ) as run_command,
+        ):
+            attempt = providers._claude_attempt(
+                review=self.review,
+                model=providers.CLAUDE_MODELS[0],
+                index=1,
+                env=claude_env,
+            )
+
+        self.assertEqual(attempt.category, "success")
+        self.assertEqual(attempt.final_text, "No findings.")
+        self.assertEqual(keychain_runtime.call_count, 2)
+        self.assertEqual(self.trust_preflight.call_count, 2)
+        self.assertEqual(prepare_tls.call_count, 2)
+        self.warmup.assert_called_once()
+        run_command.assert_called_once()
+
     def test_claude_rejects_success_with_nonempty_errors(self) -> None:
         stdout = json.dumps(
             {
