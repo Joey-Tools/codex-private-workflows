@@ -3743,6 +3743,7 @@ class SessionShardsCompatibilityTests(unittest.TestCase):
             "source lease ref is a one-time challenge",
             "carry the authenticated `holdout_ref`",
             "holdout cannot satisfy backfill",
+            "`bootstrap-daily-holdout-identity`",
             "`start-daily-pair-successor`",
             "direct-successor run",
             "production_source_suppressed: false",
@@ -3754,6 +3755,7 @@ class SessionShardsCompatibilityTests(unittest.TestCase):
             "never as `no_activity`",
             "replace the authenticated `holdout_ref`",
             "exact installed v2 coordinator path",
+            "bootstrap-daily-holdout-identity",
             "start-daily-pair-successor",
         ):
             self.assertIn(phrase, skill)

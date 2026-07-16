@@ -69,8 +69,19 @@ python3 /Users/hoteng/.codex/skills/remote-host-context/scripts/remote_codex_pro
   --source-token session_shards_source_v1:0123456789abcdef
 ```
 
-Create one controlled Daily holdout receipt after creating the owner-only
-invocation directory:
+Bootstrap the acceptance campaign's holdout identity through the shadow runner
+after creating the owner-only invocation directory:
+
+```bash
+python3 /Users/hoteng/.codex/skills/remote-host-context/scripts/session_retrospective_v2_shadow_runner.py \
+  bootstrap-daily-holdout-identity \
+  --invocation-dir /Users/hoteng/Program/GitHub/Joey-Tools/codex-workspace/.codex-local/session-retrospective-v2-shadow/INVOCATION \
+  --holdout-identity-path /Users/hoteng/Program/GitHub/Joey-Tools/codex-workspace/.codex-local/session-retrospective-v2-shadow/INVOCATION/identity
+```
+
+The coordinator bridge's later status-issued source action reuses that exact
+identity while creating one controlled Daily holdout receipt; its helper argv
+is structurally equivalent to:
 
 ```bash
 python3 /Users/hoteng/.codex/skills/remote-host-context/scripts/remote_codex_probe.py \
@@ -84,13 +95,14 @@ python3 /Users/hoteng/.codex/skills/remote-host-context/scripts/remote_codex_pro
   --source-kind codex_session_history \
   --source-lease-ref source-lease:daily-partial:hoteng-srv-01:1 \
   --shadow-identity-path /Users/hoteng/Program/GitHub/Joey-Tools/codex-workspace/.codex-local/session-retrospective-v2-shadow/INVOCATION/identity \
-  --create-shadow-identity
+  --require-existing-shadow-identity
 ```
 
-Use `--require-existing-shadow-identity` instead of
-`--create-shadow-identity` when the invocation already has the intended
-identity. Never silently create a replacement identity after a receipt has
-been accepted.
+The runner bootstrap creates identity material only; it cannot emit a receipt,
+consume a source lease, or run transport. The leased source action must use
+`--require-existing-shadow-identity`, and the runner rejects
+`--create-shadow-identity` there. Never silently create a replacement identity
+after a receipt has been accepted.
 
 Protocol limits are fixed or hard-bounded:
 
@@ -172,9 +184,12 @@ The holdout identity path is a real current-user directory with exact mode
 `0700`. Its `holdout-hmac-v1.key` is a current-user, single-link, regular
 32-byte file with exact mode `0600`. Creating an identity is allowed only under
 the run-local shadow artifact root or a system temporary root, and the existing
-parent must already be mode `0700`. `--create-shadow-identity` fails if the
-identity exists; `--require-existing-shadow-identity` never creates or repairs
-it. Symlink components fail closed.
+parent must already be mode `0700`. The acceptance campaign creates it exactly
+once with the runner's `bootstrap-daily-holdout-identity` action. The transport
+helper's lower-level `--create-shadow-identity` still fails if the identity
+exists, but the shadow runner rejects that flag in a status-issued source
+action; `--require-existing-shadow-identity` never creates or repairs the
+identity. Symlink components fail closed.
 When the shadow runner launches the helper, it supplies the owner-only
 invocation directory as `CODEX_SESSION_SHARDS_SHADOW_ROOT`; that explicit root
 is authoritative even though the capture subprocess uses the invocation
@@ -534,12 +549,14 @@ blocks the invocation without retaining the host mutex indefinitely.
 The shadow runner's `start-daily-pair` action is the only supported way to
 start the qualification partial. It passes all canonical hosts and persists an
 owner-only closed state with `production_source_suppressed: false`. The caller
-must create the run-local holdout identity first and pass it through
+must first create the direct-child run-local holdout identity with
+`bootstrap-daily-holdout-identity` and pass that exact path through
 `--holdout-identity-path`; the runner records that identity's key ID before it
-starts the partial. The controlled gap may arise only from the authenticated
-status-issued holdout flow above, never from omitting, disabling, or
-intercepting a production source. The runner does not read, register, or update
-a live automation.
+starts the partial. Bootstrap is unavailable after Daily pair state exists and
+cannot replace an existing identity. The controlled gap may arise only from the
+authenticated status-issued holdout flow above, never from omitting, disabling,
+or intercepting a production source. The runner does not read, register, or
+update a live automation.
 
 For the Daily backfill, `start-daily-pair-successor` must verify the terminal
 partial status and authenticated coverage receipt before starting a distinct

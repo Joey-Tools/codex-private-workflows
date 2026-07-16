@@ -511,6 +511,57 @@ class SessionRetrospectiveV2ShadowAutomationTests(unittest.TestCase):
             {entry["source"] for entry in packaged_manifest["links"]},
         )
 
+    def test_runner_creates_the_permitted_shadow_parent_on_first_use(self) -> None:
+        with tempfile.TemporaryDirectory(
+            prefix="shadow-runner-fresh-workspace."
+        ) as raw:
+            workspace_root = Path(raw) / "workspace"
+            workspace_root.mkdir(mode=0o700)
+            shadow_root = (
+                workspace_root / ".codex-local/session-retrospective-v2-shadow"
+            )
+            invocation_path = shadow_root / "invocation"
+
+            with (
+                mock.patch.object(RUNNER, "WORKSPACE_ROOT", workspace_root),
+                mock.patch.object(RUNNER, "SHADOW_ROOT", shadow_root),
+            ):
+                invocation_dir, resolved_root = RUNNER._prepare_invocation_directory(
+                    invocation_path,
+                    shadow_root=shadow_root,
+                )
+
+            self.assertEqual(invocation_path.resolve(strict=True), invocation_dir)
+            self.assertEqual(shadow_root.resolve(strict=True), resolved_root)
+            for path in (shadow_root.parent, shadow_root, invocation_dir):
+                with self.subTest(path=path):
+                    self.assertTrue(path.is_dir())
+                    self.assertEqual(0o700, path.stat().st_mode & 0o777)
+
+    def test_runner_rejects_an_unsafe_permitted_shadow_parent(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="shadow-runner-unsafe-parent.") as raw:
+            workspace_root = Path(raw) / "workspace"
+            workspace_root.mkdir(mode=0o700)
+            shadow_parent = workspace_root / ".codex-local"
+            shadow_parent.mkdir(mode=0o700)
+            shadow_parent.chmod(0o770)
+            shadow_root = shadow_parent / "session-retrospective-v2-shadow"
+
+            with (
+                mock.patch.object(RUNNER, "WORKSPACE_ROOT", workspace_root),
+                mock.patch.object(RUNNER, "SHADOW_ROOT", shadow_root),
+                self.assertRaisesRegex(
+                    RUNNER.ShadowPolicyError,
+                    "not group/world writable",
+                ),
+            ):
+                RUNNER._prepare_invocation_directory(
+                    shadow_root / "invocation",
+                    shadow_root=shadow_root,
+                )
+
+            self.assertFalse(shadow_root.exists())
+
     def test_runner_rejects_unsafe_actions_before_executor_invocation(self) -> None:
         with tempfile.TemporaryDirectory(prefix="shadow-runner-policy.") as raw:
             shadow_root = Path(raw) / "shadow"
@@ -866,6 +917,41 @@ class SessionRetrospectiveV2ShadowAutomationTests(unittest.TestCase):
 
             self.assertTrue(marker.is_file())
 
+    def test_runner_holdout_bootstrap_is_confined_to_the_invocation(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="shadow-runner-holdout-path.") as raw:
+            root = Path(raw)
+            shadow_root = root / "shadow"
+            invocation_dir, _ = RUNNER._prepare_invocation_directory(
+                shadow_root / "invocation",
+                shadow_root=shadow_root,
+            )
+            nested_parent = invocation_dir / "nested"
+            nested_parent.mkdir(mode=0o700)
+            transport = RUNNER._load_transport_module()
+
+            cases = (
+                (root / "outside-identity", "stay inside"),
+                (
+                    nested_parent / "nested-identity",
+                    "direct child of the invocation directory",
+                ),
+            )
+            for identity_path, expected_error in cases:
+                with (
+                    self.subTest(identity_path=identity_path),
+                    self.assertRaisesRegex(
+                        RUNNER.ShadowPolicyError,
+                        expected_error,
+                    ),
+                ):
+                    RUNNER.bootstrap_daily_holdout_identity(
+                        invocation_dir=invocation_dir,
+                        holdout_identity_path=identity_path,
+                        shadow_root=shadow_root,
+                        transport_module=transport,
+                    )
+                self.assertFalse(identity_path.exists())
+
     def test_runner_starts_verified_daily_partial_successor_pair(self) -> None:
         now_utc = dt.datetime(2026, 7, 15, 12, tzinfo=dt.timezone.utc)
         window_start = "2026-07-14T00:00:00Z"
@@ -883,12 +969,50 @@ class SessionRetrospectiveV2ShadowAutomationTests(unittest.TestCase):
                 path.chmod(0o600)
             transport = RUNNER._load_transport_module()
             holdout_identity_path = invocation_dir / "holdout-identity"
-            holdout_identity_key = transport._create_session_shards_shadow_identity(
+            parsed_bootstrap = RUNNER.build_parser().parse_args(
+                [
+                    "bootstrap-daily-holdout-identity",
+                    "--invocation-dir",
+                    str(invocation_dir),
+                    "--holdout-identity-path",
+                    str(holdout_identity_path),
+                ]
+            )
+            bootstrap_result = RUNNER.bootstrap_daily_holdout_identity(
+                invocation_dir=invocation_dir,
+                holdout_identity_path=holdout_identity_path,
+                shadow_root=shadow_root,
+                transport_module=transport,
+            )
+            holdout_identity_key = transport._read_session_shards_shadow_identity_key(
                 holdout_identity_path
             )
             partial_run_dir = invocation_dir / "partial-run"
             backfill_run_dir = invocation_dir / "backfill-run"
             observed: list[tuple[str, ...]] = []
+
+            self.assertEqual(
+                "bootstrap-daily-holdout-identity",
+                parsed_bootstrap.runner_action,
+            )
+            self.assertEqual(
+                RUNNER.DAILY_HOLDOUT_IDENTITY_BOOTSTRAP_SCHEMA,
+                bootstrap_result["schema"],
+            )
+            self.assertEqual(
+                str(holdout_identity_path), bootstrap_result["identity_path"]
+            )
+            self.assertEqual(
+                transport._session_shards_holdout_identity_key_id(holdout_identity_key),
+                bootstrap_result["identity_key_id"],
+            )
+            with self.assertRaisesRegex(ValueError, "identity already exists"):
+                RUNNER.bootstrap_daily_holdout_identity(
+                    invocation_dir=invocation_dir,
+                    holdout_identity_path=holdout_identity_path,
+                    shadow_root=shadow_root,
+                    transport_module=transport,
+                )
 
             def executor(
                 _coordinator: Path,
@@ -943,6 +1067,18 @@ class SessionRetrospectiveV2ShadowAutomationTests(unittest.TestCase):
                 partial_manifest["holdout_identity_key_id"],
             )
             self.assertEqual(0o600, manifest_path.stat().st_mode & 0o777)
+            replacement_identity_path = invocation_dir / "replacement-holdout-identity"
+            with self.assertRaisesRegex(
+                RUNNER.ShadowPolicyError,
+                "bootstrap must precede Daily pair state",
+            ):
+                RUNNER.bootstrap_daily_holdout_identity(
+                    invocation_dir=invocation_dir,
+                    holdout_identity_path=replacement_identity_path,
+                    shadow_root=shadow_root,
+                    transport_module=transport,
+                )
+            self.assertFalse(replacement_identity_path.exists())
 
             receipt = transport._session_shards_holdout_receipt(
                 identity_key=holdout_identity_key,
@@ -1681,6 +1817,45 @@ raise SystemExit(0 if not failures else 74)
                     host="miku-bot-dev",
                     invocation_dir=invocation_dir,
                 )
+
+    def test_runner_requires_leased_transport_to_reuse_bootstrapped_identity(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory(prefix="shadow-runner-holdout-lease.") as raw:
+            shadow_root = Path(raw) / "shadow"
+            invocation_dir, _ = RUNNER._prepare_invocation_directory(
+                shadow_root / "invocation",
+                shadow_root=shadow_root,
+            )
+            status = source_status_result(invocation_dir, host="hoteng-srv-01")
+            action = status["result"]["active_source_leases"][0]
+            command = action["source_transport_command"]
+            command[command.index("--emit") + 1] = "holdout-receipt"
+            command.extend(
+                (
+                    "--shadow-identity-path",
+                    str(invocation_dir / "holdout-identity"),
+                    "--create-shadow-identity",
+                )
+            )
+
+            with self.assertRaisesRegex(
+                RUNNER.ShadowPolicyError,
+                "reuse the runner-bootstrapped shadow identity",
+            ):
+                RUNNER._validated_source_transport_command(
+                    action,
+                    host="hoteng-srv-01",
+                    invocation_dir=invocation_dir,
+                )
+
+            command[-1] = "--require-existing-shadow-identity"
+            validated = RUNNER._validated_source_transport_command(
+                action,
+                host="hoteng-srv-01",
+                invocation_dir=invocation_dir,
+            )
+            self.assertEqual(tuple(command), validated.argv)
 
     def test_runner_rejects_non_transport_capture_program(self) -> None:
         with tempfile.TemporaryDirectory(
@@ -2660,6 +2835,8 @@ raise SystemExit(0 if not failures else 74)
             "production automation update",
             "reference-only Daily and Weekly release templates are not evidence",
             "cannot perform a first registration or a verified in-place update",
+            "may create the missing ignored .codex-local parent with mode 0700",
+            "not group/world writable",
             "Never read or write any production retrospective history/state",
             "Do not initialize it as a Git repository",
             "no such ref may be created",
@@ -2667,8 +2844,11 @@ raise SystemExit(0 if not failures else 74)
             "explicit absolute run-local coordinator identity file",
             "`identity --create-identity --identity-path <path> --shadow`",
             "separate source holdout identity",
+            "`bootstrap-daily-holdout-identity",
             "`--create-shadow-identity`",
             "`--require-existing-shadow-identity`",
+            "cannot emit a receipt, consume a source lease, or run transport",
+            "rejects `--create-shadow-identity` in that leased action",
             "Never accept an implicit/default identity",
             'final `kind == "shadow"`',
             "`state_advanced == false`",
@@ -2690,6 +2870,7 @@ raise SystemExit(0 if not failures else 74)
             "latest closed UTC seven-day window",
             "Daily partial shadow",
             "Daily missing-host backfill shadow",
+            "`bootstrap-daily-holdout-identity`",
             "`start-daily-pair`",
             "`start-daily-pair-successor`",
             "`--holdout-identity-path`",

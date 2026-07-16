@@ -196,6 +196,7 @@ SANDBOX_EXEC_PATH = pathlib.Path("/usr/bin/sandbox-exec")
 DAILY_PAIR_SCHEMA = "shadow_daily_pair_v2"
 DAILY_PAIR_FILENAME = "daily-pair.json"
 DAILY_PAIR_HOLDOUT_MECHANISM = "authenticated_status_lease_holdout"
+DAILY_HOLDOUT_IDENTITY_BOOTSTRAP_SCHEMA = "shadow_daily_holdout_identity_v1"
 DAILY_PAIR_STATES = frozenset(
     {"partial_starting", "partial_started", "backfill_starting", "backfill_started"}
 )
@@ -424,6 +425,40 @@ def _ensure_owner_only_directory(path: pathlib.Path) -> None:
     _validate_owner_only_directory(path)
 
 
+def _validate_owner_controlled_directory(path: pathlib.Path) -> None:
+    try:
+        metadata = path.lstat()
+    except FileNotFoundError as exc:
+        raise ShadowPolicyError(
+            f"owner-controlled directory does not exist: {path}"
+        ) from exc
+    if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
+        raise ShadowPolicyError(f"shadow parent must be a real directory: {path}")
+    if metadata.st_uid != os.getuid() or stat.S_IMODE(metadata.st_mode) & 0o022:
+        raise ShadowPolicyError(
+            f"shadow parent must be current-user controlled and not group/world writable: {path}"
+        )
+
+
+def _prepare_shadow_root_parent(shadow_root: pathlib.Path) -> None:
+    parent = shadow_root.parent
+    _reject_symlink_components(parent)
+    if parent.is_dir():
+        if shadow_root == _normalize_system_alias_path(SHADOW_ROOT):
+            _validate_owner_controlled_directory(parent)
+        return
+
+    configured_root = _normalize_system_alias_path(SHADOW_ROOT)
+    workspace_root = _normalize_system_alias_path(WORKSPACE_ROOT)
+    permitted_parent = workspace_root / ".codex-local"
+    if shadow_root != configured_root or parent != permitted_parent:
+        raise ShadowPolicyError("shadow root parent must already exist")
+
+    _reject_symlink_components(workspace_root)
+    _validate_owner_controlled_directory(workspace_root)
+    _ensure_owner_only_directory(parent)
+
+
 def _prepare_invocation_directory(
     invocation_dir: pathlib.Path,
     *,
@@ -437,9 +472,7 @@ def _prepare_invocation_directory(
     invocation_dir = _normalize_system_alias_path(invocation_dir)
     shadow_root = _normalize_system_alias_path(shadow_root)
 
-    _reject_symlink_components(shadow_root.parent)
-    if not shadow_root.parent.is_dir():
-        raise ShadowPolicyError("shadow root parent must already exist")
+    _prepare_shadow_root_parent(shadow_root)
     _ensure_owner_only_directory(shadow_root)
     resolved_root = shadow_root.resolve(strict=True)
 
@@ -1486,6 +1519,13 @@ def _validated_source_transport_command(
             identity_path,
             invocation_dir=invocation_dir,
         )
+        if (
+            "--require-existing-shadow-identity" not in parsed_options
+            or "--create-shadow-identity" in parsed_options
+        ):
+            raise ShadowPolicyError(
+                "source transport must reuse the runner-bootstrapped shadow identity"
+            )
     lease = action.get("transport_lease")
     commitment = (
         lease.get("transport_program_commitment")
@@ -2553,6 +2593,49 @@ def _daily_pair_start_arguments(
     return tuple(arguments)
 
 
+def bootstrap_daily_holdout_identity(
+    *,
+    invocation_dir: pathlib.Path,
+    holdout_identity_path: pathlib.Path,
+    shadow_root: pathlib.Path = SHADOW_ROOT,
+    transport_module: Any | None = None,
+) -> dict[str, str]:
+    invocation_dir, _shadow_root = _prepare_invocation_directory(
+        invocation_dir,
+        shadow_root=shadow_root,
+    )
+    _validate_path_argument(
+        "--holdout-identity-path",
+        str(holdout_identity_path),
+        invocation_dir=invocation_dir,
+    )
+    holdout_identity_path = _normalize_system_alias_path(
+        holdout_identity_path.expanduser()
+    ).resolve(strict=False)
+    if holdout_identity_path.parent != invocation_dir:
+        raise ShadowPolicyError(
+            "Daily holdout identity must be a direct child of the invocation directory"
+        )
+    manifest_path = invocation_dir / DAILY_PAIR_FILENAME
+    if manifest_path.exists() or manifest_path.is_symlink():
+        raise ShadowPolicyError(
+            "Daily holdout identity bootstrap must precede Daily pair state"
+        )
+
+    module = transport_module or _load_transport_module()
+    identity_key = module._create_session_shards_shadow_identity(holdout_identity_path)
+    identity_key_id = module._session_shards_holdout_identity_key_id(identity_key)
+    if HOLDOUT_IDENTITY_KEY_ID_RE.fullmatch(identity_key_id) is None:
+        raise ShadowPolicyError("Daily holdout identity key ID is invalid")
+    return {
+        "automation_id": AUTOMATION_ID,
+        "identity_key_id": identity_key_id,
+        "identity_path": str(holdout_identity_path),
+        "result": "daily_holdout_identity_bootstrapped",
+        "schema": DAILY_HOLDOUT_IDENTITY_BOOTSTRAP_SCHEMA,
+    }
+
+
 def start_daily_shadow_pair(
     *,
     invocation_dir: pathlib.Path,
@@ -3136,6 +3219,14 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--host", choices=sorted(CANONICAL_HOSTS))
     run.add_argument("coordinator_arguments", nargs=argparse.REMAINDER)
 
+    bootstrap = subparsers.add_parser(
+        "bootstrap-daily-holdout-identity",
+        help="Create the run-local Daily holdout identity exactly once.",
+        allow_abbrev=False,
+    )
+    bootstrap.add_argument("--invocation-dir", type=pathlib.Path, required=True)
+    bootstrap.add_argument("--holdout-identity-path", type=pathlib.Path, required=True)
+
     pair = subparsers.add_parser(
         "start-daily-pair",
         help="Start a shadow Daily partial with every canonical source enabled.",
@@ -3197,6 +3288,13 @@ def main() -> int:
                 host=args.host,
             )
             return int(result.returncode)
+        if args.runner_action == "bootstrap-daily-holdout-identity":
+            result = bootstrap_daily_holdout_identity(
+                invocation_dir=args.invocation_dir,
+                holdout_identity_path=args.holdout_identity_path,
+            )
+            print(json.dumps(result, separators=(",", ":"), sort_keys=True))
+            return 0
         if args.runner_action == "start-daily-pair":
             result = start_daily_shadow_pair(
                 invocation_dir=args.invocation_dir,
