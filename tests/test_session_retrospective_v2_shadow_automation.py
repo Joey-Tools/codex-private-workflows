@@ -10,6 +10,7 @@ import json
 import multiprocessing
 import os
 from pathlib import Path
+import signal
 import subprocess
 import sys
 import tarfile
@@ -36,7 +37,7 @@ RUNNER_RELATIVE_PATH = (
 )
 RUNNER_PATH = REPO_ROOT / RUNNER_RELATIVE_PATH
 STABLE_CWD = "/Users/hoteng/Program/GitHub/Joey-Tools/codex-workspace"
-INSTALLED_V2_CLI = (
+TEMPLATE_INSTALLED_V2_CLI = (
     "/Users/hoteng/.codex/skills/codex-session-retrospective/scripts/"
     "session_retrospective_v2.py"
 )
@@ -393,7 +394,7 @@ class SessionRetrospectiveV2ShadowAutomationTests(unittest.TestCase):
                     "path/type/parse/ID mismatch blocks cutover", raw_template
                 )
                 self.assertIn(
-                    INSTALLED_V2_CLI,
+                    TEMPLATE_INSTALLED_V2_CLI,
                     prompt,
                 )
                 self.assertIn("suppress a production source", prompt)
@@ -644,7 +645,13 @@ class SessionRetrospectiveV2ShadowAutomationTests(unittest.TestCase):
             str(invocation_dir),
             capture_environment["CODEX_SESSION_SHARDS_SHADOW_ROOT"],
         )
-        self.assertIn(INSTALLED_V2_CLI, help_text)
+        self.assertIn(str(RUNNER._installed_v2_coordinator_path()), help_text)
+        self.assertEqual(
+            Path(
+                "/home/runner/.codex/skills/codex-session-retrospective/scripts/session_retrospective_v2.py"
+            ),
+            RUNNER._installed_v2_coordinator_path(Path("/home/runner")),
+        )
 
     def test_runner_requires_the_latest_closed_weekly_window(self) -> None:
         now_utc = dt.datetime(2026, 7, 16, 12, tzinfo=dt.timezone.utc)
@@ -1188,11 +1195,23 @@ raise SystemExit(0 if not failures else 74)
     def test_runner_supervisor_times_out_and_cleans_process_group(self) -> None:
         with tempfile.TemporaryDirectory(prefix="shadow-runner-timeout.") as raw:
             root = Path(raw)
-            pid_path = root / "coordinator.pid"
-            script = (
-                "import os, pathlib, time; "
-                f"pathlib.Path({str(pid_path)!r}).write_text(str(os.getpgrp())); "
-                "time.sleep(60)"
+            group_path = root / "coordinator.pgid"
+            descendant_pid_path = root / "descendant.pid"
+            descendant = root / "descendant.py"
+            descendant.write_text(
+                "import os, pathlib, signal, sys, time\n"
+                "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+                "pathlib.Path(sys.argv[1]).write_text(str(os.getpid()))\n"
+                "time.sleep(60)\n",
+                encoding="utf-8",
+            )
+            coordinator = root / "coordinator.py"
+            coordinator.write_text(
+                "import os, pathlib, subprocess, sys, time\n"
+                f"subprocess.Popen([sys.executable, {str(descendant)!r}, {str(descendant_pid_path)!r}])\n"
+                f"pathlib.Path({str(group_path)!r}).write_text(str(os.getpgrp()))\n"
+                "time.sleep(60)\n",
+                encoding="utf-8",
             )
             started = time.monotonic()
             with self.assertRaisesRegex(
@@ -1200,25 +1219,63 @@ raise SystemExit(0 if not failures else 74)
                 "coordinator action timed out",
             ):
                 RUNNER._run_supervised_process(
-                    (sys.executable, "-c", script),
+                    (sys.executable, str(coordinator)),
                     cwd=root,
                     environment=os.environ,
                     capture_output=False,
-                    timeout_seconds=0.2,
+                    timeout_seconds=0.5,
                 )
-            if pid_path.exists():
-                process_group = int(pid_path.read_text(encoding="utf-8"))
-                deadline = time.monotonic() + 3
-                while time.monotonic() < deadline:
-                    try:
-                        os.killpg(process_group, 0)
-                    except ProcessLookupError:
-                        break
-                    time.sleep(0.05)
+            self.assertTrue(group_path.is_file())
+            self.assertTrue(descendant_pid_path.is_file())
+            process_group = int(group_path.read_text(encoding="utf-8"))
+            descendant_pid = int(descendant_pid_path.read_text(encoding="utf-8"))
+            deadline = time.monotonic() + 3
+            while time.monotonic() < deadline:
+                try:
+                    os.killpg(process_group, 0)
+                except ProcessLookupError:
+                    group_exists = False
                 else:
-                    self.fail("timed-out coordinator process group was retained")
+                    group_exists = True
+                try:
+                    os.kill(descendant_pid, 0)
+                except ProcessLookupError:
+                    descendant_exists = False
+                else:
+                    descendant_exists = True
+                if not group_exists and not descendant_exists:
+                    break
+                time.sleep(0.05)
+            else:
+                try:
+                    os.killpg(process_group, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                self.fail("timed-out coordinator descendants were retained")
 
-        self.assertLess(time.monotonic() - started, 5)
+        self.assertLess(time.monotonic() - started, 7)
+
+    def test_sandbox_profile_uses_explicit_python_runtime_roots(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="shadow-sandbox-profile.") as raw:
+            root = Path(raw)
+            invocation_dir = root / "invocation"
+            invocation_dir.mkdir(mode=0o700)
+            coordinator_path = root / "coordinator.py"
+            coordinator_path.write_text("raise SystemExit(0)\n", encoding="utf-8")
+            runtime_root = root / "python-runtime"
+            runtime_root.mkdir()
+
+            with mock.patch.object(RUNNER.sys, "platform", "darwin"):
+                profile = RUNNER._sandbox_profile(
+                    invocation_dir,
+                    coordinator_path,
+                    python_read_subpaths=(runtime_root,),
+                )
+
+        self.assertIn(
+            f"(allow file-read* (subpath {json.dumps(str(runtime_root.resolve()))}))",
+            profile,
+        )
 
     def test_source_capture_uses_output_idle_timeout(self) -> None:
         class ProgressProcess:

@@ -17,7 +17,6 @@ import signal
 import stat
 import subprocess
 import sys
-import sysconfig
 import tempfile
 import threading
 import time
@@ -88,9 +87,75 @@ MAX_SOURCE_CAPTURE_BYTES = 512 * 1024 * 1024
 MAX_SOURCE_CAPTURE_ARGUMENTS = 128
 MAX_SOURCE_CAPTURE_ARGUMENT_BYTES = 64 * 1024
 MAX_TRANSPORT_PROGRAM_BYTES = 8 * 1024 * 1024
-_PROCESS_GROUP_SUPERVISOR = (
-    "import subprocess, sys\nraise SystemExit(subprocess.Popen(sys.argv[1:]).wait())\n"
-)
+_PROCESS_GROUP_SUPERVISOR = r"""
+import ctypes
+import os
+import signal
+import subprocess
+import sys
+import time
+
+if sys.platform.startswith("linux"):
+    try:
+        ctypes.CDLL(None, use_errno=True).prctl(36, 1, 0, 0, 0)
+    except (AttributeError, OSError):
+        pass
+
+child = subprocess.Popen(sys.argv[1:], start_new_session=True)
+stopping = False
+termination_deadline = None
+
+def group_exists():
+    try:
+        os.killpg(child.pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+def signal_group(signum):
+    try:
+        os.killpg(child.pid, signum)
+    except (ProcessLookupError, PermissionError):
+        pass
+
+def request_stop(signum, _frame):
+    global stopping, termination_deadline
+    if not stopping:
+        stopping = True
+        termination_deadline = time.monotonic() + 1.0
+        signal_group(signal.SIGTERM)
+
+signal.signal(signal.SIGTERM, request_stop)
+signal.signal(signal.SIGINT, request_stop)
+
+while child.poll() is None:
+    if stopping and time.monotonic() >= termination_deadline:
+        signal_group(signal.SIGKILL)
+    time.sleep(0.01)
+
+returncode = child.wait()
+if group_exists():
+    signal_group(signal.SIGKILL)
+
+group_deadline = time.monotonic() + 2.0
+while True:
+    while True:
+        try:
+            waited_pid, _status = os.waitpid(-1, os.WNOHANG)
+        except ChildProcessError:
+            break
+        if waited_pid == 0:
+            break
+    if not group_exists():
+        break
+    if time.monotonic() >= group_deadline:
+        raise SystemExit(125)
+    time.sleep(0.01)
+
+raise SystemExit(128 + signal.SIGTERM if stopping else returncode)
+"""
 _SOURCE_CAPTURE_OPTION_ARITY = {
     "--byte-end": 1,
     "--byte-start": 1,
@@ -115,10 +180,17 @@ _SOURCE_CAPTURE_OPTION_ARITY = {
 
 WORKSPACE_ROOT = pathlib.Path("/Users/hoteng/Program/GitHub/Joey-Tools/codex-workspace")
 SHADOW_ROOT = WORKSPACE_ROOT / ".codex-local/session-retrospective-v2-shadow"
-COORDINATOR_PATH = (
-    pathlib.Path.home()
-    / ".codex/skills/codex-session-retrospective/scripts/session_retrospective_v2.py"
-)
+
+
+def _installed_v2_coordinator_path(
+    home: pathlib.Path | None = None,
+) -> pathlib.Path:
+    return (
+        home if home is not None else pathlib.Path.home()
+    ) / ".codex/skills/codex-session-retrospective/scripts/session_retrospective_v2.py"
+
+
+COORDINATOR_PATH = _installed_v2_coordinator_path()
 TRANSPORT_PATH = pathlib.Path(__file__).with_name("remote_codex_probe.py")
 SANDBOX_EXEC_PATH = pathlib.Path("/usr/bin/sandbox-exec")
 DAILY_PAIR_SCHEMA = "shadow_daily_pair_v2"
@@ -706,6 +778,8 @@ def daily_pair_mutex(shadow_root: pathlib.Path) -> Iterator[None]:
 def _sandbox_profile(
     invocation_dir: pathlib.Path,
     coordinator_path: pathlib.Path,
+    *,
+    python_read_subpaths: Sequence[pathlib.Path] | None = None,
 ) -> str:
     python_path = pathlib.Path(sys.executable).resolve(strict=True)
     read_literals = {
@@ -727,12 +801,22 @@ def _sandbox_profile(
     coordinator_package = coordinator_path.parent / "retrospective_v2"
     if coordinator_package.is_dir():
         read_subpaths.add(coordinator_package.resolve(strict=True))
-    for key in ("base", "platbase", "installed_base", "installed_platbase"):
-        value = sysconfig.get_config_var(key)
-        if isinstance(value, str) and value:
-            candidate = pathlib.Path(value).resolve(strict=False)
-            if candidate.is_dir():
-                read_subpaths.add(candidate)
+    if python_read_subpaths is None:
+        python_read_subpaths = tuple(
+            pathlib.Path(value).resolve(strict=False)
+            for value in {
+                sys.prefix,
+                sys.exec_prefix,
+                sys.base_prefix,
+                sys.base_exec_prefix,
+                str(python_path.parent),
+            }
+            if value
+        )
+    for candidate in python_read_subpaths:
+        resolved = candidate.resolve(strict=False)
+        if resolved.is_dir():
+            read_subpaths.add(resolved)
 
     lines = [
         "(version 1)",
@@ -846,6 +930,8 @@ def _source_capture_environment(invocation_dir: pathlib.Path) -> dict[str, str]:
 
 
 def _process_group_exists(process: subprocess.Popen[Any]) -> bool:
+    if process.poll() is not None:
+        return False
     try:
         os.killpg(process.pid, 0)
     except ProcessLookupError:
@@ -889,12 +975,11 @@ def _terminate_process_group(process: subprocess.Popen[Any]) -> None:
         time.sleep(SOURCE_CAPTURE_POLL_SECONDS)
     if _process_group_exists(process):
         _signal_process_group(process, signal.SIGKILL)
-    if process.poll() is None:
-        try:
-            process.wait(timeout=2)
-        except subprocess.TimeoutExpired:
-            process.kill()
-            process.wait()
+    try:
+        process.wait(timeout=2)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait()
 
 
 def _run_supervised_process(

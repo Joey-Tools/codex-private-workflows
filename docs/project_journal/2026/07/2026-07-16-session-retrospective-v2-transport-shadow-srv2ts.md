@@ -25,7 +25,7 @@ superseded_by:
 - Transport pagination is bound to source tokens, resume cursors, exact byte and record coordinates, and terminal conservation proofs.
 - Raw record handling has fixed spool, scan, JSON-depth, fragment, frame, idle-progress, total-timeout, and range limits.
 - The shadow runner constrains coordinator commands, paths, writes, network access, and per-host concurrency before execution.
-- The runner exposes `/Users/hoteng/.codex/skills/codex-session-retrospective/scripts/session_retrospective_v2.py`, rechecks its inert history directory after coordinator actions, and persists Daily pair transitions plus the original holdout identity key ID atomically.
+- The runner derives and exposes the exact installed coordinator path from the effective home, rechecks its inert history directory after coordinator actions, and persists Daily pair transitions plus the original holdout identity key ID atomically.
 - Release templates do not assert that a live automation exists, and this change performs no live automation registration or update.
 - Existing remote-host helper commands retain their prior interfaces and defaults.
 
@@ -43,5 +43,6 @@ superseded_by:
 - `personal_codex/automations/weekly-session-retrospective/automation.toml`
 - `tests/test_remote_session_shards.py`
 - `tests/test_session_retrospective_v2_shadow_automation.py`
-- Focused transport/shadow suite: 96 tests passed in 7.167 seconds with 1 platform-dependent skip.
-- Full test suite: 568 tests passed in 78.292 seconds with 3 platform-dependent skips.
+- Focused transport/shadow suite: 97 tests passed in 9.201 seconds with 1 platform-dependent skip.
+- Full test suite: 569 tests passed in 159.860 seconds with 3 platform-dependent skips.
+- Changed-file Ruff format/check, Python compileall, remote-host skill validation, actionlint, and project journal validation passed.
