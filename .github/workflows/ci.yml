@@ -51,6 +51,12 @@ jobs:
           python3 -m unittest discover \
             -s personal_codex/skills/review-orchestration-playbook/tests \
             -p 'test_*.py'
+      - name: Verify private overlay sync on macOS
+        if: runner.os == 'macOS'
+        run: |
+          python3 -m unittest discover \
+            -s tests \
+            -p 'test_private_overlay_sync.py'
       - name: Run real Linux isolation integration test
         if: runner.os == 'Linux'
         env:
