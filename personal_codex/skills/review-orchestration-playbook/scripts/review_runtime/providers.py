@@ -258,6 +258,10 @@ def unique_object(pairs):
     return result
 
 
+def reject_constant(_value):
+    raise ValueError("non-standard JSON constant")
+
+
 def fingerprint(metadata):
     return (
         metadata.st_dev,
@@ -296,15 +300,29 @@ try:
         acl_get_fd = libc.acl_get_fd
         acl_get_fd.argtypes = [ctypes.c_int]
         acl_get_fd.restype = ctypes.c_void_p
+        acl_get_entry = libc.acl_get_entry
+        acl_get_entry.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_int,
+            ctypes.POINTER(ctypes.c_void_p),
+        ]
+        acl_get_entry.restype = ctypes.c_int
         acl_free = libc.acl_free
         acl_free.argtypes = [ctypes.c_void_p]
         acl_free.restype = ctypes.c_int
         ctypes.set_errno(0)
         acl = acl_get_fd(fd)
         if acl:
+            entry = ctypes.c_void_p()
+            ctypes.set_errno(0)
+            entry_status = acl_get_entry(acl, 0, ctypes.byref(entry))
+            entry_errno = ctypes.get_errno()
             acl_free(acl)
-            finish(64)
-        if ctypes.get_errno() != errno.ENOENT:
+            if entry_status == 0:
+                finish(64)
+            if entry_status != -1 or entry_errno != errno.EINVAL:
+                finish(64)
+        elif ctypes.get_errno() != errno.ENOENT:
             finish(64)
     while len(raw) <= limit:
         chunk = os.read(fd, min(64 * 1024, limit + 1 - len(raw)))
@@ -318,7 +336,11 @@ try:
         or fingerprint(before) != fingerprint(after)
     ):
         finish(64)
-    config = json.loads(raw, object_pairs_hook=unique_object)
+    config = json.loads(
+        raw,
+        object_pairs_hook=unique_object,
+        parse_constant=reject_constant,
+    )
     oauth_account = config.get("oauthAccount") if isinstance(config, dict) else None
     if not isinstance(oauth_account, dict):
         finish(64)
@@ -1481,6 +1503,13 @@ def _require_no_extended_acl(fd: int, *, label: str) -> None:
         acl_get_fd = libc.acl_get_fd
         acl_get_fd.argtypes = [ctypes.c_int]
         acl_get_fd.restype = ctypes.c_void_p
+        acl_get_entry = libc.acl_get_entry
+        acl_get_entry.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_int,
+            ctypes.POINTER(ctypes.c_void_p),
+        ]
+        acl_get_entry.restype = ctypes.c_int
         acl_free = libc.acl_free
         acl_free.argtypes = [ctypes.c_void_p]
         acl_free.restype = ctypes.c_int
@@ -1493,7 +1522,14 @@ def _require_no_extended_acl(fd: int, *, label: str) -> None:
             return
         raise ReviewError(f"cannot inspect {label} access controls")
     try:
-        raise ReviewError(f"{label} has an extended access control list")
+        entry = ctypes.c_void_p()
+        ctypes.set_errno(0)
+        entry_status = acl_get_entry(acl, 0, ctypes.byref(entry))
+        entry_errno = ctypes.get_errno()
+        if entry_status == 0:
+            raise ReviewError(f"{label} has an extended access control list")
+        if entry_status != -1 or entry_errno != errno.EINVAL:
+            raise ReviewError(f"cannot inspect {label} access controls")
     finally:
         acl_free(acl)
 
@@ -3373,6 +3409,7 @@ def _warm_claude_local_login(
     deterministic_auth_shape = (
         warmup.returncode != 0
         and output_shape.get("json_shape") == "object"
+        and output_shape.get("event_shape") == "supported-result-error"
         and output_shape.get("is_error") is True
         and (
             output_shape.get("model_usage_shape") == "missing"
@@ -3439,6 +3476,32 @@ def _claude_auth_warmup_output_shape(stdout: bytes) -> dict[str, object]:
         " ".join(raw_result.lower().split()) if isinstance(raw_result, str) else None
     )
     model_usage = result.get("modelUsage")
+    safe_type = _safe_claude_auth_warmup_enum(
+        result.get("type"),
+        CLAUDE_AUTH_WARMUP_SAFE_TYPES,
+    )
+    safe_subtype = _safe_claude_auth_warmup_enum(
+        result.get("subtype"),
+        CLAUDE_AUTH_WARMUP_SAFE_SUBTYPES,
+    )
+    is_error = result["is_error"] if type(result.get("is_error")) is bool else None
+    known_error_fields = [
+        key for key in CLAUDE_AUTH_WARMUP_ERROR_FIELDS if key in result
+    ]
+    result_shape = (
+        "missing"
+        if "result" not in result
+        else "string"
+        if isinstance(raw_result, str)
+        else "non-string"
+    )
+    supported_result_error = (
+        safe_type == "result"
+        and safe_subtype in {"success", "error_during_execution"}
+        and is_error is True
+        and result_shape == "string"
+        and known_error_fields in ([], ["api_error_status"])
+    )
     return {
         "api_error_status": safe_api_error_status,
         "api_error_status_present": "api_error_status" in result,
@@ -3451,13 +3514,12 @@ def _claude_auth_warmup_output_shape(stdout: bytes) -> dict[str, object]:
             if safe_api_error_status is not None
             else "invalid"
         ),
-        "is_error": (
-            result["is_error"] if type(result.get("is_error")) is bool else None
+        "event_shape": (
+            "supported-result-error" if supported_result_error else "unsupported"
         ),
+        "is_error": is_error,
         "json_shape": "object",
-        "known_error_fields_present": [
-            key for key in CLAUDE_AUTH_WARMUP_ERROR_FIELDS if key in result
-        ],
+        "known_error_fields_present": known_error_fields,
         "model_usage_entry_count": (
             min(len(model_usage), 256) if isinstance(model_usage, dict) else None
         ),
@@ -3483,21 +3545,9 @@ def _claude_auth_warmup_output_shape(stdout: bytes) -> dict[str, object]:
             if normalized_result is not None
             else []
         ),
-        "result_shape": (
-            "missing"
-            if "result" not in result
-            else "string"
-            if isinstance(raw_result, str)
-            else "non-string"
-        ),
-        "subtype": _safe_claude_auth_warmup_enum(
-            result.get("subtype"),
-            CLAUDE_AUTH_WARMUP_SAFE_SUBTYPES,
-        ),
-        "type": _safe_claude_auth_warmup_enum(
-            result.get("type"),
-            CLAUDE_AUTH_WARMUP_SAFE_TYPES,
-        ),
+        "result_shape": result_shape,
+        "subtype": safe_subtype,
+        "type": safe_type,
     }
 
 

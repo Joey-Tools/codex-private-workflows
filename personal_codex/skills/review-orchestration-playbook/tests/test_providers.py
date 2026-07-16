@@ -4,6 +4,7 @@ import asyncio
 from collections.abc import Callable
 import contextlib
 from dataclasses import replace
+import errno
 import hashlib
 import json
 import os
@@ -721,6 +722,26 @@ class ProviderPolicyTest(unittest.TestCase):
 
         parent_parser.assert_not_called()
 
+    def test_claude_auth_metadata_rejects_nonstandard_json_constants(self) -> None:
+        base = json.dumps(
+            {"oauthAccount": self.claude_auth_metadata},
+            separators=(",", ":"),
+        ).encode()
+        for constant in (b"NaN", b"Infinity", b"-Infinity"):
+            with self.subTest(constant=constant):
+                self.claude_auth_config.write_bytes(
+                    base[:-1] + b',"excluded":' + constant + b"}"
+                )
+                with mock.patch.object(
+                    providers,
+                    "_strict_json_object",
+                ) as parent_parser:
+                    with self.assertRaises(
+                        providers.ClaudeKeychainCredentialUnavailable
+                    ):
+                        providers._read_claude_auth_metadata_environment()
+                parent_parser.assert_not_called()
+
     def test_claude_auth_metadata_rejects_unsafe_file_identity(self) -> None:
         self.claude_auth_config.chmod(0o640)
         with self.assertRaisesRegex(
@@ -751,6 +772,40 @@ class ProviderPolicyTest(unittest.TestCase):
         finally:
             providers.run(("/bin/chmod", "-N", str(self.claude_auth_config)))
 
+    def test_acl_object_without_entries_is_not_an_extended_acl(self) -> None:
+        if sys.platform != "darwin":
+            self.skipTest("extended ACL validation requires macOS")
+        libc = mock.Mock()
+        libc.acl_get_fd.return_value = 123
+        libc.acl_get_entry.return_value = -1
+        libc.acl_free.return_value = 0
+        with (
+            mock.patch("ctypes.CDLL", return_value=libc),
+            mock.patch("ctypes.get_errno", return_value=errno.EINVAL),
+        ):
+            providers._require_no_extended_acl(42, label="fixture")
+
+        libc.acl_get_entry.assert_called_once()
+        libc.acl_free.assert_called_once_with(123)
+
+    def test_acl_object_with_an_entry_is_an_extended_acl(self) -> None:
+        if sys.platform != "darwin":
+            self.skipTest("extended ACL validation requires macOS")
+        libc = mock.Mock()
+        libc.acl_get_fd.return_value = 123
+        libc.acl_get_entry.return_value = 0
+        libc.acl_free.return_value = 0
+        with (
+            mock.patch("ctypes.CDLL", return_value=libc),
+            mock.patch("ctypes.get_errno", return_value=0),
+            self.assertRaisesRegex(ReviewError, "extended access control list"),
+        ):
+            providers._require_no_extended_acl(42, label="fixture")
+
+        libc.acl_get_entry.assert_called_once()
+        libc.acl_free.assert_called_once_with(123)
+
+    def test_claude_auth_metadata_rejects_links_and_oversize(self) -> None:
         target = self.claude_host_home / "metadata-target.json"
         target.write_text(
             json.dumps({"oauthAccount": self.claude_auth_metadata}),
@@ -1471,6 +1526,62 @@ class ProviderPolicyTest(unittest.TestCase):
 
     @mock.patch.object(providers, "_require_fresh_claude_keychain_credential")
     @mock.patch.object(providers, "_run_claude_auth_warmup")
+    def test_auth_warmup_unsupported_event_shapes_remain_inconclusive(
+        self,
+        warmup: mock.Mock,
+        require_fresh: mock.Mock,
+    ) -> None:
+        cases = (
+            {"type": "unknown", "subtype": "success"},
+            {"type": "result", "subtype": "interrupted"},
+            {"type": "result", "subtype": "success", "error": "malformed"},
+        )
+        for event_fields in cases:
+            with self.subTest(event_fields=event_fields):
+                require_fresh.side_effect = (
+                    providers.ClaudeKeychainCredentialRefreshRequired("stale"),
+                    providers.ClaudeKeychainCredentialRefreshRequired("still stale"),
+                )
+                warmup.return_value = Completed(
+                    argv=("claude",),
+                    returncode=1,
+                    stdout=json.dumps(
+                        {
+                            **event_fields,
+                            "is_error": True,
+                            "api_error_status": None,
+                            "result": (
+                                "OAuth credential is unavailable; sign in again"
+                            ),
+                            "modelUsage": {},
+                        }
+                    ).encode(),
+                    stderr=b"",
+                )
+
+                with self.assertRaisesRegex(
+                    providers.ClaudeAuthWarmupInconclusive,
+                    "returncode=1, category=other",
+                ):
+                    self.warm_claude_local_login(
+                        self.review,
+                        pathlib.Path("/bin/claude"),
+                        {},
+                    )
+
+                diagnostic = json.loads(
+                    (self.review.container_dir / "claude-auth-warmup.json").read_text(
+                        encoding="utf-8"
+                    )
+                )
+                self.assertEqual(diagnostic["category"], "other")
+                self.assertEqual(
+                    diagnostic["output_shape"]["event_shape"],
+                    "unsupported",
+                )
+
+    @mock.patch.object(providers, "_require_fresh_claude_keychain_credential")
+    @mock.patch.object(providers, "_run_claude_auth_warmup")
     def test_mixed_auth_transient_warmup_signal_remains_inconclusive(
         self,
         warmup: mock.Mock,
@@ -1587,6 +1698,7 @@ class ProviderPolicyTest(unittest.TestCase):
 
         retained = json.dumps(shape, sort_keys=True)
         self.assertEqual(shape["json_shape"], "object")
+        self.assertEqual(shape["event_shape"], "unsupported")
         self.assertEqual(shape["type"], "other")
         self.assertEqual(shape["subtype"], "other")
         self.assertIsNone(shape["api_error_status"])
