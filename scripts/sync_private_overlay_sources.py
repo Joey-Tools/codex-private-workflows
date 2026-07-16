@@ -5,9 +5,8 @@ import argparse
 import contextlib
 from collections.abc import Callable, Iterator
 import ctypes
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import errno
-from enum import Enum, auto
 import os
 from pathlib import Path
 import secrets
@@ -19,12 +18,6 @@ import tempfile
 
 class SyncError(RuntimeError):
     pass
-
-
-class _RegularFileOverlayRenameError(SyncError):
-    def __init__(self, message: str, *, error_number: int) -> None:
-        super().__init__(message)
-        self.error_number = error_number
 
 
 class _RegularFileOverlayBackupRetentionError(SyncError):
@@ -476,11 +469,11 @@ EXCLUDED_SUFFIXES = (".pyc",)
 MAX_REGULAR_FILE_OVERLAY_BYTES = 64 * 1024
 REGULAR_FILE_OVERLAY_TARGET_MODE = 0o644
 REGULAR_FILE_OVERLAY_TEMP_ATTEMPTS = 16
-REGULAR_FILE_OVERLAY_TEMP_PREFIX = ".codex-private-overlay-"
 REGULAR_FILE_OVERLAY_BACKUP_PREFIX = ".codex-private-overlay-backup-"
 REGULAR_FILE_OVERLAY_RECOVERY_ROOT = Path(".codex-tmp/private-overlay-recovery")
 REGULAR_FILE_OVERLAY_RECOVERY_SCOPE_PREFIX = "sync-"
 MAX_REGULAR_FILE_OVERLAY_RECOVERY_PATHS = 64
+MAX_REGULAR_FILE_OVERLAY_RETAINED_ENTRIES = 64
 
 
 def _is_text_candidate(path: Path, extensions: tuple[str, ...]) -> bool:
@@ -642,17 +635,42 @@ def _validate_canonical_review_target(repo_root: Path) -> None:
     _validate_canonical_review_target_contents(repo_root / CANONICAL_REVIEW_TARGET)
 
 
-def _validate_no_retired_review_references(repo_root: Path) -> None:
+def _validate_no_retired_review_references(
+    repo_root: Path,
+    *,
+    excluded_targets: tuple[Path, ...] = (),
+) -> None:
     overlay_root = repo_root / "personal_codex"
     if not overlay_root.exists():
         return
     for path in sorted(overlay_root.rglob("*.md")):
+        relative = path.relative_to(repo_root)
+        if any(
+            relative == excluded or excluded in relative.parents
+            for excluded in excluded_targets
+        ):
+            continue
         text = path.read_text(encoding="utf-8")
         for reference in RETIRED_REVIEW_REFERENCES:
             if reference in text:
                 raise SyncError(
                     "private overlay retains retired review reference "
-                    f"{reference!r} in {path.relative_to(repo_root)}"
+                    f"{reference!r} in {relative}"
+                )
+
+
+def _validate_no_retired_review_references_in_staging(
+    staging: Path,
+    target: Path,
+) -> None:
+    for path in sorted(staging.rglob("*.md")):
+        text = path.read_text(encoding="utf-8")
+        for reference in RETIRED_REVIEW_REFERENCES:
+            if reference in text:
+                relative = target / path.relative_to(staging)
+                raise SyncError(
+                    "private overlay retains retired review reference "
+                    f"{reference!r} in {relative}"
                 )
 
 
@@ -865,20 +883,35 @@ def _pin_regular_file_overlay_directory_chain(
     relative: Path,
     *,
     label: str,
+    root_binding: _PinnedRegularFileOverlayDirectory | None = None,
 ) -> Iterator[_PinnedRegularFileOverlayDirectoryChain]:
     _require_overlay_relative_path(relative, field=label)
     flags = _regular_file_overlay_directory_flags(label=label)
     with contextlib.ExitStack() as stack:
-        root_descriptor = _open_regular_file_overlay_root(root, label=label)
-        stack.callback(os.close, root_descriptor)
-        descriptors = [root_descriptor]
-        identities = [
-            _regular_file_overlay_directory_identity(
-                root_descriptor,
+        if root_binding is None:
+            root_descriptor = _open_regular_file_overlay_root(root, label=label)
+        else:
+            if root_binding.path != root:
+                raise SyncError(
+                    f"regular-file overlay {label} root capability mismatch: {root}"
+                )
+            _assert_regular_file_overlay_directory_binding(
+                root_binding,
                 label=label,
-                path=root,
             )
-        ]
+            root_descriptor = os.dup(root_binding.descriptor)
+        stack.callback(os.close, root_descriptor)
+        root_identity = _regular_file_overlay_directory_identity(
+            root_descriptor,
+            label=label,
+            path=root,
+        )
+        if root_binding is not None and root_identity != root_binding.identity:
+            raise SyncError(
+                f"regular-file overlay {label} root capability changed: {root}"
+            )
+        descriptors = [root_descriptor]
+        identities = [root_identity]
         current = root_descriptor
         current_path = root
         try:
@@ -1011,43 +1044,6 @@ def _stat_regular_file_overlay_entry(
     return metadata
 
 
-def _require_regular_file_overlay_atomic_replace() -> None:
-    if (
-        not hasattr(os, "O_CREAT")
-        or not hasattr(os, "O_EXCL")
-        or not hasattr(os, "O_NOFOLLOW")
-        or not hasattr(os, "fchmod")
-        or os.rename not in os.supports_dir_fd
-    ):
-        raise SyncError("secure regular-file overlay atomic replace is unavailable")
-
-
-def _open_regular_file_overlay_temporary(
-    parent_descriptor: int,
-) -> tuple[int, str]:
-    _require_regular_file_overlay_atomic_replace()
-    flags = (
-        os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
-    )
-    for _attempt in range(REGULAR_FILE_OVERLAY_TEMP_ATTEMPTS):
-        name = f"{REGULAR_FILE_OVERLAY_TEMP_PREFIX}{secrets.token_hex(16)}"
-        try:
-            descriptor = os.open(
-                name,
-                flags,
-                0o600,
-                dir_fd=parent_descriptor,
-            )
-        except FileExistsError:
-            continue
-        except OSError as exc:
-            raise SyncError(
-                f"cannot create regular-file overlay temporary file: {exc}"
-            ) from exc
-        return descriptor, name
-    raise SyncError("cannot allocate a unique regular-file overlay temporary file")
-
-
 def _read_regular_file_overlay_descriptor(
     descriptor: int,
     *,
@@ -1074,12 +1070,18 @@ def _write_regular_file_overlay_descriptor(descriptor: int, data: bytes) -> None
         offset += written
 
 
-def _read_regular_file_overlay_source(repo_root: Path, relative: Path) -> bytes:
+def _read_regular_file_overlay_source(
+    repo_root: Path,
+    relative: Path,
+    *,
+    repo_binding: _PinnedRegularFileOverlayDirectory | None = None,
+) -> bytes:
     source = repo_root / relative
     with _pin_regular_file_overlay_directory_chain(
         repo_root,
         relative,
         label="source",
+        root_binding=repo_binding,
     ) as chain:
         if source.is_symlink():
             raise SyncError(f"refusing regular-file overlay source symlink: {source}")
@@ -1171,191 +1173,98 @@ def _read_regular_file_overlay_source(repo_root: Path, relative: Path) -> bytes:
     return data
 
 
-def _write_regular_file_overlay_target(
-    staging: Path,
-    relative: Path,
-    data: bytes,
+def _load_regular_file_overlay_data(
+    repo_root: Path,
+    rule: SyncRule,
     *,
-    binding_stack: contextlib.ExitStack | None = None,
-) -> _PinnedRegularFileOverlayTarget | None:
-    if len(data) > MAX_REGULAR_FILE_OVERLAY_BYTES:
-        raise SyncError(
-            "regular-file overlay target data exceeds "
-            f"{MAX_REGULAR_FILE_OVERLAY_BYTES} bytes: {relative}"
+    repo_binding: _PinnedRegularFileOverlayDirectory,
+) -> dict[Path, bytes]:
+    loaded: dict[Path, bytes] = {}
+    for overlay in rule.regular_file_overlays:
+        loaded[overlay.target] = _read_regular_file_overlay_source(
+            repo_root,
+            overlay.source,
+            repo_binding=repo_binding,
         )
-    target = staging / relative
-    with contextlib.ExitStack() as local_stack:
-        chain = local_stack.enter_context(
+    return loaded
+
+
+def _pin_regular_file_overlay_targets(
+    stack: contextlib.ExitStack,
+    staging: Path,
+    staging_root: _PinnedRegularFileOverlayDirectory,
+    overlay_data: dict[Path, bytes],
+) -> tuple[_PinnedRegularFileOverlayTarget, ...]:
+    bindings: list[_PinnedRegularFileOverlayTarget] = []
+    flags = (
+        os.O_RDONLY
+        | os.O_NOFOLLOW
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NONBLOCK", 0)
+    )
+    for relative, expected_data in overlay_data.items():
+        chain = stack.enter_context(
             _pin_regular_file_overlay_directory_chain(
                 staging,
                 relative,
                 label="target",
+                root_binding=staging_root,
             )
         )
-        _ensure_safe_target(staging, target)
-        _assert_regular_file_overlay_directory_chain_binding(
-            chain,
-            label="target",
-        )
-        target_stat = _stat_regular_file_overlay_entry(
+        initial = _stat_regular_file_overlay_entry(
             chain.parent_descriptor,
             chain.name,
             label="target",
             path=relative,
         )
-        temporary_descriptor, temporary_name = _open_regular_file_overlay_temporary(
-            chain.parent_descriptor
-        )
-        local_stack.callback(os.close, temporary_descriptor)
         try:
-            try:
-                _write_regular_file_overlay_descriptor(temporary_descriptor, data)
-                written = os.fstat(temporary_descriptor)
-                _validate_overlay_regular_file(
-                    written,
-                    label="temporary target",
-                    path=Path(temporary_name),
-                )
-                written_data = _read_regular_file_overlay_descriptor(
-                    temporary_descriptor,
-                    byte_limit=len(data),
-                )
-                after_read = os.fstat(temporary_descriptor)
-                if (
-                    written_data != data
-                    or written.st_size != len(data)
-                    or _overlay_file_content_identity(written)
-                    != _overlay_file_content_identity(after_read)
-                ):
-                    raise SyncError(
-                        "regular-file overlay temporary byte verification failed: "
-                        f"{relative}"
-                    )
-                os.fchmod(temporary_descriptor, REGULAR_FILE_OVERLAY_TARGET_MODE)
-                ready = os.fstat(temporary_descriptor)
-            except OSError as exc:
-                raise SyncError(
-                    f"cannot prepare regular-file overlay temporary target: {exc}"
-                ) from exc
-            _validate_overlay_regular_file(
-                ready,
-                label="temporary target",
-                path=Path(temporary_name),
-            )
-            if (
-                ready.st_size != len(data)
-                or stat.S_IMODE(ready.st_mode) != REGULAR_FILE_OVERLAY_TARGET_MODE
-            ):
-                raise SyncError(
-                    f"regular-file overlay temporary target mode or size drift: {relative}"
-                )
-
-            current_target = _stat_regular_file_overlay_entry(
-                chain.parent_descriptor,
+            descriptor = os.open(
                 chain.name,
-                label="target",
-                path=relative,
+                flags,
+                dir_fd=chain.parent_descriptor,
             )
-            if _overlay_file_identity(current_target) != _overlay_file_identity(
-                target_stat
-            ):
-                raise SyncError(
-                    f"regular-file overlay target changed before replace: {relative}"
-                )
-            _assert_regular_file_overlay_directory_chain_binding(
-                chain,
-                label="target",
-            )
-            try:
-                os.rename(
-                    temporary_name,
-                    chain.name,
-                    src_dir_fd=chain.parent_descriptor,
-                    dst_dir_fd=chain.parent_descriptor,
-                )
-            except OSError as exc:
-                raise SyncError(
-                    f"cannot atomically replace regular-file overlay target: {relative}: {exc}"
-                ) from exc
-
-            installed_descriptor = os.fstat(temporary_descriptor)
-            installed_named = _stat_regular_file_overlay_entry(
-                chain.parent_descriptor,
-                chain.name,
-                label="target",
-                path=relative,
-            )
-            installed_data = _read_regular_file_overlay_descriptor(
-                temporary_descriptor,
-                byte_limit=len(data),
-            )
-            installed_after = os.fstat(temporary_descriptor)
-            if (
-                _overlay_file_identity(installed_named)
-                != _overlay_file_identity(installed_descriptor)
-                or installed_data != data
-                or _overlay_file_content_identity(installed_descriptor)
-                != _overlay_file_content_identity(installed_after)
-                or installed_after.st_size != len(data)
-                or stat.S_IMODE(installed_after.st_mode)
-                != REGULAR_FILE_OVERLAY_TARGET_MODE
-            ):
-                raise SyncError(
-                    f"regular-file overlay installed target verification failed: {relative}"
-                )
-            final_named = _stat_regular_file_overlay_entry(
-                chain.parent_descriptor,
-                chain.name,
-                label="target",
-                path=relative,
-            )
-            if _overlay_file_content_identity(
-                final_named
-            ) != _overlay_file_content_identity(installed_after):
-                raise SyncError(
-                    f"regular-file overlay installed target changed after verification: {relative}"
-                )
-            _assert_regular_file_overlay_directory_chain_binding(
-                chain,
-                label="target",
-            )
-        except BaseException:
-            # A pathname cannot be conditionally unlinked by inode with portable
-            # POSIX APIs. Leave both the original temporary inode and any rebound
-            # basename inside the caller-managed recovery scope.
-            raise
-
-        binding = _PinnedRegularFileOverlayTarget(
-            chain=chain,
-            file_descriptor=temporary_descriptor,
-            expected_data=data,
-            expected_identity=_overlay_file_content_identity(installed_after),
+        except OSError as exc:
+            raise SyncError(
+                f"cannot pin private regular-file overlay target: {relative}: {exc}"
+            ) from exc
+        stack.callback(os.close, descriptor)
+        opened = os.fstat(descriptor)
+        _validate_overlay_regular_file(opened, label="target", path=relative)
+        data = _read_regular_file_overlay_descriptor(
+            descriptor,
+            byte_limit=len(expected_data),
         )
-        if binding_stack is not None:
-            held_resources = local_stack.pop_all()
-            binding_stack.callback(held_resources.close)
-            return binding
-    return None
-
-
-def _apply_regular_file_overlays(
-    repo_root: Path,
-    staging: Path,
-    rule: SyncRule,
-    *,
-    binding_stack: contextlib.ExitStack | None = None,
-) -> tuple[_PinnedRegularFileOverlayTarget, ...]:
-    bindings: list[_PinnedRegularFileOverlayTarget] = []
-    for overlay in rule.regular_file_overlays:
-        data = _read_regular_file_overlay_source(repo_root, overlay.source)
-        binding = _write_regular_file_overlay_target(
-            staging,
-            overlay.target,
-            data,
-            binding_stack=binding_stack,
+        final = os.fstat(descriptor)
+        named = _stat_regular_file_overlay_entry(
+            chain.parent_descriptor,
+            chain.name,
+            label="target",
+            path=relative,
         )
-        if binding is not None:
-            bindings.append(binding)
+        if (
+            _overlay_file_identity(initial) != _overlay_file_identity(opened)
+            or _overlay_file_content_identity(opened)
+            != _overlay_file_content_identity(final)
+            or _overlay_file_identity(named) != _overlay_file_identity(final)
+            or data != expected_data
+            or final.st_size != len(expected_data)
+            or stat.S_IMODE(final.st_mode) != REGULAR_FILE_OVERLAY_TARGET_MODE
+        ):
+            raise SyncError(
+                f"private regular-file overlay target binding changed: {relative}"
+            )
+        _assert_regular_file_overlay_directory_chain_binding(
+            chain,
+            label="target",
+        )
+        bindings.append(
+            _PinnedRegularFileOverlayTarget(
+                chain=chain,
+                file_descriptor=descriptor,
+                expected_data=expected_data,
+                expected_identity=_overlay_file_content_identity(final),
+            )
+        )
     return tuple(bindings)
 
 
@@ -1379,14 +1288,6 @@ class _PinnedRegularFileOverlayEntry:
     identity: tuple[int, int, int, int, int]
 
 
-class _RegularFileOverlayInstallState(Enum):
-    PREPARED = auto()
-    BACKUP_MOVED = auto()
-    CANDIDATE_READY = auto()
-    CANDIDATE_INSTALLED = auto()
-    VALIDATED = auto()
-
-
 @dataclass
 class _RegularFileOverlayStagingScope:
     path: Path
@@ -1394,15 +1295,58 @@ class _RegularFileOverlayStagingScope:
     temporary_root: _PinnedRegularFileOverlayDirectory
     recovery_root: _PinnedRegularFileOverlayDirectory
     target_parent: _PinnedRegularFileOverlayDirectory
+    target_parent_chain: tuple[_PinnedRegularFileOverlayDirectory, ...]
     container: _PinnedRegularFileOverlayDirectory
     resource_stack: contextlib.ExitStack
+    retained_entries: dict[str, _PinnedRegularFileOverlayEntry] = field(
+        default_factory=dict
+    )
     completed: bool = False
-    recovery_name: str | None = None
-    recovery_entry: _PinnedRegularFileOverlayEntry | None = None
 
     @property
     def recovery_path(self) -> Path:
         return self.path
+
+
+def _register_regular_file_overlay_retained_entry(
+    scope: _RegularFileOverlayStagingScope,
+    name: str,
+    entry: _PinnedRegularFileOverlayEntry,
+) -> None:
+    if name in scope.retained_entries:
+        raise SyncError("duplicate regular-file overlay retained entry")
+    if len(scope.retained_entries) >= MAX_REGULAR_FILE_OVERLAY_RETAINED_ENTRIES:
+        raise SyncError("regular-file overlay retained entry limit exceeded")
+    _assert_regular_file_overlay_entry_binding(
+        scope.container.descriptor,
+        entry,
+        label="retained recovery entry",
+        name=name,
+    )
+    scope.retained_entries[name] = entry
+
+
+def _assert_regular_file_overlay_retained_entries(
+    scope: _RegularFileOverlayStagingScope,
+    *,
+    exact_names: set[str] | None = None,
+) -> None:
+    if exact_names is not None:
+        try:
+            actual_names = set(os.listdir(scope.container.descriptor))
+        except OSError as exc:
+            raise SyncError(
+                f"cannot inspect regular-file overlay recovery scope: {exc}"
+            ) from exc
+        if actual_names != exact_names:
+            raise SyncError("regular-file overlay recovery scope entries changed")
+    for name, entry in scope.retained_entries.items():
+        _assert_regular_file_overlay_entry_binding(
+            scope.container.descriptor,
+            entry,
+            label="retained recovery entry",
+            name=name,
+        )
 
 
 def _load_regular_file_overlay_noreplace_primitive() -> (
@@ -1465,10 +1409,9 @@ def _rename_regular_file_overlay_noreplace(
     }
     if error_number in unsupported:
         raise SyncError("secure regular-file overlay no-replace rename is unavailable")
-    raise _RegularFileOverlayRenameError(
+    raise SyncError(
         "cannot securely rename regular-file overlay entry without replacement: "
-        f"{os.strerror(error_number)}",
-        error_number=error_number,
+        f"{os.strerror(error_number)}"
     )
 
 
@@ -1490,6 +1433,127 @@ def _pin_regular_file_overlay_directory(
         descriptor=descriptor,
         identity=identity,
     )
+
+
+def _pin_or_create_regular_file_overlay_descendant_chain(
+    stack: contextlib.ExitStack,
+    root: _PinnedRegularFileOverlayDirectory,
+    relative: Path,
+    *,
+    label: str,
+) -> tuple[_PinnedRegularFileOverlayDirectory, ...]:
+    if relative.is_absolute() or ".." in relative.parts:
+        raise SyncError(f"unsafe regular-file overlay {label}: {relative}")
+    _assert_regular_file_overlay_directory_binding(root, label="repository root")
+    chain: list[_PinnedRegularFileOverlayDirectory] = [root]
+    current = root
+    current_path = root.path
+    for component in relative.parts:
+        current_path = current_path / component
+        _assert_regular_file_overlay_directory_binding(
+            root,
+            label="repository root before target-parent creation",
+        )
+        _assert_regular_file_overlay_directory_binding(
+            current,
+            label="target parent before descendant creation",
+        )
+        try:
+            os.mkdir(component, 0o755, dir_fd=current.descriptor)
+        except FileExistsError:
+            pass
+        except OSError as exc:
+            raise SyncError(
+                f"cannot create regular-file overlay {label}: {current_path}: {exc}"
+            ) from exc
+        try:
+            descriptor = os.open(
+                component,
+                _regular_file_overlay_directory_flags(label=label),
+                dir_fd=current.descriptor,
+            )
+        except OSError as exc:
+            raise SyncError(
+                f"cannot pin regular-file overlay {label}: {current_path}: {exc}"
+            ) from exc
+        stack.callback(os.close, descriptor)
+        metadata = os.fstat(descriptor)
+        if metadata.st_uid != os.getuid() or metadata.st_mode & (
+            stat.S_IWGRP | stat.S_IWOTH
+        ):
+            raise SyncError(
+                f"regular-file overlay {label} has unsafe ownership or mode: "
+                f"{current_path}"
+            )
+        pinned = _PinnedRegularFileOverlayDirectory(
+            path=current_path,
+            descriptor=descriptor,
+            identity=_regular_file_overlay_directory_identity(
+                descriptor,
+                label=label,
+                path=current_path,
+            ),
+        )
+        if not _regular_file_overlay_named_root_matches(
+            current.descriptor,
+            component,
+            pinned.identity,
+            label=label,
+        ):
+            raise SyncError(
+                f"regular-file overlay {label} binding changed: {current_path}"
+            )
+        chain.append(pinned)
+        current = pinned
+    _assert_regular_file_overlay_directory_binding(root, label="repository root")
+    return tuple(chain)
+
+
+def _assert_regular_file_overlay_scope_binding(
+    scope: _RegularFileOverlayStagingScope,
+    *,
+    operation: str,
+) -> None:
+    _assert_regular_file_overlay_directory_binding(
+        scope.repo_root,
+        label="repository root",
+    )
+    lineage = (
+        (scope.repo_root, scope.temporary_root, scope.temporary_root.path.name),
+        (scope.temporary_root, scope.recovery_root, scope.recovery_root.path.name),
+        (scope.recovery_root, scope.container, scope.container.path.name),
+    )
+    for parent, child, name in lineage:
+        if parent is child:
+            continue
+        if not _regular_file_overlay_named_root_matches(
+            parent.descriptor,
+            name,
+            child.identity,
+            label=operation,
+        ):
+            raise SyncError(
+                "regular-file overlay scope lineage changed before "
+                f"{operation}: {child.path}"
+            )
+    for index in range(1, len(scope.target_parent_chain)):
+        parent = scope.target_parent_chain[index - 1]
+        child = scope.target_parent_chain[index]
+        if not _regular_file_overlay_named_root_matches(
+            parent.descriptor,
+            child.path.name,
+            child.identity,
+            label=operation,
+        ):
+            raise SyncError(
+                "regular-file overlay target parent lineage changed before "
+                f"{operation}: {child.path}"
+            )
+    _assert_regular_file_overlay_directory_binding(
+        scope.target_parent,
+        label="target parent",
+    )
+    _assert_regular_file_overlay_retained_entries(scope)
 
 
 def _assert_regular_file_overlay_directory_binding(
@@ -1793,14 +1857,13 @@ def _retain_regular_file_overlay_backup(
     return staging_parent.path / backup_name
 
 
-def _restore_regular_file_overlay_backup_or_retain(
-    primitive: _RegularFileOverlayNoReplacePrimitive,
+def _locate_regular_file_overlay_backup_or_retain(
     staging_parent: _PinnedRegularFileOverlayDirectory,
     backup_name: str | None,
     backup: _PinnedRegularFileOverlayEntry | None,
     target_parent: _PinnedRegularFileOverlayDirectory,
     target_name: str,
-) -> Path:
+) -> Path | None:
     if backup_name is None or backup is None:
         return None
     try:
@@ -1808,80 +1871,26 @@ def _restore_regular_file_overlay_backup_or_retain(
             target_parent.descriptor, target_name, backup
         ):
             return None
-        backup_is_staged = _regular_file_overlay_named_entry_matches(
-            staging_parent.descriptor, backup_name, backup
-        )
-    except SyncError:
-        return _retain_regular_file_overlay_backup(
-            staging_parent,
-            backup_name,
-            backup,
-        )
-    if not backup_is_staged:
-        raise _RegularFileOverlayBackupRetentionError(
-            "regular-file overlay prior target is not bound at its target or "
-            f"recovery path: {staging_parent.path / backup_name}"
-        )
-    try:
-        target_exists = _regular_file_overlay_entry_exists(
-            target_parent.descriptor, target_name
-        )
-    except SyncError:
-        return _retain_regular_file_overlay_backup(
-            staging_parent,
-            backup_name,
-            backup,
-        )
-    if target_exists:
-        return _retain_regular_file_overlay_backup(
-            staging_parent,
-            backup_name,
-            backup,
-        )
-    _assert_regular_file_overlay_entry_binding(
-        staging_parent.descriptor,
-        backup,
-        label="backup before restore",
-        name=backup_name,
-    )
-    try:
-        _rename_regular_file_overlay_noreplace(
-            primitive,
-            staging_parent.descriptor,
-            backup_name,
-            target_parent.descriptor,
-            target_name,
-        )
-    except BaseException:
-        try:
-            if _regular_file_overlay_named_entry_matches(
-                target_parent.descriptor, target_name, backup
-            ):
-                return None
-        except SyncError:
-            pass
-        return _retain_regular_file_overlay_backup(
-            staging_parent,
-            backup_name,
-            backup,
-        )
-    try:
         if _regular_file_overlay_named_entry_matches(
-            target_parent.descriptor, target_name, backup
+            staging_parent.descriptor, backup_name, backup
         ):
-            _assert_regular_file_overlay_entry_binding(
-                target_parent.descriptor,
+            # A portable pathname rename cannot conditionally move only the
+            # pinned inode. Never restore through a basename that could have
+            # rebound; retain the verified prior target for manual recovery.
+            return _retain_regular_file_overlay_backup(
+                staging_parent,
+                backup_name,
                 backup,
-                label="restored backup",
-                name=target_name,
             )
-            return None
     except SyncError:
-        pass
-    return _retain_regular_file_overlay_backup(
-        staging_parent,
-        backup_name,
-        backup,
+        return _retain_regular_file_overlay_backup(
+            staging_parent,
+            backup_name,
+            backup,
+        )
+    raise _RegularFileOverlayBackupRetentionError(
+        "regular-file overlay prior target is not bound at its target or "
+        f"recovery path: {staging_parent.path / backup_name}"
     )
 
 
@@ -1907,6 +1916,10 @@ def _replace_target_with_regular_file_overlays(
         or target.parent != staging_scope.target_parent.path
     ):
         raise SyncError("regular-file overlay staging scope mismatch")
+    _assert_regular_file_overlay_scope_binding(
+        staging_scope,
+        operation="final install preparation",
+    )
 
     with contextlib.ExitStack() as stack:
         staging_parent = staging_scope.container
@@ -1934,6 +1947,10 @@ def _replace_target_with_regular_file_overlays(
             raise SyncError(
                 f"regular-file overlay staged target root binding changed: {staging}"
             )
+        _assert_regular_file_overlay_retained_entries(
+            staging_scope,
+            exact_names={staging.name},
+        )
 
         backup_name: str | None = None
         backup: _PinnedRegularFileOverlayEntry | None = None
@@ -1948,10 +1965,24 @@ def _replace_target_with_regular_file_overlays(
                 staging_parent.descriptor,
                 prefix=REGULAR_FILE_OVERLAY_BACKUP_PREFIX,
             )
+            if (
+                len(staging_scope.retained_entries) + 1
+                > MAX_REGULAR_FILE_OVERLAY_RETAINED_ENTRIES
+            ):
+                raise SyncError(
+                    "regular-file overlay retained entry limit would be exceeded"
+                )
 
-        state = _RegularFileOverlayInstallState.PREPARED
         try:
             if backup_name is not None and backup is not None:
+                _assert_regular_file_overlay_scope_binding(
+                    staging_scope,
+                    operation="prior target backup move",
+                )
+                _assert_regular_file_overlay_retained_entries(
+                    staging_scope,
+                    exact_names={staging.name},
+                )
                 _assert_regular_file_overlay_entry_binding(
                     target_parent.descriptor,
                     backup,
@@ -1970,7 +2001,13 @@ def _replace_target_with_regular_file_overlays(
                     label="moved prior target backup",
                     name=backup_name,
                 )
-                state = _RegularFileOverlayInstallState.BACKUP_MOVED
+                _register_regular_file_overlay_retained_entry(
+                    staging_scope,
+                    backup_name,
+                    backup,
+                )
+                held_resources = stack.pop_all()
+                staging_scope.resource_stack.callback(held_resources.close)
             _assert_regular_file_overlay_directory_binding(
                 staging_parent,
                 label="staging container",
@@ -1994,7 +2031,23 @@ def _replace_target_with_regular_file_overlays(
                 raise SyncError(
                     f"regular-file overlay staged target root binding changed: {staging}"
                 )
-            state = _RegularFileOverlayInstallState.CANDIDATE_READY
+            _assert_regular_file_overlay_scope_binding(
+                staging_scope,
+                operation="final candidate install",
+            )
+            expected_preinstall_entries = {staging.name}
+            if backup_name is not None:
+                expected_preinstall_entries.add(backup_name)
+            _assert_regular_file_overlay_retained_entries(
+                staging_scope,
+                exact_names=expected_preinstall_entries,
+            )
+            # No portable rename primitive can atomically require the source
+            # basename to still name the previously pinned source-entry inode.
+            # The randomized 0700 recovery scope keeps other UIDs out; a
+            # concurrent same-UID basename rebind is detected by the
+            # installed-root and exact-byte checks below and fails forward
+            # without restoring any mutable recovery basename.
             _rename_regular_file_overlay_noreplace(
                 primitive,
                 staging_parent.descriptor,
@@ -2011,7 +2064,6 @@ def _replace_target_with_regular_file_overlays(
                 raise SyncError(
                     f"regular-file overlay installed target root binding changed: {target}"
                 )
-            state = _RegularFileOverlayInstallState.CANDIDATE_INSTALLED
             _assert_regular_file_overlay_directory_binding(
                 staging_parent,
                 label="staging container",
@@ -2035,7 +2087,10 @@ def _replace_target_with_regular_file_overlays(
                     binding,
                     label="installed target",
                 )
-            expected_staging_entries = [backup_name] if backup_name is not None else []
+            expected_staging_entries = sorted(
+                set(staging_scope.retained_entries)
+                | ({backup_name} if backup_name is not None else set())
+            )
             try:
                 actual_staging_entries = sorted(os.listdir(staging_parent.descriptor))
             except OSError as exc:
@@ -2057,8 +2112,16 @@ def _replace_target_with_regular_file_overlays(
                 target_parent,
                 label="target parent",
             )
-            state = _RegularFileOverlayInstallState.VALIDATED
+            _assert_regular_file_overlay_scope_binding(
+                staging_scope,
+                operation="final candidate validation",
+            )
         except BaseException as transaction_error:
+            # Recovery is deliberately forward-only. After either no-replace
+            # rename, a mutable basename may have rebound even while the pinned
+            # descriptors remain trustworthy. Inspect capabilities and retain
+            # evidence, but never move a recovery basename back into the live
+            # target or move an installed candidate back into staging.
             target_is_candidate = _regular_file_overlay_named_root_matches(
                 target_parent.descriptor,
                 target.name,
@@ -2071,126 +2134,62 @@ def _replace_target_with_regular_file_overlays(
                 expected_root_identity,
                 label="candidate recovery staging",
             )
-            candidate_was_installed = target_is_candidate
+            if target_is_candidate and not staging_is_candidate:
+                candidate_detail = f"installed candidate left live at {target}"
+            elif staging_is_candidate and not target_is_candidate:
+                candidate_detail = (
+                    f"candidate retained in recovery scope {staging_scope.path}"
+                )
+            else:
+                candidate_detail = (
+                    "candidate binding is ambiguous between live target and "
+                    f"recovery scope {staging_scope.path}"
+                )
 
-            if target_is_candidate:
+            retained: Path | None = None
+            if backup_name is not None and backup is not None:
                 try:
-                    staging_name_exists = _regular_file_overlay_entry_exists(
-                        staging_parent.descriptor,
-                        staging.name,
-                    )
-                except SyncError as recovery_error:
-                    raise SyncError(
-                        "regular-file overlay transaction failed with unknown "
-                        f"candidate state in recovery scope {staging_scope.path}"
-                    ) from recovery_error
-                if staging_name_exists:
-                    raise SyncError(
-                        "regular-file overlay transaction retained candidate and "
-                        f"backup with a conflicting recovery name in {staging_scope.path}"
-                    ) from transaction_error
-                rollback_error: BaseException | None = None
-                try:
-                    _rename_regular_file_overlay_noreplace(
-                        primitive,
-                        target_parent.descriptor,
+                    retained = _locate_regular_file_overlay_backup_or_retain(
+                        staging_parent,
+                        backup_name,
+                        backup,
+                        target_parent,
                         target.name,
-                        staging_parent.descriptor,
-                        staging.name,
                     )
-                except BaseException as exc:
-                    rollback_error = exc
-                target_is_candidate = _regular_file_overlay_named_root_matches(
+                except _RegularFileOverlayBackupRetentionError as recovery_error:
+                    raise SyncError(
+                        "regular-file overlay transaction failed; "
+                        f"{candidate_detail}; prior target binding is unknown; "
+                        f"inspect {staging_scope.path}: {recovery_error}"
+                    ) from transaction_error
+                if retained is None:
+                    prior_detail = f"prior target remains live at {target}"
+                else:
+                    prior_detail = f"prior target retained at {retained}"
+            else:
+                prior_detail = "no prior target existed"
+
+            try:
+                target_exists = _regular_file_overlay_entry_exists(
                     target_parent.descriptor,
                     target.name,
-                    expected_root_identity,
-                    label="candidate recovery target",
                 )
-                staging_is_candidate = _regular_file_overlay_named_root_matches(
-                    staging_parent.descriptor,
-                    staging.name,
-                    expected_root_identity,
-                    label="candidate recovery staging",
-                )
-                if target_is_candidate or not staging_is_candidate:
-                    raise SyncError(
-                        "regular-file overlay transaction could not retain the "
-                        f"candidate in recovery scope {staging_scope.path}"
-                    ) from rollback_error
+            except SyncError:
+                live_detail = "live target state could not be inspected"
+            else:
+                if target_is_candidate:
+                    live_detail = "live target is the pinned candidate"
+                elif retained is None and backup is not None:
+                    live_detail = "live target is the pinned prior target"
+                elif target_exists:
+                    live_detail = f"untrusted live target remains at {target}"
+                else:
+                    live_detail = "live target is absent"
 
-            if not staging_is_candidate:
-                retained = None
-                if backup_name is not None and backup is not None:
-                    try:
-                        retained = _retain_regular_file_overlay_backup(
-                            staging_parent,
-                            backup_name,
-                            backup,
-                        )
-                    except _RegularFileOverlayBackupRetentionError:
-                        pass
-                detail = f"; backup retained at {retained}" if retained else ""
-                raise SyncError(
-                    "regular-file overlay transaction failed with unknown candidate "
-                    f"state{detail}"
-                ) from transaction_error
-
-            retained = _restore_regular_file_overlay_backup_or_retain(
-                primitive,
-                staging_parent,
-                backup_name,
-                backup,
-                target_parent,
-                target.name,
-            )
-            if retained is not None:
-                raise SyncError(
-                    "regular-file overlay transaction failed; candidate and prior "
-                    f"target retained in recovery scope {staging_scope.path}; "
-                    f"prior target at {retained}"
-                ) from transaction_error
-            if backup is None:
-                try:
-                    target_exists = _regular_file_overlay_entry_exists(
-                        target_parent.descriptor,
-                        target.name,
-                    )
-                except SyncError as recovery_error:
-                    raise SyncError(
-                        "regular-file overlay transaction could not verify the "
-                        "originally absent target"
-                    ) from recovery_error
-                if target_exists:
-                    raise SyncError(
-                        "regular-file overlay transaction retained an unknown target "
-                        f"and candidate in recovery scope {staging_scope.path}"
-                    ) from transaction_error
-
-            if (
-                state
-                in {
-                    _RegularFileOverlayInstallState.CANDIDATE_INSTALLED,
-                    _RegularFileOverlayInstallState.VALIDATED,
-                }
-                or candidate_was_installed
-            ) and isinstance(transaction_error, SyncError):
-                raise SyncError(
-                    "regular-file overlay installed target validation failed; "
-                    "prior target restored"
-                ) from transaction_error
-            raise
-
-        if backup_name is not None and backup is not None:
-            _assert_regular_file_overlay_entry_binding(
-                staging_parent.descriptor,
-                backup,
-                label="recovery backup before handoff",
-                name=backup_name,
-            )
-            staging_scope.recovery_name = backup_name
-            staging_scope.recovery_entry = backup
-            held_resources = stack.pop_all()
-            staging_scope.resource_stack.callback(held_resources.close)
+            raise SyncError(
+                "regular-file overlay transaction failed; "
+                f"{candidate_detail}; {prior_detail}; {live_detail}"
+            ) from transaction_error
         staging_scope.completed = True
         return staging_scope.recovery_path
 
@@ -2245,28 +2244,374 @@ def _pin_or_create_regular_file_overlay_directory(
     return pinned
 
 
+def _pin_regular_file_overlay_child_directory(
+    stack: contextlib.ExitStack,
+    parent: _PinnedRegularFileOverlayDirectory,
+    name: str,
+    *,
+    path: Path,
+    label: str,
+) -> _PinnedRegularFileOverlayDirectory:
+    try:
+        descriptor = os.open(
+            name,
+            _regular_file_overlay_directory_flags(label=label),
+            dir_fd=parent.descriptor,
+        )
+    except OSError as exc:
+        raise SyncError(f"cannot pin regular-file overlay {label}: {exc}") from exc
+    stack.callback(os.close, descriptor)
+    pinned = _PinnedRegularFileOverlayDirectory(
+        path=path,
+        descriptor=descriptor,
+        identity=_regular_file_overlay_directory_identity(
+            descriptor,
+            label=label,
+            path=path,
+        ),
+    )
+    if not _regular_file_overlay_named_root_matches(
+        parent.descriptor,
+        name,
+        pinned.identity,
+        label=label,
+    ):
+        raise SyncError(f"regular-file overlay {label} binding changed: {path}")
+    return pinned
+
+
+def _copy_prepared_regular_file_overlay_file(
+    source: Path,
+    destination_parent: _PinnedRegularFileOverlayDirectory,
+    destination_name: str,
+    *,
+    staging_scope: _RegularFileOverlayStagingScope,
+) -> None:
+    try:
+        source_before = source.lstat()
+    except OSError as exc:
+        raise SyncError(
+            f"cannot inspect prepared overlay source: {source}: {exc}"
+        ) from exc
+    if not stat.S_ISREG(source_before.st_mode):
+        raise SyncError(f"prepared overlay source is not a regular file: {source}")
+    source_flags = os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+    destination_flags = (
+        os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+    )
+    try:
+        source_descriptor = os.open(source, source_flags)
+    except OSError as exc:
+        raise SyncError(
+            f"cannot open prepared overlay source: {source}: {exc}"
+        ) from exc
+    try:
+        opened_source = os.fstat(source_descriptor)
+        if _overlay_file_content_identity(
+            opened_source
+        ) != _overlay_file_content_identity(source_before):
+            raise SyncError(f"prepared overlay source changed while opening: {source}")
+        _assert_regular_file_overlay_scope_binding(
+            staging_scope,
+            operation="prepared file creation",
+        )
+        _assert_regular_file_overlay_directory_binding(
+            destination_parent,
+            label="prepared file parent",
+        )
+        try:
+            destination_descriptor = os.open(
+                destination_name,
+                destination_flags,
+                0o600,
+                dir_fd=destination_parent.descriptor,
+            )
+        except OSError as exc:
+            raise SyncError(
+                "cannot create prepared regular-file overlay target: "
+                f"{destination_parent.path / destination_name}: {exc}"
+            ) from exc
+        try:
+            while True:
+                chunk = os.read(source_descriptor, 1024 * 1024)
+                if not chunk:
+                    break
+                _write_regular_file_overlay_descriptor(destination_descriptor, chunk)
+            os.fchmod(destination_descriptor, stat.S_IMODE(opened_source.st_mode))
+            copied = os.fstat(destination_descriptor)
+        finally:
+            os.close(destination_descriptor)
+        source_after = os.fstat(source_descriptor)
+        if (
+            _overlay_file_content_identity(source_after)
+            != _overlay_file_content_identity(opened_source)
+            or copied.st_size != opened_source.st_size
+        ):
+            raise SyncError(f"prepared overlay source changed while copying: {source}")
+        _assert_regular_file_overlay_scope_binding(
+            staging_scope,
+            operation="prepared file validation",
+        )
+    finally:
+        os.close(source_descriptor)
+
+
+def _create_prepared_regular_file_overlay_value(
+    data: bytes,
+    destination_parent: _PinnedRegularFileOverlayDirectory,
+    destination_name: str,
+    *,
+    staging_scope: _RegularFileOverlayStagingScope,
+) -> None:
+    if len(data) > MAX_REGULAR_FILE_OVERLAY_BYTES:
+        raise SyncError(
+            "regular-file overlay target data exceeds "
+            f"{MAX_REGULAR_FILE_OVERLAY_BYTES} bytes: {destination_name}"
+        )
+    _assert_regular_file_overlay_scope_binding(
+        staging_scope,
+        operation="private overlay target creation",
+    )
+    _assert_regular_file_overlay_directory_binding(
+        destination_parent,
+        label="private overlay target parent",
+    )
+    flags = (
+        os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+    )
+    try:
+        descriptor = os.open(
+            destination_name,
+            flags,
+            0o600,
+            dir_fd=destination_parent.descriptor,
+        )
+    except OSError as exc:
+        raise SyncError(
+            "cannot create private regular-file overlay target: "
+            f"{destination_parent.path / destination_name}: {exc}"
+        ) from exc
+    try:
+        _write_regular_file_overlay_descriptor(descriptor, data)
+        os.fchmod(descriptor, REGULAR_FILE_OVERLAY_TARGET_MODE)
+        written = os.fstat(descriptor)
+        written_data = _read_regular_file_overlay_descriptor(
+            descriptor,
+            byte_limit=len(data),
+        )
+        final = os.fstat(descriptor)
+        _validate_overlay_regular_file(
+            final,
+            label="private target",
+            path=destination_parent.path / destination_name,
+        )
+        if (
+            written_data != data
+            or written.st_size != len(data)
+            or _overlay_file_content_identity(written)
+            != _overlay_file_content_identity(final)
+            or stat.S_IMODE(final.st_mode) != REGULAR_FILE_OVERLAY_TARGET_MODE
+        ):
+            raise SyncError(
+                "private regular-file overlay target verification failed: "
+                f"{destination_parent.path / destination_name}"
+            )
+    finally:
+        os.close(descriptor)
+    _assert_regular_file_overlay_scope_binding(
+        staging_scope,
+        operation="private overlay target validation",
+    )
+
+
+def _copy_prepared_regular_file_overlay_directory(
+    stack: contextlib.ExitStack,
+    source: Path,
+    destination: _PinnedRegularFileOverlayDirectory,
+    *,
+    staging_scope: _RegularFileOverlayStagingScope,
+    ignored_names: frozenset[str],
+    relative: Path,
+    overlay_data: dict[Path, bytes],
+    applied_overlays: set[Path],
+) -> None:
+    for child in sorted(source.iterdir(), key=lambda path: path.name):
+        if _is_ignored_name(child.name, ignored_names):
+            continue
+        child_relative = relative / child.name
+        try:
+            metadata = child.lstat()
+        except OSError as exc:
+            raise SyncError(
+                f"cannot inspect prepared overlay source: {child}: {exc}"
+            ) from exc
+        if stat.S_ISLNK(metadata.st_mode):
+            raise SyncError(f"refusing prepared overlay source symlink: {child}")
+        if child_relative in overlay_data and not stat.S_ISREG(metadata.st_mode):
+            raise SyncError(
+                f"regular-file overlay target is not a regular file: {child_relative}"
+            )
+        if stat.S_ISDIR(metadata.st_mode):
+            _assert_regular_file_overlay_scope_binding(
+                staging_scope,
+                operation="prepared directory creation",
+            )
+            _assert_regular_file_overlay_directory_binding(
+                destination,
+                label="prepared directory parent",
+            )
+            try:
+                os.mkdir(child.name, 0o700, dir_fd=destination.descriptor)
+            except OSError as exc:
+                raise SyncError(
+                    "cannot create prepared regular-file overlay directory: "
+                    f"{destination.path / child.name}: {exc}"
+                ) from exc
+            pinned_child = _pin_regular_file_overlay_child_directory(
+                stack,
+                destination,
+                child.name,
+                path=destination.path / child.name,
+                label="prepared directory",
+            )
+            _copy_prepared_regular_file_overlay_directory(
+                stack,
+                child,
+                pinned_child,
+                staging_scope=staging_scope,
+                ignored_names=ignored_names,
+                relative=child_relative,
+                overlay_data=overlay_data,
+                applied_overlays=applied_overlays,
+            )
+            _assert_regular_file_overlay_scope_binding(
+                staging_scope,
+                operation="prepared directory mode update",
+            )
+            os.fchmod(pinned_child.descriptor, stat.S_IMODE(metadata.st_mode))
+            continue
+        if stat.S_ISREG(metadata.st_mode):
+            if child_relative in overlay_data:
+                _create_prepared_regular_file_overlay_value(
+                    overlay_data[child_relative],
+                    destination,
+                    child.name,
+                    staging_scope=staging_scope,
+                )
+                applied_overlays.add(child_relative)
+            else:
+                _copy_prepared_regular_file_overlay_file(
+                    child,
+                    destination,
+                    child.name,
+                    staging_scope=staging_scope,
+                )
+            continue
+        raise SyncError(f"unsupported prepared overlay source type: {child}")
+
+
+def _copy_prepared_regular_file_overlay_staging(
+    stack: contextlib.ExitStack,
+    source: Path,
+    staging: Path,
+    *,
+    staging_scope: _RegularFileOverlayStagingScope,
+    exclude_names: tuple[str, ...],
+    overlay_data: dict[Path, bytes],
+) -> _PinnedRegularFileOverlayDirectory:
+    try:
+        source_metadata = source.lstat()
+    except OSError as exc:
+        raise SyncError(
+            f"cannot inspect prepared overlay source: {source}: {exc}"
+        ) from exc
+    if not stat.S_ISDIR(source_metadata.st_mode):
+        raise SyncError("regular-file overlay sync requires a directory source")
+    if staging.parent != staging_scope.path:
+        raise SyncError("prepared regular-file overlay staging scope mismatch")
+    _assert_regular_file_overlay_scope_binding(
+        staging_scope,
+        operation="prepared staging root creation",
+    )
+    try:
+        os.mkdir(staging.name, 0o700, dir_fd=staging_scope.container.descriptor)
+    except OSError as exc:
+        raise SyncError(f"cannot create prepared overlay staging root: {exc}") from exc
+    staging_root = _pin_regular_file_overlay_child_directory(
+        stack,
+        staging_scope.container,
+        staging.name,
+        path=staging,
+        label="staged target",
+    )
+    applied_overlays: set[Path] = set()
+    _copy_prepared_regular_file_overlay_directory(
+        stack,
+        source,
+        staging_root,
+        staging_scope=staging_scope,
+        ignored_names=EXCLUDED_NAMES | frozenset(exclude_names),
+        relative=Path(),
+        overlay_data=overlay_data,
+        applied_overlays=applied_overlays,
+    )
+    if applied_overlays != set(overlay_data):
+        missing = sorted(str(path) for path in set(overlay_data) - applied_overlays)
+        raise SyncError(
+            "regular-file overlay target missing from prepared public tree: "
+            + ", ".join(missing)
+        )
+    _assert_regular_file_overlay_scope_binding(
+        staging_scope,
+        operation="prepared staging root mode update",
+    )
+    os.fchmod(staging_root.descriptor, stat.S_IMODE(source_metadata.st_mode))
+    return _PinnedRegularFileOverlayDirectory(
+        path=staging_root.path,
+        descriptor=staging_root.descriptor,
+        identity=_regular_file_overlay_directory_identity(
+            staging_root.descriptor,
+            label="staged target",
+            path=staging_root.path,
+        ),
+    )
+
+
 @contextlib.contextmanager
 def _regular_file_overlay_staging_directory(
-    repo_root: Path,
-    target: Path,
+    repo_binding: _PinnedRegularFileOverlayDirectory,
+    target_relative: Path,
 ) -> Iterator[_RegularFileOverlayStagingScope]:
     if os.mkdir not in os.supports_dir_fd or os.listdir not in os.supports_fd:
         raise SyncError(
             "secure regular-file overlay descriptor-relative recovery is unavailable"
         )
+    _require_overlay_relative_path(target_relative, field="sync target")
+    repo_root = repo_binding.path
     with contextlib.ExitStack() as stack:
-        pinned_repo_root = _pin_regular_file_overlay_directory(
-            stack,
-            repo_root,
+        _assert_regular_file_overlay_directory_binding(
+            repo_binding,
             label="repository root",
+        )
+        _assert_regular_file_overlay_directory_binding(
+            repo_binding,
+            label="repository root before temporary-root creation",
         )
         temporary_root = _pin_or_create_regular_file_overlay_directory(
             stack,
-            pinned_repo_root,
+            repo_binding,
             REGULAR_FILE_OVERLAY_RECOVERY_ROOT.parts[0],
             path=repo_root / REGULAR_FILE_OVERLAY_RECOVERY_ROOT.parts[0],
             label="temporary root",
             private=False,
+        )
+        _assert_regular_file_overlay_directory_binding(
+            repo_binding,
+            label="repository root before recovery-root creation",
+        )
+        _assert_regular_file_overlay_directory_binding(
+            temporary_root,
+            label="temporary root before recovery-root creation",
         )
         recovery_root = _pin_or_create_regular_file_overlay_directory(
             stack,
@@ -2276,11 +2621,13 @@ def _regular_file_overlay_staging_directory(
             label="recovery root",
             private=True,
         )
-        target_parent = _pin_regular_file_overlay_directory(
+        target_parent_chain = _pin_or_create_regular_file_overlay_descendant_chain(
             stack,
-            target.parent,
+            repo_binding,
+            target_relative.parent,
             label="target parent",
         )
+        target_parent = target_parent_chain[-1]
         if (
             os.fstat(recovery_root.descriptor).st_dev
             != os.fstat(target_parent.descriptor).st_dev
@@ -2302,6 +2649,23 @@ def _regular_file_overlay_staging_directory(
             recovery_root.descriptor,
             prefix=REGULAR_FILE_OVERLAY_RECOVERY_SCOPE_PREFIX,
         )
+        _assert_regular_file_overlay_directory_binding(
+            repo_binding,
+            label="repository root before staging-container creation",
+        )
+        _assert_regular_file_overlay_directory_binding(
+            temporary_root,
+            label="temporary root before staging-container creation",
+        )
+        _assert_regular_file_overlay_directory_binding(
+            recovery_root,
+            label="recovery root before staging-container creation",
+        )
+        for pinned_parent in target_parent_chain:
+            _assert_regular_file_overlay_directory_binding(
+                pinned_parent,
+                label="target parent before staging-container creation",
+            )
         try:
             os.mkdir(container_name, 0o700, dir_fd=recovery_root.descriptor)
         except OSError as exc:
@@ -2326,59 +2690,152 @@ def _regular_file_overlay_staging_directory(
         )
         scope = _RegularFileOverlayStagingScope(
             path=container_path,
-            repo_root=pinned_repo_root,
+            repo_root=repo_binding,
             temporary_root=temporary_root,
             recovery_root=recovery_root,
             target_parent=target_parent,
+            target_parent_chain=target_parent_chain,
             container=container,
             resource_stack=stack,
+        )
+        _assert_regular_file_overlay_scope_binding(
+            scope,
+            operation="staging scope creation",
         )
         yield scope
         if not scope.completed:
             raise SyncError(
                 f"regular-file overlay staging retained for inspection: {container_path}"
             )
-        _assert_regular_file_overlay_directory_binding(
-            pinned_repo_root,
-            label="repository root",
-        )
-        _assert_regular_file_overlay_directory_binding(
-            temporary_root,
-            label="temporary root",
-        )
-        _assert_regular_file_overlay_directory_binding(
-            recovery_root,
-            label="recovery root",
-        )
-        _assert_regular_file_overlay_directory_binding(
-            target_parent,
-            label="target parent",
-        )
-        _assert_regular_file_overlay_directory_binding(
-            container,
-            label="staging container",
-        )
-        expected_entries = [scope.recovery_name] if scope.recovery_name else []
-        if sorted(os.listdir(container.descriptor)) != expected_entries:
-            raise SyncError(
-                f"regular-file overlay staging gained an unknown entry: {container_path}"
+
+
+def _sync_sources_with_repo_binding(
+    repo_root: Path,
+    source_root: Path,
+    rules: tuple[SyncRule, ...],
+    repo_binding: _PinnedRegularFileOverlayDirectory | None,
+) -> tuple[Path, ...]:
+    recovery_paths: list[Path] = []
+    for rule in rules:
+        if repo_binding is not None:
+            _assert_regular_file_overlay_directory_binding(
+                repo_binding,
+                label="repository root",
             )
-        if scope.recovery_name is not None and scope.recovery_entry is not None:
-            _assert_regular_file_overlay_entry_binding(
-                container.descriptor,
-                scope.recovery_entry,
-                label="retained recovery backup",
-                name=scope.recovery_name,
+        source_repo_root = source_root / rule.repo
+        source = source_repo_root / rule.source
+        target = repo_root / rule.target
+        if not source.exists():
+            raise SyncError(f"sync source missing for {rule.repo}: {source}")
+        _ensure_safe_source(source_repo_root, source)
+        _ensure_safe_target(repo_root, target)
+        if rule.regular_file_overlays:
+            if repo_binding is None:
+                raise SyncError("secure sync requires a pinned repository root")
+            prepared_directory = Path(
+                tempfile.mkdtemp(prefix=f".{target.name}.prepared.")
             )
-        if not _regular_file_overlay_named_root_matches(
-            recovery_root.descriptor,
-            container_name,
-            container.identity,
-            label="staging container",
-        ):
-            raise SyncError(
-                f"regular-file overlay staging binding changed: {container_path}"
-            )
+            prepared_cleanup_pending = True
+            prepared_recovery_path: Path | None = None
+            try:
+                prepared = prepared_directory / target.name
+                _copy_source_to_staging(
+                    source,
+                    prepared,
+                    exclude_names=rule.exclude_names,
+                )
+                _apply_rule_replacements(prepared, rule)
+                _reject_forbidden_residuals(prepared, rule)
+                if rule.target == CANONICAL_REVIEW_TARGET:
+                    _validate_canonical_review_target_contents(prepared)
+                overlay_data = _load_regular_file_overlay_data(
+                    repo_root,
+                    rule,
+                    repo_binding=repo_binding,
+                )
+                with _regular_file_overlay_staging_directory(
+                    repo_binding,
+                    rule.target,
+                ) as staging_scope:
+                    prepared_recovery_path = staging_scope.path
+                    staging = staging_scope.path / target.name
+                    with contextlib.ExitStack() as binding_stack:
+                        staging_root = _copy_prepared_regular_file_overlay_staging(
+                            binding_stack,
+                            prepared,
+                            staging,
+                            staging_scope=staging_scope,
+                            exclude_names=rule.exclude_names,
+                            overlay_data=overlay_data,
+                        )
+                        if rule.target == CANONICAL_REVIEW_TARGET:
+                            _validate_canonical_review_target_contents(staging)
+                        else:
+                            _validate_no_retired_review_references_in_staging(
+                                staging,
+                                rule.target,
+                            )
+                        bindings = _pin_regular_file_overlay_targets(
+                            binding_stack,
+                            staging,
+                            staging_root,
+                            overlay_data,
+                        )
+                        # Remove the external public candidate before the first
+                        # live no-replace mutation. No fallible prepared-tree
+                        # cleanup remains after the secure commit boundary.
+                        try:
+                            shutil.rmtree(prepared_directory)
+                        except OSError as exc:
+                            recovery_detail = (
+                                "; candidate retained in recovery scope "
+                                f"{prepared_recovery_path}"
+                                if prepared_recovery_path is not None
+                                else ""
+                            )
+                            raise SyncError(
+                                "cannot remove external prepared tree before "
+                                f"secure commit{recovery_detail}: {exc}"
+                            ) from exc
+                        prepared_cleanup_pending = False
+                        recovery_path = _replace_target_with_regular_file_overlays(
+                            target,
+                            staging,
+                            bindings,
+                            staging_scope=staging_scope,
+                        )
+                if recovery_path is not None:
+                    recovery_paths.append(recovery_path)
+            except BaseException as primary_error:
+                if prepared_cleanup_pending:
+                    try:
+                        shutil.rmtree(prepared_directory)
+                    except OSError as cleanup_error:
+                        detail = (
+                            "external prepared-tree cleanup also failed at "
+                            f"{prepared_directory}: {cleanup_error}"
+                        )
+                        if isinstance(primary_error, SyncError):
+                            raise SyncError(
+                                f"{primary_error}; {detail}"
+                            ) from primary_error
+                        if hasattr(primary_error, "add_note"):
+                            primary_error.add_note(detail)
+                raise
+            continue
+
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(
+            prefix=f".{target.name}.staging.", dir=target.parent
+        ) as temp_directory:
+            staging = Path(temp_directory) / target.name
+            _copy_source_to_staging(source, staging, exclude_names=rule.exclude_names)
+            _apply_rule_replacements(staging, rule)
+            _reject_forbidden_residuals(staging, rule)
+            if rule.target == CANONICAL_REVIEW_TARGET:
+                _validate_canonical_review_target_contents(staging)
+            _replace_target(target, staging)
+    return tuple(recovery_paths)
 
 
 def sync_sources(
@@ -2387,71 +2844,41 @@ def sync_sources(
     repo_root = repo_root.resolve()
     _validate_regular_file_overlay_targets(rules)
     secure_rule_count = sum(bool(rule.regular_file_overlays) for rule in rules)
-    if secure_rule_count > MAX_REGULAR_FILE_OVERLAY_RECOVERY_PATHS:
-        raise SyncError(
-            "regular-file overlay recovery path limit exceeded: "
-            f"{secure_rule_count} > {MAX_REGULAR_FILE_OVERLAY_RECOVERY_PATHS}"
-        )
-    recovery_paths: list[Path] = []
-    for rule in rules:
-        source_repo_root = source_root / rule.repo
-        source = source_repo_root / rule.source
-        target = repo_root / rule.target
-        if not source.exists():
-            raise SyncError(f"sync source missing for {rule.repo}: {source}")
-        _ensure_safe_source(source_repo_root, source)
-        _ensure_safe_target(repo_root, target)
-        target.parent.mkdir(parents=True, exist_ok=True)
-        if rule.regular_file_overlays:
-            staging_context = _regular_file_overlay_staging_directory(
-                repo_root,
-                target,
-            )
-        else:
-            staging_context = tempfile.TemporaryDirectory(
-                prefix=f".{target.name}.staging.", dir=target.parent
-            )
-        rule_recovery_path: Path | None = None
-        with staging_context as temp_result:
-            if isinstance(temp_result, _RegularFileOverlayStagingScope):
-                staging_scope = temp_result
-                temp_dir = staging_scope.path
-            else:
-                staging_scope = None
-                temp_dir = Path(temp_result)
-            staging = temp_dir / target.name
-            _copy_source_to_staging(source, staging, exclude_names=rule.exclude_names)
-            _apply_rule_replacements(staging, rule)
-            with contextlib.ExitStack() as binding_stack:
-                bindings = _apply_regular_file_overlays(
-                    repo_root,
-                    staging,
-                    rule,
-                    binding_stack=binding_stack,
-                )
-                _reject_forbidden_residuals(staging, rule)
-                if rule.target == CANONICAL_REVIEW_TARGET:
-                    _validate_canonical_review_target_contents(staging)
-                if bindings:
-                    if staging_scope is None:
-                        raise SyncError(
-                            "secure regular-file overlay install requires a "
-                            "recovery scope"
-                        )
-                    rule_recovery_path = _replace_target_with_regular_file_overlays(
-                        target,
-                        staging,
-                        bindings,
-                        staging_scope=staging_scope,
-                    )
-                else:
-                    _replace_target(target, staging)
-        if rule_recovery_path is not None:
-            recovery_paths.append(rule_recovery_path)
-    _validate_canonical_review_target(repo_root)
+    if secure_rule_count > 1:
+        raise SyncError("private overlay sync permits exactly one secure rule")
+    plain_rules = tuple(rule for rule in rules if not rule.regular_file_overlays)
+    secure_rules = tuple(rule for rule in rules if rule.regular_file_overlays)
+    recovery_paths = _sync_sources_with_repo_binding(
+        repo_root,
+        source_root,
+        plain_rules,
+        None,
+    )
     _remove_retired_targets(repo_root)
-    _validate_no_retired_review_references(repo_root)
-    return tuple(recovery_paths)
+    if secure_rules:
+        secure_targets = tuple(rule.target for rule in secure_rules)
+        if CANONICAL_REVIEW_TARGET not in secure_targets:
+            _validate_canonical_review_target(repo_root)
+        _validate_no_retired_review_references(
+            repo_root,
+            excluded_targets=secure_targets,
+        )
+        with contextlib.ExitStack() as stack:
+            repo_binding = _pin_regular_file_overlay_directory(
+                stack,
+                repo_root,
+                label="repository root",
+            )
+            recovery_paths += _sync_sources_with_repo_binding(
+                repo_root,
+                source_root,
+                secure_rules,
+                repo_binding,
+            )
+    else:
+        _validate_canonical_review_target(repo_root)
+        _validate_no_retired_review_references(repo_root)
+    return recovery_paths
 
 
 def build_parser() -> argparse.ArgumentParser:
