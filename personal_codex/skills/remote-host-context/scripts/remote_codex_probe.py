@@ -26,7 +26,7 @@ import sys
 import tempfile
 import threading
 import time
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from typing import Any
 
 DATE_FORMAT = "%Y/%m/%d"
@@ -5688,6 +5688,47 @@ def _parse_remote_session_shards_frame(value: str) -> dict[str, Any]:
     return item
 
 
+class _RemoteSessionShardsIdleState:
+    def __init__(
+        self,
+        timeout_seconds: float,
+        *,
+        monotonic: Callable[[], float] = time.monotonic,
+    ) -> None:
+        self.timeout_seconds = timeout_seconds
+        self._monotonic = monotonic
+        self._lock = threading.Lock()
+        self._last_progress = monotonic()
+
+    @property
+    def poll_seconds(self) -> float:
+        return min(1.0, max(0.01, self.timeout_seconds / 10))
+
+    def mark_progress(self) -> None:
+        with self._lock:
+            self._last_progress = self._monotonic()
+
+    def expired(self) -> bool:
+        with self._lock:
+            return self._monotonic() - self._last_progress >= self.timeout_seconds
+
+
+def _watch_remote_session_shards_idle(
+    process: Any,
+    stop: threading.Event,
+    timed_out: threading.Event,
+    idle_state: _RemoteSessionShardsIdleState,
+) -> None:
+    while not stop.wait(idle_state.poll_seconds):
+        if process.poll() is not None:
+            return
+        if not idle_state.expired():
+            continue
+        timed_out.set()
+        process.kill()
+        return
+
+
 def _iter_remote_session_shard_frames(
     alias: str,
     payload: dict[str, object],
@@ -5723,37 +5764,20 @@ def _iter_remote_session_shard_frames(
             os.close(progress_descriptor)
         raise
 
-    timed_out = False
+    timed_out = threading.Event()
     timeout_stop = threading.Event()
-    progress_lock = threading.Lock()
-    last_progress = time.monotonic()
+    idle_state = _RemoteSessionShardsIdleState(
+        REMOTE_SESSION_SHARDS_IDLE_TIMEOUT_SECONDS
+    )
 
     def mark_progress() -> None:
-        nonlocal last_progress
-        with progress_lock:
-            last_progress = time.monotonic()
+        idle_state.mark_progress()
         if progress_descriptor >= 0 and os.write(progress_descriptor, b".") != 1:
             raise RuntimeError("session-shards capture progress update failed")
 
-    def terminate_on_idle() -> None:
-        nonlocal timed_out
-        poll_seconds = min(
-            1.0,
-            max(0.01, REMOTE_SESSION_SHARDS_IDLE_TIMEOUT_SECONDS / 10),
-        )
-        while not timeout_stop.wait(poll_seconds):
-            if process.poll() is not None:
-                return
-            with progress_lock:
-                idle_seconds = time.monotonic() - last_progress
-            if idle_seconds < REMOTE_SESSION_SHARDS_IDLE_TIMEOUT_SECONDS:
-                continue
-            timed_out = True
-            process.kill()
-            return
-
     watchdog = threading.Thread(
-        target=terminate_on_idle,
+        target=_watch_remote_session_shards_idle,
+        args=(process, timeout_stop, timed_out, idle_state),
         name="remote-session-shards-idle-watchdog",
         daemon=True,
     )
@@ -5824,7 +5848,7 @@ def _iter_remote_session_shard_frames(
         if progress_descriptor >= 0:
             os.close(progress_descriptor)
 
-    if timed_out:
+    if timed_out.is_set():
         raise RuntimeError(
             "remote session-shards idle timed out after "
             f"{REMOTE_SESSION_SHARDS_IDLE_TIMEOUT_SECONDS}s without output"

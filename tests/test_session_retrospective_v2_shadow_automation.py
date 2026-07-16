@@ -17,9 +17,13 @@ import tarfile
 import tempfile
 import threading
 import time
-import tomllib
 import unittest
 from unittest import mock
+
+try:
+    import tomllib
+except ModuleNotFoundError:  # pragma: no cover - exercised by the Python 3.10 CI lane
+    import tomli as tomllib
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]

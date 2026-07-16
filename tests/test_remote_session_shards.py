@@ -15,7 +15,6 @@ import subprocess
 import sys
 import tempfile
 import threading
-import time
 import tracemalloc
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
@@ -370,25 +369,6 @@ class FakePopen:
 
     def kill(self) -> None:
         self._waited = True
-
-
-class DelayedChunkReader(io.BytesIO):
-    def __init__(
-        self,
-        output: str,
-        delay_seconds: float,
-        chunk_bytes: int,
-    ) -> None:
-        super().__init__(output.encode("utf-8"))
-        self.delay_seconds = delay_seconds
-        self.chunk_bytes = chunk_bytes
-
-    def read1(self, size: int = -1) -> bytes:
-        if self.tell() >= len(self.getbuffer()):
-            return b""
-        time.sleep(self.delay_seconds)
-        limit = self.chunk_bytes if size < 0 else min(size, self.chunk_bytes)
-        return super().read(limit)
 
 
 class SessionShardsLocalTests(unittest.TestCase):
@@ -1999,12 +1979,10 @@ class SessionShardsRemoteTests(unittest.TestCase):
             max_shards=2,
         )
         output_lines = remote_output(empty_descriptor_frames(request)).splitlines()
-        output_lines[1] += " " * 4096
+        output_lines[1] += " " * (128 * 1024)
         output = "\n".join(output_lines) + "\n"
 
         progressing = FakePopen(output, 0)
-        progressing.stdout = DelayedChunkReader(output, 0.005, 512)
-        started = time.monotonic()
         with tempfile.TemporaryDirectory(prefix="session-shards-progress.") as raw:
             progress_root = Path(raw)
             progress_root.chmod(0o700)
@@ -2026,11 +2004,6 @@ class SessionShardsRemoteTests(unittest.TestCase):
                     "Popen",
                     return_value=progressing,
                 ) as popen,
-                mock.patch.object(
-                    MODULE,
-                    "REMOTE_SESSION_SHARDS_IDLE_TIMEOUT_SECONDS",
-                    0.02,
-                ),
             ):
                 frames = list(
                     MODULE._iter_remote_session_shard_frames(
@@ -2039,30 +2012,73 @@ class SessionShardsRemoteTests(unittest.TestCase):
                     )
                 )
             self.assertGreater(progress_path.stat().st_size, 1)
-        self.assertGreater(time.monotonic() - started, 0.02)
         self.assertEqual("stream_end", frames[-1]["kind"])
         self.assertEqual(
             ["python3", "-I", "-B", "-"],
             popen.call_args.args[0][-4:],
         )
 
-        stalled = FakePopen(output, 0)
-        stalled.stdout = DelayedChunkReader(output, 0.05, len(output))
-        with (
-            mock.patch.object(MODULE.subprocess, "Popen", return_value=stalled),
-            mock.patch.object(
-                MODULE,
-                "REMOTE_SESSION_SHARDS_IDLE_TIMEOUT_SECONDS",
-                0.02,
-            ),
-        ):
-            with self.assertRaisesRegex(RuntimeError, "idle timed out"):
-                list(
-                    MODULE._iter_remote_session_shard_frames(
-                        "miku-bot-dev",
-                        request,
-                    )
-                )
+        now = 0.0
+
+        def monotonic() -> float:
+            return now
+
+        idle_state = MODULE._RemoteSessionShardsIdleState(
+            10.0,
+            monotonic=monotonic,
+        )
+        now = 9.0
+        self.assertFalse(idle_state.expired())
+        idle_state.mark_progress()
+        now = 18.0
+        self.assertFalse(idle_state.expired())
+        now = 19.0
+        self.assertTrue(idle_state.expired())
+
+    def test_remote_receiver_idle_watchdog_kills_only_after_deadline(self) -> None:
+        now = 0.0
+
+        def monotonic() -> float:
+            return now
+
+        idle_state = MODULE._RemoteSessionShardsIdleState(
+            10.0,
+            monotonic=monotonic,
+        )
+
+        class AdvancingStop:
+            observed_timeout: float | None = None
+
+            def wait(self, timeout: float) -> bool:
+                nonlocal now
+                self.observed_timeout = timeout
+                now = 10.0
+                return False
+
+        class KillableProcess:
+            killed = False
+
+            @staticmethod
+            def poll() -> None:
+                return None
+
+            def kill(self) -> None:
+                self.killed = True
+
+        stop = AdvancingStop()
+        process = KillableProcess()
+        timed_out = threading.Event()
+
+        MODULE._watch_remote_session_shards_idle(
+            process,
+            stop,
+            timed_out,
+            idle_state,
+        )
+
+        self.assertEqual(1.0, stop.observed_timeout)
+        self.assertTrue(timed_out.is_set())
+        self.assertTrue(process.killed)
 
     def test_remote_receiver_rejects_unbounded_gap_descriptors(self) -> None:
         data = b"not-json\n"
