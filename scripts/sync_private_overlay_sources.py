@@ -21,6 +21,20 @@ class SyncError(RuntimeError):
     pass
 
 
+def _base_exception_note_method(error: BaseException):
+    return getattr(error, "add_note", None)
+
+
+def _attach_base_exception_detail(error: BaseException, detail: str) -> None:
+    """Preserve recovery detail on Python 3.10 and newer runtimes."""
+
+    add_note = _base_exception_note_method(error)
+    if callable(add_note):
+        add_note(detail)
+        return
+    print(f"error detail: {detail}", file=sys.stderr)
+
+
 class _RegularFileOverlayBackupRetentionError(SyncError):
     pass
 
@@ -1551,351 +1565,6 @@ def _assert_regular_file_overlay_tree_manifest_at_path(
         raise SyncError(f"regular-file overlay {label} exact tree manifest changed")
 
 
-def _regular_file_overlay_named_identity(
-    parent_descriptor: int,
-    name: str,
-    *,
-    label: str,
-) -> tuple[int, int, int, int]:
-    try:
-        metadata = os.stat(
-            name,
-            dir_fd=parent_descriptor,
-            follow_symlinks=False,
-        )
-    except OSError as exc:
-        raise SyncError(
-            f"cannot inspect regular-file overlay {label}: {exc}"
-        ) from exc
-    return _overlay_root_identity(metadata)
-
-
-def _assert_regular_file_overlay_name_absent(
-    parent_descriptor: int,
-    name: str,
-    *,
-    label: str,
-) -> None:
-    try:
-        os.stat(name, dir_fd=parent_descriptor, follow_symlinks=False)
-    except FileNotFoundError:
-        return
-    except OSError as exc:
-        raise SyncError(
-            f"cannot verify regular-file overlay {label} removal: {exc}"
-        ) from exc
-    raise SyncError(f"regular-file overlay {label} name was rebound after removal")
-
-
-def _remove_regular_file_overlay_manifest_file(
-    parent: _PinnedRegularFileOverlayDirectory,
-    name: str,
-    expected: _RegularFileOverlayTreeEntry,
-    *,
-    label: str,
-) -> None:
-    nonblocking = getattr(os, "O_NONBLOCK", None)
-    if nonblocking is None:
-        raise SyncError(
-            f"secure regular-file overlay {label} nonblocking open is unavailable"
-        )
-    flags = (
-        os.O_RDONLY
-        | os.O_NOFOLLOW
-        | nonblocking
-        | getattr(os, "O_CLOEXEC", 0)
-    )
-    try:
-        named_before = os.stat(
-            name,
-            dir_fd=parent.descriptor,
-            follow_symlinks=False,
-        )
-        descriptor = os.open(name, flags, dir_fd=parent.descriptor)
-    except OSError as exc:
-        raise SyncError(
-            f"cannot pin regular-file overlay {label} file: {exc}"
-        ) from exc
-    try:
-        opened = os.fstat(descriptor)
-        if (
-            expected.kind != "file"
-            or _overlay_file_identity(named_before) != expected.identity
-            or _overlay_file_identity(opened) != expected.identity
-            or opened.st_size != expected.size
-        ):
-            raise SyncError(
-                f"regular-file overlay {label} file binding changed"
-            )
-        digest = _hash_regular_file_overlay_descriptor(
-            descriptor,
-            initial_size=expected.size,
-            label=f"{label} file",
-        )
-        named_after = os.stat(
-            name,
-            dir_fd=parent.descriptor,
-            follow_symlinks=False,
-        )
-        held_after = os.fstat(descriptor)
-        if (
-            digest != expected.sha256
-            or _overlay_file_identity(named_after) != expected.identity
-            or _overlay_file_identity(held_after) != expected.identity
-            or held_after.st_size != expected.size
-        ):
-            raise SyncError(
-                f"regular-file overlay {label} file contents changed"
-            )
-        try:
-            os.unlink(name, dir_fd=parent.descriptor)
-        except OSError as exc:
-            raise SyncError(
-                f"cannot remove regular-file overlay {label} file: {exc}"
-            ) from exc
-        held_unlinked = os.fstat(descriptor)
-        if held_unlinked.st_nlink >= held_after.st_nlink:
-            raise SyncError(
-                f"regular-file overlay {label} file binding changed during removal"
-            )
-        _assert_regular_file_overlay_name_absent(
-            parent.descriptor,
-            name,
-            label=f"{label} file",
-        )
-    finally:
-        os.close(descriptor)
-
-
-def _remove_regular_file_overlay_manifest_directory(
-    stack: contextlib.ExitStack,
-    directory: _PinnedRegularFileOverlayDirectory,
-    *,
-    prefix: tuple[str, ...],
-    expected_entries: dict[tuple[str, ...], _RegularFileOverlayTreeEntry],
-    label: str,
-) -> None:
-    direct_entries = {
-        parts[-1]: entry
-        for parts, entry in expected_entries.items()
-        if parts[:-1] == prefix
-    }
-    names = _bounded_regular_file_overlay_tree_names(
-        directory.descriptor,
-        maximum=len(direct_entries),
-        label=label,
-    )
-    if names != sorted(direct_entries):
-        raise SyncError(
-            f"regular-file overlay {label} exact directory contents changed"
-        )
-
-    for name in names:
-        expected = direct_entries[name]
-        child_prefix = (*prefix, name)
-        if expected.kind == "file":
-            _remove_regular_file_overlay_manifest_file(
-                directory,
-                name,
-                expected,
-                label=f"{label} {'/'.join(child_prefix)}",
-            )
-            continue
-        if expected.kind != "directory":
-            raise SyncError(f"regular-file overlay {label} manifest kind is invalid")
-        child = _pin_regular_file_overlay_child_directory(
-            stack,
-            directory,
-            name,
-            path=directory.path / name,
-            label=f"{label} directory {'/'.join(child_prefix)}",
-        )
-        if _overlay_file_identity(os.fstat(child.descriptor)) != expected.identity:
-            raise SyncError(
-                f"regular-file overlay {label} directory binding changed: "
-                f"{'/'.join(child_prefix)}"
-            )
-        _remove_regular_file_overlay_manifest_directory(
-            stack,
-            child,
-            prefix=child_prefix,
-            expected_entries=expected_entries,
-            label=label,
-        )
-        if _bounded_regular_file_overlay_tree_names(
-            child.descriptor,
-            maximum=0,
-            label=f"{label} empty directory",
-        ):
-            raise SyncError(
-                f"regular-file overlay {label} directory was not emptied"
-            )
-        if (
-            _regular_file_overlay_named_identity(
-                directory.descriptor,
-                name,
-                label=f"{label} directory",
-            )
-            != (
-                expected.identity[0],
-                expected.identity[1],
-                expected.identity[2],
-                expected.identity[4],
-            )
-        ):
-            raise SyncError(
-                f"regular-file overlay {label} directory binding changed before removal"
-            )
-        try:
-            os.rmdir(name, dir_fd=directory.descriptor)
-        except OSError as exc:
-            raise SyncError(
-                f"cannot remove regular-file overlay {label} directory: {exc}"
-            ) from exc
-        _assert_regular_file_overlay_name_absent(
-            directory.descriptor,
-            name,
-            label=f"{label} directory",
-        )
-
-    if _bounded_regular_file_overlay_tree_names(
-        directory.descriptor,
-        maximum=0,
-        label=f"{label} emptied tree",
-    ):
-        raise SyncError(f"regular-file overlay {label} retained an unknown entry")
-
-
-def _remove_external_prepared_regular_file_overlay_tree(
-    parent: _PinnedRegularFileOverlayDirectory,
-    container: _PinnedRegularFileOverlayDirectory,
-    root: _PinnedRegularFileOverlayDirectory | None,
-    manifest: _RegularFileOverlayTreeManifest | None,
-    *,
-    root_name: str,
-) -> None:
-    """Remove only the bounded, pinned external tree built by this process."""
-
-    _assert_regular_file_overlay_directory_binding(
-        parent,
-        label="external prepared parent",
-    )
-    if not _regular_file_overlay_named_root_matches(
-        parent.descriptor,
-        container.path.name,
-        container.identity,
-        label="external prepared container",
-    ):
-        raise SyncError(
-            "external prepared container binding changed; retaining last-known path "
-            f"{container.path}"
-        )
-    expected_container_names = [] if root is None else [root_name]
-    if (
-        _bounded_regular_file_overlay_tree_names(
-            container.descriptor,
-            maximum=len(expected_container_names),
-            label="external prepared container",
-        )
-        != expected_container_names
-    ):
-        raise SyncError(
-            "external prepared container gained an unknown entry; retaining "
-            f"last-known path {container.path}"
-        )
-    if (root is None) != (manifest is None):
-        raise SyncError("external prepared cleanup binding is incomplete")
-
-    if root is not None and manifest is not None:
-        if root.path != container.path / root_name:
-            raise SyncError("external prepared cleanup root path mismatch")
-        if (
-            _overlay_file_identity(os.fstat(root.descriptor))
-            != manifest.root_identity
-        ):
-            raise SyncError("external prepared cleanup root identity mismatch")
-        if not _regular_file_overlay_named_root_matches(
-            container.descriptor,
-            root_name,
-            root.identity,
-            label="external prepared root",
-        ):
-            raise SyncError(
-                "external prepared root binding changed; retaining last-known path "
-                f"{container.path}"
-            )
-        actual_manifest = _capture_regular_file_overlay_tree_manifest(
-            root.descriptor,
-            label="external prepared cleanup",
-        )
-        if actual_manifest != manifest:
-            raise SyncError(
-                "external prepared cleanup exact tree manifest changed; retaining "
-                f"last-known path {container.path}"
-            )
-        expected_entries = _regular_file_overlay_manifest_index(
-            manifest,
-            label="external prepared cleanup",
-        )
-        with contextlib.ExitStack() as stack:
-            _remove_regular_file_overlay_manifest_directory(
-                stack,
-                root,
-                prefix=(),
-                expected_entries=expected_entries,
-                label="external prepared cleanup",
-            )
-        if not _regular_file_overlay_named_root_matches(
-            container.descriptor,
-            root_name,
-            root.identity,
-            label="external prepared root before removal",
-        ):
-            raise SyncError(
-                "external prepared root binding changed before removal; retaining "
-                f"last-known path {container.path}"
-            )
-        try:
-            os.rmdir(root_name, dir_fd=container.descriptor)
-        except OSError as exc:
-            raise SyncError(
-                f"cannot remove external prepared root: {exc}"
-            ) from exc
-        _assert_regular_file_overlay_name_absent(
-            container.descriptor,
-            root_name,
-            label="external prepared root",
-        )
-
-    if _bounded_regular_file_overlay_tree_names(
-        container.descriptor,
-        maximum=0,
-        label="emptied external prepared container",
-    ):
-        raise SyncError("external prepared container retained an unknown entry")
-    if not _regular_file_overlay_named_root_matches(
-        parent.descriptor,
-        container.path.name,
-        container.identity,
-        label="external prepared container before removal",
-    ):
-        raise SyncError(
-            "external prepared container binding changed before removal; retaining "
-            f"last-known path {container.path}"
-        )
-    try:
-        os.rmdir(container.path.name, dir_fd=parent.descriptor)
-    except OSError as exc:
-        raise SyncError(
-            f"cannot remove external prepared container: {exc}"
-        ) from exc
-    _assert_regular_file_overlay_name_absent(
-        parent.descriptor,
-        container.path.name,
-        label="external prepared container",
-    )
-
-
 def _write_regular_file_overlay_descriptor(descriptor: int, data: bytes) -> None:
     offset = 0
     while offset < len(data):
@@ -3190,6 +2859,10 @@ def _pin_regular_file_overlay_child_directory(
     return pinned
 
 
+def _external_prepared_regular_file_overlay_parent_path() -> Path:
+    return Path(tempfile.gettempdir()).resolve(strict=True)
+
+
 def _create_external_prepared_regular_file_overlay_container(
     stack: contextlib.ExitStack,
     *,
@@ -3198,7 +2871,7 @@ def _create_external_prepared_regular_file_overlay_container(
     _PinnedRegularFileOverlayDirectory,
     _PinnedRegularFileOverlayDirectory,
 ]:
-    temporary_root = Path(tempfile.gettempdir()).resolve(strict=True)
+    temporary_root = _external_prepared_regular_file_overlay_parent_path()
     parent = _pin_regular_file_overlay_directory(
         stack,
         temporary_root,
@@ -3220,6 +2893,17 @@ def _create_external_prepared_regular_file_overlay_container(
             raise SyncError(
                 f"cannot create external prepared container: {exc}"
             ) from exc
+        except BaseException as exc:
+            detail = (
+                "external prepared tree may be retained at "
+                f"{parent.path / candidate_name}"
+            )
+            if isinstance(exc, Exception):
+                raise SyncError(
+                    f"{type(exc).__name__}: {exc}; {detail}"
+                ) from exc
+            _attach_base_exception_detail(exc, detail)
+            raise
         container_name = candidate_name
         break
     if container_name is None:
@@ -3254,15 +2938,14 @@ def _create_external_prepared_regular_file_overlay_container(
                 "creation"
             )
     except BaseException as exc:
-        detail = f"retaining last-known path {container_path}"
+        detail = f"external prepared tree retained at {container_path}"
         if isinstance(exc, SyncError):
             raise SyncError(f"{exc}; {detail}") from exc
         if isinstance(exc, Exception):
             raise SyncError(
                 f"{type(exc).__name__}: {exc}; {detail}"
             ) from exc
-        if hasattr(exc, "add_note"):
-            exc.add_note(detail)
+        _attach_base_exception_detail(exc, detail)
         raise
     return parent, container
 
@@ -3501,83 +3184,84 @@ def _copy_regular_file_overlay_public_source_to_prepared(
                         kind="directory",
                         label="public source",
                     )
-                    source_child = _pin_regular_file_overlay_child_directory(
-                        stack,
-                        source_directory,
-                        name,
-                        path=source_directory.path / name,
-                        label="public source directory",
-                    )
-                    source_opened = os.fstat(source_child.descriptor)
-                    _validate_regular_file_overlay_tree_directory(
-                        source_opened,
-                        label=f"public source directory {child_relative}",
-                    )
-                    source_identity = _overlay_file_identity(source_opened)
-                    if (
-                        source_identity != expected.identity
-                        or _overlay_file_identity(named_before) != expected.identity
-                    ):
-                        raise SyncError(
-                            "regular-file overlay public source directory binding "
-                            f"changed: {child_relative}"
-                        )
-                    visited_entries.add(child_relative.parts)
-                    try:
-                        os.mkdir(
+                    with contextlib.ExitStack() as child_stack:
+                        source_child = _pin_regular_file_overlay_child_directory(
+                            child_stack,
+                            source_directory,
                             name,
-                            0o700,
-                            dir_fd=destination_directory.descriptor,
+                            path=source_directory.path / name,
+                            label="public source directory",
                         )
-                    except OSError as exc:
-                        raise SyncError(
-                            "cannot create bounded prepared public directory "
-                            f"{child_relative}: {exc}"
-                        ) from exc
-                    destination_child = _pin_regular_file_overlay_child_directory(
-                        stack,
-                        destination_directory,
-                        name,
-                        path=destination_directory.path / name,
-                        label="prepared public directory",
-                    )
-                    copy_directory(
-                        source_child,
-                        destination_child,
-                        child_relative,
-                        depth + 1,
-                    )
-                    try:
-                        source_after = os.fstat(source_child.descriptor)
-                        source_named_after = os.stat(
+                        source_opened = os.fstat(source_child.descriptor)
+                        _validate_regular_file_overlay_tree_directory(
+                            source_opened,
+                            label=f"public source directory {child_relative}",
+                        )
+                        source_identity = _overlay_file_identity(source_opened)
+                        if (
+                            source_identity != expected.identity
+                            or _overlay_file_identity(named_before) != expected.identity
+                        ):
+                            raise SyncError(
+                                "regular-file overlay public source directory binding "
+                                f"changed: {child_relative}"
+                            )
+                        visited_entries.add(child_relative.parts)
+                        try:
+                            os.mkdir(
+                                name,
+                                0o700,
+                                dir_fd=destination_directory.descriptor,
+                            )
+                        except OSError as exc:
+                            raise SyncError(
+                                "cannot create bounded prepared public directory "
+                                f"{child_relative}: {exc}"
+                            ) from exc
+                        destination_child = _pin_regular_file_overlay_child_directory(
+                            child_stack,
+                            destination_directory,
                             name,
-                            dir_fd=source_directory.descriptor,
-                            follow_symlinks=False,
+                            path=destination_directory.path / name,
+                            label="prepared public directory",
                         )
-                        os.fchmod(
-                            destination_child.descriptor,
-                            stat.S_IMODE(source_opened.st_mode),
+                        copy_directory(
+                            source_child,
+                            destination_child,
+                            child_relative,
+                            depth + 1,
                         )
-                        destination_after = os.fstat(destination_child.descriptor)
-                    except OSError as exc:
-                        raise SyncError(
-                            "cannot finalize bounded prepared public directory "
-                            f"{child_relative}: {exc}"
-                        ) from exc
-                    if (
-                        _overlay_file_identity(source_after) != expected.identity
-                        or _overlay_file_identity(source_named_after)
-                        != expected.identity
-                    ):
-                        raise SyncError(
-                            "regular-file overlay public source directory changed "
-                            f"while copying: {child_relative}"
+                        try:
+                            source_after = os.fstat(source_child.descriptor)
+                            source_named_after = os.stat(
+                                name,
+                                dir_fd=source_directory.descriptor,
+                                follow_symlinks=False,
+                            )
+                            os.fchmod(
+                                destination_child.descriptor,
+                                stat.S_IMODE(source_opened.st_mode),
+                            )
+                            destination_after = os.fstat(destination_child.descriptor)
+                        except OSError as exc:
+                            raise SyncError(
+                                "cannot finalize bounded prepared public directory "
+                                f"{child_relative}: {exc}"
+                            ) from exc
+                        if (
+                            _overlay_file_identity(source_after) != expected.identity
+                            or _overlay_file_identity(source_named_after)
+                            != expected.identity
+                        ):
+                            raise SyncError(
+                                "regular-file overlay public source directory changed "
+                                f"while copying: {child_relative}"
+                            )
+                        manifest_builder.record_directory(
+                            child_relative,
+                            destination_after,
+                            label="prepared public directory",
                         )
-                    manifest_builder.record_directory(
-                        child_relative,
-                        destination_after,
-                        label="prepared public directory",
-                    )
                     continue
                 if not stat.S_ISREG(named_before.st_mode):
                     raise SyncError(
@@ -4105,87 +3789,91 @@ def _copy_prepared_regular_file_overlay_directory(
                 kind="directory",
                 label="prepared source",
             )
-            source_child = _pin_regular_file_overlay_child_directory(
-                stack,
-                source,
-                child_name,
-                path=child,
-                label="prepared source directory",
-            )
-            source_opened = os.fstat(source_child.descriptor)
-            if (
-                _overlay_file_identity(metadata) != expected.identity
-                or _overlay_file_identity(source_opened) != expected.identity
-            ):
-                raise SyncError(
-                    f"prepared overlay source directory changed: {child_relative}"
-                )
-            visited_entries.add(child_relative.parts)
-            _assert_regular_file_overlay_scope_binding(
-                staging_scope,
-                operation="prepared directory creation",
-            )
-            _assert_regular_file_overlay_directory_binding(
-                destination,
-                label="prepared directory parent",
-            )
-            try:
-                os.mkdir(child_name, 0o700, dir_fd=destination.descriptor)
-            except OSError as exc:
-                raise SyncError(
-                    "cannot create prepared regular-file overlay directory: "
-                    f"{destination.path / child_name}: {exc}"
-                ) from exc
-            pinned_child = _pin_regular_file_overlay_child_directory(
-                stack,
-                destination,
-                child_name,
-                path=destination.path / child_name,
-                label="prepared directory",
-            )
-            _copy_prepared_regular_file_overlay_directory(
-                stack,
-                source_child,
-                pinned_child,
-                staging_scope=staging_scope,
-                relative=child_relative,
-                policy_target=policy_target,
-                expected_entries=expected_entries,
-                visited_entries=visited_entries,
-                overlay_data=overlay_data,
-                applied_overlays=applied_overlays,
-                copy_budget=copy_budget,
-                manifest_builder=manifest_builder,
-            )
-            _assert_regular_file_overlay_scope_binding(
-                staging_scope,
-                operation="prepared directory mode update",
-            )
-            try:
-                source_after = os.fstat(source_child.descriptor)
-                source_named_after = os.stat(
+            with contextlib.ExitStack() as child_stack:
+                source_child = _pin_regular_file_overlay_child_directory(
+                    child_stack,
+                    source,
                     child_name,
-                    dir_fd=source.descriptor,
-                    follow_symlinks=False,
+                    path=child,
+                    label="prepared source directory",
                 )
-            except OSError as exc:
-                raise SyncError(
-                    "cannot verify prepared overlay source directory "
-                    f"{child_relative}: {exc}"
-                ) from exc
-            if (
-                _overlay_file_identity(source_after) != expected.identity
-                or _overlay_file_identity(source_named_after) != expected.identity
-            ):
-                raise SyncError(
-                    f"prepared overlay source directory changed: {child_relative}"
+                source_opened = os.fstat(source_child.descriptor)
+                if (
+                    _overlay_file_identity(metadata) != expected.identity
+                    or _overlay_file_identity(source_opened) != expected.identity
+                ):
+                    raise SyncError(
+                        f"prepared overlay source directory changed: {child_relative}"
+                    )
+                visited_entries.add(child_relative.parts)
+                _assert_regular_file_overlay_scope_binding(
+                    staging_scope,
+                    operation="prepared directory creation",
                 )
-            os.fchmod(pinned_child.descriptor, stat.S_IMODE(source_opened.st_mode))
-            manifest_builder.record_directory(
-                child_relative,
-                os.fstat(pinned_child.descriptor),
-                label="prepared target directory",
-            )
+                _assert_regular_file_overlay_directory_binding(
+                    destination,
+                    label="prepared directory parent",
+                )
+                try:
+                    os.mkdir(child_name, 0o700, dir_fd=destination.descriptor)
+                except OSError as exc:
+                    raise SyncError(
+                        "cannot create prepared regular-file overlay directory: "
+                        f"{destination.path / child_name}: {exc}"
+                    ) from exc
+                pinned_child = _pin_regular_file_overlay_child_directory(
+                    child_stack,
+                    destination,
+                    child_name,
+                    path=destination.path / child_name,
+                    label="prepared directory",
+                )
+                _copy_prepared_regular_file_overlay_directory(
+                    child_stack,
+                    source_child,
+                    pinned_child,
+                    staging_scope=staging_scope,
+                    relative=child_relative,
+                    policy_target=policy_target,
+                    expected_entries=expected_entries,
+                    visited_entries=visited_entries,
+                    overlay_data=overlay_data,
+                    applied_overlays=applied_overlays,
+                    copy_budget=copy_budget,
+                    manifest_builder=manifest_builder,
+                )
+                _assert_regular_file_overlay_scope_binding(
+                    staging_scope,
+                    operation="prepared directory mode update",
+                )
+                try:
+                    source_after = os.fstat(source_child.descriptor)
+                    source_named_after = os.stat(
+                        child_name,
+                        dir_fd=source.descriptor,
+                        follow_symlinks=False,
+                    )
+                except OSError as exc:
+                    raise SyncError(
+                        "cannot verify prepared overlay source directory "
+                        f"{child_relative}: {exc}"
+                    ) from exc
+                if (
+                    _overlay_file_identity(source_after) != expected.identity
+                    or _overlay_file_identity(source_named_after) != expected.identity
+                ):
+                    raise SyncError(
+                        f"prepared overlay source directory changed: {child_relative}"
+                    )
+                os.fchmod(
+                    pinned_child.descriptor,
+                    stat.S_IMODE(source_opened.st_mode),
+                )
+                manifest_builder.record_directory(
+                    child_relative,
+                    os.fstat(pinned_child.descriptor),
+                    label="prepared target directory",
+                )
             continue
         if stat.S_ISREG(metadata.st_mode):
             expected = _require_regular_file_overlay_manifest_entry(
@@ -4492,42 +4180,56 @@ def _regular_file_overlay_staging_directory(
                 pinned_parent,
                 label="target parent before staging-container creation",
             )
-        try:
-            os.mkdir(container_name, 0o700, dir_fd=recovery_root.descriptor)
-        except OSError as exc:
-            raise SyncError(
-                f"cannot create regular-file overlay staging container: {exc}"
-            ) from exc
         container_path = recovery_root.path / container_name
-        container_descriptor = os.open(
-            container_name,
-            _regular_file_overlay_directory_flags(label="staging container"),
-            dir_fd=recovery_root.descriptor,
-        )
-        stack.callback(os.close, container_descriptor)
-        container = _PinnedRegularFileOverlayDirectory(
-            path=container_path,
-            descriptor=container_descriptor,
-            identity=_regular_file_overlay_directory_identity(
-                container_descriptor,
-                label="staging container",
+        try:
+            try:
+                os.mkdir(container_name, 0o700, dir_fd=recovery_root.descriptor)
+            except OSError as exc:
+                raise SyncError(
+                    f"cannot create regular-file overlay staging container: {exc}"
+                ) from exc
+            container_descriptor = os.open(
+                container_name,
+                _regular_file_overlay_directory_flags(label="staging container"),
+                dir_fd=recovery_root.descriptor,
+            )
+            stack.callback(os.close, container_descriptor)
+            container = _PinnedRegularFileOverlayDirectory(
                 path=container_path,
-            ),
-        )
-        scope = _RegularFileOverlayStagingScope(
-            path=container_path,
-            repo_root=repo_binding,
-            temporary_root=temporary_root,
-            recovery_root=recovery_root,
-            target_parent=target_parent,
-            target_parent_chain=target_parent_chain,
-            container=container,
-            resource_stack=stack,
-        )
-        _assert_regular_file_overlay_scope_binding(
-            scope,
-            operation="staging scope creation",
-        )
+                descriptor=container_descriptor,
+                identity=_regular_file_overlay_directory_identity(
+                    container_descriptor,
+                    label="staging container",
+                    path=container_path,
+                ),
+            )
+            scope = _RegularFileOverlayStagingScope(
+                path=container_path,
+                repo_root=repo_binding,
+                temporary_root=temporary_root,
+                recovery_root=recovery_root,
+                target_parent=target_parent,
+                target_parent_chain=target_parent_chain,
+                container=container,
+                resource_stack=stack,
+            )
+            _assert_regular_file_overlay_scope_binding(
+                scope,
+                operation="staging scope creation",
+            )
+        except BaseException as primary_error:
+            detail = (
+                "regular-file overlay recovery scope may be retained at "
+                f"{container_path}"
+            )
+            if isinstance(primary_error, SyncError):
+                raise SyncError(f"{primary_error}; {detail}") from primary_error
+            if isinstance(primary_error, Exception):
+                raise SyncError(
+                    f"{type(primary_error).__name__}: {primary_error}; {detail}"
+                ) from primary_error
+            _attach_base_exception_detail(primary_error, detail)
+            raise
         try:
             yield scope
         except BaseException as primary_error:
@@ -4540,8 +4242,7 @@ def _regular_file_overlay_staging_directory(
                 raise SyncError(
                     f"{type(primary_error).__name__}: {primary_error}; {detail}"
                 ) from primary_error
-            if hasattr(primary_error, "add_note"):
-                primary_error.add_note(detail)
+            _attach_base_exception_detail(primary_error, detail)
             raise
         else:
             if not scope.completed:
@@ -4582,8 +4283,6 @@ def _sync_sources_with_repo_binding(
                 prepared = prepared_directory / target.name
                 prepared_root: _PinnedRegularFileOverlayDirectory | None = None
                 prepared_source_manifest: _RegularFileOverlayTreeManifest | None = None
-                prepared_cleanup_manifest: _RegularFileOverlayTreeManifest | None = None
-                prepared_cleanup_pending = True
                 try:
                     try:
                         os.mkdir(
@@ -4616,7 +4315,6 @@ def _sync_sources_with_repo_binding(
                             "initial external prepared root is not empty; retaining "
                             f"last-known path {prepared_directory}"
                         )
-                    prepared_cleanup_manifest = initial_prepared_manifest
                     prepared_source_manifest = (
                         _copy_regular_file_overlay_public_source_to_prepared(
                             source,
@@ -4634,7 +4332,6 @@ def _sync_sources_with_repo_binding(
                             path=prepared_root.path,
                         ),
                     )
-                    prepared_cleanup_manifest = prepared_source_manifest
                     if (
                         _capture_regular_file_overlay_tree_manifest(
                             prepared_root.descriptor,
@@ -4680,17 +4377,20 @@ def _sync_sources_with_repo_binding(
                                 overlay_data,
                                 candidate.manifest,
                             )
-                            # Remove only the exact held external tree before
-                            # the first live no-replace mutation. No fallible
-                            # prepared-tree cleanup remains past this boundary.
-                            _remove_external_prepared_regular_file_overlay_tree(
+                            _assert_regular_file_overlay_directory_binding(
                                 prepared_parent,
-                                prepared_container,
-                                prepared_root,
-                                prepared_source_manifest,
-                                root_name=prepared.name,
+                                label="retained external prepared parent",
                             )
-                            prepared_cleanup_pending = False
+                            _assert_regular_file_overlay_directory_binding(
+                                prepared_container,
+                                label="retained external prepared container",
+                            )
+                            _assert_regular_file_overlay_tree_manifest(
+                                prepared_container.descriptor,
+                                prepared.name,
+                                prepared_source_manifest,
+                                label="retained external prepared source",
+                            )
                             recovery_path = (
                                 _replace_target_with_regular_file_overlays(
                                     target,
@@ -4701,37 +4401,23 @@ def _sync_sources_with_repo_binding(
                             )
                     if recovery_path is not None:
                         recovery_paths.append(recovery_path)
+                    recovery_paths.append(prepared_directory)
                 except BaseException as primary_error:
-                    cleanup_error: BaseException | None = None
-                    if prepared_cleanup_pending:
-                        try:
-                            _remove_external_prepared_regular_file_overlay_tree(
-                                prepared_parent,
-                                prepared_container,
-                                prepared_root,
-                                prepared_cleanup_manifest,
-                                root_name=prepared.name,
-                            )
-                            prepared_cleanup_pending = False
-                        except BaseException as secondary_error:
-                            cleanup_error = secondary_error
-                    if cleanup_error is not None:
-                        detail = (
-                            "external prepared-tree exact cleanup failed; retained "
-                            f"last-known path {prepared_directory}: {cleanup_error}"
-                        )
-                        if isinstance(primary_error, SyncError):
-                            if detail not in str(primary_error):
-                                raise SyncError(
-                                    f"{primary_error}; {detail}"
-                                ) from primary_error
-                        elif isinstance(primary_error, Exception):
+                    detail = (
+                        f"external prepared tree retained at {prepared_directory}"
+                    )
+                    if isinstance(primary_error, SyncError):
+                        if detail not in str(primary_error):
                             raise SyncError(
-                                f"{type(primary_error).__name__}: {primary_error}; "
-                                f"{detail}"
+                                f"{primary_error}; {detail}"
                             ) from primary_error
-                        elif hasattr(primary_error, "add_note"):
-                            primary_error.add_note(detail)
+                    elif isinstance(primary_error, Exception):
+                        raise SyncError(
+                            f"{type(primary_error).__name__}: {primary_error}; "
+                            f"{detail}"
+                        ) from primary_error
+                    else:
+                        _attach_base_exception_detail(primary_error, detail)
                     raise
             continue
 
@@ -4814,7 +4500,12 @@ def main(argv: list[str] | None = None) -> int:
         print(f"error: {error}", file=sys.stderr)
         return 1
     for recovery_path in recovery_paths:
-        print(f"regular-file overlay recovery: {recovery_path.relative_to(repo_root)}")
+        try:
+            relative = recovery_path.relative_to(repo_root)
+        except ValueError:
+            print(f"external prepared tree retained: {recovery_path}")
+        else:
+            print(f"regular-file overlay recovery: {relative}")
     return 0
 
 

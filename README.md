@@ -80,6 +80,13 @@ in the previous eight hours. Ordinary manual runs also observe the eight-hour co
 Post-merge dispatches should use `force=true` so consecutive source PR merges are
 not suppressed by cooldown.
 
+For the secure review-skill rule, source sync intentionally retains one randomized
+`0700` public-only preparation tree under the system temporary directory and prints
+its absolute path. This avoids unsafe pathname deletion under same-UID races; private
+catalog bytes are created only in the repository-side recovery scope and never enter
+the retained external tree. Normal system-temporary-directory lifecycle handles the
+retained copy.
+
 The private manifest declares the public base release repo through `base_release.repo`.
 Private machines should bootstrap the public runner from a `Joey-Tools/codex-toolbox`
 release that includes `install-private`, then switch the scheduler to the private

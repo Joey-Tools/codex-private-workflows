@@ -83,8 +83,17 @@ class PrivateOverlaySyncTests(unittest.TestCase):
         self.source_root = self.root / "source"
         self.repo_root.mkdir()
         self.source_root.mkdir()
+        self.external_prepared_parent = self.root / "external-prepared"
+        self.external_prepared_parent.mkdir(mode=0o700)
+        self.external_prepared_parent_patcher = mock.patch.object(
+            SYNC_MODULE,
+            "_external_prepared_regular_file_overlay_parent_path",
+            return_value=self.external_prepared_parent,
+        )
+        self.external_prepared_parent_patcher.start()
 
     def tearDown(self) -> None:
+        self.external_prepared_parent_patcher.stop()
         self.tmpdir.cleanup()
 
     @contextlib.contextmanager
@@ -844,10 +853,29 @@ class PrivateOverlaySyncTests(unittest.TestCase):
             (target / "SKILL.md").read_text(encoding="utf-8"),
             "Use this when Joey asks.\n",
         )
-        self.assertEqual(len(recovery_paths), 1)
-        self.assertTrue(recovery_paths[0].is_relative_to(self.repo_root / ".codex-tmp"))
-        retained = list(recovery_paths[0].iterdir())
+        self.assertEqual(len(recovery_paths), 2)
+        repo_recoveries = [
+            path for path in recovery_paths if path.is_relative_to(self.repo_root)
+        ]
+        external_prepared = [
+            path for path in recovery_paths if not path.is_relative_to(self.repo_root)
+        ]
+        self.assertEqual(len(repo_recoveries), 1)
+        self.assertTrue(
+            repo_recoveries[0].is_relative_to(self.repo_root / ".codex-tmp")
+        )
+        retained = list(repo_recoveries[0].iterdir())
         self.assertEqual(retained, [])
+        self.assertEqual(len(external_prepared), 1)
+        self.assertEqual(stat.S_IMODE(external_prepared[0].stat().st_mode), 0o700)
+        retained_public_root = external_prepared[0] / target.name
+        self.assertEqual(
+            (retained_public_root / "catalog.json").read_bytes(),
+            b'{"owner":"Joey","pool":"public"}\n',
+        )
+        for retained_file in retained_public_root.rglob("*"):
+            if retained_file.is_file():
+                self.assertNotEqual(retained_file.read_bytes(), expected)
         self.assertEqual(rename_mock.call_count, 1)
         private_create_mock.assert_called_once()
         self.assertEqual(private_create_mock.call_args.args[0], expected)
@@ -855,6 +883,38 @@ class PrivateOverlaySyncTests(unittest.TestCase):
         self.assertNotIn(
             "catalog.json",
             [call.args[2] for call in public_copy_mock.call_args_list],
+        )
+
+    def test_sync_main_reports_repo_recovery_and_external_retention(self) -> None:
+        repo_recovery = self.repo_root / ".codex-tmp/private-overlay-recovery/run"
+        external_retained = self.external_prepared_parent / ".skill.prepared.example"
+        output = io.StringIO()
+
+        with (
+            mock.patch.object(
+                SYNC_MODULE,
+                "sync_sources",
+                return_value=(repo_recovery, external_retained),
+            ),
+            contextlib.redirect_stdout(output),
+        ):
+            result = SYNC_MODULE.main(
+                [
+                    "--repo-root",
+                    str(self.repo_root),
+                    "--source-root",
+                    str(self.source_root),
+                ]
+            )
+
+        self.assertEqual(result, 0)
+        self.assertEqual(
+            output.getvalue().splitlines(),
+            [
+                "regular-file overlay recovery: "
+                ".codex-tmp/private-overlay-recovery/run",
+                f"external prepared tree retained: {external_retained}",
+            ],
         )
 
     def test_secure_replacements_bypass_plain_path_helpers(self) -> None:
@@ -1804,7 +1864,7 @@ class PrivateOverlaySyncTests(unittest.TestCase):
             "private\n",
         )
 
-    def test_canonical_secure_validation_and_cleanup_precede_live_commit(
+    def test_canonical_secure_validation_and_retention_precede_live_commit(
         self,
     ) -> None:
         rule, target = self._create_canonical_regular_file_overlay_rule()
@@ -1813,9 +1873,7 @@ class PrivateOverlaySyncTests(unittest.TestCase):
             SYNC_MODULE._validate_regular_file_overlay_required_manifest_paths
         )
         real_pin = SYNC_MODULE._pin_regular_file_overlay_targets
-        real_remove = (
-            SYNC_MODULE._remove_external_prepared_regular_file_overlay_tree
-        )
+        real_manifest_assert = SYNC_MODULE._assert_regular_file_overlay_tree_manifest
         real_rename = SYNC_MODULE._rename_regular_file_overlay_noreplace
 
         def record_validation(manifest, policy_target, *, surface):
@@ -1834,9 +1892,10 @@ class PrivateOverlaySyncTests(unittest.TestCase):
             events.append("private-pin")
             return real_pin(*args, **kwargs)
 
-        def record_cleanup(*args, **kwargs):
-            events.append("external-cleanup")
-            return real_remove(*args, **kwargs)
+        def record_manifest_assert(*args, **kwargs):
+            if kwargs.get("label") == "retained external prepared source":
+                events.append("external-retention-validation")
+            return real_manifest_assert(*args, **kwargs)
 
         def record_rename(*args, **kwargs):
             events.append("live-rename")
@@ -1855,8 +1914,8 @@ class PrivateOverlaySyncTests(unittest.TestCase):
             ),
             mock.patch.object(
                 SYNC_MODULE,
-                "_remove_external_prepared_regular_file_overlay_tree",
-                side_effect=record_cleanup,
+                "_assert_regular_file_overlay_tree_manifest",
+                side_effect=record_manifest_assert,
             ),
             mock.patch.object(
                 SYNC_MODULE,
@@ -1876,7 +1935,7 @@ class PrivateOverlaySyncTests(unittest.TestCase):
                 "external-validation",
                 "staging-validation",
                 "private-pin",
-                "external-cleanup",
+                "external-retention-validation",
                 "live-rename",
                 "live-rename",
             ],
@@ -2591,28 +2650,73 @@ class PrivateOverlaySyncTests(unittest.TestCase):
         self.assertEqual(target.stat().st_ino, target_inode)
         self.assertEqual((target / "marker").read_bytes(), b"old\n")
 
-    def test_external_prepared_cleanup_failure_precedes_live_mutation(
+    def test_secure_copy_bounds_descriptors_by_tree_depth(self) -> None:
+        try:
+            import resource
+        except ImportError:
+            self.skipTest("resource limits are unavailable")
+
+        descriptor_root = next(
+            (
+                path
+                for path in (Path("/dev/fd"), Path("/proc/self/fd"))
+                if path.is_dir()
+            ),
+            None,
+        )
+        if descriptor_root is None:
+            self.skipTest("open descriptor inventory is unavailable")
+        open_descriptors = len(list(descriptor_root.iterdir()))
+        old_limit = resource.getrlimit(resource.RLIMIT_NOFILE)
+        soft_target = max(64, open_descriptors + 24)
+        if soft_target > 128:
+            self.skipTest("process already holds too many descriptors")
+        hard_limit = old_limit[1]
+        if hard_limit != resource.RLIM_INFINITY and hard_limit < soft_target:
+            self.skipTest("hard descriptor limit is too low for the regression test")
+        if old_limit[0] != resource.RLIM_INFINITY and old_limit[0] < soft_target:
+            soft_target = old_limit[0]
+        if soft_target <= open_descriptors + 16:
+            self.skipTest("soft descriptor limit has insufficient test headroom")
+
+        rule, target = self._create_canonical_regular_file_overlay_rule()
+        source = self.source_root / rule.repo / rule.source
+        for index in range(soft_target):
+            sibling = source / f"wide-{index:03d}"
+            sibling.mkdir()
+            (sibling / "fixture.txt").write_bytes(b"fixture\n")
+
+        resource.setrlimit(resource.RLIMIT_NOFILE, (soft_target, hard_limit))
+        try:
+            retained_paths = SYNC_MODULE.sync_sources(
+                self.repo_root,
+                self.source_root,
+                (rule,),
+            )
+        finally:
+            resource.setrlimit(resource.RLIMIT_NOFILE, old_limit)
+
+        self.assertTrue(target.is_dir())
+        self.assertEqual(len(retained_paths), 2)
+        self.assertTrue((target / "wide-000/fixture.txt").is_file())
+
+    def test_external_prepared_retention_validation_failure_precedes_live_mutation(
         self,
     ) -> None:
         rule, target = self._create_canonical_regular_file_overlay_rule()
         target_inode = target.stat().st_ino
-        real_remove = (
-            SYNC_MODULE._remove_external_prepared_regular_file_overlay_tree
-        )
-        cleanup_calls = 0
+        real_manifest_assert = SYNC_MODULE._assert_regular_file_overlay_tree_manifest
 
-        def fail_first_cleanup(*args, **kwargs):
-            nonlocal cleanup_calls
-            cleanup_calls += 1
-            if cleanup_calls == 1:
-                raise SYNC_MODULE.SyncError("injected exact cleanup failure")
-            return real_remove(*args, **kwargs)
+        def fail_retention_validation(*args, **kwargs):
+            if kwargs.get("label") == "retained external prepared source":
+                raise SYNC_MODULE.SyncError("injected retention validation failure")
+            return real_manifest_assert(*args, **kwargs)
 
         with (
             mock.patch.object(
                 SYNC_MODULE,
-                "_remove_external_prepared_regular_file_overlay_tree",
-                side_effect=fail_first_cleanup,
+                "_assert_regular_file_overlay_tree_manifest",
+                side_effect=fail_retention_validation,
             ),
             mock.patch.object(
                 SYNC_MODULE,
@@ -2622,8 +2726,9 @@ class PrivateOverlaySyncTests(unittest.TestCase):
         ):
             with self.assertRaisesRegex(
                 SYNC_MODULE.SyncError,
-                "injected exact cleanup failure.*"
-                "recovery scope retained for inspection",
+                "injected retention validation failure.*"
+                "recovery scope retained for inspection.*"
+                "external prepared tree retained at",
             ):
                 SYNC_MODULE.sync_sources(
                     self.repo_root,
@@ -2631,8 +2736,10 @@ class PrivateOverlaySyncTests(unittest.TestCase):
                     (rule,),
                 )
 
-        self.assertEqual(cleanup_calls, 2)
         self.assertEqual(rename_mock.call_count, 0)
+        retained = list(self.external_prepared_parent.iterdir())
+        self.assertEqual(len(retained), 1)
+        self.assertTrue((retained[0] / target.name).is_dir())
         self.assertEqual(target.stat().st_ino, target_inode)
         self.assertEqual((target / "old-marker").read_bytes(), b"old\n")
 
@@ -2666,8 +2773,8 @@ class PrivateOverlaySyncTests(unittest.TestCase):
             ):
                 with self.assertRaisesRegex(
                     SYNC_MODULE.SyncError,
-                    "injected public-copy failure.*exact cleanup failed.*"
-                    "retained last-known path",
+                    "injected public-copy failure.*"
+                    "external prepared tree retained at",
                 ):
                     SYNC_MODULE.sync_sources(
                         self.repo_root,
@@ -2722,7 +2829,7 @@ class PrivateOverlaySyncTests(unittest.TestCase):
                 with self.assertRaisesRegex(
                     SYNC_MODULE.SyncError,
                     "initial external prepared root is not empty.*"
-                    "exact cleanup failed.*retained last-known path",
+                    "external prepared tree retained at",
                 ):
                     SYNC_MODULE.sync_sources(
                         self.repo_root,
@@ -2790,7 +2897,7 @@ class PrivateOverlaySyncTests(unittest.TestCase):
                 with self.assertRaisesRegex(
                     SYNC_MODULE.SyncError,
                     "cannot pin regular-file overlay external prepared container.*"
-                    "retaining last-known path",
+                    "external prepared tree retained at",
                 ):
                     SYNC_MODULE.sync_sources(
                         self.repo_root,
@@ -2840,8 +2947,8 @@ class PrivateOverlaySyncTests(unittest.TestCase):
             ):
                 with self.assertRaisesRegex(
                     SYNC_MODULE.SyncError,
-                    "injected prepared-root pin failure.*exact cleanup failed.*"
-                    "retained last-known path",
+                    "injected prepared-root pin failure.*"
+                    "external prepared tree retained at",
                 ):
                     SYNC_MODULE.sync_sources(
                         self.repo_root,
@@ -2858,44 +2965,112 @@ class PrivateOverlaySyncTests(unittest.TestCase):
             if retained_container is not None and retained_container.exists():
                 shutil.rmtree(retained_container)
 
-    def test_external_prepared_cleanup_rejects_root_rebind_before_live_mutation(
+    def test_external_prepared_interrupt_reports_path_without_add_note(self) -> None:
+        rule, target = self._create_canonical_regular_file_overlay_rule()
+        target_inode = target.stat().st_ino
+        errors = io.StringIO()
+
+        with (
+            mock.patch.object(
+                SYNC_MODULE,
+                "_copy_regular_file_overlay_public_source_to_prepared",
+                side_effect=KeyboardInterrupt,
+            ),
+            mock.patch.object(
+                SYNC_MODULE,
+                "_base_exception_note_method",
+                return_value=None,
+            ),
+            contextlib.redirect_stderr(errors),
+        ):
+            with self.assertRaises(KeyboardInterrupt):
+                SYNC_MODULE.sync_sources(
+                    self.repo_root,
+                    self.source_root,
+                    (rule,),
+                )
+
+        retained = list(self.external_prepared_parent.iterdir())
+        self.assertEqual(len(retained), 1)
+        self.assertIn(
+            f"external prepared tree retained at {retained[0]}",
+            errors.getvalue(),
+        )
+        self.assertEqual(target.stat().st_ino, target_inode)
+        self.assertEqual((target / "old-marker").read_bytes(), b"old\n")
+
+    def test_external_post_mkdir_interrupt_reports_possible_retained_path(self) -> None:
+        rule, target = self._create_canonical_regular_file_overlay_rule()
+        target_inode = target.stat().st_ino
+        real_mkdir = SYNC_MODULE.os.mkdir
+        errors = io.StringIO()
+
+        def create_then_interrupt(path, mode=0o777, *, dir_fd=None):
+            real_mkdir(path, mode, dir_fd=dir_fd)
+            if str(path).startswith(f".{target.name}.prepared."):
+                raise KeyboardInterrupt
+
+        with (
+            mock.patch.object(
+                SYNC_MODULE.os,
+                "mkdir",
+                side_effect=create_then_interrupt,
+            ),
+            mock.patch.object(
+                SYNC_MODULE,
+                "_base_exception_note_method",
+                return_value=None,
+            ),
+            contextlib.redirect_stderr(errors),
+        ):
+            with self.assertRaises(KeyboardInterrupt):
+                SYNC_MODULE.sync_sources(
+                    self.repo_root,
+                    self.source_root,
+                    (rule,),
+                )
+
+        retained = list(self.external_prepared_parent.iterdir())
+        self.assertEqual(len(retained), 1)
+        self.assertIn(
+            f"external prepared tree may be retained at {retained[0]}",
+            errors.getvalue(),
+        )
+        self.assertEqual(target.stat().st_ino, target_inode)
+        self.assertEqual((target / "old-marker").read_bytes(), b"old\n")
+
+    def test_external_prepared_retention_validation_rejects_root_rebind(
         self,
     ) -> None:
         rule, target = self._create_canonical_regular_file_overlay_rule()
         target_inode = target.stat().st_ino
-        real_remove = (
-            SYNC_MODULE._remove_external_prepared_regular_file_overlay_tree
-        )
-        cleanup_calls = 0
+        real_manifest_assert = SYNC_MODULE._assert_regular_file_overlay_tree_manifest
         rebound = False
         decoy_survived = False
 
-        def rebind_first_cleanup(parent, container, root, manifest, *, root_name):
-            nonlocal cleanup_calls, rebound, decoy_survived
-            cleanup_calls += 1
-            if cleanup_calls != 1:
-                return real_remove(
-                    parent,
-                    container,
-                    root,
+        def rebind_retained_root(parent_descriptor, name, manifest, *, label):
+            nonlocal rebound, decoy_survived
+            if label != "retained external prepared source":
+                return real_manifest_assert(
+                    parent_descriptor,
+                    name,
                     manifest,
-                    root_name=root_name,
+                    label=label,
                 )
-            saved_name = f".{container.path.name}.{root_name}.expected"
-            saved = container.path.parent / saved_name
-            visible = container.path / root_name
+            container = next(self.external_prepared_parent.iterdir())
+            visible = container / name
+            saved = container / f".{name}.expected"
             visible.rename(saved)
             visible.mkdir(mode=0o700)
             marker = visible / "do-not-delete"
             marker.write_bytes(b"decoy\n")
             rebound = True
             try:
-                return real_remove(
-                    parent,
-                    container,
-                    root,
+                return real_manifest_assert(
+                    parent_descriptor,
+                    name,
                     manifest,
-                    root_name=root_name,
+                    label=label,
                 )
             finally:
                 decoy_survived = marker.read_bytes() == b"decoy\n"
@@ -2905,8 +3080,8 @@ class PrivateOverlaySyncTests(unittest.TestCase):
         with (
             mock.patch.object(
                 SYNC_MODULE,
-                "_remove_external_prepared_regular_file_overlay_tree",
-                side_effect=rebind_first_cleanup,
+                "_assert_regular_file_overlay_tree_manifest",
+                side_effect=rebind_retained_root,
             ),
             mock.patch.object(
                 SYNC_MODULE,
@@ -2916,8 +3091,9 @@ class PrivateOverlaySyncTests(unittest.TestCase):
         ):
             with self.assertRaisesRegex(
                 SYNC_MODULE.SyncError,
-                "external prepared root binding changed.*"
-                "recovery scope retained for inspection",
+                "retained external prepared source tree root binding changed.*"
+                "recovery scope retained for inspection.*"
+                "external prepared tree retained at",
             ):
                 SYNC_MODULE.sync_sources(
                     self.repo_root,
@@ -2927,7 +3103,6 @@ class PrivateOverlaySyncTests(unittest.TestCase):
 
         self.assertTrue(rebound)
         self.assertTrue(decoy_survived)
-        self.assertEqual(cleanup_calls, 2)
         self.assertEqual(rename_mock.call_count, 0)
         self.assertEqual(target.stat().st_ino, target_inode)
         self.assertEqual((target / "old-marker").read_bytes(), b"old\n")
@@ -4632,6 +4807,82 @@ class PrivateOverlaySyncTests(unittest.TestCase):
         )
         self.assertEqual(len(recovery), 1)
         self.assertEqual((recovery[0] / "catalog.json").read_bytes(), b"public\n")
+
+    def test_recovery_interrupt_reports_path_without_add_note(self) -> None:
+        target = self.repo_root / "interrupt-reporting"
+        errors = io.StringIO()
+        scope_path: Path | None = None
+
+        with (
+            mock.patch.object(
+                SYNC_MODULE,
+                "_base_exception_note_method",
+                return_value=None,
+            ),
+            contextlib.redirect_stderr(errors),
+        ):
+            with self.assertRaises(KeyboardInterrupt):
+                with self._regular_file_overlay_staging_directory(target) as scope:
+                    scope_path = scope.path
+                    raise KeyboardInterrupt
+
+        self.assertIsNotNone(scope_path)
+        self.assertIn(
+            f"recovery scope retained for inspection at {scope_path}",
+            errors.getvalue(),
+        )
+
+    def test_recovery_post_mkdir_interrupt_reports_possible_retained_path(
+        self,
+    ) -> None:
+        rule, target = self._create_canonical_regular_file_overlay_rule()
+        target_inode = target.stat().st_ino
+        real_mkdir = SYNC_MODULE.os.mkdir
+        errors = io.StringIO()
+
+        def create_then_interrupt(path, mode=0o777, *, dir_fd=None):
+            real_mkdir(path, mode, dir_fd=dir_fd)
+            if str(path).startswith(
+                SYNC_MODULE.REGULAR_FILE_OVERLAY_RECOVERY_SCOPE_PREFIX
+            ):
+                raise KeyboardInterrupt
+
+        mkdir_mock = mock.Mock(side_effect=create_then_interrupt)
+        supported_dir_fd = frozenset(
+            (set(SYNC_MODULE.os.supports_dir_fd) - {real_mkdir}) | {mkdir_mock}
+        )
+        with (
+            mock.patch.object(SYNC_MODULE.os, "mkdir", mkdir_mock),
+            mock.patch.object(
+                SYNC_MODULE.os,
+                "supports_dir_fd",
+                supported_dir_fd,
+            ),
+            mock.patch.object(
+                SYNC_MODULE,
+                "_base_exception_note_method",
+                return_value=None,
+            ),
+            contextlib.redirect_stderr(errors),
+        ):
+            with self.assertRaises(KeyboardInterrupt):
+                SYNC_MODULE.sync_sources(
+                    self.repo_root,
+                    self.source_root,
+                    (rule,),
+                )
+
+        recovery_root = self.repo_root / SYNC_MODULE.REGULAR_FILE_OVERLAY_RECOVERY_ROOT
+        retained = list(recovery_root.iterdir())
+        self.assertEqual(len(retained), 1)
+        self.assertIn(
+            "regular-file overlay recovery scope may be retained at "
+            f"{retained[0]}",
+            errors.getvalue(),
+        )
+        self.assertIn("external prepared tree retained at", errors.getvalue())
+        self.assertEqual(target.stat().st_ino, target_inode)
+        self.assertEqual((target / "old-marker").read_bytes(), b"old\n")
 
     def test_regular_file_overlay_final_rename_interrupt_retains_both_trees(
         self,
