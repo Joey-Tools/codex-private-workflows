@@ -113,7 +113,17 @@ class PrivateOverlayPackageTests(unittest.TestCase):
         return dist_dir / f"personal-codex-{sha}.tar.gz"
 
     def test_private_manifest_packages_overlay_targets(self) -> None:
-        archive_path = self.build_private_package()
+        temporary_root = REPO_ROOT / ".codex-tmp"
+        temporary_root.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(
+            prefix="private-overlay-recovery-package-test.",
+            dir=temporary_root,
+        ) as recovery:
+            (Path(recovery) / "must-not-package").write_text(
+                "recovery\n",
+                encoding="utf-8",
+            )
+            archive_path = self.build_private_package()
         extract_root = self.root / "extract"
         release_root = MODULE.safe_extract_archive(archive_path, extract_root)
         entries = MODULE.validate_release_tree(release_root)
@@ -160,6 +170,7 @@ class PrivateOverlayPackageTests(unittest.TestCase):
             "packaged generated catalog differs from the private override source",
         )
         with tarfile.open(archive_path, "r:gz") as archive:
+            self.assertFalse(any(".codex-tmp" in name for name in archive.getnames()))
             self.assertFalse(
                 any("private-overrides" in name for name in archive.getnames())
             )
