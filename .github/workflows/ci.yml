@@ -10,13 +10,23 @@ permissions:
   contents: read
 
 jobs:
-  test:
-    runs-on: ubuntu-slim
+  platform_tests:
+    name: platform-tests (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - macos-latest
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.x"
+          python-version: "3.10"
+      - name: Install Python test dependencies
+        run: |
+          python3 -m pip install --disable-pip-version-check --no-input 'tomli==2.2.1; python_version < "3.11"'
       - name: Compile helpers
         run: |
           python3 -m py_compile \
@@ -39,3 +49,15 @@ jobs:
           python3 -m unittest discover \
             -s personal_codex/skills/waited-delivery/tests \
             -p 'test_*.py'
+
+  test:
+    name: test
+    if: ${{ always() }}
+    needs: platform_tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require every platform test to pass
+        env:
+          PLATFORM_TESTS_RESULT: ${{ needs.platform_tests.result }}
+        run: |
+          test "$PLATFORM_TESTS_RESULT" = "success"

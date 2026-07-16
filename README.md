@@ -2,6 +2,9 @@
 
 这个仓库承载 private Codex overlay release。它需要保持 private，不应公开。
 
+The synced review helper requires Python 3.10 or later; CI pins the minimum
+supported runtime on both Ubuntu and macOS.
+
 ## Scope
 
 - private `AGENTS.md`

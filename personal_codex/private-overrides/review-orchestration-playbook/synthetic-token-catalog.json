@@ -1,0 +1,215 @@
+{
+  "schema_version": 1,
+  "authoring_pool": {
+    "version": "joey-private-v1",
+    "tokens": [
+      {
+        "id": "access-a",
+        "role": "access",
+        "state": "active",
+        "rule": "generic-secret-assignment",
+        "value": "codex_synth_v1_access_a"
+      },
+      {
+        "id": "access-b",
+        "role": "access",
+        "state": "active",
+        "rule": "generic-secret-assignment",
+        "value": "codex_synth_v1_access_b"
+      },
+      {
+        "id": "access-expired",
+        "role": "access",
+        "state": "expired",
+        "rule": "generic-secret-assignment",
+        "value": "codex_synth_v1_access_expired"
+      },
+      {
+        "id": "refresh-a",
+        "role": "refresh",
+        "state": "active",
+        "rule": "generic-secret-assignment",
+        "value": "codex_synth_v1_refresh_a"
+      },
+      {
+        "id": "refresh-b",
+        "role": "refresh",
+        "state": "active",
+        "rule": "generic-secret-assignment",
+        "value": "codex_synth_v1_refresh_b"
+      },
+      {
+        "id": "refresh-consumed",
+        "role": "refresh",
+        "state": "consumed",
+        "rule": "generic-secret-assignment",
+        "value": "codex_synth_v1_refresh_consumed"
+      },
+      {
+        "id": "id-a",
+        "role": "id",
+        "state": "active",
+        "rule": "generic-secret-assignment",
+        "value": "codex_synth_v1_id_a"
+      },
+      {
+        "id": "id-b",
+        "role": "id",
+        "state": "active",
+        "rule": "generic-secret-assignment",
+        "value": "codex_synth_v1_id_b"
+      },
+      {
+        "id": "api-key-a",
+        "role": "api-key",
+        "state": "active",
+        "rule": "generic-secret-assignment",
+        "value": "codex_synth_v1_api_key_a"
+      },
+      {
+        "id": "bearer-a",
+        "role": "bearer",
+        "state": "active",
+        "rule": "generic-secret-assignment",
+        "value": "codex_synth_v1_bearer_a"
+      }
+    ]
+  },
+  "legacy_exemptions": [
+    {
+      "id": "codex-workflow-hygiene-session-retrospective-github-pat-v1",
+      "repository": "Joey-Tools/codex-workflow-hygiene",
+      "verified_master_tip": "95befb966cd93e0161ecb45099c124eac56cb52f",
+      "match": "non-increasing-global-count",
+      "values": [
+        {
+          "id": "codex-workflow-hygiene-session-retrospective-pat-value-v1",
+          "rule": "github-token",
+          "value_base64": "Z2l0aHViX3BhdF9hYmNkZWZnaGlqa2xtbm9wMTIzNDU2Nzg5MA==",
+          "containing_commit": "b82d501918a52beb78f1daab3b4c75a5a8843f47",
+          "source_occurrences": 1
+        }
+      ]
+    },
+    {
+      "id": "portable-codex-runtime-master-generic-fixtures-v1",
+      "repository": "cha-op/portable-codex-runtime",
+      "verified_master_tip": "83542fa2a29661c1422c108887bc13cb5bddd7eb",
+      "match": "non-increasing-global-count",
+      "values": [
+        {
+          "id": "portable-runtime-legacy-v1-001",
+          "rule": "generic-secret-assignment",
+          "value_base64": "PHNob3J0LWxpdmVkIHNlY3JldD4=",
+          "containing_commit": "83542fa2a29661c1422c108887bc13cb5bddd7eb",
+          "source_occurrences": 1
+        },
+        {
+          "id": "portable-runtime-legacy-v1-002",
+          "rule": "generic-secret-assignment",
+          "value_base64": "YWNjZXNzLXNlY3JldC1zZW50aW5lbA==",
+          "containing_commit": "83542fa2a29661c1422c108887bc13cb5bddd7eb",
+          "source_occurrences": 2
+        },
+        {
+          "id": "portable-runtime-legacy-v1-003",
+          "rule": "generic-secret-assignment",
+          "value_base64": "YWNjZXNzLXNlbnNpdGl2ZQ==",
+          "containing_commit": "83542fa2a29661c1422c108887bc13cb5bddd7eb",
+          "source_occurrences": 7
+        },
+        {
+          "id": "portable-runtime-legacy-v1-004",
+          "rule": "generic-secret-assignment",
+          "value_base64": "cmVmcmVzaC1hY2NvdW50LTI=",
+          "containing_commit": "83542fa2a29661c1422c108887bc13cb5bddd7eb",
+          "source_occurrences": 1
+        },
+        {
+          "id": "portable-runtime-legacy-v1-007",
+          "rule": "generic-secret-assignment",
+          "value_base64": "cmVmcmVzaC1jb21wZXRpbmc=",
+          "containing_commit": "83542fa2a29661c1422c108887bc13cb5bddd7eb",
+          "source_occurrences": 1
+        },
+        {
+          "id": "portable-runtime-legacy-v1-012",
+          "rule": "generic-secret-assignment",
+          "value_base64": "cmVmcmVzaC1yZWNvdmVyZWQ=",
+          "containing_commit": "83542fa2a29661c1422c108887bc13cb5bddd7eb",
+          "source_occurrences": 6
+        },
+        {
+          "id": "portable-runtime-legacy-v1-013",
+          "rule": "generic-secret-assignment",
+          "value_base64": "cmVmcmVzaC1yZWNvdmVyZWQtYWNjb3VudC0y",
+          "containing_commit": "83542fa2a29661c1422c108887bc13cb5bddd7eb",
+          "source_occurrences": 1
+        },
+        {
+          "id": "portable-runtime-legacy-v1-015",
+          "rule": "generic-secret-assignment",
+          "value_base64": "cmVmcmVzaC1yZWNvdmVyZWQtYmVmb3JlLXJvdGF0aW9u",
+          "containing_commit": "83542fa2a29661c1422c108887bc13cb5bddd7eb",
+          "source_occurrences": 1
+        },
+        {
+          "id": "portable-runtime-legacy-v1-016",
+          "rule": "generic-secret-assignment",
+          "value_base64": "cmVmcmVzaC1yZWNvdmVyZWQtdXNlci0y",
+          "containing_commit": "83542fa2a29661c1422c108887bc13cb5bddd7eb",
+          "source_occurrences": 1
+        },
+        {
+          "id": "portable-runtime-legacy-v1-017",
+          "rule": "generic-secret-assignment",
+          "value_base64": "cmVmcmVzaC1yZWluc3RhbGxlZA==",
+          "containing_commit": "83542fa2a29661c1422c108887bc13cb5bddd7eb",
+          "source_occurrences": 2
+        },
+        {
+          "id": "portable-runtime-legacy-v1-019",
+          "rule": "generic-secret-assignment",
+          "value_base64": "cmVmcmVzaC1zZWNyZXQtaW5zdGFsbC1zZW50aW5lbA==",
+          "containing_commit": "83542fa2a29661c1422c108887bc13cb5bddd7eb",
+          "source_occurrences": 2
+        },
+        {
+          "id": "portable-runtime-legacy-v1-020",
+          "rule": "generic-secret-assignment",
+          "value_base64": "cmVmcmVzaC1zZWNyZXQtcmVmcmVzaC1zZW50aW5lbA==",
+          "containing_commit": "83542fa2a29661c1422c108887bc13cb5bddd7eb",
+          "source_occurrences": 2
+        },
+        {
+          "id": "portable-runtime-legacy-v1-021",
+          "rule": "generic-secret-assignment",
+          "value_base64": "cmVmcmVzaC1zZWNyZXQtc2VudGluZWw=",
+          "containing_commit": "83542fa2a29661c1422c108887bc13cb5bddd7eb",
+          "source_occurrences": 2
+        },
+        {
+          "id": "portable-runtime-legacy-v1-022",
+          "rule": "generic-secret-assignment",
+          "value_base64": "cmVmcmVzaC1zZW5zaXRpdmUtMTIzNDU2Nzg5MA==",
+          "containing_commit": "83542fa2a29661c1422c108887bc13cb5bddd7eb",
+          "source_occurrences": 3
+        },
+        {
+          "id": "portable-runtime-legacy-v1-023",
+          "rule": "generic-secret-assignment",
+          "value_base64": "cm90YXRlZC1hY2Nlc3Mtc2Vuc2l0aXZl",
+          "containing_commit": "83542fa2a29661c1422c108887bc13cb5bddd7eb",
+          "source_occurrences": 3
+        },
+        {
+          "id": "portable-runtime-legacy-v1-025",
+          "rule": "generic-secret-assignment",
+          "value_base64": "aWQtc2VjcmV0LXNlbnRpbmVs",
+          "containing_commit": "83542fa2a29661c1422c108887bc13cb5bddd7eb",
+          "source_occurrences": 2
+        }
+      ]
+    }
+  ]
+}
