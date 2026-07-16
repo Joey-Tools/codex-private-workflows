@@ -10,6 +10,7 @@ import json
 import os
 from pathlib import Path
 import re
+import stat
 import sys
 import tempfile
 from types import SimpleNamespace
@@ -887,13 +888,15 @@ class PrivateOverlaySyncTests(unittest.TestCase):
         source.parent.mkdir()
         source.write_text("private\n", encoding="utf-8")
         real_fstat = SYNC_MODULE.os.fstat
-        calls = 0
+        regular_file_calls = 0
 
         def drifting_fstat(descriptor):
-            nonlocal calls
-            calls += 1
+            nonlocal regular_file_calls
             metadata = real_fstat(descriptor)
-            if calls != 2:
+            if not stat.S_ISREG(metadata.st_mode):
+                return metadata
+            regular_file_calls += 1
+            if regular_file_calls != 2:
                 return metadata
             return SimpleNamespace(
                 st_dev=metadata.st_dev,
@@ -1009,7 +1012,7 @@ class PrivateOverlaySyncTests(unittest.TestCase):
         ):
             with self.assertRaisesRegex(
                 SYNC_MODULE.SyncError,
-                "cannot securely open regular-file overlay source parent",
+                "regular-file overlay source root binding changed",
             ):
                 SYNC_MODULE._read_regular_file_overlay_source(
                     self.repo_root,
@@ -1043,7 +1046,7 @@ class PrivateOverlaySyncTests(unittest.TestCase):
         ):
             with self.assertRaisesRegex(
                 SYNC_MODULE.SyncError,
-                "cannot securely open regular-file overlay target parent",
+                "regular-file overlay target root binding changed",
             ):
                 SYNC_MODULE._write_regular_file_overlay_target(
                     staging,
@@ -1053,15 +1056,202 @@ class PrivateOverlaySyncTests(unittest.TestCase):
 
         self.assertEqual(outside_catalog.read_text(encoding="utf-8"), "outside\n")
 
+    def test_regular_file_overlay_blocks_source_directory_root_swap_after_preflight(
+        self,
+    ) -> None:
+        private = self.repo_root / "private"
+        private.mkdir()
+        (private / "catalog.json").write_text("original\n", encoding="utf-8")
+        replacement_root = self.root / "replacement-source-root"
+        replacement_private = replacement_root / "private"
+        replacement_private.mkdir(parents=True)
+        (replacement_private / "catalog.json").write_text(
+            "replacement\n",
+            encoding="utf-8",
+        )
+        saved = self.root / "target-before-directory-root-swap"
+        real_ensure_safe_source = SYNC_MODULE._ensure_safe_source
+
+        def swap_root(source_root, source):
+            real_ensure_safe_source(source_root, source)
+            self.repo_root.rename(saved)
+            replacement_root.rename(self.repo_root)
+
+        with mock.patch.object(
+            SYNC_MODULE,
+            "_ensure_safe_source",
+            side_effect=swap_root,
+        ):
+            with self.assertRaisesRegex(
+                SYNC_MODULE.SyncError,
+                "regular-file overlay source root binding changed",
+            ):
+                SYNC_MODULE._read_regular_file_overlay_source(
+                    self.repo_root,
+                    Path("private/catalog.json"),
+                )
+
+        self.assertEqual(
+            (self.repo_root / "private" / "catalog.json").read_text(encoding="utf-8"),
+            "replacement\n",
+        )
+
+    def test_regular_file_overlay_blocks_target_directory_root_swap_after_preflight(
+        self,
+    ) -> None:
+        staging = self.repo_root / "staging-directory-root-swap"
+        staging.mkdir()
+        (staging / "catalog.json").write_text("public\n", encoding="utf-8")
+        replacement_root = self.root / "replacement-target-root"
+        replacement_root.mkdir()
+        (replacement_root / "catalog.json").write_text(
+            "replacement\n",
+            encoding="utf-8",
+        )
+        saved = self.repo_root / "staging-before-directory-root-swap"
+        real_ensure_safe_target = SYNC_MODULE._ensure_safe_target
+
+        def swap_root(repo_root, target):
+            real_ensure_safe_target(repo_root, target)
+            staging.rename(saved)
+            replacement_root.rename(staging)
+
+        with mock.patch.object(
+            SYNC_MODULE,
+            "_ensure_safe_target",
+            side_effect=swap_root,
+        ):
+            with self.assertRaisesRegex(
+                SYNC_MODULE.SyncError,
+                "regular-file overlay target root binding changed",
+            ):
+                SYNC_MODULE._write_regular_file_overlay_target(
+                    staging,
+                    Path("catalog.json"),
+                    b"private\n",
+                )
+
+        self.assertEqual(
+            (staging / "catalog.json").read_text(encoding="utf-8"),
+            "replacement\n",
+        )
+
+    def test_regular_file_overlay_detects_source_root_swap_after_binding_check(
+        self,
+    ) -> None:
+        private = self.repo_root / "private"
+        private.mkdir()
+        (private / "catalog.json").write_text("original\n", encoding="utf-8")
+        replacement_root = self.root / "late-replacement-source-root"
+        replacement_private = replacement_root / "private"
+        replacement_private.mkdir(parents=True)
+        (replacement_private / "catalog.json").write_text(
+            "replacement\n",
+            encoding="utf-8",
+        )
+        saved = self.root / "target-before-late-root-swap"
+        real_assert_binding = SYNC_MODULE._assert_regular_file_overlay_root_binding
+        real_read = SYNC_MODULE.os.read
+        calls = 0
+        read_inodes: list[int] = []
+
+        def swap_after_binding(root_descriptor, root, *, label):
+            nonlocal calls
+            real_assert_binding(root_descriptor, root, label=label)
+            calls += 1
+            if calls == 1:
+                self.repo_root.rename(saved)
+                replacement_root.rename(self.repo_root)
+
+        def record_read(descriptor, size):
+            metadata = SYNC_MODULE.os.fstat(descriptor)
+            if stat.S_ISREG(metadata.st_mode):
+                read_inodes.append(metadata.st_ino)
+            return real_read(descriptor, size)
+
+        with (
+            mock.patch.object(
+                SYNC_MODULE,
+                "_assert_regular_file_overlay_root_binding",
+                side_effect=swap_after_binding,
+            ),
+            mock.patch.object(SYNC_MODULE.os, "read", side_effect=record_read),
+        ):
+            with self.assertRaisesRegex(
+                SYNC_MODULE.SyncError,
+                "regular-file overlay source root binding changed",
+            ):
+                SYNC_MODULE._read_regular_file_overlay_source(
+                    self.repo_root,
+                    Path("private/catalog.json"),
+                )
+
+        self.assertEqual(
+            (self.repo_root / "private" / "catalog.json").read_text(encoding="utf-8"),
+            "replacement\n",
+        )
+        self.assertTrue(read_inodes)
+        original_inode = (saved / "private" / "catalog.json").stat().st_ino
+        replacement_inode = (self.repo_root / "private" / "catalog.json").stat().st_ino
+        self.assertEqual(set(read_inodes), {original_inode})
+        self.assertNotEqual(original_inode, replacement_inode)
+
+    def test_regular_file_overlay_detects_target_root_swap_after_binding_check(
+        self,
+    ) -> None:
+        staging = self.repo_root / "staging-late-root-swap"
+        staging.mkdir()
+        (staging / "catalog.json").write_text("public\n", encoding="utf-8")
+        replacement_root = self.root / "late-replacement-target-root"
+        replacement_root.mkdir()
+        (replacement_root / "catalog.json").write_text(
+            "replacement\n",
+            encoding="utf-8",
+        )
+        saved = self.repo_root / "staging-before-late-root-swap"
+        real_assert_binding = SYNC_MODULE._assert_regular_file_overlay_root_binding
+        calls = 0
+
+        def swap_after_binding(root_descriptor, root, *, label):
+            nonlocal calls
+            real_assert_binding(root_descriptor, root, label=label)
+            calls += 1
+            if calls == 1:
+                staging.rename(saved)
+                replacement_root.rename(staging)
+
+        with mock.patch.object(
+            SYNC_MODULE,
+            "_assert_regular_file_overlay_root_binding",
+            side_effect=swap_after_binding,
+        ):
+            with self.assertRaisesRegex(
+                SYNC_MODULE.SyncError,
+                "regular-file overlay target root binding changed",
+            ):
+                SYNC_MODULE._write_regular_file_overlay_target(
+                    staging,
+                    Path("catalog.json"),
+                    b"private\n",
+                )
+
+        self.assertEqual(
+            (staging / "catalog.json").read_text(encoding="utf-8"),
+            "replacement\n",
+        )
+        self.assertEqual(
+            (saved / "catalog.json").read_text(encoding="utf-8"),
+            "private\n",
+        )
+
     def test_regular_file_overlay_secure_open_requires_dir_fd_support(self) -> None:
         with mock.patch.object(SYNC_MODULE.os, "supports_dir_fd", set()):
             with self.assertRaisesRegex(
                 SYNC_MODULE.SyncError,
                 "secure regular-file overlay source path traversal is unavailable",
             ):
-                SYNC_MODULE._open_regular_file_overlay_parent(
+                SYNC_MODULE._open_regular_file_overlay_root(
                     self.repo_root,
-                    Path("private/catalog.json"),
                     label="source",
                 )
 

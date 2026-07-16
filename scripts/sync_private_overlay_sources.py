@@ -750,15 +750,7 @@ def _validate_overlay_regular_file(
         )
 
 
-def _open_regular_file_overlay_parent(
-    root: Path,
-    relative: Path,
-    *,
-    label: str,
-) -> tuple[int, str]:
-    _require_overlay_relative_path(relative, field=label)
-    if not root.is_absolute() or root.anchor != os.sep:
-        raise SyncError(f"regular-file overlay {label} root must be absolute: {root}")
+def _regular_file_overlay_directory_flags(*, label: str) -> int:
     if (
         not hasattr(os, "O_DIRECTORY")
         or not hasattr(os, "O_NOFOLLOW")
@@ -769,12 +761,85 @@ def _open_regular_file_overlay_parent(
         raise SyncError(
             f"secure regular-file overlay {label} path traversal is unavailable"
         )
+    return os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
 
-    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+
+def _open_regular_file_overlay_root(
+    root: Path,
+    *,
+    label: str,
+) -> int:
+    if not root.is_absolute() or root.anchor != os.sep:
+        raise SyncError(f"regular-file overlay {label} root must be absolute: {root}")
+    flags = _regular_file_overlay_directory_flags(label=label)
     descriptor: int | None = None
     try:
         descriptor = os.open(os.sep, flags)
-        for component in (*root.parts[1:], *relative.parts[:-1]):
+        for component in root.parts[1:]:
+            next_descriptor = os.open(component, flags, dir_fd=descriptor)
+            previous_descriptor = descriptor
+            descriptor = next_descriptor
+            os.close(previous_descriptor)
+    except OSError as exc:
+        if descriptor is not None:
+            os.close(descriptor)
+        raise SyncError(
+            f"cannot securely open regular-file overlay {label} root: {root}: {exc}"
+        ) from exc
+    return descriptor
+
+
+def _overlay_root_identity(metadata: os.stat_result) -> tuple[int, int, int, int]:
+    return (
+        metadata.st_dev,
+        metadata.st_ino,
+        metadata.st_mode,
+        metadata.st_uid,
+    )
+
+
+def _assert_regular_file_overlay_root_binding(
+    root_descriptor: int,
+    root: Path,
+    *,
+    label: str,
+) -> None:
+    try:
+        pinned = os.fstat(root_descriptor)
+    except OSError as exc:
+        raise SyncError(
+            f"cannot inspect pinned regular-file overlay {label} root: {root}: {exc}"
+        ) from exc
+    try:
+        visible_descriptor = _open_regular_file_overlay_root(root, label=label)
+    except SyncError as exc:
+        raise SyncError(
+            f"regular-file overlay {label} root binding changed: {root}"
+        ) from exc
+    try:
+        visible = os.fstat(visible_descriptor)
+    except OSError as exc:
+        raise SyncError(
+            f"cannot inspect visible regular-file overlay {label} root: {root}: {exc}"
+        ) from exc
+    finally:
+        os.close(visible_descriptor)
+    if _overlay_root_identity(pinned) != _overlay_root_identity(visible):
+        raise SyncError(f"regular-file overlay {label} root binding changed: {root}")
+
+
+def _open_regular_file_overlay_parent(
+    root_descriptor: int,
+    relative: Path,
+    *,
+    label: str,
+) -> tuple[int, str]:
+    _require_overlay_relative_path(relative, field=label)
+    flags = _regular_file_overlay_directory_flags(label=label)
+    descriptor: int | None = None
+    try:
+        descriptor = os.dup(root_descriptor)
+        for component in relative.parts[:-1]:
             next_descriptor = os.open(component, flags, dir_fd=descriptor)
             previous_descriptor = descriptor
             descriptor = next_descriptor
@@ -816,16 +881,27 @@ def _stat_regular_file_overlay_entry(
 
 def _read_regular_file_overlay_source(repo_root: Path, relative: Path) -> bytes:
     source = repo_root / relative
-    if source.is_symlink():
-        raise SyncError(f"refusing regular-file overlay source symlink: {source}")
-    if not source.exists():
-        raise SyncError(f"regular-file overlay source missing: {source}")
-    _ensure_safe_source(repo_root, source)
-    parent_descriptor, name = _open_regular_file_overlay_parent(
-        repo_root,
-        relative,
-        label="source",
-    )
+    root_descriptor = _open_regular_file_overlay_root(repo_root, label="source")
+    try:
+        if source.is_symlink():
+            raise SyncError(f"refusing regular-file overlay source symlink: {source}")
+        if not source.exists():
+            raise SyncError(f"regular-file overlay source missing: {source}")
+        _ensure_safe_source(repo_root, source)
+        _assert_regular_file_overlay_root_binding(
+            root_descriptor,
+            repo_root,
+            label="source",
+        )
+        parent_descriptor, name = _open_regular_file_overlay_parent(
+            root_descriptor,
+            relative,
+            label="source",
+        )
+    except BaseException:
+        os.close(root_descriptor)
+        raise
+
     try:
         initial = _stat_regular_file_overlay_entry(
             parent_descriptor,
@@ -892,8 +968,16 @@ def _read_regular_file_overlay_source(repo_root: Path, relative: Path) -> bytes:
             raise SyncError(
                 f"regular-file overlay source changed after reading: {source}"
             )
+        _assert_regular_file_overlay_root_binding(
+            root_descriptor,
+            repo_root,
+            label="source",
+        )
     finally:
-        os.close(parent_descriptor)
+        try:
+            os.close(parent_descriptor)
+        finally:
+            os.close(root_descriptor)
     if len(data) > MAX_REGULAR_FILE_OVERLAY_BYTES:
         raise SyncError(
             "regular-file overlay source exceeds "
@@ -906,12 +990,23 @@ def _write_regular_file_overlay_target(
     staging: Path, relative: Path, data: bytes
 ) -> None:
     target = staging / relative
-    _ensure_safe_target(staging, target)
-    parent_descriptor, name = _open_regular_file_overlay_parent(
-        staging,
-        relative,
-        label="target",
-    )
+    root_descriptor = _open_regular_file_overlay_root(staging, label="target")
+    try:
+        _ensure_safe_target(staging, target)
+        _assert_regular_file_overlay_root_binding(
+            root_descriptor,
+            staging,
+            label="target",
+        )
+        parent_descriptor, name = _open_regular_file_overlay_parent(
+            root_descriptor,
+            relative,
+            label="target",
+        )
+    except BaseException:
+        os.close(root_descriptor)
+        raise
+
     try:
         target_stat = _stat_regular_file_overlay_entry(
             parent_descriptor,
@@ -966,8 +1061,16 @@ def _write_regular_file_overlay_target(
             label="target",
             path=relative,
         )
+        _assert_regular_file_overlay_root_binding(
+            root_descriptor,
+            staging,
+            label="target",
+        )
     finally:
-        os.close(parent_descriptor)
+        try:
+            os.close(parent_descriptor)
+        finally:
+            os.close(root_descriptor)
     if (
         written_data != data
         or _overlay_file_identity(after) != _overlay_file_identity(target_stat)
