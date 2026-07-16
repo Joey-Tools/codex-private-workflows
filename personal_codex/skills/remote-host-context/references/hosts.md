@@ -79,7 +79,13 @@ If deeper remote reads start repeating across sessions, add a helper under `~/.c
 
 ## Codex Thread Locator Skim
 
-When Joey supplies a `codex://threads/<id>` URL, use a callable thread reader only to locate the task or inspect its latest compact state. Read one exact thread per call with:
+When Joey supplies a `codex://threads/<id>` URL, `read_thread` is forbidden unless the service supports and the caller sets every one of these server-side controls:
+
+- accepted item-type filtering that admits only selected thread metadata and user or agent messages
+- an item-count limit that bounds the entire result and permits no more than 12 message snippets
+- a whole-response byte cap that applies before any payload reaches the caller
+
+Those controls are additional to reading one exact thread per call with:
 
 ```text
 turnLimit: 1
@@ -87,7 +93,14 @@ includeOutputs: false
 maxOutputCharsPerItem: 400
 ```
 
-Project only thread id, host id, title, status, cwd, created/updated timestamps, and at most 12 user or agent message snippets of at most 400 characters each, rendered on one line per snippet. Exclude reasoning, tool calls, tool outputs, file-change payloads, and other retained artifacts. Do not batch several thread reads or stringify or serialize the raw result: an output cap on the parent tool call does not bound the thread payload. If one compact turn is insufficient, use the created timestamp as the primary `YYYY/MM/DD` date for `session-meta`, because the canonical rollout remains under its creation date when a thread continues across days. Query only the distinct updated date and UTC/host-local calendar dates when they differ, then filter the bounded results by the exact session id. After locating the canonical rollout, use `rollout-summary` or `chunked-rollout-summary` rather than widening `read_thread`.
+The service itself must emit only thread id, host id, title, status, cwd, created/updated timestamps, and at most 12 user or agent message snippets of at most 400 characters each, rendered on one line per snippet. It must exclude reasoning, tool calls, tool outputs, file-change payloads, and other retained artifacts before returning. `turnLimit`, a per-item character cap, an output cap on the parent tool call, and caller-side projection do not bound item count or whole-response bytes. Do not batch several thread reads or stringify or serialize the raw result.
+
+If any required server-side control is unavailable, including the whole-response controls missing from the observed API, do not call `read_thread` at all:
+
+- When a creation or nearby activity date is known, query only the bounded `session-meta` date windows needed for the created, distinct updated, and UTC/host-local calendar dates; filter the bounded results by the exact session id, then use `rollout-summary` or `chunked-rollout-summary`.
+- When the date is unknown, use a bounded metadata-only exact-thread or session-index lookup that cannot return transcript items, or ask Joey for or derive a date from adjacent task evidence. Never widen `read_thread` to discover the date.
+
+The canonical rollout remains under its creation date when a thread continues across days. After locating it, use `rollout-summary` or `chunked-rollout-summary` rather than widening `read_thread`.
 
 Treat the bounded latest turn as a locator, not as permission to discard task history. If the thread started with an automation, skill, or instruction wrapper, retain later substantive human follow-ups typed by the user and delegate replay-prefix and wrapper filtering to `codex-session-mining`.
 

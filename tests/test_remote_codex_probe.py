@@ -60,30 +60,63 @@ class RemoteHostContextDocumentationTests(unittest.TestCase):
         self.assertIn("`turnLimit: 1`", skill)
         self.assertIn("`includeOutputs: false`", skill)
         self.assertIn("`maxOutputCharsPerItem` at most 400", skill)
+        self.assertIn(
+            "do not call `read_thread` unless the service supports", skill
+        )
+        self.assertIn("server-side accepted item-type filtering", skill)
+        self.assertIn("an item-count limit", skill)
+        self.assertIn("a whole-response byte cap", skill)
+        self.assertIn("the service itself must emit", skill)
+        self.assertIn("Caller-side projection or truncation after receipt", skill)
+        self.assertIn("skip `read_thread` entirely", skill)
+        self.assertIn("bounded `session-meta` date windows", skill)
+        self.assertIn("exact session-id filtering", skill)
+        self.assertIn("bounded metadata-only exact-thread or index lookup", skill)
+        self.assertIn("never widen `read_thread`", skill)
         self.assertIn("Do not batch multiple thread reads", skill)
         self.assertIn(
             "[Codex Thread Locator Skim]"
             "(references/hosts.md#codex-thread-locator-skim)",
             skill,
         )
+        self.assertIn("`read_thread` is forbidden unless", reference)
+        self.assertIn("caller sets every one", reference)
         self.assertIn("Do not batch several thread reads", reference)
+        self.assertIn("accepted item-type filtering", reference)
+        self.assertIn("an item-count limit that bounds the entire result", reference)
+        self.assertIn("permits no more than 12 message snippets", reference)
+        self.assertIn("a whole-response byte cap", reference)
         self.assertIn("at most 12 user or agent message snippets", reference)
         self.assertIn("rendered on one line per snippet", reference)
         self.assertIn("stringify or serialize the raw result", reference)
+        self.assertIn("before returning", reference)
         self.assertIn("created/updated timestamps", reference)
         self.assertIn(
-            "created timestamp as the primary `YYYY/MM/DD` date for `session-meta`",
+            "do not bound item count or whole-response bytes",
             reference,
         )
         self.assertIn(
-            "distinct updated date and UTC/host-local calendar dates", reference
+            "whole-response controls missing from the observed API", reference
+        )
+        self.assertIn(
+            "If any required server-side control is unavailable", reference
+        )
+        self.assertIn("do not call `read_thread` at all", reference)
+        self.assertIn("bounded `session-meta` date windows", reference)
+        self.assertIn(
+            "created, distinct updated, and UTC/host-local calendar dates", reference
         )
         self.assertIn("filter the bounded results by the exact session id", reference)
-        self.assertIn("an output cap on the parent tool call does not bound", reference)
+        self.assertIn(
+            "bounded metadata-only exact-thread or session-index lookup", reference
+        )
+        self.assertIn("Never widen `read_thread` to discover the date", reference)
         self.assertIn("`chunked-rollout-summary`", reference)
         self.assertIn(
             "retain later substantive human follow-ups typed by the user", reference
         )
+        self.assertNotIn("use `read_thread` only as a bounded locator", skill)
+        self.assertNotIn("use a callable thread reader only", reference)
 
     def test_bl_mac_mini_uses_hoteng_macos_home(self) -> None:
         host = MODULE.HOSTS["BL-mac-mini-m4-hoteng"]
