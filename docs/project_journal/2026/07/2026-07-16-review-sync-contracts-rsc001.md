@@ -5,7 +5,7 @@ status: completed
 created: 2026-07-16
 updated: 2026-07-16
 branch: codex/review-sync-contracts
-pr:
+pr: https://github.com/Joey-Tools/codex-private-workflows/pull/86
 supersedes: []
 superseded_by:
 ---
