@@ -750,6 +750,81 @@ def _validate_overlay_regular_file(
         )
 
 
+def _open_regular_file_overlay_parent(
+    root: Path,
+    relative: Path,
+    *,
+    label: str,
+) -> tuple[int, str]:
+    _require_overlay_relative_path(relative, field=label)
+    try:
+        root = root.resolve(strict=True)
+    except OSError as exc:
+        raise SyncError(
+            f"cannot resolve regular-file overlay {label} root: {root}: {exc}"
+        ) from exc
+    if not root.is_absolute() or root.anchor != os.sep:
+        raise SyncError(f"regular-file overlay {label} root must be absolute: {root}")
+    if (
+        not hasattr(os, "O_DIRECTORY")
+        or not hasattr(os, "O_NOFOLLOW")
+        or os.open not in os.supports_dir_fd
+        or os.stat not in os.supports_dir_fd
+        or os.stat not in os.supports_follow_symlinks
+    ):
+        raise SyncError(
+            f"secure regular-file overlay {label} path traversal is unavailable"
+        )
+
+    flags = (
+        os.O_RDONLY
+        | os.O_DIRECTORY
+        | os.O_NOFOLLOW
+        | getattr(os, "O_CLOEXEC", 0)
+    )
+    descriptor: int | None = None
+    try:
+        descriptor = os.open(os.sep, flags)
+        for component in (*root.parts[1:], *relative.parts[:-1]):
+            next_descriptor = os.open(component, flags, dir_fd=descriptor)
+            previous_descriptor = descriptor
+            descriptor = next_descriptor
+            os.close(previous_descriptor)
+    except OSError as exc:
+        if descriptor is not None:
+            os.close(descriptor)
+        raise SyncError(
+            "cannot securely open regular-file overlay "
+            f"{label} parent: {relative}: {exc}"
+        ) from exc
+    return descriptor, relative.name
+
+
+def _stat_regular_file_overlay_entry(
+    parent_descriptor: int,
+    name: str,
+    *,
+    label: str,
+    path: Path,
+) -> os.stat_result:
+    try:
+        metadata = os.stat(
+            name,
+            dir_fd=parent_descriptor,
+            follow_symlinks=False,
+        )
+    except FileNotFoundError as exc:
+        raise SyncError(f"regular-file overlay {label} missing: {path}") from exc
+    except OSError as exc:
+        raise SyncError(
+            f"cannot inspect regular-file overlay {label}: {path}: {exc}"
+        ) from exc
+    if stat.S_ISLNK(metadata.st_mode):
+        raise SyncError(f"refusing regular-file overlay {label} symlink: {path}")
+    _validate_overlay_regular_file(metadata, label=label, path=path)
+    return metadata
+
+
 def _read_regular_file_overlay_source(repo_root: Path, relative: Path) -> bytes:
     source = repo_root / relative
     if source.is_symlink():
@@ -757,70 +832,79 @@ def _read_regular_file_overlay_source(repo_root: Path, relative: Path) -> bytes:
     if not source.exists():
         raise SyncError(f"regular-file overlay source missing: {source}")
     _ensure_safe_source(repo_root, source)
+    parent_descriptor, name = _open_regular_file_overlay_parent(
+        repo_root,
+        relative,
+        label="source",
+    )
     try:
-        initial = source.lstat()
-    except OSError as exc:
-        raise SyncError(
-            f"cannot inspect regular-file overlay source: {source}: {exc}"
-        ) from exc
-    _validate_overlay_regular_file(initial, label="source", path=source)
+        initial = _stat_regular_file_overlay_entry(
+            parent_descriptor,
+            name,
+            label="source",
+            path=source,
+        )
+        flags = (
+            os.O_RDONLY
+            | os.O_NOFOLLOW
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NONBLOCK", 0)
+        )
+        try:
+            descriptor = os.open(name, flags, dir_fd=parent_descriptor)
+        except OSError as exc:
+            raise SyncError(
+                f"cannot open regular-file overlay source: {source}: {exc}"
+            ) from exc
+        try:
+            before = os.fstat(descriptor)
+            _validate_overlay_regular_file(before, label="source", path=source)
+            if _overlay_file_content_identity(
+                before
+            ) != _overlay_file_content_identity(initial):
+                raise SyncError(
+                    f"regular-file overlay source changed before reading: {source}"
+                )
+            if before.st_size > MAX_REGULAR_FILE_OVERLAY_BYTES:
+                raise SyncError(
+                    "regular-file overlay source exceeds "
+                    f"{MAX_REGULAR_FILE_OVERLAY_BYTES} bytes: {source}"
+                )
+            chunks: list[bytes] = []
+            remaining = MAX_REGULAR_FILE_OVERLAY_BYTES + 1
+            while remaining:
+                chunk = os.read(descriptor, min(remaining, 64 * 1024))
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                remaining -= len(chunk)
+            data = b"".join(chunks)
+            after = os.fstat(descriptor)
+        except OSError as exc:
+            raise SyncError(
+                f"cannot read regular-file overlay source: {source}: {exc}"
+            ) from exc
+        finally:
+            os.close(descriptor)
 
-    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
-    if hasattr(os, "O_NOFOLLOW"):
-        flags |= os.O_NOFOLLOW
-    if hasattr(os, "O_NONBLOCK"):
-        flags |= os.O_NONBLOCK
-    try:
-        descriptor = os.open(source, flags)
-    except OSError as exc:
-        raise SyncError(
-            f"cannot open regular-file overlay source: {source}: {exc}"
-        ) from exc
-    try:
-        before = os.fstat(descriptor)
-        _validate_overlay_regular_file(before, label="source", path=source)
-        if _overlay_file_content_identity(before) != _overlay_file_content_identity(
-            initial
-        ):
+        identity_before = _overlay_file_content_identity(before)
+        identity_after = _overlay_file_content_identity(after)
+        if identity_before != identity_after or len(data) != after.st_size:
             raise SyncError(
-                f"regular-file overlay source changed before reading: {source}"
+                f"regular-file overlay source changed while reading: {source}"
             )
-        if before.st_size > MAX_REGULAR_FILE_OVERLAY_BYTES:
+        final = _stat_regular_file_overlay_entry(
+            parent_descriptor,
+            name,
+            label="source",
+            path=source,
+        )
+        if _overlay_file_content_identity(final) != identity_after:
             raise SyncError(
-                "regular-file overlay source exceeds "
-                f"{MAX_REGULAR_FILE_OVERLAY_BYTES} bytes: {source}"
+                f"regular-file overlay source changed after reading: {source}"
             )
-        chunks: list[bytes] = []
-        remaining = MAX_REGULAR_FILE_OVERLAY_BYTES + 1
-        while remaining:
-            chunk = os.read(descriptor, min(remaining, 64 * 1024))
-            if not chunk:
-                break
-            chunks.append(chunk)
-            remaining -= len(chunk)
-        data = b"".join(chunks)
-        after = os.fstat(descriptor)
-    except OSError as exc:
-        raise SyncError(
-            f"cannot read regular-file overlay source: {source}: {exc}"
-        ) from exc
     finally:
-        os.close(descriptor)
-
-    identity_before = _overlay_file_content_identity(before)
-    identity_after = _overlay_file_content_identity(after)
-    if identity_before != identity_after or len(data) != after.st_size:
-        raise SyncError(f"regular-file overlay source changed while reading: {source}")
-    try:
-        final = source.lstat()
-    except OSError as exc:
-        raise SyncError(
-            f"cannot recheck regular-file overlay source: {source}: {exc}"
-        ) from exc
-    final_identity = _overlay_file_content_identity(final)
-    if final_identity != identity_after:
-        raise SyncError(f"regular-file overlay source changed after reading: {source}")
-    _validate_overlay_regular_file(final, label="source", path=source)
+        os.close(parent_descriptor)
     if len(data) > MAX_REGULAR_FILE_OVERLAY_BYTES:
         raise SyncError(
             "regular-file overlay source exceeds "
@@ -834,64 +918,65 @@ def _write_regular_file_overlay_target(
 ) -> None:
     target = staging / relative
     _ensure_safe_target(staging, target)
-    if target.is_symlink():
-        raise SyncError(f"refusing regular-file overlay target symlink: {relative}")
-    if not target.exists():
-        raise SyncError(
-            f"regular-file overlay target missing from copied source: {relative}"
+    parent_descriptor, name = _open_regular_file_overlay_parent(
+        staging,
+        relative,
+        label="target",
+    )
+    try:
+        target_stat = _stat_regular_file_overlay_entry(
+            parent_descriptor,
+            name,
+            label="target",
+            path=relative,
         )
-    target_stat = target.lstat()
-    _validate_overlay_regular_file(target_stat, label="target", path=relative)
-
-    flags = os.O_RDWR | getattr(os, "O_CLOEXEC", 0)
-    if hasattr(os, "O_NOFOLLOW"):
-        flags |= os.O_NOFOLLOW
-    try:
-        descriptor = os.open(target, flags)
-    except OSError as exc:
-        raise SyncError(
-            f"cannot open regular-file overlay target: {relative}: {exc}"
-        ) from exc
-    try:
-        opened = os.fstat(descriptor)
-        _validate_overlay_regular_file(opened, label="target", path=relative)
-        if _overlay_file_identity(opened) != _overlay_file_identity(target_stat):
+        flags = os.O_RDWR | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+        try:
+            descriptor = os.open(name, flags, dir_fd=parent_descriptor)
+        except OSError as exc:
             raise SyncError(
-                f"regular-file overlay target changed before writing: {relative}"
-            )
-        os.ftruncate(descriptor, 0)
-        offset = 0
-        while offset < len(data):
-            written = os.write(descriptor, data[offset:])
-            if written <= 0:
+                f"cannot open regular-file overlay target: {relative}: {exc}"
+            ) from exc
+        try:
+            opened = os.fstat(descriptor)
+            _validate_overlay_regular_file(opened, label="target", path=relative)
+            if _overlay_file_identity(opened) != _overlay_file_identity(target_stat):
                 raise SyncError(
-                    f"short write for regular-file overlay target: {relative}"
+                    f"regular-file overlay target changed before writing: {relative}"
                 )
-            offset += written
-        os.lseek(descriptor, 0, os.SEEK_SET)
-        chunks: list[bytes] = []
-        while True:
-            chunk = os.read(descriptor, 64 * 1024)
-            if not chunk:
-                break
-            chunks.append(chunk)
-        written_data = b"".join(chunks)
-        after = os.fstat(descriptor)
-    except OSError as exc:
-        raise SyncError(
-            f"cannot write regular-file overlay target: {relative}: {exc}"
-        ) from exc
-    finally:
-        os.close(descriptor)
+            os.ftruncate(descriptor, 0)
+            offset = 0
+            while offset < len(data):
+                written = os.write(descriptor, data[offset:])
+                if written <= 0:
+                    raise SyncError(
+                        f"short write for regular-file overlay target: {relative}"
+                    )
+                offset += written
+            os.lseek(descriptor, 0, os.SEEK_SET)
+            chunks: list[bytes] = []
+            while True:
+                chunk = os.read(descriptor, 64 * 1024)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+            written_data = b"".join(chunks)
+            after = os.fstat(descriptor)
+        except OSError as exc:
+            raise SyncError(
+                f"cannot write regular-file overlay target: {relative}: {exc}"
+            ) from exc
+        finally:
+            os.close(descriptor)
 
-    try:
-        final = target.lstat()
-    except OSError as exc:
-        raise SyncError(
-            f"cannot recheck regular-file overlay target: {relative}: {exc}"
-        ) from exc
-    _validate_overlay_regular_file(after, label="target", path=relative)
-    _validate_overlay_regular_file(final, label="target", path=relative)
+        final = _stat_regular_file_overlay_entry(
+            parent_descriptor,
+            name,
+            label="target",
+            path=relative,
+        )
+    finally:
+        os.close(parent_descriptor)
     if (
         written_data != data
         or _overlay_file_identity(after) != _overlay_file_identity(target_stat)

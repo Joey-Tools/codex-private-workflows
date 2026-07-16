@@ -913,6 +913,88 @@ class PrivateOverlaySyncTests(unittest.TestCase):
                     Path("private/catalog.json"),
                 )
 
+    def test_regular_file_overlay_blocks_source_ancestor_swap_after_preflight(
+        self,
+    ) -> None:
+        private = self.repo_root / "private"
+        private.mkdir()
+        (private / "catalog.json").write_text("original\n", encoding="utf-8")
+        outside = self.root / "outside-source"
+        outside.mkdir()
+        outside_catalog = outside / "catalog.json"
+        outside_catalog.write_text("outside\n", encoding="utf-8")
+        saved = self.repo_root / "private-before-swap"
+        real_ensure_safe_source = SYNC_MODULE._ensure_safe_source
+
+        def swap_ancestor(source_root, source):
+            real_ensure_safe_source(source_root, source)
+            private.rename(saved)
+            private.symlink_to(outside, target_is_directory=True)
+
+        with mock.patch.object(
+            SYNC_MODULE,
+            "_ensure_safe_source",
+            side_effect=swap_ancestor,
+        ):
+            with self.assertRaisesRegex(
+                SYNC_MODULE.SyncError,
+                "cannot securely open regular-file overlay source parent",
+            ):
+                SYNC_MODULE._read_regular_file_overlay_source(
+                    self.repo_root,
+                    Path("private/catalog.json"),
+                )
+
+        self.assertEqual(outside_catalog.read_text(encoding="utf-8"), "outside\n")
+
+    def test_regular_file_overlay_blocks_target_ancestor_swap_after_preflight(
+        self,
+    ) -> None:
+        staging = (self.repo_root / "staging-ancestor-swap").resolve()
+        nested = staging / "nested"
+        nested.mkdir(parents=True)
+        (nested / "catalog.json").write_text("public\n", encoding="utf-8")
+        outside = self.root / "outside-target"
+        outside.mkdir()
+        outside_catalog = outside / "catalog.json"
+        outside_catalog.write_text("outside\n", encoding="utf-8")
+        saved = staging / "nested-before-swap"
+        real_ensure_safe_target = SYNC_MODULE._ensure_safe_target
+
+        def swap_ancestor(repo_root, target):
+            real_ensure_safe_target(repo_root, target)
+            nested.rename(saved)
+            nested.symlink_to(outside, target_is_directory=True)
+
+        with mock.patch.object(
+            SYNC_MODULE,
+            "_ensure_safe_target",
+            side_effect=swap_ancestor,
+        ):
+            with self.assertRaisesRegex(
+                SYNC_MODULE.SyncError,
+                "cannot securely open regular-file overlay target parent",
+            ):
+                SYNC_MODULE._write_regular_file_overlay_target(
+                    staging,
+                    Path("nested/catalog.json"),
+                    b"private\n",
+                )
+
+        self.assertEqual(outside_catalog.read_text(encoding="utf-8"), "outside\n")
+
+    def test_regular_file_overlay_secure_open_requires_dir_fd_support(self) -> None:
+        with mock.patch.object(SYNC_MODULE.os, "supports_dir_fd", set()):
+            with self.assertRaisesRegex(
+                SYNC_MODULE.SyncError,
+                "secure regular-file overlay source path traversal is unavailable",
+            ):
+                SYNC_MODULE._open_regular_file_overlay_parent(
+                    self.repo_root,
+                    Path("private/catalog.json"),
+                    label="source",
+                )
+
     def test_regular_file_overlay_enforces_size_limit(self) -> None:
         source = self.source_root / "example-repo" / "skill"
         source.mkdir(parents=True)
