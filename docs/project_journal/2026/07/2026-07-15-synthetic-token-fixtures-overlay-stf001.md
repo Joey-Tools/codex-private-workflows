@@ -32,7 +32,7 @@ superseded_by:
 
 ## Delivery State
 
-- Public source commit `8acf51adc829329cdca2e4b0f81a273a97ca6300` contains the complete synthetic-token facility, printable legacy correction, exhaustive pinned-master audit, and required Claude runtime hardening.
+- Public source commit `d8d310da7f40abc7ca12ea4839580fe00df7b84e` contains the complete synthetic-token facility, printable legacy correction, exhaustive pinned-master audit, required Claude runtime hardening, and the explicit-override fail-closed follow-up.
 - The private release is generated from that complete public skill plus the fixed trusted catalog replacement; public and private catalogs are not unioned.
 - Default-branch release packaging installs the generated review skill and thin fixture skill, never the private override source directory.
 
@@ -41,10 +41,10 @@ superseded_by:
 - Digest-bound recovery verified all 26 historical IDs against their pinned master Git objects. Admission retained the one hygiene value and 16 portable values totaling 37 source occurrences; nine portable IDs with no exact eligible scanner capture were excluded from the runtime catalog.
 - The refreshed public parser accepted the migrated catalog as schema version 1 with pool `joey-private-v1`, 10 authoring values, 2 legacy envelopes, and 17 legacy values.
 - Both pinned-master audits passed against the hygiene tip and portable runtime tip; emitted evidence contained IDs, rules, digests, lengths, and counts without raw or Base64 values.
-- The real private source sync from public commit `8acf51adc829329cdca2e4b0f81a273a97ca6300` completed, and `cmp` proved the generated catalog is byte-equal to the trusted override source.
+- The real private source sync from public commit `d8d310da7f40abc7ca12ea4839580fe00df7b84e` completed, and `cmp` proved the generated catalog is byte-equal to the trusted override source.
 - `/usr/bin/env GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=commit.gpgsign GIT_CONFIG_VALUE_0=false python3 -m unittest discover -s tests -v` passed (`486` tests, `2` skipped). The override only neutralized Joey's global signing configuration for four ephemeral merge fixtures.
 - Both focused session-retrospective JWT redaction tests passed after the source-fragment migration, followed by another complete private suite pass (`486` tests, `2` skipped).
-- `python3 -m unittest discover -s personal_codex/skills/review-orchestration-playbook/tests -p 'test_*.py' -v` passed (`672` tests, `10` skipped).
+- `python3 -m unittest discover -s personal_codex/skills/review-orchestration-playbook/tests -p 'test_*.py' -v` passed (`674` tests, `10` skipped), including both explicit Claude override fail-closed paths found by the independent review gate.
 - `python3 -m py_compile`, generated-skill `compileall`, Ruff checks, both skill validators, `actionlint .github/workflows/ci.yml`, catalog validation, and staged/unstaged `git diff --check` passed. Ruff format validation passed for private-owned Python; a whole generated-tree format probe identified 15 byte-for-byte upstream files and was intentionally not applied.
 - Package build and `private_overlay_release.py verify-package` passed; archive inspection found both generated skills and the generated catalog while excluding the private override source directory.
 
