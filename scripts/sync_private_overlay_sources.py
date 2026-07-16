@@ -757,12 +757,6 @@ def _open_regular_file_overlay_parent(
     label: str,
 ) -> tuple[int, str]:
     _require_overlay_relative_path(relative, field=label)
-    try:
-        root = root.resolve(strict=True)
-    except OSError as exc:
-        raise SyncError(
-            f"cannot resolve regular-file overlay {label} root: {root}: {exc}"
-        ) from exc
     if not root.is_absolute() or root.anchor != os.sep:
         raise SyncError(f"regular-file overlay {label} root must be absolute: {root}")
     if (
@@ -776,12 +770,7 @@ def _open_regular_file_overlay_parent(
             f"secure regular-file overlay {label} path traversal is unavailable"
         )
 
-    flags = (
-        os.O_RDONLY
-        | os.O_DIRECTORY
-        | os.O_NOFOLLOW
-        | getattr(os, "O_CLOEXEC", 0)
-    )
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
     descriptor: int | None = None
     try:
         descriptor = os.open(os.sep, flags)
@@ -859,9 +848,9 @@ def _read_regular_file_overlay_source(repo_root: Path, relative: Path) -> bytes:
         try:
             before = os.fstat(descriptor)
             _validate_overlay_regular_file(before, label="source", path=source)
-            if _overlay_file_content_identity(
-                before
-            ) != _overlay_file_content_identity(initial):
+            if _overlay_file_content_identity(before) != _overlay_file_content_identity(
+                initial
+            ):
                 raise SyncError(
                     f"regular-file overlay source changed before reading: {source}"
                 )

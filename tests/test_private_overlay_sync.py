@@ -75,7 +75,7 @@ def load_private_review_synthetic_tokens():
 class PrivateOverlaySyncTests(unittest.TestCase):
     def setUp(self) -> None:
         self.tmpdir = tempfile.TemporaryDirectory(prefix="private-overlay-sync.")
-        self.root = Path(self.tmpdir.name)
+        self.root = Path(self.tmpdir.name).resolve()
         self.repo_root = self.root / "target"
         self.source_root = self.root / "source"
         self.repo_root.mkdir()
@@ -978,6 +978,76 @@ class PrivateOverlaySyncTests(unittest.TestCase):
                 SYNC_MODULE._write_regular_file_overlay_target(
                     staging,
                     Path("nested/catalog.json"),
+                    b"private\n",
+                )
+
+        self.assertEqual(outside_catalog.read_text(encoding="utf-8"), "outside\n")
+
+    def test_regular_file_overlay_blocks_source_root_swap_after_preflight(
+        self,
+    ) -> None:
+        private = self.repo_root / "private"
+        private.mkdir()
+        (private / "catalog.json").write_text("original\n", encoding="utf-8")
+        outside_root = self.root / "outside-source-root"
+        outside_private = outside_root / "private"
+        outside_private.mkdir(parents=True)
+        outside_catalog = outside_private / "catalog.json"
+        outside_catalog.write_text("outside\n", encoding="utf-8")
+        saved = self.root / "target-before-root-swap"
+        real_ensure_safe_source = SYNC_MODULE._ensure_safe_source
+
+        def swap_root(source_root, source):
+            real_ensure_safe_source(source_root, source)
+            self.repo_root.rename(saved)
+            self.repo_root.symlink_to(outside_root, target_is_directory=True)
+
+        with mock.patch.object(
+            SYNC_MODULE,
+            "_ensure_safe_source",
+            side_effect=swap_root,
+        ):
+            with self.assertRaisesRegex(
+                SYNC_MODULE.SyncError,
+                "cannot securely open regular-file overlay source parent",
+            ):
+                SYNC_MODULE._read_regular_file_overlay_source(
+                    self.repo_root,
+                    Path("private/catalog.json"),
+                )
+
+        self.assertEqual(outside_catalog.read_text(encoding="utf-8"), "outside\n")
+
+    def test_regular_file_overlay_blocks_target_root_swap_after_preflight(
+        self,
+    ) -> None:
+        staging = self.repo_root / "staging-root-swap"
+        staging.mkdir()
+        (staging / "catalog.json").write_text("public\n", encoding="utf-8")
+        outside_root = self.root / "outside-target-root"
+        outside_root.mkdir()
+        outside_catalog = outside_root / "catalog.json"
+        outside_catalog.write_text("outside\n", encoding="utf-8")
+        saved = self.repo_root / "staging-before-root-swap"
+        real_ensure_safe_target = SYNC_MODULE._ensure_safe_target
+
+        def swap_root(repo_root, target):
+            real_ensure_safe_target(repo_root, target)
+            staging.rename(saved)
+            staging.symlink_to(outside_root, target_is_directory=True)
+
+        with mock.patch.object(
+            SYNC_MODULE,
+            "_ensure_safe_target",
+            side_effect=swap_root,
+        ):
+            with self.assertRaisesRegex(
+                SYNC_MODULE.SyncError,
+                "cannot securely open regular-file overlay target parent",
+            ):
+                SYNC_MODULE._write_regular_file_overlay_target(
+                    staging,
+                    Path("catalog.json"),
                     b"private\n",
                 )
 
