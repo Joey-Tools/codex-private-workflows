@@ -32,6 +32,13 @@ DEFAULT_ROLLOUT_CHUNK_BYTES = 1024 * 1024
 MAX_ROLLOUT_CHUNK_BYTES = 2 * 1024 * 1024
 MAX_FETCH_ROLLOUT_CHUNK_BYTES = 2 * 1024 * 1024
 MAX_CHUNKED_ROLLOUT_SUMMARY_OUTPUT_BYTES = 4 * 1024 * 1024
+# Reserve 1 KiB of the serialized summary budget per in-memory range entry.
+FETCH_RANGE_PLAN_ENTRY_BUDGET_BYTES = 1024
+MAX_FETCH_RANGE_PLAN_ENTRIES = max(
+    1,
+    MAX_CHUNKED_ROLLOUT_SUMMARY_OUTPUT_BYTES
+    // FETCH_RANGE_PLAN_ENTRY_BUDGET_BYTES,
+)
 MAX_SOURCE_IDENTITY_TOKEN_CHARS = 256
 MAX_REMOTE_METADATA_STDOUT_BYTES = 64 * 1024
 MAX_REMOTE_STDERR_BYTES = 64 * 1024
@@ -909,18 +916,23 @@ def _fetch_ranges_for_byte_range(
         raise ValueError("byte_end must be greater than byte_start")
     if max_bytes < 1:
         raise ValueError("max_bytes must be positive")
+    range_count = (byte_end - byte_start + max_bytes - 1) // max_bytes
+    if range_count > MAX_FETCH_RANGE_PLAN_ENTRIES:
+        raise ValueError(
+            "fetch range plan too large: "
+            f"{range_count} ranges > {MAX_FETCH_RANGE_PLAN_ENTRIES}"
+        )
     ranges: list[dict[str, int]] = []
-    cursor = byte_start
-    while cursor < byte_end:
+    for range_index in range(range_count):
+        cursor = byte_start + range_index * max_bytes
         next_cursor = min(cursor + max_bytes, byte_end)
         ranges.append(
             {
-                "range_index": len(ranges),
+                "range_index": range_index,
                 "byte_start": cursor,
                 "byte_end": next_cursor,
             }
         )
-        cursor = next_cursor
     return ranges
 
 
@@ -1132,6 +1144,7 @@ MAX_FETCH_ROLLOUT_CHUNK_BYTES = int(CONFIG.get("max_fetch_rollout_chunk_bytes", 
 MIN_ROLLOUT_CHUNK_BYTES = int(CONFIG.get("min_rollout_chunk_bytes", 0))
 MAX_ROLLOUT_CHUNK_BYTES = int(CONFIG.get("max_rollout_chunk_bytes", 0))
 MAX_CHUNKED_ROLLOUT_SUMMARY_OUTPUT_BYTES = int(CONFIG.get("max_chunked_summary_output_bytes", 0))
+MAX_FETCH_RANGE_PLAN_ENTRIES = int(CONFIG.get("max_fetch_range_plan_entries", 0))
 EXPECTED_SOURCE_IDENTITY_TOKEN = str(CONFIG.get("expected_source_identity", ""))
 EXPECTED_SOURCE_BYTES = int(CONFIG.get("expected_source_bytes", -1))
 AUTHORIZED_SOURCE_BYTES_RAW = CONFIG.get("authorized_source_bytes")
@@ -1585,16 +1598,23 @@ def fetch_ranges_for_byte_range(byte_start, byte_end, max_bytes):
         raise ValueError("byte_end must be greater than byte_start")
     if max_bytes < 1:
         raise ValueError("max_bytes must be positive")
+    range_count = (byte_end - byte_start + max_bytes - 1) // max_bytes
+    if range_count > MAX_FETCH_RANGE_PLAN_ENTRIES:
+        raise ValueError(
+            "fetch range plan too large: "
+            + str(range_count)
+            + " ranges > "
+            + str(MAX_FETCH_RANGE_PLAN_ENTRIES)
+        )
     ranges = []
-    cursor = byte_start
-    while cursor < byte_end:
+    for range_index in range(range_count):
+        cursor = byte_start + range_index * max_bytes
         next_cursor = min(cursor + max_bytes, byte_end)
         ranges.append({{
-            "range_index": len(ranges),
+            "range_index": range_index,
             "byte_start": cursor,
             "byte_end": next_cursor,
         }})
-        cursor = next_cursor
     return ranges
 
 
@@ -1942,6 +1962,7 @@ def chunk_meta_record(chunk, records, source_identity, chunk_bytes):
         "records_emitted": len(records),
         "redacted_or_signal_only_records": redacted_or_signal_only_records,
         "raw_fetch_recommended": raw_fetch_recommended,
+        "fetch_range_plan_limit": MAX_FETCH_RANGE_PLAN_ENTRIES,
         "timestamp": chunk["first_timestamp"],
     }}
     meta.update(chunk_common_fields(chunk))
@@ -1977,6 +1998,7 @@ def rollout_summary_meta_record(source_identity, source_sha256):
         ),
         "min_chunk_bytes": MIN_ROLLOUT_CHUNK_BYTES,
         "chunk_summary_output_limit_bytes": MAX_CHUNKED_ROLLOUT_SUMMARY_OUTPUT_BYTES,
+        "fetch_range_plan_limit": MAX_FETCH_RANGE_PLAN_ENTRIES,
     }})
     return record
 
@@ -3766,6 +3788,7 @@ def _chunk_meta_record(
         "records_emitted": len(records),
         "redacted_or_signal_only_records": redacted_or_signal_only_records,
         "raw_fetch_recommended": raw_fetch_recommended,
+        "fetch_range_plan_limit": MAX_FETCH_RANGE_PLAN_ENTRIES,
         "timestamp": chunk.first_timestamp,
     }
     meta.update(_chunk_common_fields(chunk))
@@ -3819,6 +3842,7 @@ def _rollout_summary_meta_record(
             "chunk_summary_output_limit_bytes": (
                 MAX_CHUNKED_ROLLOUT_SUMMARY_OUTPUT_BYTES
             ),
+            "fetch_range_plan_limit": MAX_FETCH_RANGE_PLAN_ENTRIES,
         }
     )
     return record
@@ -4096,6 +4120,7 @@ def cmd_chunked_rollout_summary(args: argparse.Namespace) -> int:
                 "max_chunked_summary_output_bytes": (
                     MAX_CHUNKED_ROLLOUT_SUMMARY_OUTPUT_BYTES
                 ),
+                "max_fetch_range_plan_entries": MAX_FETCH_RANGE_PLAN_ENTRIES,
                 "expected_source_identity": _rollout_identity_token(
                     expected_identity
                 ),

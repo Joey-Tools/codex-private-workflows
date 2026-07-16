@@ -25,6 +25,7 @@ superseded_by:
 - Added same-descriptor SHA-256 during the frozen summary scan, pre/post descriptor and current-path identity checks, identity-bound chunk reads, reconstructed digest verification, and a final stat check so append, truncation, or pathname replacement invalidates the attempt.
 - Replaced unbounded parent capture for remote stat and chunk-summary commands with concurrent bounded stdout/stderr readers that terminate noisy producers at the configured limit.
 - Ensured the bounded parent kills and reaps a child that closes both output pipes but remains alive until the command deadline.
+- Rejected oversized explicit fetch-range plans before list allocation, using a 4,096-entry ceiling derived conservatively from the 4 MiB summary-output budget in both local and embedded remote producers.
 
 ## Current State
 
@@ -48,8 +49,9 @@ superseded_by:
 - Pinned whole-range review of `7d44fb81ef2baf221f3ee2f8d2998aba22c95c18` identified that sequential 2 MiB chunk reads could still bypass the existing 16 MiB full-rollout budget without a cumulative plan gate.
 - Pinned whole-range review of `132d05962ab2ac415346e93cf8356644a4098799..63c4a7613d32ef2123d2aa9ad30795d4c5d6a49d` identified that the remote producer and parent capture could still emit or retain an unbounded summary, and that separate chunk reads were not bound to one immutable source snapshot.
 - Independent Codex PR review of `132d05962ab2ac415346e93cf8356644a4098799..24c3f6473b8bbb1ee4f7ee6b280b964fb4c579eb` identified that a child closing its pipes before the deadline could escape the existing timeout cleanup without being killed and reaped.
-- Focused remote probe suite: 23 tests passed.
-- Full repository suite: 577 tests passed with 2 skipped after running outside the sandbox for signed temporary Git fixtures and the package-test scratch directory.
+- Pinned whole-range review of `132d05962ab2ac415346e93cf8356644a4098799..abf63e9e18adfd5fcf498d312d405533b78ff1a8` identified that an authorized rollout with a huge single JSONL record could allocate an unbounded `fetch_ranges` list before the 4 MiB serialized-output check.
+- Focused remote probe suite: 25 tests passed.
+- Full repository suite: 579 tests passed with 2 skipped after running outside the sandbox for signed temporary Git fixtures and the package-test scratch directory.
 - Ruff lint, Python byte compilation, skill quick validation, project journal validation, and `git diff --check` passed. The changed test file also passes Ruff format checking; the helper's exact `7d44fb81ef2baf221f3ee2f8d2998aba22c95c18` baseline already fails the current formatter and would require a broad unrelated mechanical rewrite, while the new helper hunks do not appear in the formatter diff.
 - `personal_codex/skills/remote-host-context/SKILL.md`
 - `personal_codex/skills/remote-host-context/references/hosts.md`

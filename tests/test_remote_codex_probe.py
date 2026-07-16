@@ -6,6 +6,7 @@ import importlib.util
 import io
 import json
 import os
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -260,6 +261,7 @@ class RemoteCodexProbeChunkTests(unittest.TestCase):
                 "min_rollout_chunk_bytes": MODULE.MIN_ROLLOUT_CHUNK_BYTES,
                 "max_rollout_chunk_bytes": MODULE.MAX_ROLLOUT_CHUNK_BYTES,
                 "max_chunked_summary_output_bytes": MODULE.MAX_CHUNKED_ROLLOUT_SUMMARY_OUTPUT_BYTES,
+                "max_fetch_range_plan_entries": MODULE.MAX_FETCH_RANGE_PLAN_ENTRIES,
                 "expected_source_bytes": identity.size,
                 "expected_source_identity": token,
                 "authorized_source_bytes": None,
@@ -291,6 +293,7 @@ class RemoteCodexProbeChunkTests(unittest.TestCase):
             chunked_script,
         )
         self.assertIn("hashlib.sha256()", chunked_script)
+        self.assertIn("fetch range plan too large", chunked_script)
 
     def test_remote_chunked_rollout_summary_passes_full_fetch_limit(self) -> None:
         identity = MODULE.RolloutIdentity(120, 1, 2, 3, 4)
@@ -376,6 +379,49 @@ class RemoteCodexProbeChunkTests(unittest.TestCase):
             MODULE.MAX_CHUNKED_ROLLOUT_SUMMARY_OUTPUT_BYTES
             + MODULE.REMOTE_CHUNKED_SUMMARY_FRAME_OVERHEAD_BYTES,
         )
+
+    def test_embedded_remote_rejects_fetch_range_plan_before_allocation(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            codex_root = Path(temp_dir) / ".codex"
+            rollout = write_rollout(
+                codex_root,
+                [json.dumps({"message": "x" * 256}, separators=(",", ":"))],
+            )
+            identity = rollout_identity(codex_root, rollout)
+            script = MODULE._remote_python_script(
+                {
+                    "mode": "chunked-rollout-summary",
+                    "rollout": rollout,
+                    "codex_root": str(codex_root),
+                    "summary_keywords": [],
+                    "summary_limit": 10,
+                    "summary_tail_records": 0,
+                    "summary_max_text_chars": 200,
+                    "chunk_bytes": 64,
+                    "max_fetch_rollout_bytes": MODULE.MAX_FETCH_ROLLOUT_BYTES,
+                    "max_fetch_rollout_chunk_bytes": 16,
+                    "min_rollout_chunk_bytes": 1,
+                    "max_rollout_chunk_bytes": 1024,
+                    "max_chunked_summary_output_bytes": MODULE.MAX_CHUNKED_ROLLOUT_SUMMARY_OUTPUT_BYTES,
+                    "max_fetch_range_plan_entries": 1,
+                    "expected_source_bytes": identity.size,
+                    "expected_source_identity": MODULE._rollout_identity_token(
+                        identity
+                    ),
+                    "authorized_source_bytes": None,
+                    "output_host": "miku-bot-dev",
+                }
+            )
+
+            result = subprocess.run(
+                [sys.executable, "-c", script],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("fetch range plan too large", result.stdout)
 
     def test_chunked_rollout_summary_reads_all_chunks_with_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -549,6 +595,18 @@ class RemoteCodexProbeChunkTests(unittest.TestCase):
                 for item in oversized["fetch_ranges"]
             )
         )
+
+    def test_fetch_range_plan_rejects_huge_count_before_allocation(self) -> None:
+        with mock.patch.object(MODULE, "MAX_FETCH_RANGE_PLAN_ENTRIES", 4):
+            with self.assertRaisesRegex(
+                ValueError,
+                "fetch range plan too large: 1000000000000000000000000000000 ranges > 4",
+            ):
+                MODULE._fetch_ranges_for_byte_range(
+                    byte_start=0,
+                    byte_end=10**30,
+                    max_bytes=1,
+                )
 
     def test_fetch_rollout_chunk_writes_bounded_local_output(self) -> None:
         original_cwd = Path.cwd()
