@@ -40,6 +40,31 @@ def write_rollout(codex_root: Path, lines: list[str]) -> str:
     return "sessions/2026/05/26/rollout-2026-05-26T10-00-00-example.jsonl"
 
 
+def write_session_meta_rollout(
+    path: Path, session_id: str, cwd: str, followup: str
+) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    records = [
+        {
+            "type": "session_meta",
+            "payload": {"id": session_id, "cwd": cwd},
+        },
+        {
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_text", "text": followup}],
+            },
+        },
+    ]
+    path.write_text(
+        "\n".join(json.dumps(record, separators=(",", ":")) for record in records)
+        + "\n",
+        encoding="utf-8",
+    )
+
+
 def rollout_identity(codex_root: Path, rollout: str) -> MODULE.RolloutIdentity:
     return MODULE._stat_local_rollout_identity(
         codex_root, MODULE._resolve_rollout_relative_path(rollout)
@@ -243,6 +268,167 @@ class SizeGuardedBytesIO(io.BytesIO):
 
 
 class RemoteCodexProbeChunkTests(unittest.TestCase):
+    def test_private_output_rejects_parent_symlink_swap_after_resolution(self) -> None:
+        with tempfile.TemporaryDirectory(dir="/tmp") as temp_dir:
+            root = Path(temp_dir).resolve()
+            output_parent = root / "output"
+            output_parent.mkdir()
+            output = MODULE._resolve_output_path(str(output_parent / "chunk.jsonl"))
+            moved_parent = root / "moved-output"
+            escape_parent = root / "escape"
+            escape_parent.mkdir()
+            os.replace(output_parent, moved_parent)
+            output_parent.symlink_to(escape_parent, target_is_directory=True)
+
+            with self.assertRaises(OSError):
+                MODULE._write_private_bytes(output, b"sensitive\n")
+
+            self.assertFalse((escape_parent / output.name).exists())
+            self.assertFalse((moved_parent / output.name).exists())
+
+    def test_private_output_rename_stays_on_pinned_parent_descriptor(self) -> None:
+        with tempfile.TemporaryDirectory(dir="/tmp") as temp_dir:
+            root = Path(temp_dir).resolve()
+            output_parent = root / "output"
+            output_parent.mkdir()
+            output = MODULE._resolve_output_path(str(output_parent / "chunk.jsonl"))
+            moved_parent = root / "moved-output"
+            escape_parent = root / "escape"
+            escape_parent.mkdir()
+            real_replace = os.replace
+            replace_dir_fds: list[tuple[int | None, int | None]] = []
+
+            def swap_parent_then_replace(
+                src: str,
+                dst: str,
+                *,
+                src_dir_fd: int | None = None,
+                dst_dir_fd: int | None = None,
+            ) -> None:
+                replace_dir_fds.append((src_dir_fd, dst_dir_fd))
+                real_replace(output_parent, moved_parent)
+                output_parent.symlink_to(escape_parent, target_is_directory=True)
+                real_replace(
+                    src,
+                    dst,
+                    src_dir_fd=src_dir_fd,
+                    dst_dir_fd=dst_dir_fd,
+                )
+
+            with mock.patch.object(
+                MODULE.os, "replace", side_effect=swap_parent_then_replace
+            ):
+                MODULE._write_private_bytes(output, b"sensitive\n")
+
+            written_output = moved_parent / output.name
+            self.assertEqual(written_output.read_bytes(), b"sensitive\n")
+            self.assertEqual(written_output.stat().st_mode & 0o777, 0o600)
+            self.assertFalse((escape_parent / output.name).exists())
+            self.assertEqual(len(replace_dir_fds), 1)
+            self.assertIsNotNone(replace_dir_fds[0][0])
+            self.assertEqual(replace_dir_fds[0][0], replace_dir_fds[0][1])
+
+    def test_session_meta_preserves_distinct_lifecycle_paths_with_same_session_id(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            codex_root = Path(temp_dir) / ".codex"
+            basename = "rollout-2026-05-26T10-00-00-same.jsonl"
+            active_relative = Path("sessions/2026/05/26") / basename
+            dated_relative = Path("archived_sessions/2026/05/26") / basename
+            flat_relative = Path("archived_sessions") / basename
+            write_session_meta_rollout(
+                codex_root / active_relative,
+                "shared-session",
+                "/active",
+                "Active follow-up only.",
+            )
+            write_session_meta_rollout(
+                codex_root / dated_relative,
+                "shared-session",
+                "/dated",
+                "Dated archive follow-up only.",
+            )
+            write_session_meta_rollout(
+                codex_root / flat_relative,
+                "shared-session",
+                "/flat",
+                "Flat archive follow-up only.",
+            )
+
+            local_scan = MODULE._scan_session_meta_records(
+                codex_root=codex_root,
+                dates=[MODULE.dt.date(2026, 5, 26), MODULE.dt.date(2026, 5, 26)],
+                limit=10,
+                host="local",
+            )
+            script = MODULE._remote_python_script(
+                {
+                    "mode": "session-meta",
+                    "dates": ["2026/05/26", "2026/05/26"],
+                    "limit": 10,
+                    "codex_root": str(codex_root),
+                    "session_meta_scan_bytes": MODULE.MAX_SESSION_META_SCAN_BYTES,
+                }
+            )
+            result = subprocess.run(
+                [sys.executable, "-c", script],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertIn(
+                "Active follow-up only.",
+                (codex_root / active_relative).read_text(encoding="utf-8"),
+            )
+            self.assertIn(
+                "Dated archive follow-up only.",
+                (codex_root / dated_relative).read_text(encoding="utf-8"),
+            )
+            self.assertIn(
+                "Flat archive follow-up only.",
+                (codex_root / flat_relative).read_text(encoding="utf-8"),
+            )
+
+        self.assertFalse(local_scan.truncated)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        embedded_rows = [
+            json.loads(line)
+            for line in MODULE._extract_framed_lines(
+                result.stdout,
+                begin_marker=MODULE.REMOTE_SESSION_META_BEGIN,
+                end_marker=MODULE.REMOTE_SESSION_META_END,
+                host="embedded",
+                command="session-meta",
+            )
+        ]
+        local_projection = {
+            (row["session_id"], row["cwd"], row["rollout"]) for row in local_scan.rows
+        }
+        embedded_projection = {
+            (row["session_id"], row["cwd"], row["rollout"]) for row in embedded_rows
+        }
+        expected = {
+            ("shared-session", "/active", active_relative.as_posix()),
+            ("shared-session", "/dated", dated_relative.as_posix()),
+            ("shared-session", "/flat", flat_relative.as_posix()),
+        }
+        self.assertEqual(local_projection, expected)
+        self.assertEqual(embedded_projection, expected)
+        self.assertEqual(
+            {
+                MODULE._session_meta_rollout_dedupe_key(
+                    MODULE.pathlib.PurePosixPath(relative.as_posix())
+                )
+                for relative in (active_relative, dated_relative, flat_relative)
+            },
+            {
+                active_relative.as_posix(),
+                dated_relative.as_posix(),
+                flat_relative.as_posix(),
+            },
+        )
+
     def test_remote_python_script_compiles_for_chunk_commands(self) -> None:
         identity = MODULE.RolloutIdentity(120, 1, 2, 3, 4)
         token = MODULE._rollout_identity_token(identity)

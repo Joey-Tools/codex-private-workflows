@@ -850,7 +850,9 @@ class SessionRetrospectiveTests(unittest.TestCase):
                     "sessions/2026/05/01/rollout-2026-05-01T10-00-00-raw.jsonl",
                 )
 
-    def test_remote_probe_session_meta_deduplicates_archived_rollout_names_before_limit(self) -> None:
+    def test_remote_probe_session_meta_preserves_flat_and_dated_archive_paths_before_limit(
+        self,
+    ) -> None:
         for probe in (REMOTE_PROBE, REMOTE_HOST_CONTEXT_PROBE):
             with self.subTest(probe=probe.__name__):
                 with tempfile.TemporaryDirectory() as raw:
@@ -889,14 +891,22 @@ class SessionRetrospectiveTests(unittest.TestCase):
                         ],
                     )
 
-                    rows = probe._iter_session_meta_records(
+                    scan = probe._scan_session_meta_records(
                         codex_root=root,
                         dates=[dt.date(2026, 5, 1)],
-                        limit=2,
+                        limit=3,
                         host="local",
                     )
 
-                self.assertEqual([row["session_id"] for row in rows], ["duplicate-dated-session", "unique-session"])
+                self.assertFalse(scan.truncated)
+                self.assertEqual(
+                    {row["rollout"] for row in scan.rows},
+                    {
+                        "archived_sessions/2026/05/01/rollout-2026-05-01T12-00-00-dup.jsonl",
+                        "archived_sessions/rollout-2026-05-01T12-00-00-dup.jsonl",
+                        "archived_sessions/rollout-2026-05-01T11-00-00-unique.jsonl",
+                    },
+                )
 
     def test_remote_probe_session_meta_rejects_local_limit_truncation(self) -> None:
         for probe in (REMOTE_PROBE, REMOTE_HOST_CONTEXT_PROBE):
