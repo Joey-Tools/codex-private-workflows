@@ -19,11 +19,16 @@ from .providers import CLAUDE_EGRESS_CONSENTS, run_review
 from .state import FINAL_CLEANUP_TIMEOUT_SECONDS
 from .state import cleanup as cleanup_state
 from .state import final, run_state, start, status, wait
+from .synthetic_tokens import (
+    authoring_metadata,
+    legacy_metadata,
+    load_catalog,
+)
 from .workspace import (
     ReviewWorkspace,
     cleanup_workspace,
     prepare_workspace,
-    synthetic_secret_exemption_ids,
+    validate_authoring_catalog_scanner_contract,
 )
 
 
@@ -57,10 +62,10 @@ def _add_review_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--synthetic-secret-exemption",
         action="append",
-        choices=synthetic_secret_exemption_ids(),
+        default=[],
         help=(
-            "Explicitly select one named, exact synthetic-fixture exemption. "
-            "The helper fails closed unless every selected exemption matches."
+            "Select one helper-defined legacy synthetic fixture envelope. "
+            "Repeat for multiple envelopes."
         ),
     )
 
@@ -72,9 +77,6 @@ def _validate_review_arguments(args: argparse.Namespace) -> None:
         )
     if args.reviewer != "claude" and args.egress_consent is not None:
         raise ReviewError("--egress-consent is valid only with --reviewer claude")
-    synthetic_exemptions = getattr(args, "synthetic_secret_exemption", None) or []
-    if len(set(synthetic_exemptions)) != len(synthetic_exemptions):
-        raise ReviewError("--synthetic-secret-exemption values must be unique")
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -103,6 +105,98 @@ def _build_stateful_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _build_synthetic_tokens_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="isolated_review synthetic-tokens")
+    actions = parser.add_subparsers(dest="action", required=True)
+    actions.add_parser("validate")
+    list_parser = actions.add_parser("list")
+    list_parser.add_argument("--json", action="store_true")
+    get_parser = actions.add_parser("get")
+    get_parser.add_argument("id")
+    get_parser.add_argument("--json", action="store_true")
+    exemptions_parser = actions.add_parser("list-exemptions")
+    exemptions_parser.add_argument("--json", action="store_true")
+    audit_parser = actions.add_parser("audit-master")
+    audit_parser.add_argument("--repo", required=True)
+    audit_parser.add_argument("--ref", required=True)
+    audit_parser.add_argument("--exemption", required=True)
+    return parser
+
+
+def _run_synthetic_tokens(argv: list[str]) -> int:
+    args = _build_synthetic_tokens_parser().parse_args(argv)
+    catalog = load_catalog()
+    validate_authoring_catalog_scanner_contract(catalog)
+    if args.action == "validate":
+        print(
+            json.dumps(
+                {
+                    "pool_version": catalog.pool_version,
+                    "schema_version": catalog.schema_version,
+                    "status": "valid",
+                },
+                sort_keys=True,
+            )
+        )
+        return 0
+    if args.action == "list":
+        payload = {
+            "pool_version": catalog.pool_version,
+            "tokens": authoring_metadata(catalog),
+        }
+        if args.json:
+            print(json.dumps(payload, indent=2, sort_keys=True))
+        else:
+            for token in payload["tokens"]:
+                print(
+                    f"{token['id']}\t{token['role']}\t{token['state']}\t{token['rule']}"
+                )
+        return 0
+    if args.action == "get":
+        token = catalog.authoring_token(args.id)
+        payload = {
+            "pool_version": catalog.pool_version,
+            "token": {
+                "id": token.identifier,
+                "role": token.role,
+                "rule": token.rule,
+                "state": token.state,
+                "value": token.value.decode("ascii"),
+                "value_sha256": token.value_sha256,
+            },
+        }
+        if args.json:
+            print(json.dumps(payload, indent=2, sort_keys=True))
+        else:
+            print(payload["token"]["value"])
+        return 0
+    if args.action == "list-exemptions":
+        payload = {
+            "exemptions": legacy_metadata(catalog),
+            "pool_version": catalog.pool_version,
+        }
+        if args.json:
+            print(json.dumps(payload, indent=2, sort_keys=True))
+        else:
+            for exemption in payload["exemptions"]:
+                print(
+                    f"{exemption['id']}\t{exemption['repository']}\t"
+                    f"{len(exemption['values'])}"
+                )
+        return 0
+    if args.action == "audit-master":
+        from .workspace import audit_legacy_exemption
+
+        evidence = audit_legacy_exemption(
+            repo=pathlib.Path(args.repo),
+            ref=args.ref,
+            exemption=catalog.legacy_exemption(args.exemption),
+        )
+        print(json.dumps(evidence, indent=2, sort_keys=True))
+        return 0
+    raise ReviewError(f"unknown synthetic-tokens action: {args.action}")
+
+
 def _run_foreground(args: argparse.Namespace) -> int:
     _validate_review_arguments(args)
     review = None
@@ -128,7 +222,7 @@ def _run_foreground(args: argparse.Namespace) -> int:
             head_ref=args.head_ref,
             ownership_handoff=accept_workspace,
             synthetic_secret_exemptions=tuple(
-                getattr(args, "synthetic_secret_exemption", None) or ()
+                getattr(args, "synthetic_secret_exemption", ())
             ),
             prompt_override=(
                 pathlib.Path(args.prompt_file) if args.prompt_file else None
@@ -201,7 +295,7 @@ def _run_stateful(argv: list[str], *, script_path: pathlib.Path) -> int:
             keep_workspace=args.keep_workspace,
             egress_consent=args.egress_consent,
             synthetic_secret_exemptions=tuple(
-                args.synthetic_secret_exemption or ()
+                getattr(args, "synthetic_secret_exemption", ())
             ),
             publisher=lambda created: print(created, flush=True),
         )
@@ -240,6 +334,8 @@ def main(argv: list[str] | None = None) -> int:
             os._exit(exit_code)
         if arguments and arguments[0] == "stateful":
             return _run_stateful(arguments[1:], script_path=script_path)
+        if arguments and arguments[0] == "synthetic-tokens":
+            return _run_synthetic_tokens(arguments[1:])
         return _run_foreground(_build_parser().parse_args(arguments))
     except ForwardedSignal as error:
         if error.detail:
