@@ -1125,6 +1125,26 @@ class RemoteCodexProbeChunkTests(unittest.TestCase):
                         max_stderr_bytes=1024,
                     )
 
+    def test_parent_bounded_reader_reaps_child_after_closed_pipe_timeout(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            pid_path = Path(temp_dir) / "child.pid"
+            child_script = (
+                "import os, pathlib, time; "
+                f"pathlib.Path({str(pid_path)!r}).write_text(str(os.getpid())); "
+                "os.close(1); os.close(2); time.sleep(60)"
+            )
+            with self.assertRaisesRegex(RuntimeError, "command timed out after 1s"):
+                MODULE._run_subprocess_text_bounded(
+                    [sys.executable, "-c", child_script],
+                    timeout_seconds=1,
+                    max_stdout_bytes=1024,
+                    max_stderr_bytes=1024,
+                )
+
+            child_pid = int(pid_path.read_text(encoding="utf-8"))
+            with self.assertRaises(ProcessLookupError):
+                os.kill(child_pid, 0)
+
     def test_fetch_rollout_chunk_rejects_oversized_range_before_reading(self) -> None:
         identity = MODULE.RolloutIdentity(9, 1, 2, 3, 4)
         buffer = io.StringIO()

@@ -1042,6 +1042,9 @@ def _run_subprocess_text_bounded(
             raise RuntimeError(f"command timed out after {timeout_seconds}s")
         returncode = process.wait(timeout=remaining)
     except subprocess.TimeoutExpired as exc:
+        if process.poll() is None:
+            process.kill()
+        process.wait()
         raise RuntimeError(f"command timed out after {timeout_seconds}s") from exc
     except Exception:
         if process.poll() is None:
