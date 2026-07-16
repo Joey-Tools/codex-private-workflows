@@ -670,38 +670,83 @@ def _read_local_rollout_byte_range(
             os.close(fd)
 
 
-def _write_private_bytes(output: pathlib.Path, data: bytes) -> None:
-    output.parent.mkdir(parents=True, exist_ok=True)
+def _open_output_parent(output: pathlib.Path) -> int:
+    if not output.is_absolute() or output.name in ("", ".", ".."):
+        raise ValueError("output path must name an absolute file")
+    directory_flag = getattr(os, "O_DIRECTORY", None)
+    nofollow_flag = getattr(os, "O_NOFOLLOW", None)
+    if directory_flag is None or nofollow_flag is None:
+        raise OSError("secure output writes require O_DIRECTORY and O_NOFOLLOW")
+    flags = os.O_RDONLY | directory_flag | nofollow_flag | getattr(os, "O_CLOEXEC", 0)
+    anchor = pathlib.Path(output.anchor)
+    directory_fd = os.open(str(anchor), flags)
     try:
-        target_stat = output.lstat()
-    except FileNotFoundError:
-        target_stat = None
-    if target_stat is not None and not stat.S_ISREG(target_stat.st_mode):
-        raise ValueError("output path exists and is not a regular file")
-
-    last_error: FileExistsError | None = None
-    for attempt in range(100):
-        temp_path = output.with_name(f".{output.name}.tmp-{os.getpid()}-{attempt}")
-        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
-        try:
-            fd = os.open(str(temp_path), flags, 0o600)
-        except FileExistsError as error:
-            last_error = error
-            continue
-        try:
-            with os.fdopen(fd, "wb") as handle:
-                handle.write(data)
-            os.chmod(temp_path, 0o600)
-            os.replace(temp_path, output)
-            os.chmod(output, 0o600)
-            return
-        except Exception:
+        for part in output.parent.relative_to(anchor).parts:
+            if part in ("", ".", ".."):
+                raise ValueError("output path has an invalid directory component")
             try:
-                temp_path.unlink()
+                next_fd = os.open(part, flags, dir_fd=directory_fd)
             except FileNotFoundError:
-                pass
-            raise
-    raise FileExistsError(f"could not create private temporary output for {output}") from last_error
+                try:
+                    os.mkdir(part, mode=0o700, dir_fd=directory_fd)
+                except FileExistsError:
+                    pass
+                next_fd = os.open(part, flags, dir_fd=directory_fd)
+            os.close(directory_fd)
+            directory_fd = next_fd
+        return directory_fd
+    except Exception:
+        os.close(directory_fd)
+        raise
+
+
+def _write_private_bytes(output: pathlib.Path, data: bytes) -> None:
+    parent_fd = _open_output_parent(output)
+    try:
+        try:
+            target_stat = os.stat(output.name, dir_fd=parent_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            target_stat = None
+        if target_stat is not None and not stat.S_ISREG(target_stat.st_mode):
+            raise ValueError("output path exists and is not a regular file")
+
+        last_error: FileExistsError | None = None
+        for attempt in range(100):
+            temp_name = f".{output.name}.tmp-{os.getpid()}-{attempt}"
+            flags = (
+                os.O_WRONLY
+                | os.O_CREAT
+                | os.O_EXCL
+                | getattr(os, "O_NOFOLLOW", 0)
+                | getattr(os, "O_CLOEXEC", 0)
+            )
+            try:
+                fd = os.open(temp_name, flags, 0o600, dir_fd=parent_fd)
+            except FileExistsError as error:
+                last_error = error
+                continue
+            try:
+                with os.fdopen(fd, "wb") as handle:
+                    handle.write(data)
+                    os.fchmod(handle.fileno(), 0o600)
+                os.replace(
+                    temp_name,
+                    output.name,
+                    src_dir_fd=parent_fd,
+                    dst_dir_fd=parent_fd,
+                )
+                return
+            except Exception:
+                try:
+                    os.unlink(temp_name, dir_fd=parent_fd)
+                except FileNotFoundError:
+                    pass
+                raise
+        raise FileExistsError(
+            f"could not create private temporary output for {output}"
+        ) from last_error
+    finally:
+        os.close(parent_fd)
 
 
 def _flat_archived_rollout_matches_date(
@@ -715,9 +760,6 @@ def _is_raw_rollout_file(path: pathlib.Path) -> bool:
 
 
 def _session_meta_rollout_dedupe_key(relative_path: pathlib.PurePosixPath) -> str:
-    parts = relative_path.parts
-    if len(parts) >= 2 and parts[0] == "archived_sessions":
-        return f"archived_sessions/{relative_path.name}"
     return relative_path.as_posix()
 
 
@@ -1418,9 +1460,6 @@ def is_raw_rollout_file(path):
 
 
 def session_meta_rollout_dedupe_key(rel):
-    parts = rel.parts
-    if len(parts) >= 2 and parts[0] == "archived_sessions":
-        return "archived_sessions/" + rel.name
     return rel.as_posix()
 
 
@@ -2323,7 +2362,7 @@ def iter_session_meta():
             session_directory_unreadable()
 
     count = 0
-    seen_session_ids = set()
+    seen_rollout_paths = set()
     for date_text in reversed(DATE_STRINGS):
         rollout_paths = []
         for rel_dir in (pathlib.PurePosixPath("sessions") / date_text, pathlib.PurePosixPath("archived_sessions") / date_text):
@@ -2349,7 +2388,6 @@ def iter_session_meta():
             pass
         except OSError:
             session_directory_unreadable()
-        seen_rollout_paths = set()
         for rollout in rollout_paths:
             rel = pathlib.PurePosixPath(rollout.relative_to(root).as_posix())
             rel_key = session_meta_rollout_dedupe_key(rel)
@@ -2381,9 +2419,6 @@ def iter_session_meta():
                     cwd = str(payload.get("cwd", ""))
                     break
             if session_id:
-                if session_id in seen_session_ids:
-                    continue
-                seen_session_ids.add(session_id)
                 count += 1
                 if LIMIT and count > LIMIT:
                     print(json.dumps({{"kind": "truncation", "reason": SESSION_META_LIMIT_TRUNCATED_REASON, "date": date_text, "limit": LIMIT}}, separators=(",", ":"), sort_keys=True))
@@ -2540,7 +2575,7 @@ def _scan_session_meta_records(
     except OSError:
         return SessionMetaScan(rows=[], truncated=False)
     rows: list[dict[str, str]] = []
-    seen_session_ids: set[str] = set()
+    seen_rollout_paths: set[str] = set()
 
     def sorted_rollout_paths(directory: pathlib.Path) -> list[pathlib.Path]:
         try:
@@ -2577,7 +2612,6 @@ def _scan_session_meta_records(
             pass
         except OSError as exc:
             raise SessionMetaRolloutError("session directory unreadable") from exc
-        seen_rollout_paths: set[str] = set()
         for rollout_path in rollout_paths:
             rollout_relative_path = pathlib.PurePosixPath(
                 rollout_path.relative_to(resolved_root).as_posix()
@@ -2611,9 +2645,6 @@ def _scan_session_meta_records(
                     break
             if not session_id:
                 continue
-            if session_id in seen_session_ids:
-                continue
-            seen_session_ids.add(session_id)
             rows.append(
                 {
                     "host": host,
