@@ -80,6 +80,8 @@ SOURCE_CAPTURE_PROGRESS_PATH_ENV = "CODEX_SESSION_SHARDS_CAPTURE_PROGRESS_PATH"
 MAX_SOURCE_CAPTURE_PROGRESS_BYTES = 1024 * 1024
 COORDINATOR_STATUS_TIMEOUT_SECONDS = 30
 COORDINATOR_ACTION_TIMEOUT_SECONDS = 5 * 60
+SUPERVISOR_CLEANUP_FAILURE_EXIT_CODE = 125
+SUPERVISOR_SHUTDOWN_TIMEOUT_SECONDS = 4
 MAX_COORDINATOR_STATUS_BYTES = 1024 * 1024
 MAX_COORDINATOR_DIAGNOSTIC_BYTES = 64 * 1024
 MIN_SOURCE_CAPTURE_BYTES = 4 * 1024 * 1024
@@ -177,6 +179,33 @@ _SOURCE_CAPTURE_OPTION_ARITY = {
     "--window-end": 1,
     "--window-start": 1,
 }
+_HOLDOUT_SOURCE_TRANSPORT_OPTIONS = frozenset(
+    {
+        "--controlled-missing-host",
+        "--emit",
+        "--host",
+        "--qualification-mode",
+        "--require-existing-shadow-identity",
+        "--shadow-identity-path",
+        "--source-kind",
+        "--source-lease-ref",
+        "--window-end",
+        "--window-start",
+    }
+)
+_HOLDOUT_SOURCE_TRANSPORT_MARKERS = frozenset(
+    {
+        "--controlled-missing-host",
+        "--create-shadow-identity",
+        "--qualification-mode",
+        "--require-existing-shadow-identity",
+        "--shadow-identity-path",
+        "--source-kind",
+        "--source-lease-ref",
+        "--window-end",
+        "--window-start",
+    }
+)
 
 WORKSPACE_ROOT = pathlib.Path("/Users/hoteng/Program/GitHub/Joey-Tools/codex-workspace")
 SHADOW_ROOT = WORKSPACE_ROOT / ".codex-local/session-retrospective-v2-shadow"
@@ -1001,18 +1030,25 @@ def _supervised_command(command: Sequence[str]) -> tuple[str, ...]:
 
 
 def _terminate_process_group(process: subprocess.Popen[Any]) -> None:
+    forced_termination = False
     if _process_group_exists(process):
         _signal_process_group(process, signal.SIGTERM)
-    deadline = time.monotonic() + 2
+    deadline = time.monotonic() + SUPERVISOR_SHUTDOWN_TIMEOUT_SECONDS
     while _process_group_exists(process) and time.monotonic() < deadline:
         time.sleep(SOURCE_CAPTURE_POLL_SECONDS)
     if _process_group_exists(process):
         _signal_process_group(process, signal.SIGKILL)
+        forced_termination = True
     try:
-        process.wait(timeout=2)
+        returncode = process.wait(timeout=2)
     except subprocess.TimeoutExpired:
         process.kill()
-        process.wait()
+        returncode = process.wait()
+        forced_termination = True
+    if forced_termination or returncode == SUPERVISOR_CLEANUP_FAILURE_EXIT_CODE:
+        raise ShadowPolicyError(
+            "coordinator process-group supervisor could not reap all descendants"
+        )
 
 
 def _run_supervised_process(
@@ -1441,6 +1477,58 @@ def _authenticated_source_action(
     return action
 
 
+def _validate_holdout_source_transport_options(
+    parsed_options: Mapping[str, str | None],
+    *,
+    action: Mapping[str, Any],
+    lease: Mapping[str, Any],
+    host: str,
+) -> None:
+    is_holdout = parsed_options.get("--emit") == "holdout-receipt" or bool(
+        _HOLDOUT_SOURCE_TRANSPORT_MARKERS.intersection(parsed_options)
+    )
+    if not is_holdout:
+        return
+    if set(parsed_options) != _HOLDOUT_SOURCE_TRANSPORT_OPTIONS:
+        raise ShadowPolicyError(
+            "controlled holdout transport must use its exact closed option set"
+        )
+    window = lease.get("window")
+    if (
+        not isinstance(window, Mapping)
+        or set(window) != {"end", "start"}
+        or not all(isinstance(window.get(key), str) for key in ("end", "start"))
+    ):
+        raise ShadowPolicyError(
+            "controlled holdout transport lease has an invalid window"
+        )
+    if (
+        action.get("host") != lease.get("host")
+        or lease.get("host") != host
+        or action.get("window") != window
+        or action.get("source_kind") != lease.get("source_kind")
+        or action.get("lease_ref") != lease.get("lease_ref")
+    ):
+        raise ShadowPolicyError(
+            "controlled holdout action does not match its authenticated lease"
+        )
+    expected = {
+        "--controlled-missing-host": None,
+        "--emit": "holdout-receipt",
+        "--host": host,
+        "--qualification-mode": "shadow",
+        "--require-existing-shadow-identity": None,
+        "--source-kind": lease.get("source_kind"),
+        "--source-lease-ref": lease.get("lease_ref"),
+        "--window-end": window["end"],
+        "--window-start": window["start"],
+    }
+    if any(parsed_options.get(option) != value for option, value in expected.items()):
+        raise ShadowPolicyError(
+            "controlled holdout transport does not match its authenticated lease"
+        )
+
+
 def _validated_source_transport_command(
     action: Mapping[str, Any],
     *,
@@ -1527,11 +1615,15 @@ def _validated_source_transport_command(
                 "source transport must reuse the runner-bootstrapped shadow identity"
             )
     lease = action.get("transport_lease")
-    commitment = (
-        lease.get("transport_program_commitment")
-        if isinstance(lease, Mapping)
-        else None
+    if not isinstance(lease, Mapping):
+        raise ShadowPolicyError("source transport lease is missing")
+    _validate_holdout_source_transport_options(
+        parsed_options,
+        action=action,
+        lease=lease,
+        host=host,
     )
+    commitment = lease.get("transport_program_commitment")
     if (
         not isinstance(commitment, str)
         or TRANSPORT_PROGRAM_COMMITMENT_RE.fullmatch(commitment) is None

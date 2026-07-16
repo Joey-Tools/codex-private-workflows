@@ -200,6 +200,41 @@ def source_status_result(
     }
 
 
+def controlled_holdout_source_action(invocation_dir: Path) -> dict[str, object]:
+    status = source_status_result(invocation_dir, host="hoteng-srv-01")
+    action = status["result"]["active_source_leases"][0]
+    lease = action["transport_lease"]
+    window = lease["window"]
+    command = [
+        sys.executable,
+        "-I",
+        str(RUNNER.TRANSPORT_PATH),
+        "session-shards",
+        "--host",
+        str(lease["host"]),
+        "--emit",
+        "holdout-receipt",
+        "--qualification-mode",
+        "shadow",
+        "--controlled-missing-host",
+        "--window-start",
+        str(window["start"]),
+        "--window-end",
+        str(window["end"]),
+        "--source-kind",
+        str(lease["source_kind"]),
+        "--source-lease-ref",
+        str(lease["lease_ref"]),
+        "--shadow-identity-path",
+        str(invocation_dir / "holdout-identity"),
+        "--require-existing-shadow-identity",
+    ]
+    lease["command_argv"] = command
+    action["source_transport_command"] = command
+    action["native_coordinator_actions"][0]["command"] = command
+    return action
+
+
 def accept_source_arguments(
     invocation_dir: Path,
     *,
@@ -1427,6 +1462,44 @@ raise SystemExit(0 if not failures else 74)
 
         self.assertLess(time.monotonic() - started, 7)
 
+    def test_runner_propagates_supervisor_descendant_cleanup_failure(self) -> None:
+        class FailedCleanupSupervisor:
+            pid = 12345
+            returncode = RUNNER.SUPERVISOR_CLEANUP_FAILURE_EXIT_CODE
+
+            @staticmethod
+            def poll() -> int:
+                return RUNNER.SUPERVISOR_CLEANUP_FAILURE_EXIT_CODE
+
+            @staticmethod
+            def wait(timeout: float | None = None) -> int:
+                del timeout
+                return RUNNER.SUPERVISOR_CLEANUP_FAILURE_EXIT_CODE
+
+        supervisor = FailedCleanupSupervisor()
+        with tempfile.TemporaryDirectory(
+            prefix="shadow-runner-cleanup-failure."
+        ) as raw:
+            with (
+                mock.patch.object(RUNNER.subprocess, "Popen", return_value=supervisor),
+                mock.patch.object(
+                    RUNNER,
+                    "_process_group_exists",
+                    return_value=False,
+                ),
+                self.assertRaisesRegex(
+                    RUNNER.ShadowPolicyError,
+                    "could not reap all descendants",
+                ),
+            ):
+                RUNNER._run_supervised_process(
+                    (sys.executable, "-c", "raise SystemExit(0)"),
+                    cwd=Path(raw),
+                    environment=os.environ,
+                    capture_output=False,
+                    timeout_seconds=1,
+                )
+
     def test_sandbox_profile_uses_explicit_python_runtime_roots(self) -> None:
         with tempfile.TemporaryDirectory(prefix="shadow-sandbox-profile.") as raw:
             root = Path(raw)
@@ -1827,17 +1900,9 @@ raise SystemExit(0 if not failures else 74)
                 shadow_root / "invocation",
                 shadow_root=shadow_root,
             )
-            status = source_status_result(invocation_dir, host="hoteng-srv-01")
-            action = status["result"]["active_source_leases"][0]
+            action = controlled_holdout_source_action(invocation_dir)
             command = action["source_transport_command"]
-            command[command.index("--emit") + 1] = "holdout-receipt"
-            command.extend(
-                (
-                    "--shadow-identity-path",
-                    str(invocation_dir / "holdout-identity"),
-                    "--create-shadow-identity",
-                )
-            )
+            command[-1] = "--create-shadow-identity"
 
             with self.assertRaisesRegex(
                 RUNNER.ShadowPolicyError,
@@ -1856,6 +1921,70 @@ raise SystemExit(0 if not failures else 74)
                 invocation_dir=invocation_dir,
             )
             self.assertEqual(tuple(command), validated.argv)
+
+    def test_runner_rejects_controlled_holdout_binding_substitution(self) -> None:
+        with tempfile.TemporaryDirectory(
+            prefix="shadow-runner-holdout-binding."
+        ) as raw:
+            shadow_root = Path(raw) / "shadow"
+            invocation_dir, _ = RUNNER._prepare_invocation_directory(
+                shadow_root / "invocation",
+                shadow_root=shadow_root,
+            )
+            substitutions = (
+                ("--host", "miku-bot-dev"),
+                ("--emit", "descriptors"),
+                ("--qualification-mode", "production"),
+                ("--window-start", "2026-07-12T00:00:00Z"),
+                ("--window-end", "2026-07-15T00:00:00Z"),
+                ("--source-kind", "other_history"),
+                ("--source-lease-ref", "lease_ref_v2:substituted"),
+            )
+            for option, substituted_value in substitutions:
+                action = controlled_holdout_source_action(invocation_dir)
+                command = action["source_transport_command"]
+                command[command.index(option) + 1] = substituted_value
+                with (
+                    self.subTest(option=option),
+                    self.assertRaisesRegex(
+                        RUNNER.ShadowPolicyError,
+                        "authenticated lease",
+                    ),
+                ):
+                    RUNNER._validated_source_transport_command(
+                        action,
+                        host="hoteng-srv-01",
+                        invocation_dir=invocation_dir,
+                    )
+
+            for forbidden_option in ("--rollout", "--byte-start"):
+                action = controlled_holdout_source_action(invocation_dir)
+                command = action["source_transport_command"]
+                command.extend((forbidden_option, "unexpected"))
+                with (
+                    self.subTest(forbidden_option=forbidden_option),
+                    self.assertRaisesRegex(
+                        RUNNER.ShadowPolicyError,
+                        "exact closed option set",
+                    ),
+                ):
+                    RUNNER._validated_source_transport_command(
+                        action,
+                        host="hoteng-srv-01",
+                        invocation_dir=invocation_dir,
+                    )
+
+            action = controlled_holdout_source_action(invocation_dir)
+            action["source_transport_command"].remove("--controlled-missing-host")
+            with self.assertRaisesRegex(
+                RUNNER.ShadowPolicyError,
+                "exact closed option set",
+            ):
+                RUNNER._validated_source_transport_command(
+                    action,
+                    host="hoteng-srv-01",
+                    invocation_dir=invocation_dir,
+                )
 
     def test_runner_rejects_non_transport_capture_program(self) -> None:
         with tempfile.TemporaryDirectory(
@@ -2825,6 +2954,7 @@ raise SystemExit(0 if not failures else 74)
             "owner-only snapshot of exactly those bytes",
             "atomically publish it to the authenticated stream path",
             "never pre-capture or replace that stream outside the runner",
+            "supervisor cleanup failure or forced supervisor kill",
             "unavailable pre-execution write sandbox",
             "Every finalize invocation must include `--shadow`",
             "must not include `--provider-state`",
@@ -2849,6 +2979,8 @@ raise SystemExit(0 if not failures else 74)
             "`--require-existing-shadow-identity`",
             "cannot emit a receipt, consume a source lease, or run transport",
             "rejects `--create-shadow-identity` in that leased action",
+            "compare every controlled-holdout argv binding",
+            "rejecting unrelated rollout/range options",
             "Never accept an implicit/default identity",
             'final `kind == "shadow"`',
             "`state_advanced == false`",

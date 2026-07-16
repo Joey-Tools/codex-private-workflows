@@ -27,6 +27,7 @@ superseded_by:
 - The shadow runner constrains coordinator commands, paths, writes, network access, and per-host concurrency before execution.
 - The runner derives and exposes the exact installed coordinator path from the effective home, safely initializes the fixed ignored shadow parent on first use, rechecks its inert history directory after coordinator actions, and persists Daily pair transitions plus the original holdout identity key ID atomically.
 - Daily qualification bootstraps its direct-child holdout identity exactly once through the runner before pair state exists; later status-issued transport must reuse that identity and its source lease rather than create or replace it.
+- Supervisor cleanup failures are propagated, and controlled-holdout commands are matched field-for-field to their authenticated source lease before the transport snapshot executes.
 - Release templates do not assert that a live automation exists, and this change performs no live automation registration or update.
 - Existing remote-host helper commands retain their prior interfaces and defaults.
 
@@ -44,7 +45,7 @@ superseded_by:
 - `personal_codex/automations/weekly-session-retrospective/automation.toml`
 - `tests/test_remote_session_shards.py`
 - `tests/test_session_retrospective_v2_shadow_automation.py`
-- Python 3.10.19 with `tomli==2.2.1` on the Linux code path: 37 shadow tests passed in 2.471 seconds with 1 platform-dependent skip.
-- Focused transport/shadow suite: 103 tests passed in 7.656 seconds with 1 platform-dependent skip.
-- Full test suite: 575 tests passed in 93.282 seconds with 3 platform-dependent skips.
+- Python 3.10.19 with `tomli==2.2.1` on the Linux code path: 39 shadow tests passed in 2.714 seconds with 1 platform-dependent skip.
+- Focused transport/shadow suite: 105 tests passed in 7.709 seconds with 1 platform-dependent skip.
+- Full test suite: 577 tests passed in 94.250 seconds with 3 platform-dependent skips.
 - Changed-file Ruff format/check, Python compileall, remote-host skill validation, actionlint, and project journal validation passed.

@@ -200,6 +200,11 @@ day, source kind, and status-issued source lease ref. `holdout_ref` is the
 SHA-256 commitment to that terminal state and binding. `identity_key_id`
 identifies the shadow key without exposing it, and `authentication_tag` is an
 HMAC-SHA-256 over the canonical receipt body and a protocol-domain separator.
+Before materializing the transport-program snapshot, the shadow runner requires
+the exact closed holdout argv and compares host, emit mode, qualification mode,
+window, source kind, source lease ref, controlled-missing-host flag, and identity
+reuse mode against the authenticated action and lease. Substitution or an
+unrelated rollout/range option blocks execution.
 
 The source lease ref is a one-time challenge, not reusable metadata. The
 consumer validates the closed schema, receipt ref, key id, HMAC, and every
@@ -519,7 +524,9 @@ mismatch, or atomic-publication failure blocks acceptance.
 Coordinator status and action subprocesses run in supervised process groups
 with 30-second and 300-second limits respectively. Timeout, oversized status
 output, or a retained descendant terminates the complete process group and
-blocks the invocation without retaining the host mutex indefinitely.
+blocks the invocation without retaining the host mutex indefinitely. A
+supervisor cleanup failure or forced supervisor kill is propagated explicitly;
+it cannot be discarded in favor of the original timeout result.
 
 ## Recovery And Retention
 
