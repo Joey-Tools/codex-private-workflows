@@ -80,7 +80,10 @@ class RemoteHostContextDocumentationTests(unittest.TestCase):
         self.assertIn(
             "cannot prove that every later substantive human follow-up", skill
         )
-        self.assertIn("hand the exact JSONL records to `codex-session-mining`", skill)
+        self.assertIn("iterate every `chunk_meta` row in byte order", skill)
+        self.assertIn("fetch every listed `fetch_ranges[]` entry", skill)
+        self.assertIn("complete exact JSONL record stream", skill)
+        self.assertIn("must never decide omissions", skill)
         self.assertIn("Do not batch multiple thread reads", skill)
         self.assertIn(
             "[Codex Thread Locator Skim]"
@@ -126,13 +129,20 @@ class RemoteHostContextDocumentationTests(unittest.TestCase):
         self.assertIn("never widen `read_thread` to discover the date", reference)
         self.assertIn("`chunked-rollout-summary`", reference)
         self.assertIn(
-            "cannot prove that all later substantive human follow-ups were retained",
+            "a later wrapper or noise record can obscure a substantive follow-up",
             reference,
         )
-        self.assertIn(
-            "hand the exact JSONL records to `codex-session-mining`", reference
-        )
+        self.assertIn("sort every `chunk_meta` row by `byte_start`", reference)
+        self.assertIn("consume all of them", reference)
+        self.assertIn("start at byte 0", reference)
+        self.assertIn("gap-free and non-overlapping", reference)
+        self.assertIn("end at `source_bytes`", reference)
+        self.assertIn("complete exact JSONL record stream", reference)
+        self.assertIn("must never decide omissions", reference)
         self.assertIn("summary rows alone are not sufficient evidence", reference)
+        self.assertNotIn("selected user-bearing chunk", skill)
+        self.assertNotIn("relevant user-bearing chunk", reference)
+        self.assertNotIn("candidate user-bearing chunk", reference)
         self.assertNotIn("creation or nearby activity date", reference)
         self.assertNotIn("use `read_thread` only as a bounded locator", skill)
         self.assertNotIn("use a callable thread reader only", reference)
@@ -391,86 +401,72 @@ class RemoteCodexProbeChunkTests(unittest.TestCase):
     ) -> None:
         first_followup = "Please include archived sessions in the audit."
         second_followup = "Also verify later human follow-ups are not discarded."
+        first_wrapper = "Synthetic wrapper bookkeeping after the user's request."
+        second_wrapper = "Background artifact chatter after the user's request."
+
+        def message_line(timestamp: str, role: str, text: str) -> str:
+            content_type = "input_text" if role == "user" else "output_text"
+            return json.dumps(
+                {
+                    "timestamp": timestamp,
+                    "type": "response_item",
+                    "payload": {
+                        "type": "message",
+                        "role": role,
+                        "content": [{"type": content_type, "text": text}],
+                    },
+                },
+                separators=(",", ":"),
+            )
+
+        session_meta_line = json.dumps(
+            {
+                "timestamp": "2026-05-26T10:00:00Z",
+                "type": "session_meta",
+                "payload": {"id": "abc", "cwd": "/repo"},
+            },
+            separators=(",", ":"),
+        )
+        first_followup_line = message_line(
+            "2026-05-26T10:02:00Z", "user", first_followup
+        )
+        first_wrapper_line = message_line("2026-05-26T10:03:00Z", "user", first_wrapper)
+        second_followup_line = message_line(
+            "2026-05-26T10:04:00Z", "user", second_followup
+        )
+        second_wrapper_line = message_line(
+            "2026-05-26T10:05:00Z", "user", second_wrapper
+        )
+        chunk_bytes = max(
+            len((first_followup_line + "\n" + first_wrapper_line + "\n").encode()),
+            len((second_followup_line + "\n" + second_wrapper_line + "\n").encode()),
+        )
+        oversized_noise_line = json.dumps(
+            {
+                "timestamp": "2026-05-26T10:01:00Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "function_call_output",
+                    "output": "noise:" + "x" * (chunk_bytes + 100),
+                },
+            },
+            separators=(",", ":"),
+        )
+        rollout_lines = [
+            session_meta_line,
+            oversized_noise_line,
+            first_followup_line,
+            first_wrapper_line,
+            second_followup_line,
+            second_wrapper_line,
+        ]
         original_cwd = Path.cwd()
         with tempfile.TemporaryDirectory() as temp_dir:
             workspace = Path(temp_dir) / "workspace"
             workspace.mkdir()
             codex_root = Path(temp_dir) / ".codex"
-            rollout = write_rollout(
-                codex_root,
-                [
-                    json.dumps(
-                        {
-                            "timestamp": "2026-05-26T10:00:00Z",
-                            "type": "session_meta",
-                            "payload": {"id": "abc", "cwd": "/repo"},
-                        },
-                        separators=(",", ":"),
-                    ),
-                    json.dumps(
-                        {
-                            "timestamp": "2026-05-26T10:01:00Z",
-                            "type": "response_item",
-                            "payload": {
-                                "type": "message",
-                                "role": "user",
-                                "content": [
-                                    {
-                                        "type": "input_text",
-                                        "text": "Run inside the dedicated worktree provisioned for this automation.",
-                                    }
-                                ],
-                            },
-                        },
-                        separators=(",", ":"),
-                    ),
-                    json.dumps(
-                        {
-                            "timestamp": "2026-05-26T10:02:00Z",
-                            "type": "response_item",
-                            "payload": {
-                                "type": "message",
-                                "role": "user",
-                                "content": [
-                                    {"type": "input_text", "text": first_followup}
-                                ],
-                            },
-                        },
-                        separators=(",", ":"),
-                    ),
-                    json.dumps(
-                        {
-                            "timestamp": "2026-05-26T10:03:00Z",
-                            "type": "response_item",
-                            "payload": {
-                                "type": "message",
-                                "role": "assistant",
-                                "content": [
-                                    {
-                                        "type": "output_text",
-                                        "text": "I will inspect it.",
-                                    }
-                                ],
-                            },
-                        },
-                        separators=(",", ":"),
-                    ),
-                    json.dumps(
-                        {
-                            "timestamp": "2026-05-26T10:04:00Z",
-                            "type": "response_item",
-                            "payload": {
-                                "type": "message",
-                                "role": "user",
-                                "content": [
-                                    {"type": "input_text", "text": second_followup}
-                                ],
-                            },
-                        },
-                        separators=(",", ":"),
-                    ),
-                ],
-            )
+            rollout = write_rollout(codex_root, rollout_lines)
+            source_data = (codex_root / rollout).read_bytes()
             with mock.patch.object(
                 MODULE, "_local_codex_root", return_value=codex_root
             ):
@@ -481,7 +477,7 @@ class RemoteCodexProbeChunkTests(unittest.TestCase):
                             host="local",
                             rollout=rollout,
                             keyword=[],
-                            chunk_bytes=4096,
+                            chunk_bytes=chunk_bytes,
                             limit_per_chunk=20,
                             tail_records=0,
                             max_text_chars=200,
@@ -495,36 +491,69 @@ class RemoteCodexProbeChunkTests(unittest.TestCase):
                     for record in summary_records
                     if record["kind"] == "chunk_meta"
                 ]
-                self.assertEqual(len(chunk_meta_rows), 1)
-                chunk_meta = chunk_meta_rows[0]
+                chunk_meta_rows.sort(key=lambda record: record["byte_start"])
+                self.assertGreaterEqual(len(chunk_meta_rows), 2)
+                self.assertTrue(
+                    any(
+                        record["record_start"] <= 3 and record["record_end"] >= 4
+                        for record in chunk_meta_rows
+                    )
+                )
+                self.assertTrue(
+                    any(
+                        record["record_start"] <= 5 and record["record_end"] >= 6
+                        for record in chunk_meta_rows
+                    )
+                )
                 summary_user_records = [
                     record
                     for record in summary_records
                     if record["kind"] == "user_message"
                 ]
                 summary_user_texts = [record["text"] for record in summary_user_records]
+                summary_user_lines = [record["line"] for record in summary_user_records]
+                expected_ranges = []
+                for chunk_meta in chunk_meta_rows:
+                    ranges = chunk_meta.get("fetch_ranges") or [
+                        {
+                            "byte_start": chunk_meta["byte_start"],
+                            "byte_end": chunk_meta["byte_end"],
+                        }
+                    ]
+                    expected_ranges.extend(
+                        (item["byte_start"], item["byte_end"]) for item in ranges
+                    )
 
                 os.chdir(workspace)
                 try:
-                    with redirect_stdout(io.StringIO()):
-                        fetch_rc = MODULE.cmd_fetch_rollout_chunk(
-                            argparse.Namespace(
-                                host="local",
-                                rollout=rollout,
-                                byte_start=chunk_meta["byte_start"],
-                                byte_end=chunk_meta["byte_end"],
-                                output="substantive-followups.jsonl",
+                    fetch_rcs = []
+                    fetched_ranges = []
+                    fetched_parts = []
+                    for fetch_index, (byte_start, byte_end) in enumerate(
+                        expected_ranges
+                    ):
+                        output_name = f"reconstruction/part-{fetch_index:03d}.jsonl"
+                        with redirect_stdout(io.StringIO()):
+                            fetch_rcs.append(
+                                MODULE.cmd_fetch_rollout_chunk(
+                                    argparse.Namespace(
+                                        host="local",
+                                        rollout=rollout,
+                                        byte_start=byte_start,
+                                        byte_end=byte_end,
+                                        output=output_name,
+                                    )
+                                )
                             )
+                        fetched_path = (
+                            workspace / ".codex-tmp/remote-host-context" / output_name
                         )
-                    fetched_path = (
-                        workspace
-                        / ".codex-tmp/remote-host-context/substantive-followups.jsonl"
-                    )
+                        fetched_ranges.append((byte_start, byte_end))
+                        fetched_parts.append(fetched_path.read_bytes())
+                    reconstructed_data = b"".join(fetched_parts)
                     fetched_records = [
                         json.loads(line)
-                        for line in fetched_path.read_text(
-                            encoding="utf-8"
-                        ).splitlines()
+                        for line in reconstructed_data.decode("utf-8").splitlines()
                     ]
                 finally:
                     os.chdir(original_cwd)
@@ -539,12 +568,28 @@ class RemoteCodexProbeChunkTests(unittest.TestCase):
             if item.get("type") == "input_text"
         ]
         self.assertEqual(summary_rc, 0)
-        self.assertEqual(fetch_rc, 0)
-        self.assertEqual(len(summary_user_records), 1)
-        self.assertEqual(summary_user_records[0]["line"], 5)
+        self.assertEqual(summary_user_lines, [4, 6])
         self.assertNotIn(first_followup, summary_user_texts)
         self.assertNotIn(second_followup, summary_user_texts)
-        self.assertEqual(fetched_user_texts[-2:], [first_followup, second_followup])
+        self.assertTrue(all(rc == 0 for rc in fetch_rcs))
+        self.assertEqual(fetched_ranges, expected_ranges)
+        self.assertEqual(expected_ranges[0][0], 0)
+        self.assertTrue(
+            all(
+                current_end == next_start
+                for (_, current_end), (next_start, _) in zip(
+                    expected_ranges, expected_ranges[1:]
+                )
+            )
+        )
+        self.assertEqual(expected_ranges[-1][1], len(source_data))
+        self.assertEqual(reconstructed_data, source_data)
+        self.assertIn(first_followup, fetched_user_texts)
+        self.assertIn(second_followup, fetched_user_texts)
+        self.assertLess(
+            fetched_user_texts.index(first_followup),
+            fetched_user_texts.index(second_followup),
+        )
 
     def test_fetch_rollout_chunk_rejects_oversized_range_before_reading(self) -> None:
         buffer = io.StringIO()

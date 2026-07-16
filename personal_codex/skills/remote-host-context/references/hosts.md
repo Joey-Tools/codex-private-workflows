@@ -100,9 +100,11 @@ If any required server-side control is unavailable, including the whole-response
 - When the creation date is known, run `session-meta` only against that creation-date directory and, when the creation timestamp crosses a calendar boundary, its bounded UTC/host-local date variant; filter the bounded results by the exact session id.
 - When only an activity or updated date is known, or no date is known, first use a bounded metadata-only exact-thread or session-index lookup that cannot return transcript items to derive the creation date. Then run `session-meta` against the derived creation-date directory and filter by the exact session id. If that lookup is unavailable, ask Joey for or derive the creation date from adjacent metadata. Never scan activity-date directories as a proxy, and never widen `read_thread` to discover the date.
 
-The canonical rollout remains under its creation date when a thread continues across days. After locating it, use `rollout-summary` or `chunked-rollout-summary` only to identify relevant byte/record ranges rather than widening `read_thread`.
+The canonical rollout remains under its creation date when a thread continues across days. After locating it, use `rollout-summary` for coarse triage or `chunked-rollout-summary` to enumerate the complete byte/record range map rather than widening `read_thread`.
 
-Treat the bounded latest turn and both summary commands as locator and triage output, not as permission to discard task history. A summary may emit only a representative or last user message from a chunk, so it cannot prove that all later substantive human follow-ups were retained. If the thread started with an automation, skill, or instruction wrapper, select every relevant user-bearing chunk from `chunk_meta`, fetch the exact `byte_start`/`byte_end` range (or all listed `fetch_ranges`) with `fetch-rollout-chunk`, reassemble split ranges in byte order, and hand the exact JSONL records to `codex-session-mining` for replay-prefix and wrapper filtering.
+Treat the bounded latest turn and both summary commands as locator and triage output, not as permission to discard task history. A summary may emit only a representative or last user message from a chunk, so a later wrapper or noise record can obscure a substantive follow-up in that same chunk. Summary content may choose candidates for coarse triage only; it must never decide omissions for full task reconstruction.
+
+For full task reconstruction, sort every `chunk_meta` row by `byte_start` and consume all of them. For each row, fetch every listed `fetch_ranges[]` entry in order, or fetch the row's complete `byte_start`/`byte_end` range when no split ranges are listed. Use sequential bounded `fetch-rollout-chunk` calls, verify that the combined ranges start at byte 0, remain gap-free and non-overlapping, and end at `source_bytes`, then reassemble the complete exact JSONL record stream in byte order. Hand that complete stream to `codex-session-mining` for replay-prefix and wrapper filtering; do not pre-filter chunks based on summary text, `raw_fetch_recommended`, or whether the summary exposed a user message.
 
 Current dedicated helper path for those repeated remote Codex reads:
 
@@ -126,7 +128,7 @@ python3 "$HOME/.codex/skills/remote-host-context/scripts/remote_codex_probe.py" 
 
 `session-meta` takes `--date YYYY/MM/DD`, not `YYYY-MM-DD`.
 `fetch-rollout` takes one destination file via `--output`; point it at a task-scoped file path, not a directory.
-Use `rollout-summary` only for fast bounded prefix triage. If a rollout is too large to copy cleanly, use `chunked-rollout-summary` for whole-rollout chunk coordinates, then fetch every candidate user-bearing chunk needed to reconstruct the task with `fetch-rollout-chunk`; summary rows alone are not sufficient evidence of all human follow-ups.
+Use `rollout-summary` only for fast bounded prefix triage. If a rollout is too large to copy cleanly, use `chunked-rollout-summary` for the complete whole-rollout range map. For full task reconstruction, fetch every range from every `chunk_meta` row with sequential `fetch-rollout-chunk` calls; summary rows alone are not sufficient evidence of all human follow-ups and must not choose omissions.
 Concrete bounded-read shape:
 
 ```bash
@@ -140,5 +142,5 @@ python3 "$HOME/.codex/skills/remote-host-context/scripts/remote_codex_probe.py" 
   --max-text-chars 400
 ```
 
-`rollout-summary` scans only a bounded prefix and emits a small structured skim. `chunked-rollout-summary` scans the file in bounded chunks but still emits lossy summaries; use their coordinates to fetch exact candidate records before delegating interpretation to `codex-session-mining`.
+`rollout-summary` scans only a bounded prefix and emits a small structured skim. `chunked-rollout-summary` scans the file in bounded chunks but still emits lossy summaries; for full reconstruction, use all of its coordinates to fetch the complete exact record stream before delegating interpretation to `codex-session-mining`.
 If a host has an explicitly verified `archived_sessions/rollout-*.jsonl` path, use `fetch-rollout` directly for that one file instead of turning `session-meta` into a broad archived-session search.
