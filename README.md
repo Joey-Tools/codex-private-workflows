@@ -2,9 +2,6 @@
 
 这个仓库承载 private Codex overlay release。它需要保持 private，不应公开。
 
-The synced review helper requires Python 3.10 or later; CI pins the minimum
-supported runtime on both Ubuntu and macOS.
-
 ## Scope
 
 - private `AGENTS.md`
@@ -22,6 +19,10 @@ installs into `~/.codex/personal-sync/overlays/private/current` and manages only
 private-owned symlinks.
 
 ## Test
+
+The synced review helper requires Python 3.10 or later. CI exercises its full
+test suite on both Ubuntu and macOS at that minimum runtime, while the private
+overlay packaging and sync tests run on the Linux matrix leg.
 
 ```bash
 python3 -m py_compile \
