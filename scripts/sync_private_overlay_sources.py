@@ -1037,6 +1037,7 @@ def _write_regular_file_overlay_target(
                         f"short write for regular-file overlay target: {relative}"
                     )
                 offset += written
+            write_complete = os.fstat(descriptor)
             os.lseek(descriptor, 0, os.SEEK_SET)
             chunks: list[bytes] = []
             remaining = len(data) + 1
@@ -1074,6 +1075,8 @@ def _write_regular_file_overlay_target(
     if (
         written_data != data
         or _overlay_file_identity(after) != _overlay_file_identity(target_stat)
+        or _overlay_file_content_identity(write_complete)
+        != _overlay_file_content_identity(after)
         or after.st_size != len(data)
         or _overlay_file_content_identity(final)
         != _overlay_file_content_identity(after)

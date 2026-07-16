@@ -1281,6 +1281,42 @@ class PrivateOverlaySyncTests(unittest.TestCase):
 
         self.assertEqual(calls, [len(b"private\n") + 1])
 
+    def test_regular_file_overlay_detects_target_mutation_after_readback(
+        self,
+    ) -> None:
+        staging = (self.repo_root / "staging-readback-mutation").resolve()
+        staging.mkdir()
+        target = staging / "catalog.json"
+        target.write_text("public\n", encoding="utf-8")
+        real_read = SYNC_MODULE.os.read
+        mutated = False
+
+        def mutate_after_eof(descriptor, size):
+            nonlocal mutated
+            chunk = real_read(descriptor, size)
+            if not chunk and not mutated:
+                mutated = True
+                os.pwrite(descriptor, b"attacker", 0)
+            return chunk
+
+        with mock.patch.object(
+            SYNC_MODULE.os,
+            "read",
+            side_effect=mutate_after_eof,
+        ):
+            with self.assertRaisesRegex(
+                SYNC_MODULE.SyncError,
+                "target byte verification failed",
+            ):
+                SYNC_MODULE._write_regular_file_overlay_target(
+                    staging,
+                    Path("catalog.json"),
+                    b"private\n",
+                )
+
+        self.assertTrue(mutated)
+        self.assertEqual(target.read_bytes(), b"attacker")
+
     def test_regular_file_overlay_enforces_size_limit(self) -> None:
         source = self.source_root / "example-repo" / "skill"
         source.mkdir(parents=True)
