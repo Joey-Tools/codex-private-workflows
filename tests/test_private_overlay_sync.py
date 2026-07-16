@@ -5097,36 +5097,22 @@ class PrivateOverlaySyncTests(unittest.TestCase):
             exemption.identifier: exemption for exemption in catalog.legacy_exemptions
         }
         pat_id = "codex-workflow-hygiene-session-retrospective-github-pat-v1"
-        jwt_id = "codex-workflow-hygiene-jwt"
         portable_id = "portable-codex-runtime-master-generic-fixtures-v1"
-        self.assertEqual(set(exemptions), {pat_id, jwt_id, portable_id})
+        self.assertEqual(set(exemptions), {pat_id, portable_id})
         pat = exemptions[pat_id]
-        jwt = exemptions[jwt_id]
         portable = exemptions[portable_id]
         self.assertEqual(pat.repository, "Joey-Tools/codex-workflow-hygiene")
-        self.assertEqual(jwt.repository, "Joey-Tools/codex-workflow-hygiene")
         self.assertEqual(portable.repository, "cha-op/portable-codex-runtime")
         self.assertEqual(
             pat.verified_master_tip, "95befb966cd93e0161ecb45099c124eac56cb52f"
-        )
-        self.assertEqual(
-            jwt.verified_master_tip, "95befb966cd93e0161ecb45099c124eac56cb52f"
         )
         self.assertEqual(
             portable.verified_master_tip,
             "83542fa2a29661c1422c108887bc13cb5bddd7eb",
         )
         self.assertEqual(len(pat.values), 1)
-        self.assertEqual(len(jwt.values), 1)
         self.assertEqual(len(portable.values), 16)
         self.assertEqual(sum(token.source_occurrences for token in pat.values), 1)
-        self.assertEqual(
-            [
-                (token.identifier, token.rule, token.source_occurrences)
-                for token in jwt.values
-            ],
-            [("session-retrospective-redaction-jwt", "jwt", 1)],
-        )
         expected_portable_counts = {
             "portable-runtime-legacy-v1-001": 1,
             "portable-runtime-legacy-v1-002": 2,
@@ -5164,14 +5150,13 @@ class PrivateOverlaySyncTests(unittest.TestCase):
             }.isdisjoint(actual_portable_counts)
         )
         self.assertEqual({token.rule for token in pat.values}, {"github-token"})
-        self.assertEqual({token.rule for token in jwt.values}, {"jwt"})
         self.assertEqual(
             {token.rule for token in portable.values},
             {"generic-secret-assignment"},
         )
         self.assertEqual(
             sum(len(exemption.values) for exemption in catalog.legacy_exemptions),
-            18,
+            17,
         )
         self.assertEqual(
             sum(
@@ -5179,7 +5164,7 @@ class PrivateOverlaySyncTests(unittest.TestCase):
                 for exemption in catalog.legacy_exemptions
                 for token in exemption.values
             ),
-            39,
+            38,
         )
 
         raw_exemptions = {
