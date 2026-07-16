@@ -117,6 +117,8 @@ class RemoteHostContextDocumentationTests(unittest.TestCase):
         self.assertIn("If only an activity or updated date is known", skill)
         self.assertIn("derive the creation date", skill)
         self.assertIn("never substitute activity-date directories", skill)
+        self.assertIn("fails closed when its bounded prefix ends", skill)
+        self.assertIn("still has unread bytes", skill)
         self.assertIn("locator and triage output only", skill)
         self.assertIn(
             "cannot prove that every later substantive human follow-up", skill
@@ -205,6 +207,10 @@ class RemoteHostContextDocumentationTests(unittest.TestCase):
         self.assertIn("4 MiB of final serialized JSONL", skill)
         self.assertIn("computes SHA-256 during that same allowed scan", skill)
         self.assertIn("bounded stdout and stderr readers", skill)
+        self.assertIn("snapshot size plus one growth-detection byte", skill)
+        self.assertIn("bounds the complete base64 frame before parsing it", skill)
+        self.assertIn("source_bytes` from the same descriptor it scans", skill)
+        self.assertIn("retains only a transient boolean", skill)
         self.assertIn("restart from byte 0 with a new `rollout-stat`", skill)
         self.assertIn("does not scan or hash its content", reference)
         self.assertIn("`rollout_meta.source_sha256`", reference)
@@ -429,6 +435,145 @@ class RemoteCodexProbeChunkTests(unittest.TestCase):
             },
         )
 
+    def test_session_meta_fails_closed_when_scan_cap_leaves_unread_bytes(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            codex_root = Path(temp_dir) / ".codex"
+            rollout = write_rollout(
+                codex_root,
+                [
+                    json.dumps(
+                        {
+                            "type": "session_meta",
+                            "payload": {
+                                "padding": "x" * 512,
+                                "id": "oversized-session",
+                                "cwd": "/repo",
+                            },
+                        },
+                        separators=(",", ":"),
+                    )
+                ],
+            )
+            scan_bytes = 64
+            with mock.patch.object(MODULE, "MAX_SESSION_META_SCAN_BYTES", scan_bytes):
+                with self.assertRaises(MODULE.SessionMetaRolloutError) as raised:
+                    MODULE._scan_session_meta_records(
+                        codex_root=codex_root,
+                        dates=[MODULE.dt.date(2026, 5, 26)],
+                        limit=10,
+                        host="local",
+                    )
+
+            script = MODULE._remote_python_script(
+                {
+                    "mode": "session-meta",
+                    "dates": ["2026/05/26"],
+                    "limit": 10,
+                    "codex_root": str(codex_root),
+                    "session_meta_scan_bytes": scan_bytes,
+                }
+            )
+            result = subprocess.run(
+                [sys.executable, "-"],
+                input=script,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+        self.assertEqual(
+            raised.exception.error, MODULE.SESSION_META_SCAN_TRUNCATED_ERROR
+        )
+        self.assertEqual(raised.exception.rollout, rollout)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        embedded_records = [
+            json.loads(line)
+            for line in MODULE._extract_framed_lines(
+                result.stdout,
+                begin_marker=MODULE.REMOTE_SESSION_META_BEGIN,
+                end_marker=MODULE.REMOTE_SESSION_META_END,
+                host="embedded",
+                command="session-meta",
+            )
+        ]
+        self.assertEqual(
+            embedded_records,
+            [
+                {
+                    "kind": "error",
+                    "error": MODULE.SESSION_META_SCAN_TRUNCATED_ERROR,
+                    "rollout": rollout,
+                }
+            ],
+        )
+
+    def test_session_meta_before_scan_cap_allows_larger_rollout(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            codex_root = Path(temp_dir) / ".codex"
+            meta_line = json.dumps(
+                {
+                    "type": "session_meta",
+                    "payload": {"id": "bounded-session", "cwd": "/repo"},
+                },
+                separators=(",", ":"),
+            )
+            rollout = write_rollout(
+                codex_root,
+                [
+                    meta_line,
+                    json.dumps(
+                        {"type": "response_item", "payload": "x" * 512},
+                        separators=(",", ":"),
+                    ),
+                ],
+            )
+            scan_bytes = len(meta_line.encode("utf-8")) + 1
+            with mock.patch.object(MODULE, "MAX_SESSION_META_SCAN_BYTES", scan_bytes):
+                local_scan = MODULE._scan_session_meta_records(
+                    codex_root=codex_root,
+                    dates=[MODULE.dt.date(2026, 5, 26)],
+                    limit=10,
+                    host="local",
+                )
+
+            script = MODULE._remote_python_script(
+                {
+                    "mode": "session-meta",
+                    "dates": ["2026/05/26"],
+                    "limit": 10,
+                    "codex_root": str(codex_root),
+                    "session_meta_scan_bytes": scan_bytes,
+                }
+            )
+            result = subprocess.run(
+                [sys.executable, "-"],
+                input=script,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+        self.assertEqual(
+            [row["session_id"] for row in local_scan.rows], ["bounded-session"]
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        embedded_records = [
+            json.loads(line)
+            for line in MODULE._extract_framed_lines(
+                result.stdout,
+                begin_marker=MODULE.REMOTE_SESSION_META_BEGIN,
+                end_marker=MODULE.REMOTE_SESSION_META_END,
+                host="embedded",
+                command="session-meta",
+            )
+        ]
+        self.assertEqual(
+            [row["session_id"] for row in embedded_records], ["bounded-session"]
+        )
+        self.assertEqual(embedded_records[0]["rollout"], rollout)
+
     def test_remote_python_script_compiles_for_chunk_commands(self) -> None:
         identity = MODULE.RolloutIdentity(120, 1, 2, 3, 4)
         token = MODULE._rollout_identity_token(identity)
@@ -468,9 +613,31 @@ class RemoteCodexProbeChunkTests(unittest.TestCase):
                 "authorized_source_bytes": None,
             }
         )
+        full_fetch_script = MODULE._remote_python_script(
+            {
+                "mode": "fetch-rollout",
+                "rollout": "sessions/2026/05/26/rollout-a.jsonl",
+                "codex_root": "/home/hoteng/.codex",
+                "max_fetch_rollout_bytes": MODULE.MAX_FETCH_ROLLOUT_BYTES,
+            }
+        )
+        summary_script = MODULE._remote_python_script(
+            {
+                "mode": "rollout-summary",
+                "rollout": "sessions/2026/05/26/rollout-a.jsonl",
+                "codex_root": "/home/hoteng/.codex",
+                "summary_keywords": ["distant needle"],
+                "summary_limit": 10,
+                "summary_scan_bytes": MODULE.MAX_ROLLOUT_SUMMARY_SCAN_BYTES,
+                "summary_tail_records": 0,
+                "summary_max_text_chars": 200,
+            }
+        )
 
         compile(chunked_script, "<chunked-rollout-summary>", "exec")
         compile(fetch_script, "<fetch-rollout-chunk>", "exec")
+        compile(full_fetch_script, "<fetch-rollout>", "exec")
+        compile(summary_script, "<rollout-summary>", "exec")
         self.assertIn(
             '"full_fetch_limit_bytes": MAX_FETCH_ROLLOUT_BYTES', chunked_script
         )
@@ -480,6 +647,20 @@ class RemoteCodexProbeChunkTests(unittest.TestCase):
         )
         self.assertIn("hashlib.sha256()", chunked_script)
         self.assertIn("fetch range plan too large", chunked_script)
+        self.assertIn('data = handle.read(identity["size"] + 1)', full_fetch_script)
+        self.assertIn(
+            'assert_rollout_path_identity(target, identity, "after read")',
+            full_fetch_script,
+        )
+        self.assertIn(
+            "source_identity = rollout_identity_from_stat(os.fstat(handle.fileno()))",
+            summary_script,
+        )
+        self.assertIn(
+            'assert_rollout_path_identity(\n                target,\n                source_identity,\n                "after summary scan",',
+            summary_script,
+        )
+        self.assertNotIn("_match_text", summary_script)
 
     def test_remote_chunked_rollout_summary_passes_full_fetch_limit(self) -> None:
         identity = MODULE.RolloutIdentity(120, 1, 2, 3, 4)
@@ -1235,6 +1416,111 @@ class RemoteCodexProbeChunkTests(unittest.TestCase):
         self.assertEqual(output.getvalue(), "")
         self.assertIn("chunked summary output too large", error_output.getvalue())
 
+    def test_full_fetch_bounds_snapshot_read_and_rechecks_identity(self) -> None:
+        for mutation in ("append", "replace"):
+            with (
+                self.subTest(mutation=mutation),
+                tempfile.TemporaryDirectory() as temp_dir,
+            ):
+                codex_root = Path(temp_dir) / ".codex"
+                rollout = write_rollout(
+                    codex_root,
+                    ['{"type":"session_meta","payload":{"id":"abc"}}'],
+                )
+                source_path = codex_root / rollout
+                source_data = source_path.read_bytes()
+                real_fdopen = MODULE.os.fdopen
+                read_sizes: list[int] = []
+                mutated = False
+
+                class MutatingReadHandle:
+                    def __init__(self, handle: object) -> None:
+                        self.handle = handle
+
+                    def __enter__(self) -> "MutatingReadHandle":
+                        return self
+
+                    def __exit__(self, *args: object) -> None:
+                        self.handle.close()
+
+                    def fileno(self) -> int:
+                        return self.handle.fileno()
+
+                    def read(self, size: int = -1) -> bytes:
+                        nonlocal mutated
+                        read_sizes.append(size)
+                        if not mutated:
+                            if mutation == "append":
+                                with source_path.open("ab") as append_handle:
+                                    append_handle.write(b"{}\n")
+                            else:
+                                replacement = source_path.with_suffix(".replacement")
+                                replacement.write_bytes(source_data)
+                                os.replace(replacement, source_path)
+                            mutated = True
+                        return self.handle.read(size)
+
+                def fdopen_with_mutation(fd: int, mode: str) -> MutatingReadHandle:
+                    return MutatingReadHandle(real_fdopen(fd, mode))
+
+                with mock.patch.object(
+                    MODULE.os,
+                    "fdopen",
+                    side_effect=fdopen_with_mutation,
+                ):
+                    with self.assertRaisesRegex(
+                        ValueError, "identity changed after read"
+                    ):
+                        MODULE._read_local_rollout_bytes(
+                            codex_root,
+                            MODULE._resolve_rollout_relative_path(rollout),
+                            max_bytes=MODULE.MAX_FETCH_ROLLOUT_BYTES,
+                        )
+
+                self.assertEqual(read_sizes, [len(source_data) + 1])
+
+    def test_remote_full_fetch_uses_bounded_parent_capture(self) -> None:
+        remote_output = (
+            f"{MODULE.REMOTE_FETCH_ROLLOUT_BEGIN}\n"
+            '{"bytes":3,"ok":true}\n'
+            "YWJj\n"
+            f"{MODULE.REMOTE_FETCH_ROLLOUT_END}\n"
+        )
+        remote_result = subprocess.CompletedProcess(
+            args=["ssh"],
+            returncode=0,
+            stdout=remote_output,
+            stderr="",
+        )
+        with tempfile.TemporaryDirectory(dir="/tmp") as temp_dir:
+            output_path = Path(temp_dir) / "rollout.jsonl"
+            with (
+                mock.patch.object(
+                    MODULE,
+                    "_run_remote_python_bounded",
+                    return_value=remote_result,
+                ) as bounded_run,
+                mock.patch.object(MODULE, "_run_remote_python") as unbounded_run,
+                redirect_stdout(io.StringIO()),
+            ):
+                rc = MODULE.cmd_fetch_rollout(
+                    argparse.Namespace(
+                        host="miku-bot-dev",
+                        rollout="sessions/2026/05/26/rollout-a.jsonl",
+                        output=str(output_path),
+                    )
+                )
+
+            self.assertEqual(output_path.read_bytes(), b"abc")
+
+        self.assertEqual(rc, 0)
+        bounded_run.assert_called_once()
+        self.assertEqual(
+            bounded_run.call_args.kwargs["max_stdout_bytes"],
+            MODULE.MAX_REMOTE_FETCH_ROLLOUT_STDOUT_BYTES,
+        )
+        unbounded_run.assert_not_called()
+
     def test_chunk_fetch_rejects_append_and_replacement_after_preflight(self) -> None:
         for mutation in ("append", "replace"):
             with (
@@ -1350,6 +1636,140 @@ class RemoteCodexProbeChunkTests(unittest.TestCase):
         self.assertEqual(rc, 1)
         self.assertEqual(output.getvalue(), "")
         self.assertIn("identity changed after summary scan", error_output.getvalue())
+
+    def test_rollout_summary_rejects_path_mutation_before_output(self) -> None:
+        for mutation in ("append", "replace"):
+            with (
+                self.subTest(mutation=mutation),
+                tempfile.TemporaryDirectory() as temp_dir,
+            ):
+                codex_root = Path(temp_dir) / ".codex"
+                rollout = write_rollout(
+                    codex_root,
+                    [
+                        '{"type":"session_meta","payload":{"id":"abc"}}',
+                        '{"type":"event_msg","payload":{"type":"task_complete","last_agent_message":"done"}}',
+                    ],
+                )
+                source_path = codex_root / rollout
+                source_data = source_path.read_bytes()
+                original_summary = MODULE._summarize_rollout_records
+
+                def summarize_then_mutate(*args: object, **kwargs: object):
+                    records = original_summary(*args, **kwargs)
+                    if mutation == "append":
+                        with source_path.open("ab") as handle:
+                            handle.write(b"{}\n")
+                    else:
+                        replacement = source_path.with_suffix(".replacement")
+                        replacement.write_bytes(source_data)
+                        os.replace(replacement, source_path)
+                    return records
+
+                output = io.StringIO()
+                error_output = io.StringIO()
+                with (
+                    mock.patch.object(
+                        MODULE, "_local_codex_root", return_value=codex_root
+                    ),
+                    mock.patch.object(
+                        MODULE,
+                        "_summarize_rollout_records",
+                        side_effect=summarize_then_mutate,
+                    ),
+                    redirect_stdout(output),
+                    redirect_stderr(error_output),
+                ):
+                    rc = MODULE.cmd_rollout_summary(
+                        argparse.Namespace(
+                            host="local",
+                            rollout=rollout,
+                            keyword=[],
+                            limit=20,
+                            tail_records=4,
+                            max_text_chars=200,
+                        )
+                    )
+
+                self.assertEqual(rc, 1)
+                self.assertEqual(output.getvalue(), "")
+                self.assertIn(
+                    "identity changed after summary scan", error_output.getvalue()
+                )
+
+    def test_keyword_match_uses_full_signal_without_retaining_raw_text(self) -> None:
+        distant_keyword = "distant needle"
+        long_text = "prefix " + ("x" * 256) + "   distant\nneedle"
+
+        def message(text: str) -> str:
+            return json.dumps(
+                {
+                    "type": "response_item",
+                    "payload": {
+                        "type": "message",
+                        "role": "user",
+                        "content": [{"type": "input_text", "text": text}],
+                    },
+                },
+                separators=(",", ":"),
+            )
+
+        lines = [message(long_text), message("final ordinary message")]
+        local_records = MODULE._summarize_rollout_records(
+            lines=lines,
+            keywords=[distant_keyword],
+            limit=20,
+            tail_records=0,
+            max_text_chars=40,
+        )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            codex_root = Path(temp_dir) / ".codex"
+            rollout = write_rollout(codex_root, lines)
+            script = MODULE._remote_python_script(
+                {
+                    "mode": "rollout-summary",
+                    "rollout": rollout,
+                    "codex_root": str(codex_root),
+                    "summary_keywords": [distant_keyword],
+                    "summary_limit": 20,
+                    "summary_scan_bytes": MODULE.MAX_ROLLOUT_SUMMARY_SCAN_BYTES,
+                    "summary_line_bytes": MODULE.MAX_ROLLOUT_SUMMARY_LINE_BYTES,
+                    "summary_tail_records": 0,
+                    "summary_max_text_chars": 40,
+                }
+            )
+            result = subprocess.run(
+                [sys.executable, "-"],
+                input=script,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+        self.assertEqual([record["line"] for record in local_records], [1, 2])
+        self.assertNotIn("_keyword_matched", json.dumps(local_records))
+        self.assertNotIn(distant_keyword, json.dumps(local_records))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        embedded_records = MODULE._extract_framed_rollout_summary_records(
+            result.stdout,
+            begin_marker=MODULE.REMOTE_ROLLOUT_SUMMARY_BEGIN,
+            end_marker=MODULE.REMOTE_ROLLOUT_SUMMARY_END,
+            host="embedded",
+            command="rollout-summary",
+        )
+        embedded_user_records = [
+            record
+            for record in embedded_records
+            if record.get("kind") == "user_message"
+        ]
+        self.assertEqual(
+            [record["line"] for record in embedded_user_records],
+            [1, 2],
+        )
+        self.assertNotIn("_keyword_matched", result.stdout)
+        self.assertNotIn(distant_keyword, result.stdout)
+        self.assertNotIn("x" * 64, result.stdout)
 
     def test_parent_bounded_reader_stops_noisy_stdout_and_stderr(self) -> None:
         for stream_name, fd in (("stdout", 1), ("stderr", 2)):
