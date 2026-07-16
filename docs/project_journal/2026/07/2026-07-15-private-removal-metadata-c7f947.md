@@ -105,7 +105,7 @@ superseded_by:
 - Add a combined public/private manifest capacity gate when the private release job has both exact manifests; the installer already performs this aggregate preflight and fails safely, while repository CI currently proves capacity one owner at a time.
 
 ## Evidence
-- `/usr/bin/env ... python3 -m unittest discover -s tests` — 1030 tests completed successfully, with 2 skipped, using Python 3.13.0 and test-only Git configuration that disables commit signing to avoid a host keybox dependency, after integrating the latest `origin/master`.
+- `/usr/bin/env ... python3 -m unittest discover -s tests` — 1033 tests completed successfully, with 2 skipped, using Python 3.13.0 and test-only Git configuration that disables commit signing to avoid a host keybox dependency, after integrating the latest `origin/master`.
 - Reconciliation safety module — 263 tests passed as part of the repository suite.
 - Package builder safety module — 57 tests passed as part of the repository suite.
 - Manifest change validation module — 77 tests passed as part of the repository suite.
