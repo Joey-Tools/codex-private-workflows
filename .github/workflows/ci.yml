@@ -137,11 +137,18 @@ jobs:
   test:
     name: test
     if: ${{ always() }}
-    needs: platform_tests
+    needs:
+      - platform_tests
+      - python-39-compatibility
+      - platform-safety
     runs-on: ubuntu-latest
     steps:
       - name: Require every platform test to pass
         env:
           PLATFORM_TESTS_RESULT: ${{ needs.platform_tests.result }}
+          PYTHON_39_RESULT: ${{ needs.python-39-compatibility.result }}
+          PLATFORM_SAFETY_RESULT: ${{ needs.platform-safety.result }}
         run: |
           test "$PLATFORM_TESTS_RESULT" = "success"
+          test "$PYTHON_39_RESULT" = "success"
+          test "$PLATFORM_SAFETY_RESULT" = "success"

@@ -5815,12 +5815,28 @@ class PrivateOverlaySyncTests(unittest.TestCase):
         self.assertIn("\n  test:\n", workflow)
         self.assertIn("\n    name: test\n", workflow)
         self.assertIn("if: ${{ always() }}", workflow)
-        self.assertIn("needs: platform_tests", workflow)
+        self.assertIn(
+            "needs:\n"
+            "      - platform_tests\n"
+            "      - python-39-compatibility\n"
+            "      - platform-safety",
+            workflow,
+        )
         self.assertIn(
             "PLATFORM_TESTS_RESULT: ${{ needs.platform_tests.result }}",
             workflow,
         )
+        self.assertIn(
+            "PYTHON_39_RESULT: ${{ needs.python-39-compatibility.result }}",
+            workflow,
+        )
+        self.assertIn(
+            "PLATFORM_SAFETY_RESULT: ${{ needs.platform-safety.result }}",
+            workflow,
+        )
         self.assertIn('test "$PLATFORM_TESTS_RESULT" = "success"', workflow)
+        self.assertIn('test "$PYTHON_39_RESULT" = "success"', workflow)
+        self.assertIn('test "$PLATFORM_SAFETY_RESULT" = "success"', workflow)
 
     def test_manifest_canonical_skills_are_backed_by_sync_rules(self) -> None:
         manifest = json.loads(
