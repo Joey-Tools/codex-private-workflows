@@ -44,6 +44,336 @@ class PrivateOverlaySyncTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.tmpdir.cleanup()
 
+    def test_verify_package_uses_fresh_workspace_and_preserves_dist_extract(
+        self,
+    ) -> None:
+        sha = "1" * 40
+        dist = self.root / "dist"
+        existing_extract = dist / "extract"
+        existing_extract.mkdir(parents=True)
+        sentinel = existing_extract / "sentinel.txt"
+        sentinel.write_text("keep\n", encoding="utf-8")
+        destinations: list[Path] = []
+        sync_module = mock.Mock()
+        sync_module.validate_release_tree.return_value = [
+            mock.Mock(owner="private", target=Path("skills/private"))
+        ]
+
+        def safe_extract(_archive_path: Path, destination: Path) -> Path:
+            destinations.append(destination)
+            self.assertNotEqual(destination, existing_extract)
+            self.assertFalse(destination.exists())
+            release_root = destination / f"personal-codex-{sha}"
+            manifest_path = (
+                release_root / "personal_codex" / "sync-manifest.json"
+            )
+            manifest_path.parent.mkdir(parents=True)
+            manifest_path.write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "owner": "private",
+                        "base_release": {"repo": "Joey-Tools/codex-toolbox"},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            return release_root
+
+        sync_module.safe_extract_archive.side_effect = safe_extract
+        with mock.patch.object(
+            RELEASE_MODULE,
+            "_load_sync_module",
+            return_value=sync_module,
+        ):
+            RELEASE_MODULE.verify_package(self.repo_root, sha, dist)
+            RELEASE_MODULE.verify_package(self.repo_root, sha, dist)
+
+        self.assertEqual(len(destinations), 2)
+        self.assertNotEqual(destinations[0], destinations[1])
+        self.assertTrue(all(not destination.exists() for destination in destinations))
+        self.assertEqual(sentinel.read_text(encoding="utf-8"), "keep\n")
+        sync_module.verify_checksum.assert_has_calls(
+            [
+                mock.call(
+                    dist / f"personal-codex-{sha}.tar.gz",
+                    dist / f"personal-codex-{sha}.sha256",
+                ),
+                mock.call(
+                    dist / f"personal-codex-{sha}.tar.gz",
+                    dist / f"personal-codex-{sha}.sha256",
+                ),
+            ]
+        )
+
+    def test_verify_package_cleanup_error_does_not_mask_primary_error(
+        self,
+    ) -> None:
+        sha = "2" * 40
+        dist = self.root / "dist"
+        dist.mkdir()
+        workspace = self.root / "verification-workspace"
+        sync_module = mock.Mock()
+        sync_module.safe_extract_archive.side_effect = RELEASE_MODULE.ReleaseError(
+            "primary verification failure"
+        )
+        stderr = io.StringIO()
+
+        with (
+            mock.patch.object(
+                RELEASE_MODULE,
+                "_load_sync_module",
+                return_value=sync_module,
+            ),
+            mock.patch.object(
+                RELEASE_MODULE.tempfile,
+                "mkdtemp",
+                side_effect=lambda **_kwargs: (
+                    workspace.mkdir() or str(workspace)
+                ),
+            ),
+            mock.patch.object(
+                RELEASE_MODULE,
+                "_cleanup_verification_workspace",
+                side_effect=RELEASE_MODULE.ReleaseError("cleanup failure"),
+            ),
+            contextlib.redirect_stderr(stderr),
+            self.assertRaisesRegex(
+                RELEASE_MODULE.ReleaseError,
+                "primary verification failure",
+            ),
+        ):
+            RELEASE_MODULE.verify_package(self.repo_root, sha, dist)
+
+        self.assertIn("warning: cleanup failure", stderr.getvalue())
+
+    def test_verify_package_unexpected_cleanup_error_preserves_primary(
+        self,
+    ) -> None:
+        sha = "3" * 40
+        dist = self.root / "dist"
+        dist.mkdir()
+        workspace = self.root / "verification-workspace"
+        sync_module = mock.Mock()
+        sync_module.safe_extract_archive.side_effect = RELEASE_MODULE.ReleaseError(
+            "primary verification failure"
+        )
+        stderr = io.StringIO()
+        real_close = RELEASE_MODULE.os.close
+
+        with (
+            mock.patch.object(
+                RELEASE_MODULE,
+                "_load_sync_module",
+                return_value=sync_module,
+            ),
+            mock.patch.object(
+                RELEASE_MODULE.tempfile,
+                "mkdtemp",
+                side_effect=lambda **_kwargs: (
+                    workspace.mkdir() or str(workspace)
+                ),
+            ),
+            mock.patch.object(
+                RELEASE_MODULE,
+                "_cleanup_verification_workspace",
+                side_effect=RecursionError("cleanup recursion"),
+            ),
+            mock.patch.object(
+                RELEASE_MODULE.os,
+                "close",
+                wraps=real_close,
+            ) as close_descriptor,
+            contextlib.redirect_stderr(stderr),
+            self.assertRaisesRegex(
+                RELEASE_MODULE.ReleaseError,
+                "primary verification failure",
+            ),
+        ):
+            RELEASE_MODULE.verify_package(self.repo_root, sha, dist)
+
+        self.assertEqual(close_descriptor.call_count, 2)
+        self.assertIn(
+            "warning: verification workspace cleanup failed: "
+            "RecursionError: cleanup recursion",
+            stderr.getvalue(),
+        )
+
+    def test_verify_package_bind_failure_removes_empty_workspace(self) -> None:
+        sha = "4" * 40
+        dist = self.root / "dist"
+        dist.mkdir()
+        workspace = self.root / "verification-workspace"
+        sync_module = mock.Mock()
+
+        with (
+            mock.patch.object(
+                RELEASE_MODULE,
+                "_load_sync_module",
+                return_value=sync_module,
+            ),
+            mock.patch.object(
+                RELEASE_MODULE.tempfile,
+                "mkdtemp",
+                side_effect=lambda **_kwargs: (
+                    workspace.mkdir() or str(workspace)
+                ),
+            ),
+            mock.patch.object(
+                RELEASE_MODULE,
+                "_open_verification_workspace",
+                side_effect=RELEASE_MODULE.ReleaseError("bind failure"),
+            ),
+            self.assertRaisesRegex(
+                RELEASE_MODULE.ReleaseError,
+                "bind failure",
+            ),
+        ):
+            RELEASE_MODULE.verify_package(self.repo_root, sha, dist)
+
+        self.assertFalse(workspace.exists())
+
+    def test_verification_cleanup_preserves_replaced_root(self) -> None:
+        workspace = self.root / "verification-workspace"
+        moved_workspace = self.root / "moved-verification-workspace"
+        replacement = self.root / "replacement-workspace"
+        workspace.mkdir()
+        replacement.mkdir()
+        (workspace / "owned.txt").write_text("owned\n", encoding="utf-8")
+        sentinel = replacement / "sentinel.txt"
+        sentinel.write_text("keep\n", encoding="utf-8")
+        parent_fd, workspace_fd, workspace_identity = (
+            RELEASE_MODULE._open_verification_workspace(workspace)
+        )
+        real_rename = RELEASE_MODULE._rename_noreplace_at
+
+        def replace_root(
+            directory_fd: int,
+            source_name: str,
+            destination_name: str,
+        ) -> None:
+            if source_name == workspace.name:
+                workspace.rename(moved_workspace)
+                replacement.rename(workspace)
+            real_rename(directory_fd, source_name, destination_name)
+
+        try:
+            with (
+                mock.patch.object(
+                    RELEASE_MODULE,
+                    "_rename_noreplace_at",
+                    side_effect=replace_root,
+                ),
+                self.assertRaisesRegex(
+                    RELEASE_MODULE.ReleaseError,
+                    "changed during isolation",
+                ),
+            ):
+                RELEASE_MODULE._cleanup_verification_workspace(
+                    workspace,
+                    parent_fd,
+                    workspace_fd,
+                    workspace_identity,
+                )
+        finally:
+            RELEASE_MODULE.os.close(workspace_fd)
+            RELEASE_MODULE.os.close(parent_fd)
+
+        retained = list(
+            self.root.glob(".codex-private-overlay-cleanup-*")
+        )
+        self.assertEqual(len(retained), 1)
+        self.assertEqual(
+            (retained[0] / "sentinel.txt").read_text(encoding="utf-8"),
+            "keep\n",
+        )
+        self.assertEqual(
+            (moved_workspace / "owned.txt").read_text(encoding="utf-8"),
+            "owned\n",
+        )
+
+    def test_verification_cleanup_preserves_replaced_leaf(self) -> None:
+        workspace = self.root / "verification-workspace"
+        workspace.mkdir()
+        (workspace / "owned.txt").write_text("owned\n", encoding="utf-8")
+        parent_fd, workspace_fd, workspace_identity = (
+            RELEASE_MODULE._open_verification_workspace(workspace)
+        )
+        real_rename = RELEASE_MODULE._rename_noreplace_at
+        replaced = False
+
+        def replace_leaf(
+            directory_fd: int,
+            source_name: str,
+            destination_name: str,
+        ) -> None:
+            nonlocal replaced
+            if source_name == "owned.txt" and not replaced:
+                replaced = True
+                RELEASE_MODULE.os.rename(
+                    source_name,
+                    "moved-owned.txt",
+                    src_dir_fd=directory_fd,
+                    dst_dir_fd=directory_fd,
+                )
+                replacement_fd = RELEASE_MODULE.os.open(
+                    source_name,
+                    RELEASE_MODULE.os.O_WRONLY
+                    | RELEASE_MODULE.os.O_CREAT
+                    | RELEASE_MODULE.os.O_EXCL,
+                    0o600,
+                    dir_fd=directory_fd,
+                )
+                try:
+                    RELEASE_MODULE.os.write(replacement_fd, b"replacement\n")
+                finally:
+                    RELEASE_MODULE.os.close(replacement_fd)
+            real_rename(directory_fd, source_name, destination_name)
+
+        try:
+            with (
+                mock.patch.object(
+                    RELEASE_MODULE,
+                    "_rename_noreplace_at",
+                    side_effect=replace_leaf,
+                ),
+                self.assertRaisesRegex(
+                    RELEASE_MODULE.ReleaseError,
+                    "changed during isolation",
+                ),
+            ):
+                RELEASE_MODULE._cleanup_verification_workspace(
+                    workspace,
+                    parent_fd,
+                    workspace_fd,
+                    workspace_identity,
+                )
+        finally:
+            RELEASE_MODULE.os.close(workspace_fd)
+            RELEASE_MODULE.os.close(parent_fd)
+
+        retained_roots = list(
+            self.root.glob(".codex-private-overlay-cleanup-*")
+        )
+        self.assertEqual(len(retained_roots), 1)
+        retained_root = retained_roots[0]
+        self.assertEqual(
+            (retained_root / "moved-owned.txt").read_text(encoding="utf-8"),
+            "owned\n",
+        )
+        retained_replacements = [
+            path
+            for path in retained_root.glob(
+                ".codex-private-overlay-cleanup-*"
+            )
+            if path.is_file()
+        ]
+        self.assertEqual(len(retained_replacements), 1)
+        self.assertEqual(
+            retained_replacements[0].read_text(encoding="utf-8"),
+            "replacement\n",
+        )
+
     def test_sync_rule_copies_and_transforms_text(self) -> None:
         source = self.source_root / "example-repo" / "skill" / "SKILL.md"
         source.parent.mkdir(parents=True)
@@ -565,12 +895,38 @@ class PrivateOverlaySyncTests(unittest.TestCase):
         self.assertIn("contents, pull-request, and issues write access", readme)
         self.assertIn("codex-automation", readme)
 
-    def test_scheduled_workflow_only_publishes_incomplete_current_release(self) -> None:
+    def test_scheduled_workflow_only_repairs_unchanged_incomplete_release(self) -> None:
         workflow = (
             REPO_ROOT / ".github" / "workflows" / "scheduled-sync-release.yml"
         ).read_text(encoding="utf-8")
+        release_guard = (
+            "steps.current-release.outputs.complete == 'false' && "
+            "steps.changes.outputs.changed != 'true'"
+        )
 
-        self.assertIn("if: steps.current-release.outputs.complete == 'false'", workflow)
+        for step_name in (
+            "Revalidate release checkout",
+            "Build release package",
+            "Verify release package",
+            "Publish GitHub release",
+        ):
+            with self.subTest(step=step_name):
+                self.assertRegex(
+                    workflow,
+                    rf"- name: {re.escape(step_name)}\n\s+if: {re.escape(release_guard)}\n",
+                )
+        self.assertEqual(workflow.count(f"if: {release_guard}"), 4)
+        self.assertIn('actual_sha="$(git rev-parse HEAD)"', workflow)
+        self.assertIn("git status --porcelain=v1 --untracked-files=all", workflow)
+        cache_redirect = (
+            'echo "PYTHONPYCACHEPREFIX=$RUNNER_TEMP/python-cache" >> "$GITHUB_ENV"'
+        )
+        self.assertIn(cache_redirect, workflow)
+        self.assertLess(workflow.index(cache_redirect), workflow.index("python3 "))
+        self.assertLess(
+            workflow.index("- name: Revalidate release checkout"),
+            workflow.index("- name: Build release package"),
+        )
         self.assertNotIn("steps.commit.outputs.sha", workflow)
 
     def test_release_workflow_runs_required_pr_check_for_all_pull_requests(self) -> None:

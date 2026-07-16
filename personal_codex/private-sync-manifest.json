@@ -86,6 +86,16 @@
       "kind": "skill"
     }
   ],
+  "removed_links": [
+    {
+      "id": "2026-07-15-move-submodule-linked-worktrees-to-public",
+      "source": "personal_codex/skills/submodule-linked-worktrees",
+      "target": "skills/submodule-linked-worktrees",
+      "kind": "skill",
+      "replacement_target": "skills/submodule-linked-worktrees",
+      "legacy": true
+    }
+  ],
   "reference_only": [
     "personal_codex/automations/daily-skill-friction/automation.toml",
     "personal_codex/automations/daily-skill-friction/com.hoteng.codex.daily-skill-friction-prefetch.plist",

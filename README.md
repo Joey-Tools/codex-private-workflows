@@ -2,6 +2,8 @@
 
 这个仓库承载 private Codex overlay release。它需要保持 private，不应公开。
 
+个人同步运行时和发布校验工具支持 Python 3.9 及以上版本。
+
 ## Scope
 
 - private `AGENTS.md`
@@ -49,12 +51,24 @@ python3 scripts/build_personal_codex_package.py \
   --output-dir dist
 ```
 
+Release validation compares removal history with the most recent complete
+GitHub Release rather than the immediately preceding commit. Strict release
+validation also batch-loads every authenticated complete Release manifest and
+rejects target hierarchy or transaction-capacity failures for clients that skip
+one or more intermediate Releases. Strict release
+builds bind the requested package SHA to `HEAD`, require packaged files to match
+the committed Git index, and reject untracked content, symlinked source
+ancestors, submodule `gitlink` content, and nested Git repositories.
+
 `Scheduled Private Overlay Sync Release` is a low-frequency fallback that runs every
 eight hours and can also be manually dispatched. It syncs explicit public Joey-Tools
 sources into this private aggregate, preserves private Joey/Cisco transforms, and
 opens or updates a sync PR when the source sync creates a repository diff. Merging
 that PR publishes the private overlay release through the normal `master` push
-release workflow.
+release workflow. If a run detects sync changes, it does not attempt to repair an
+incomplete release from the pre-sync SHA after mutating the checkout; release repair
+is reserved for runs whose sync working tree remains unchanged. Immediately before
+building, the workflow rechecks both `HEAD` and the complete Git working-tree state.
 
 The sync PR step requires a `PRIVATE_OVERLAY_SYNC_PR_TOKEN` secret with repository
 contents, pull-request, and issues write access. The workflow uses that token for
@@ -97,4 +111,7 @@ aggregate entrypoint:
 
 `install-private` downloads the private overlay release, reads its `base_release`
 configuration, installs the public base release first, installs the private overlay
-second, and then runs the overlay verifier.
+second, and then runs the overlay verifier. The shared ownership ledger adopts
+matching legacy links only during first-use bootstrap; after the ledger exists,
+an otherwise untracked matching symlink remains unowned unless the current
+transaction creates or replaces it.

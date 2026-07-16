@@ -85,6 +85,37 @@ SYNC_RULES = (
                      'DEFAULT_MANIFEST = Path("personal_codex/private-sync-manifest.json")'),),
     ),
     _rule(
+        "codex-toolbox",
+        "scripts/validate_sync_manifest_changes.py",
+        "scripts/validate_sync_manifest_changes.py",
+        (
+            Replacement(
+                'default="personal_codex/public-sync-manifest.json"',
+                'default="personal_codex/private-sync-manifest.json"',
+            ),
+        ),
+    ),
+    _rule(
+        "codex-toolbox",
+        "tests/test_sync_manifest_changes.py",
+        "tests/test_sync_manifest_changes.py",
+    ),
+    _rule(
+        "codex-toolbox",
+        "tests/test_package_builder_safety.py",
+        "tests/test_package_builder_safety.py",
+    ),
+    _rule(
+        "codex-toolbox",
+        "tests/test_release_manifest_baseline.py",
+        "tests/test_release_manifest_baseline.py",
+    ),
+    _rule(
+        "codex-toolbox",
+        "tests/test_personal_sync_reconciliation_safety.py",
+        "tests/test_personal_sync_reconciliation_safety.py",
+    ),
+    _rule(
         "codex-review-workflows",
         "agents/reviewer.toml",
         "personal_codex/agents/reviewer.toml",
