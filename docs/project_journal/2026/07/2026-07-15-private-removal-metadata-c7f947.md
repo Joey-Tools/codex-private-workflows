@@ -95,6 +95,7 @@ superseded_by:
 - Manifest and durable synchronizer state versions require exact JSON integers, so booleans and numerically equal floats cannot select a schema version.
 - Private package verification now checks the checksum and extracts from one immutable archive snapshot, closing the verification-to-extraction path replacement window.
 - The required aggregate `test` check now verifies every direct Python 3.9, platform-safety, and platform-test dependency result instead of relying on transitive skip behavior.
+- The canonical review-workflow contract accepts either scalar or list-form `needs`, so the stricter aggregate dependency list remains covered after private-overlay sync.
 - Overlay verification accepts exact desired symlinks that intentionally remain outside the ownership ledger, while still rejecting conflicting recorded ownership and preserving those links on uninstall.
 
 ## Next Steps
