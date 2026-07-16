@@ -83,7 +83,7 @@ When Joey supplies a `codex://threads/<id>` URL, `read_thread` is forbidden unle
 
 - accepted item-type filtering that admits only selected thread metadata and user or agent messages
 - an item-count limit that bounds the entire result and permits no more than 12 message snippets
-- a whole-response byte cap that applies before any payload reaches the caller
+- a whole-response byte cap of at most 32 KiB (32,768 bytes) on the encoded response, applied before any payload reaches the caller
 
 Those controls are additional to reading one exact thread per call with:
 
@@ -93,16 +93,16 @@ includeOutputs: false
 maxOutputCharsPerItem: 400
 ```
 
-The service itself must emit only thread id, host id, title, status, cwd, created/updated timestamps, and at most 12 user or agent message snippets of at most 400 characters each, rendered on one line per snippet. It must exclude reasoning, tool calls, tool outputs, file-change payloads, and other retained artifacts before returning. `turnLimit`, a per-item character cap, an output cap on the parent tool call, and caller-side projection do not bound item count or whole-response bytes. Do not batch several thread reads or stringify or serialize the raw result.
+The service itself must emit only thread id, host id, title, status, cwd, created/updated timestamps, and at most 12 user or agent message snippets of at most 400 characters each, rendered on one line per snippet. The 32 KiB cap is an upper bound, not a promise that every snippet will be returned at maximum length: 12 snippets at 400 Unicode characters can consume up to 19,200 raw UTF-8 bytes, leaving 13,568 bytes for metadata and encoding overhead, and the service must shorten or omit snippets whenever the final encoded response would exceed 32,768 bytes. It must exclude reasoning, tool calls, tool outputs, file-change payloads, and other retained artifacts before returning. `turnLimit`, a per-item character cap, an output cap on the parent tool call, and caller-side projection do not bound item count or whole-response bytes. Do not batch several thread reads or stringify or serialize the raw result.
 
 If any required server-side control is unavailable, including the whole-response controls missing from the observed API, do not call `read_thread` at all:
 
-- When a creation or nearby activity date is known, query only the bounded `session-meta` date windows needed for the created, distinct updated, and UTC/host-local calendar dates; filter the bounded results by the exact session id, then use `rollout-summary` or `chunked-rollout-summary`.
-- When the date is unknown, use a bounded metadata-only exact-thread or session-index lookup that cannot return transcript items, or ask Joey for or derive a date from adjacent task evidence. Never widen `read_thread` to discover the date.
+- When the creation date is known, run `session-meta` only against that creation-date directory and, when the creation timestamp crosses a calendar boundary, its bounded UTC/host-local date variant; filter the bounded results by the exact session id.
+- When only an activity or updated date is known, or no date is known, first use a bounded metadata-only exact-thread or session-index lookup that cannot return transcript items to derive the creation date. Then run `session-meta` against the derived creation-date directory and filter by the exact session id. If that lookup is unavailable, ask Joey for or derive the creation date from adjacent metadata. Never scan activity-date directories as a proxy, and never widen `read_thread` to discover the date.
 
-The canonical rollout remains under its creation date when a thread continues across days. After locating it, use `rollout-summary` or `chunked-rollout-summary` rather than widening `read_thread`.
+The canonical rollout remains under its creation date when a thread continues across days. After locating it, use `rollout-summary` or `chunked-rollout-summary` only to identify relevant byte/record ranges rather than widening `read_thread`.
 
-Treat the bounded latest turn as a locator, not as permission to discard task history. If the thread started with an automation, skill, or instruction wrapper, retain later substantive human follow-ups typed by the user and delegate replay-prefix and wrapper filtering to `codex-session-mining`.
+Treat the bounded latest turn and both summary commands as locator and triage output, not as permission to discard task history. A summary may emit only a representative or last user message from a chunk, so it cannot prove that all later substantive human follow-ups were retained. If the thread started with an automation, skill, or instruction wrapper, select every relevant user-bearing chunk from `chunk_meta`, fetch the exact `byte_start`/`byte_end` range (or all listed `fetch_ranges`) with `fetch-rollout-chunk`, reassemble split ranges in byte order, and hand the exact JSONL records to `codex-session-mining` for replay-prefix and wrapper filtering.
 
 Current dedicated helper path for those repeated remote Codex reads:
 
@@ -126,7 +126,7 @@ python3 "$HOME/.codex/skills/remote-host-context/scripts/remote_codex_probe.py" 
 
 `session-meta` takes `--date YYYY/MM/DD`, not `YYYY-MM-DD`.
 `fetch-rollout` takes one destination file via `--output`; point it at a task-scoped file path, not a directory.
-If a rollout is too large to copy cleanly, prefer `rollout-summary` to skim bounded assistant/tool-output evidence on the remote host before considering any heavier fallback.
+Use `rollout-summary` only for fast bounded prefix triage. If a rollout is too large to copy cleanly, use `chunked-rollout-summary` for whole-rollout chunk coordinates, then fetch every candidate user-bearing chunk needed to reconstruct the task with `fetch-rollout-chunk`; summary rows alone are not sufficient evidence of all human follow-ups.
 Concrete bounded-read shape:
 
 ```bash
@@ -140,5 +140,5 @@ python3 "$HOME/.codex/skills/remote-host-context/scripts/remote_codex_probe.py" 
   --max-text-chars 400
 ```
 
-`rollout-summary` still scans the validated rollout on the remote host, but it only emits a small structured skim instead of copying the whole JSONL payload back to the local machine.
+`rollout-summary` scans only a bounded prefix and emits a small structured skim. `chunked-rollout-summary` scans the file in bounded chunks but still emits lossy summaries; use their coordinates to fetch exact candidate records before delegating interpretation to `codex-session-mining`.
 If a host has an explicitly verified `archived_sessions/rollout-*.jsonl` path, use `fetch-rollout` directly for that one file instead of turning `session-meta` into a broad archived-session search.

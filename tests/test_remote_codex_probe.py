@@ -60,19 +60,27 @@ class RemoteHostContextDocumentationTests(unittest.TestCase):
         self.assertIn("`turnLimit: 1`", skill)
         self.assertIn("`includeOutputs: false`", skill)
         self.assertIn("`maxOutputCharsPerItem` at most 400", skill)
-        self.assertIn(
-            "do not call `read_thread` unless the service supports", skill
-        )
+        self.assertIn("do not call `read_thread` unless the service supports", skill)
         self.assertIn("server-side accepted item-type filtering", skill)
         self.assertIn("an item-count limit", skill)
         self.assertIn("a whole-response byte cap", skill)
+        self.assertIn("32 KiB (32,768 bytes)", skill)
+        self.assertIn("an upper bound, not a target", skill)
         self.assertIn("the service itself must emit", skill)
         self.assertIn("Caller-side projection or truncation after receipt", skill)
         self.assertIn("skip `read_thread` entirely", skill)
-        self.assertIn("bounded `session-meta` date windows", skill)
-        self.assertIn("exact session-id filtering", skill)
-        self.assertIn("bounded metadata-only exact-thread or index lookup", skill)
-        self.assertIn("never widen `read_thread`", skill)
+        self.assertIn(
+            "Invoke `session-meta` directly only when the creation date is known",
+            skill,
+        )
+        self.assertIn("If only an activity or updated date is known", skill)
+        self.assertIn("derive the creation date", skill)
+        self.assertIn("never substitute activity-date directories", skill)
+        self.assertIn("locator and triage output only", skill)
+        self.assertIn(
+            "cannot prove that every later substantive human follow-up", skill
+        )
+        self.assertIn("hand the exact JSONL records to `codex-session-mining`", skill)
         self.assertIn("Do not batch multiple thread reads", skill)
         self.assertIn(
             "[Codex Thread Locator Skim]"
@@ -86,6 +94,10 @@ class RemoteHostContextDocumentationTests(unittest.TestCase):
         self.assertIn("an item-count limit that bounds the entire result", reference)
         self.assertIn("permits no more than 12 message snippets", reference)
         self.assertIn("a whole-response byte cap", reference)
+        self.assertIn("32 KiB (32,768 bytes)", reference)
+        self.assertIn("19,200 raw UTF-8 bytes", reference)
+        self.assertIn("13,568 bytes for metadata and encoding overhead", reference)
+        self.assertIn("final encoded response would exceed 32,768 bytes", reference)
         self.assertIn("at most 12 user or agent message snippets", reference)
         self.assertIn("rendered on one line per snippet", reference)
         self.assertIn("stringify or serialize the raw result", reference)
@@ -98,23 +110,30 @@ class RemoteHostContextDocumentationTests(unittest.TestCase):
         self.assertIn(
             "whole-response controls missing from the observed API", reference
         )
-        self.assertIn(
-            "If any required server-side control is unavailable", reference
-        )
+        self.assertIn("If any required server-side control is unavailable", reference)
         self.assertIn("do not call `read_thread` at all", reference)
-        self.assertIn("bounded `session-meta` date windows", reference)
+        self.assertIn("When the creation date is known", reference)
         self.assertIn(
-            "created, distinct updated, and UTC/host-local calendar dates", reference
+            "run `session-meta` only against that creation-date directory", reference
         )
+        self.assertIn("When only an activity or updated date is known", reference)
+        self.assertIn("derive the creation date", reference)
         self.assertIn("filter the bounded results by the exact session id", reference)
         self.assertIn(
             "bounded metadata-only exact-thread or session-index lookup", reference
         )
-        self.assertIn("Never widen `read_thread` to discover the date", reference)
+        self.assertIn("Never scan activity-date directories as a proxy", reference)
+        self.assertIn("never widen `read_thread` to discover the date", reference)
         self.assertIn("`chunked-rollout-summary`", reference)
         self.assertIn(
-            "retain later substantive human follow-ups typed by the user", reference
+            "cannot prove that all later substantive human follow-ups were retained",
+            reference,
         )
+        self.assertIn(
+            "hand the exact JSONL records to `codex-session-mining`", reference
+        )
+        self.assertIn("summary rows alone are not sufficient evidence", reference)
+        self.assertNotIn("creation or nearby activity date", reference)
         self.assertNotIn("use `read_thread` only as a bounded locator", skill)
         self.assertNotIn("use a callable thread reader only", reference)
 
@@ -209,7 +228,9 @@ class RemoteCodexProbeChunkTests(unittest.TestCase):
                     '{"timestamp":"2026-05-26T10:03:00Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"The runner service is restored."}]}}',
                 ],
             )
-            with mock.patch.object(MODULE, "_local_codex_root", return_value=codex_root):
+            with mock.patch.object(
+                MODULE, "_local_codex_root", return_value=codex_root
+            ):
                 buffer = io.StringIO()
                 with redirect_stdout(buffer):
                     rc = MODULE.cmd_chunked_rollout_summary(
@@ -231,12 +252,20 @@ class RemoteCodexProbeChunkTests(unittest.TestCase):
         self.assertTrue(all(record["host"] == "local" for record in records))
         self.assertTrue(all(record["rollout"] == rollout for record in records))
         self.assertEqual(chunk_meta[0]["byte_start"], 0)
-        self.assertTrue(all(record["byte_end"] > record["byte_start"] for record in chunk_meta))
+        self.assertTrue(
+            all(record["byte_end"] > record["byte_start"] for record in chunk_meta)
+        )
         self.assertTrue(any(record["raw_fetch_recommended"] for record in chunk_meta))
-        self.assertTrue(any(record["kind"] == "function_call_output" for record in records))
+        self.assertTrue(
+            any(record["kind"] == "function_call_output" for record in records)
+        )
 
     def test_iter_rollout_chunks_never_reads_unbounded_oversized_line(self) -> None:
-        data = b'{"timestamp":"2026-05-26T10:00:00Z","type":"response_item","payload":"' + b"x" * 200 + b'"}\n'
+        data = (
+            b'{"timestamp":"2026-05-26T10:00:00Z","type":"response_item","payload":"'
+            + b"x" * 200
+            + b'"}\n'
+        )
         handle = SizeGuardedBytesIO(data, max_readline_size=17)
 
         chunks = list(MODULE._iter_rollout_chunks(handle, chunk_bytes=16))
@@ -298,12 +327,17 @@ class RemoteCodexProbeChunkTests(unittest.TestCase):
         oversized = next(
             record
             for record in records
-            if record["kind"] == "chunk_meta" and "oversized_record" in record["reason_codes"]
+            if record["kind"] == "chunk_meta"
+            and "oversized_record" in record["reason_codes"]
         )
         self.assertTrue(oversized["raw_fetch_recommended"])
         self.assertGreater(oversized["fetch_range_count"], 1)
-        self.assertEqual(oversized["fetch_ranges"][0]["byte_start"], oversized["byte_start"])
-        self.assertEqual(oversized["fetch_ranges"][-1]["byte_end"], oversized["byte_end"])
+        self.assertEqual(
+            oversized["fetch_ranges"][0]["byte_start"], oversized["byte_start"]
+        )
+        self.assertEqual(
+            oversized["fetch_ranges"][-1]["byte_end"], oversized["byte_end"]
+        )
         self.assertTrue(
             all(
                 item["byte_end"] - item["byte_start"] <= oversized["fetch_chunk_bytes"]
@@ -329,7 +363,9 @@ class RemoteCodexProbeChunkTests(unittest.TestCase):
             first_line_size = len(source_data.splitlines(keepends=True)[0])
             os.chdir(workspace)
             try:
-                with mock.patch.object(MODULE, "_local_codex_root", return_value=codex_root):
+                with mock.patch.object(
+                    MODULE, "_local_codex_root", return_value=codex_root
+                ):
                     buffer = io.StringIO()
                     with redirect_stdout(buffer):
                         rc = MODULE.cmd_fetch_rollout_chunk(
@@ -349,6 +385,166 @@ class RemoteCodexProbeChunkTests(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertEqual(data, source_data[:first_line_size])
         self.assertIn(f"bytes={first_line_size}", buffer.getvalue())
+
+    def test_chunk_locator_then_exact_fetch_retains_multiple_substantive_followups(
+        self,
+    ) -> None:
+        first_followup = "Please include archived sessions in the audit."
+        second_followup = "Also verify later human follow-ups are not discarded."
+        original_cwd = Path.cwd()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir) / "workspace"
+            workspace.mkdir()
+            codex_root = Path(temp_dir) / ".codex"
+            rollout = write_rollout(
+                codex_root,
+                [
+                    json.dumps(
+                        {
+                            "timestamp": "2026-05-26T10:00:00Z",
+                            "type": "session_meta",
+                            "payload": {"id": "abc", "cwd": "/repo"},
+                        },
+                        separators=(",", ":"),
+                    ),
+                    json.dumps(
+                        {
+                            "timestamp": "2026-05-26T10:01:00Z",
+                            "type": "response_item",
+                            "payload": {
+                                "type": "message",
+                                "role": "user",
+                                "content": [
+                                    {
+                                        "type": "input_text",
+                                        "text": "Run inside the dedicated worktree provisioned for this automation.",
+                                    }
+                                ],
+                            },
+                        },
+                        separators=(",", ":"),
+                    ),
+                    json.dumps(
+                        {
+                            "timestamp": "2026-05-26T10:02:00Z",
+                            "type": "response_item",
+                            "payload": {
+                                "type": "message",
+                                "role": "user",
+                                "content": [
+                                    {"type": "input_text", "text": first_followup}
+                                ],
+                            },
+                        },
+                        separators=(",", ":"),
+                    ),
+                    json.dumps(
+                        {
+                            "timestamp": "2026-05-26T10:03:00Z",
+                            "type": "response_item",
+                            "payload": {
+                                "type": "message",
+                                "role": "assistant",
+                                "content": [
+                                    {
+                                        "type": "output_text",
+                                        "text": "I will inspect it.",
+                                    }
+                                ],
+                            },
+                        },
+                        separators=(",", ":"),
+                    ),
+                    json.dumps(
+                        {
+                            "timestamp": "2026-05-26T10:04:00Z",
+                            "type": "response_item",
+                            "payload": {
+                                "type": "message",
+                                "role": "user",
+                                "content": [
+                                    {"type": "input_text", "text": second_followup}
+                                ],
+                            },
+                        },
+                        separators=(",", ":"),
+                    ),
+                ],
+            )
+            with mock.patch.object(
+                MODULE, "_local_codex_root", return_value=codex_root
+            ):
+                summary_buffer = io.StringIO()
+                with redirect_stdout(summary_buffer):
+                    summary_rc = MODULE.cmd_chunked_rollout_summary(
+                        argparse.Namespace(
+                            host="local",
+                            rollout=rollout,
+                            keyword=[],
+                            chunk_bytes=4096,
+                            limit_per_chunk=20,
+                            tail_records=0,
+                            max_text_chars=200,
+                        )
+                    )
+                summary_records = [
+                    json.loads(line) for line in summary_buffer.getvalue().splitlines()
+                ]
+                chunk_meta_rows = [
+                    record
+                    for record in summary_records
+                    if record["kind"] == "chunk_meta"
+                ]
+                self.assertEqual(len(chunk_meta_rows), 1)
+                chunk_meta = chunk_meta_rows[0]
+                summary_user_records = [
+                    record
+                    for record in summary_records
+                    if record["kind"] == "user_message"
+                ]
+                summary_user_texts = [record["text"] for record in summary_user_records]
+
+                os.chdir(workspace)
+                try:
+                    with redirect_stdout(io.StringIO()):
+                        fetch_rc = MODULE.cmd_fetch_rollout_chunk(
+                            argparse.Namespace(
+                                host="local",
+                                rollout=rollout,
+                                byte_start=chunk_meta["byte_start"],
+                                byte_end=chunk_meta["byte_end"],
+                                output="substantive-followups.jsonl",
+                            )
+                        )
+                    fetched_path = (
+                        workspace
+                        / ".codex-tmp/remote-host-context/substantive-followups.jsonl"
+                    )
+                    fetched_records = [
+                        json.loads(line)
+                        for line in fetched_path.read_text(
+                            encoding="utf-8"
+                        ).splitlines()
+                    ]
+                finally:
+                    os.chdir(original_cwd)
+
+        fetched_user_texts = [
+            item["text"]
+            for record in fetched_records
+            if record.get("type") == "response_item"
+            and record.get("payload", {}).get("type") == "message"
+            and record.get("payload", {}).get("role") == "user"
+            for item in record["payload"].get("content", [])
+            if item.get("type") == "input_text"
+        ]
+        self.assertEqual(summary_rc, 0)
+        self.assertEqual(fetch_rc, 0)
+        self.assertEqual(len(summary_user_records), 1)
+        self.assertEqual(summary_user_records[0]["line"], 5)
+        self.assertNotIn(first_followup, summary_user_texts)
+        self.assertNotIn(second_followup, summary_user_texts)
+        self.assertEqual(fetched_user_texts[-2:], [first_followup, second_followup])
 
     def test_fetch_rollout_chunk_rejects_oversized_range_before_reading(self) -> None:
         buffer = io.StringIO()
