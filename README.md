@@ -10,7 +10,8 @@
 - Apple Notes Work Report overlay
 - private automation `automation.toml` references
 - private automation workspace routing, including Daily Skill Friction's
-  `Joey-Tools/codex-workspace` canonical repo mirror wrapper
+  `Joey-Tools/codex-workspace` canonical repo mirror wrapper and its active-plus-
+  archived rollout corpus contract
 - private session retrospective automation routing for cross-host, redacted
   retrospective history capture
 
