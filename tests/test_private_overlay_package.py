@@ -634,19 +634,26 @@ class PrivateOverlayPackageTests(unittest.TestCase):
         archive.write_bytes(archive_payload)
         digest = hashlib.sha256(archive_payload).hexdigest()
         checksum.write_text(f"{digest}  {archive.name}\n", encoding="utf-8")
-        archive_identity = archive.stat().st_ino, archive.stat().st_size
+        archive_metadata = archive.stat()
+        archive_identity = (
+            archive_metadata.st_dev,
+            archive_metadata.st_ino,
+            archive_metadata.st_size,
+        )
         real_read = os.read
         rewritten = False
 
         def rewrite_after_archive_read(file_descriptor, size):
             nonlocal rewritten
-            payload = real_read(file_descriptor, size)
             metadata = os.fstat(file_descriptor)
-            if metadata.st_ino == archive_identity[0] and payload and not rewritten:
+            is_archive = (metadata.st_dev, metadata.st_ino) == archive_identity[:2]
+            payload = real_read(file_descriptor, min(size, 1) if is_archive else size)
+            if is_archive and payload and not rewritten:
                 rewritten = True
                 writer_fd = os.open(archive, os.O_RDWR)
                 try:
-                    os.lseek(writer_fd, -1, os.SEEK_END)
+                    # Rewrite a byte that the bounded first read has not copied yet.
+                    os.lseek(writer_fd, 1, os.SEEK_SET)
                     os.write(writer_fd, b"X")
                     os.fsync(writer_fd)
                 finally:
@@ -656,12 +663,16 @@ class PrivateOverlayPackageTests(unittest.TestCase):
         with mock.patch.object(MODULE.os, "read", rewrite_after_archive_read):
             with self.assertRaisesRegex(
                 MODULE.SyncError,
-                "compressed archive changed while reading",
+                "compressed archive changed while reading|checksum mismatch",
             ):
                 MODULE.verify_checksum(archive, checksum)
 
         self.assertTrue(rewritten)
-        self.assertEqual((archive.stat().st_ino, archive.stat().st_size), archive_identity)
+        final_metadata = archive.stat()
+        self.assertEqual(
+            (final_metadata.st_dev, final_metadata.st_ino, final_metadata.st_size),
+            archive_identity,
+        )
 
     def test_download_extracts_verified_snapshot_after_archive_path_replacement(
         self,
