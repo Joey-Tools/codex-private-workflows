@@ -140,6 +140,22 @@ class RemoteHostContextDocumentationTests(unittest.TestCase):
         self.assertIn("complete exact JSONL record stream", reference)
         self.assertIn("must never decide omissions", reference)
         self.assertIn("summary rows alone are not sufficient evidence", reference)
+        self.assertIn("Before any chunk fetch", skill)
+        self.assertIn("same `source_bytes` and `full_fetch_limit_bytes`", skill)
+        self.assertIn("total planned bytes must equal `source_bytes`", skill)
+        self.assertIn("16 MiB (16,777,216 bytes)", skill)
+        self.assertIn("`full_reconstruction_allowed=true`", skill)
+        self.assertIn("fetch nothing", skill)
+        self.assertIn(
+            "explicit authorization for that exact rollout and byte count", skill
+        )
+        self.assertIn("Never silently loop over an over-limit plan", skill)
+        self.assertIn("before issuing the first chunk fetch", reference)
+        self.assertIn(
+            "sum of all planned range lengths equals `source_bytes`", reference
+        )
+        self.assertIn("issue zero chunk fetches", reference)
+        self.assertIn("exact cumulative byte count", reference)
         self.assertNotIn("selected user-bearing chunk", skill)
         self.assertNotIn("relevant user-bearing chunk", reference)
         self.assertNotIn("candidate user-bearing chunk", reference)
@@ -209,6 +225,7 @@ class RemoteCodexProbeChunkTests(unittest.TestCase):
                 "summary_tail_records": 4,
                 "summary_max_text_chars": 200,
                 "chunk_bytes": 1024,
+                "max_fetch_rollout_bytes": MODULE.MAX_FETCH_ROLLOUT_BYTES,
                 "max_fetch_rollout_chunk_bytes": MODULE.MAX_FETCH_ROLLOUT_CHUNK_BYTES,
             }
         )
@@ -225,6 +242,54 @@ class RemoteCodexProbeChunkTests(unittest.TestCase):
 
         compile(chunked_script, "<chunked-rollout-summary>", "exec")
         compile(fetch_script, "<fetch-rollout-chunk>", "exec")
+        self.assertIn(
+            '"full_fetch_limit_bytes": MAX_FETCH_ROLLOUT_BYTES', chunked_script
+        )
+        self.assertIn(
+            '"full_reconstruction_allowed": source_bytes <= MAX_FETCH_ROLLOUT_BYTES',
+            chunked_script,
+        )
+
+    def test_remote_chunked_rollout_summary_passes_full_fetch_limit(self) -> None:
+        remote_result = mock.Mock(
+            returncode=0,
+            stderr="",
+            stdout="\n".join(
+                [
+                    MODULE.REMOTE_CHUNKED_ROLLOUT_SUMMARY_BEGIN,
+                    '{"ok":true}',
+                    '{"kind":"chunk_meta","line":1}',
+                    MODULE.REMOTE_CHUNKED_ROLLOUT_SUMMARY_END,
+                    "",
+                ]
+            ),
+        )
+        with mock.patch.object(
+            MODULE, "_run_remote_python", return_value=remote_result
+        ) as run_remote:
+            with redirect_stdout(io.StringIO()):
+                rc = MODULE.cmd_chunked_rollout_summary(
+                    argparse.Namespace(
+                        host="miku-bot-dev",
+                        rollout="sessions/2026/05/26/rollout-a.jsonl",
+                        keyword=["permission"],
+                        chunk_bytes=1024,
+                        limit_per_chunk=10,
+                        tail_records=4,
+                        max_text_chars=200,
+                    )
+                )
+
+        self.assertEqual(rc, 0)
+        alias, payload = run_remote.call_args.args
+        self.assertEqual(alias, "miku-bot-dev")
+        self.assertEqual(
+            payload["max_fetch_rollout_bytes"], MODULE.MAX_FETCH_ROLLOUT_BYTES
+        )
+        self.assertEqual(
+            payload["max_fetch_rollout_chunk_bytes"],
+            MODULE.MAX_FETCH_ROLLOUT_CHUNK_BYTES,
+        )
 
     def test_chunked_rollout_summary_reads_all_chunks_with_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -238,6 +303,7 @@ class RemoteCodexProbeChunkTests(unittest.TestCase):
                     '{"timestamp":"2026-05-26T10:03:00Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"The runner service is restored."}]}}',
                 ],
             )
+            source_bytes = (codex_root / rollout).stat().st_size
             with mock.patch.object(
                 MODULE, "_local_codex_root", return_value=codex_root
             ):
@@ -263,12 +329,48 @@ class RemoteCodexProbeChunkTests(unittest.TestCase):
         self.assertTrue(all(record["rollout"] == rollout for record in records))
         self.assertEqual(chunk_meta[0]["byte_start"], 0)
         self.assertTrue(
+            all(record["source_bytes"] == source_bytes for record in chunk_meta)
+        )
+        self.assertTrue(
+            all(
+                record["full_fetch_limit_bytes"] == MODULE.MAX_FETCH_ROLLOUT_BYTES
+                for record in chunk_meta
+            )
+        )
+        self.assertTrue(
+            all(record["full_reconstruction_allowed"] for record in chunk_meta)
+        )
+        self.assertTrue(
             all(record["byte_end"] > record["byte_start"] for record in chunk_meta)
         )
         self.assertTrue(any(record["raw_fetch_recommended"] for record in chunk_meta))
         self.assertTrue(
             any(record["kind"] == "function_call_output" for record in records)
         )
+
+    def test_chunk_meta_disallows_full_reconstruction_over_global_limit(self) -> None:
+        chunk = MODULE.RolloutChunk(
+            index=0,
+            byte_start=0,
+            byte_end=65,
+            record_start=1,
+            record_end=1,
+            first_timestamp="",
+            last_timestamp="",
+            oversized_record=False,
+            lines=("",),
+        )
+        with mock.patch.object(MODULE, "MAX_FETCH_ROLLOUT_BYTES", 64):
+            meta = MODULE._chunk_meta_record(
+                chunk=chunk,
+                records=[],
+                source_bytes=65,
+                chunk_bytes=64,
+            )
+
+        self.assertEqual(meta["source_bytes"], 65)
+        self.assertEqual(meta["full_fetch_limit_bytes"], 64)
+        self.assertFalse(meta["full_reconstruction_allowed"])
 
     def test_iter_rollout_chunks_never_reads_unbounded_oversized_line(self) -> None:
         data = (
@@ -486,6 +588,7 @@ class RemoteCodexProbeChunkTests(unittest.TestCase):
                 summary_records = [
                     json.loads(line) for line in summary_buffer.getvalue().splitlines()
                 ]
+                self.assertEqual(summary_rc, 0)
                 chunk_meta_rows = [
                     record
                     for record in summary_records
@@ -523,6 +626,36 @@ class RemoteCodexProbeChunkTests(unittest.TestCase):
                     expected_ranges.extend(
                         (item["byte_start"], item["byte_end"]) for item in ranges
                     )
+
+                self.assertEqual(
+                    {record["source_bytes"] for record in chunk_meta_rows},
+                    {len(source_data)},
+                )
+                self.assertEqual(
+                    {record["full_fetch_limit_bytes"] for record in chunk_meta_rows},
+                    {MODULE.MAX_FETCH_ROLLOUT_BYTES},
+                )
+                self.assertTrue(
+                    all(
+                        record["full_reconstruction_allowed"]
+                        for record in chunk_meta_rows
+                    )
+                )
+                self.assertEqual(expected_ranges[0][0], 0)
+                self.assertTrue(
+                    all(
+                        current_end == next_start
+                        for (_, current_end), (next_start, _) in zip(
+                            expected_ranges, expected_ranges[1:]
+                        )
+                    )
+                )
+                self.assertEqual(expected_ranges[-1][1], len(source_data))
+                planned_bytes = sum(
+                    byte_end - byte_start for byte_start, byte_end in expected_ranges
+                )
+                self.assertEqual(planned_bytes, len(source_data))
+                self.assertLessEqual(planned_bytes, MODULE.MAX_FETCH_ROLLOUT_BYTES)
 
                 os.chdir(workspace)
                 try:
@@ -567,22 +700,11 @@ class RemoteCodexProbeChunkTests(unittest.TestCase):
             for item in record["payload"].get("content", [])
             if item.get("type") == "input_text"
         ]
-        self.assertEqual(summary_rc, 0)
         self.assertEqual(summary_user_lines, [4, 6])
         self.assertNotIn(first_followup, summary_user_texts)
         self.assertNotIn(second_followup, summary_user_texts)
         self.assertTrue(all(rc == 0 for rc in fetch_rcs))
         self.assertEqual(fetched_ranges, expected_ranges)
-        self.assertEqual(expected_ranges[0][0], 0)
-        self.assertTrue(
-            all(
-                current_end == next_start
-                for (_, current_end), (next_start, _) in zip(
-                    expected_ranges, expected_ranges[1:]
-                )
-            )
-        )
-        self.assertEqual(expected_ranges[-1][1], len(source_data))
         self.assertEqual(reconstructed_data, source_data)
         self.assertIn(first_followup, fetched_user_texts)
         self.assertIn(second_followup, fetched_user_texts)
