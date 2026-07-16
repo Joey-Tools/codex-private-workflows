@@ -758,6 +758,95 @@ class PrivateOverlaySyncTests(unittest.TestCase):
         self.assertTrue(recovery_paths[0].is_relative_to(self.repo_root / ".codex-tmp"))
         self.assertEqual(list(recovery_paths[0].iterdir()), [])
 
+    def test_regular_file_overlay_failed_prepare_preserves_rebound_temporary(
+        self,
+    ) -> None:
+        source = self.source_root / "example-repo" / "skill"
+        source.mkdir(parents=True)
+        (source / "catalog.json").write_text("public\n", encoding="utf-8")
+        private_catalog = self.repo_root / "private-overrides" / "catalog.json"
+        private_catalog.parent.mkdir(parents=True)
+        private_catalog.write_text("private\n", encoding="utf-8")
+        target = self.repo_root / "personal_codex" / "skills" / "example"
+        target.mkdir(parents=True)
+        (target / "catalog.json").write_text("installed\n", encoding="utf-8")
+        rule = SYNC_MODULE.SyncRule(
+            repo="example-repo",
+            source=Path("skill"),
+            target=Path("personal_codex/skills/example"),
+            regular_file_overlays=(
+                SYNC_MODULE.RegularFileOverlay(
+                    source=Path("private-overrides/catalog.json"),
+                    target=Path("catalog.json"),
+                ),
+            ),
+        )
+        real_rename = SYNC_MODULE.os.rename
+        rebound_name: str | None = None
+        moved_name: str | None = None
+
+        def rebind_temporary_then_fail(
+            source_name,
+            _destination_name,
+            *,
+            src_dir_fd=None,
+            dst_dir_fd=None,
+        ):
+            nonlocal rebound_name, moved_name
+            self.assertEqual(src_dir_fd, dst_dir_fd)
+            self.assertTrue(
+                source_name.startswith(SYNC_MODULE.REGULAR_FILE_OVERLAY_TEMP_PREFIX)
+            )
+            rebound_name = source_name
+            moved_name = f"{source_name}.original"
+            real_rename(
+                source_name,
+                moved_name,
+                src_dir_fd=src_dir_fd,
+                dst_dir_fd=dst_dir_fd,
+            )
+            descriptor = os.open(
+                source_name,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                0o600,
+                dir_fd=src_dir_fd,
+            )
+            try:
+                os.write(descriptor, b"unknown\n")
+            finally:
+                os.close(descriptor)
+            raise OSError(errno.EIO, "simulated rebound")
+
+        with mock.patch.object(
+            SYNC_MODULE.os,
+            "rename",
+            side_effect=rebind_temporary_then_fail,
+        ) as rename_mock:
+            with mock.patch.object(
+                SYNC_MODULE.os,
+                "supports_dir_fd",
+                set(SYNC_MODULE.os.supports_dir_fd) | {rename_mock},
+            ):
+                with self.assertRaisesRegex(
+                    SYNC_MODULE.SyncError,
+                    "cannot atomically replace regular-file overlay target",
+                ):
+                    SYNC_MODULE.sync_sources(
+                        self.repo_root,
+                        self.source_root,
+                        (rule,),
+                    )
+
+        self.assertEqual((target / "catalog.json").read_bytes(), b"installed\n")
+        self.assertIsNotNone(rebound_name)
+        self.assertIsNotNone(moved_name)
+        recovery_root = self.repo_root / SYNC_MODULE.REGULAR_FILE_OVERLAY_RECOVERY_ROOT
+        scopes = list(recovery_root.iterdir())
+        self.assertEqual(len(scopes), 1)
+        retained_parent = scopes[0] / target.name
+        self.assertEqual((retained_parent / rebound_name).read_bytes(), b"unknown\n")
+        self.assertEqual((retained_parent / moved_name).read_bytes(), b"private\n")
+
     def test_regular_file_overlay_rejects_unsafe_paths(self) -> None:
         source = self.source_root / "example-repo" / "skill"
         source.mkdir(parents=True)
@@ -1404,7 +1493,13 @@ class PrivateOverlaySyncTests(unittest.TestCase):
             (saved / "catalog.json").read_text(encoding="utf-8"),
             "public\n",
         )
-        self._assert_no_regular_file_overlay_temporaries(saved)
+        retained = [
+            path
+            for path in saved.iterdir()
+            if path.name.startswith(SYNC_MODULE.REGULAR_FILE_OVERLAY_TEMP_PREFIX)
+        ]
+        self.assertEqual(len(retained), 1)
+        self._assert_no_regular_file_overlay_temporaries(staging)
 
     def test_regular_file_overlay_detects_source_descendant_swap_after_binding_check(
         self,
@@ -1507,7 +1602,13 @@ class PrivateOverlaySyncTests(unittest.TestCase):
             (nested / "catalog.json").read_text(encoding="utf-8"),
             "replaced\n",
         )
-        self._assert_no_regular_file_overlay_temporaries(saved, nested)
+        retained = [
+            path
+            for path in saved.iterdir()
+            if path.name.startswith(SYNC_MODULE.REGULAR_FILE_OVERLAY_TEMP_PREFIX)
+        ]
+        self.assertEqual(len(retained), 1)
+        self._assert_no_regular_file_overlay_temporaries(nested)
 
     def test_regular_file_overlay_secure_open_requires_dir_fd_support(self) -> None:
         with mock.patch.object(SYNC_MODULE.os, "supports_dir_fd", set()):
@@ -1522,7 +1623,7 @@ class PrivateOverlaySyncTests(unittest.TestCase):
 
     def test_regular_file_overlay_atomic_replace_requires_dir_fd_support(self) -> None:
         supported = set(SYNC_MODULE.os.supports_dir_fd)
-        for missing in (SYNC_MODULE.os.rename, SYNC_MODULE.os.unlink):
+        for missing in (SYNC_MODULE.os.rename,):
             with self.subTest(missing=missing.__name__):
                 staging = (
                     self.repo_root / f"staging-missing-{missing.__name__}"
@@ -1683,7 +1784,13 @@ class PrivateOverlaySyncTests(unittest.TestCase):
 
         self.assertEqual(calls, [len(b"private\n") + 1])
         self.assertEqual(target.read_text(encoding="utf-8"), "public\n")
-        self._assert_no_regular_file_overlay_temporaries(staging)
+        retained = [
+            path
+            for path in staging.iterdir()
+            if path.name.startswith(SYNC_MODULE.REGULAR_FILE_OVERLAY_TEMP_PREFIX)
+        ]
+        self.assertEqual(len(retained), 1)
+        self.assertEqual(retained[0].read_bytes(), b"private\n")
 
     def test_regular_file_overlay_visible_fifo_fails_without_blocking(self) -> None:
         stack, _target, staging, binding = (

@@ -1018,7 +1018,6 @@ def _require_regular_file_overlay_atomic_replace() -> None:
         or not hasattr(os, "O_NOFOLLOW")
         or not hasattr(os, "fchmod")
         or os.rename not in os.supports_dir_fd
-        or os.unlink not in os.supports_dir_fd
     ):
         raise SyncError("secure regular-file overlay atomic replace is unavailable")
 
@@ -1208,7 +1207,6 @@ def _write_regular_file_overlay_target(
             chain.parent_descriptor
         )
         local_stack.callback(os.close, temporary_descriptor)
-        installed = False
         try:
             try:
                 _write_regular_file_overlay_descriptor(temporary_descriptor, data)
@@ -1279,7 +1277,6 @@ def _write_regular_file_overlay_target(
                 raise SyncError(
                     f"cannot atomically replace regular-file overlay target: {relative}: {exc}"
                 ) from exc
-            installed = True
 
             installed_descriptor = os.fstat(temporary_descriptor)
             installed_named = _stat_regular_file_overlay_entry(
@@ -1322,20 +1319,11 @@ def _write_regular_file_overlay_target(
                 chain,
                 label="target",
             )
-        finally:
-            if not installed:
-                try:
-                    os.unlink(
-                        temporary_name,
-                        dir_fd=chain.parent_descriptor,
-                    )
-                except FileNotFoundError:
-                    pass
-                except OSError as exc:
-                    raise SyncError(
-                        "cannot remove uninstalled regular-file overlay "
-                        f"temporary file: {exc}"
-                    ) from exc
+        except BaseException:
+            # A pathname cannot be conditionally unlinked by inode with portable
+            # POSIX APIs. Leave both the original temporary inode and any rebound
+            # basename inside the caller-managed recovery scope.
+            raise
 
         binding = _PinnedRegularFileOverlayTarget(
             chain=chain,
