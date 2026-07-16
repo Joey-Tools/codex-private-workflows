@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import importlib.util
 import io
 import json
@@ -36,6 +37,20 @@ def write_rollout(codex_root: Path, lines: list[str]) -> str:
     rollout = rollout_dir / "rollout-2026-05-26T10-00-00-example.jsonl"
     rollout.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return "sessions/2026/05/26/rollout-2026-05-26T10-00-00-example.jsonl"
+
+
+def rollout_identity(codex_root: Path, rollout: str) -> MODULE.RolloutIdentity:
+    return MODULE._stat_local_rollout_identity(
+        codex_root, MODULE._resolve_rollout_relative_path(rollout)
+    )
+
+
+def identity_kwargs(identity: MODULE.RolloutIdentity) -> dict[str, object]:
+    return {
+        "expected_source_bytes": identity.size,
+        "expected_source_identity": MODULE._rollout_identity_token(identity),
+        "authorized_source_bytes": None,
+    }
 
 
 class RemoteHostContextDocumentationTests(unittest.TestCase):
@@ -156,6 +171,19 @@ class RemoteHostContextDocumentationTests(unittest.TestCase):
         )
         self.assertIn("issue zero chunk fetches", reference)
         self.assertIn("exact cumulative byte count", reference)
+        self.assertIn("metadata-only `rollout-stat`", skill)
+        self.assertIn("`--expected-source-bytes`", skill)
+        self.assertIn("`--expected-source-identity`", skill)
+        self.assertIn("`--authorized-source-bytes`", skill)
+        self.assertIn("64 KiB through 2 MiB", skill)
+        self.assertIn("4 MiB of final serialized JSONL", skill)
+        self.assertIn("computes SHA-256 during that same allowed scan", skill)
+        self.assertIn("bounded stdout and stderr readers", skill)
+        self.assertIn("restart from byte 0 with a new `rollout-stat`", skill)
+        self.assertIn("does not scan or hash its content", reference)
+        self.assertIn("`rollout_meta.source_sha256`", reference)
+        self.assertIn("run a final `rollout-stat`", reference)
+        self.assertIn("discard all partial chunks", reference)
         self.assertNotIn("selected user-bearing chunk", skill)
         self.assertNotIn("relevant user-bearing chunk", reference)
         self.assertNotIn("candidate user-bearing chunk", reference)
@@ -215,6 +243,8 @@ class SizeGuardedBytesIO(io.BytesIO):
 
 class RemoteCodexProbeChunkTests(unittest.TestCase):
     def test_remote_python_script_compiles_for_chunk_commands(self) -> None:
+        identity = MODULE.RolloutIdentity(120, 1, 2, 3, 4)
+        token = MODULE._rollout_identity_token(identity)
         chunked_script = MODULE._remote_python_script(
             {
                 "mode": "chunked-rollout-summary",
@@ -224,9 +254,16 @@ class RemoteCodexProbeChunkTests(unittest.TestCase):
                 "summary_limit": 10,
                 "summary_tail_records": 4,
                 "summary_max_text_chars": 200,
-                "chunk_bytes": 1024,
+                "chunk_bytes": MODULE.MIN_ROLLOUT_CHUNK_BYTES,
                 "max_fetch_rollout_bytes": MODULE.MAX_FETCH_ROLLOUT_BYTES,
                 "max_fetch_rollout_chunk_bytes": MODULE.MAX_FETCH_ROLLOUT_CHUNK_BYTES,
+                "min_rollout_chunk_bytes": MODULE.MIN_ROLLOUT_CHUNK_BYTES,
+                "max_rollout_chunk_bytes": MODULE.MAX_ROLLOUT_CHUNK_BYTES,
+                "max_chunked_summary_output_bytes": MODULE.MAX_CHUNKED_ROLLOUT_SUMMARY_OUTPUT_BYTES,
+                "expected_source_bytes": identity.size,
+                "expected_source_identity": token,
+                "authorized_source_bytes": None,
+                "output_host": "miku-bot-dev",
             }
         )
         fetch_script = MODULE._remote_python_script(
@@ -236,7 +273,11 @@ class RemoteCodexProbeChunkTests(unittest.TestCase):
                 "codex_root": "/home/hoteng/.codex",
                 "byte_start": 0,
                 "byte_end": 120,
+                "max_fetch_rollout_bytes": MODULE.MAX_FETCH_ROLLOUT_BYTES,
                 "max_fetch_rollout_chunk_bytes": MODULE.MAX_FETCH_ROLLOUT_CHUNK_BYTES,
+                "expected_source_bytes": identity.size,
+                "expected_source_identity": token,
+                "authorized_source_bytes": None,
             }
         )
 
@@ -246,26 +287,63 @@ class RemoteCodexProbeChunkTests(unittest.TestCase):
             '"full_fetch_limit_bytes": MAX_FETCH_ROLLOUT_BYTES', chunked_script
         )
         self.assertIn(
-            '"full_reconstruction_allowed": source_bytes <= MAX_FETCH_ROLLOUT_BYTES',
+            '"full_reconstruction_allowed": automatic_allowed or AUTHORIZED_SOURCE_BYTES == source_identity["size"]',
             chunked_script,
         )
+        self.assertIn("hashlib.sha256()", chunked_script)
 
     def test_remote_chunked_rollout_summary_passes_full_fetch_limit(self) -> None:
+        identity = MODULE.RolloutIdentity(120, 1, 2, 3, 4)
+        token = MODULE._rollout_identity_token(identity)
+        source_sha256 = "0" * 64
+        record_lines = [
+            json.dumps(
+                {
+                    "kind": "rollout_meta",
+                    "source_bytes": identity.size,
+                    "source_identity": token,
+                    "source_sha256": source_sha256,
+                },
+                separators=(",", ":"),
+                sort_keys=True,
+            ),
+            json.dumps(
+                {
+                    "kind": "chunk_meta",
+                    "line": 1,
+                    "source_bytes": identity.size,
+                    "source_identity": token,
+                },
+                separators=(",", ":"),
+                sort_keys=True,
+            ),
+        ]
+        output_bytes = sum(len(line.encode("utf-8")) + 1 for line in record_lines)
         remote_result = mock.Mock(
             returncode=0,
             stderr="",
             stdout="\n".join(
                 [
                     MODULE.REMOTE_CHUNKED_ROLLOUT_SUMMARY_BEGIN,
-                    '{"ok":true}',
-                    '{"kind":"chunk_meta","line":1}',
+                    json.dumps(
+                        {
+                            "ok": True,
+                            "source_bytes": identity.size,
+                            "source_identity": token,
+                            "source_sha256": source_sha256,
+                            "summary_output_bytes": output_bytes,
+                        },
+                        separators=(",", ":"),
+                        sort_keys=True,
+                    ),
+                    *record_lines,
                     MODULE.REMOTE_CHUNKED_ROLLOUT_SUMMARY_END,
                     "",
                 ]
             ),
         )
         with mock.patch.object(
-            MODULE, "_run_remote_python", return_value=remote_result
+            MODULE, "_run_remote_python_bounded", return_value=remote_result
         ) as run_remote:
             with redirect_stdout(io.StringIO()):
                 rc = MODULE.cmd_chunked_rollout_summary(
@@ -273,10 +351,11 @@ class RemoteCodexProbeChunkTests(unittest.TestCase):
                         host="miku-bot-dev",
                         rollout="sessions/2026/05/26/rollout-a.jsonl",
                         keyword=["permission"],
-                        chunk_bytes=1024,
+                        chunk_bytes=MODULE.MIN_ROLLOUT_CHUNK_BYTES,
                         limit_per_chunk=10,
                         tail_records=4,
                         max_text_chars=200,
+                        **identity_kwargs(identity),
                     )
                 )
 
@@ -289,6 +368,13 @@ class RemoteCodexProbeChunkTests(unittest.TestCase):
         self.assertEqual(
             payload["max_fetch_rollout_chunk_bytes"],
             MODULE.MAX_FETCH_ROLLOUT_CHUNK_BYTES,
+        )
+        self.assertEqual(payload["expected_source_identity"], token)
+        self.assertEqual(payload["expected_source_bytes"], identity.size)
+        self.assertEqual(
+            run_remote.call_args.kwargs["max_stdout_bytes"],
+            MODULE.MAX_CHUNKED_ROLLOUT_SUMMARY_OUTPUT_BYTES
+            + MODULE.REMOTE_CHUNKED_SUMMARY_FRAME_OVERHEAD_BYTES,
         )
 
     def test_chunked_rollout_summary_reads_all_chunks_with_metadata(self) -> None:
@@ -303,9 +389,11 @@ class RemoteCodexProbeChunkTests(unittest.TestCase):
                     '{"timestamp":"2026-05-26T10:03:00Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"The runner service is restored."}]}}',
                 ],
             )
-            source_bytes = (codex_root / rollout).stat().st_size
-            with mock.patch.object(
-                MODULE, "_local_codex_root", return_value=codex_root
+            identity = rollout_identity(codex_root, rollout)
+            source_bytes = identity.size
+            with (
+                mock.patch.object(MODULE, "_local_codex_root", return_value=codex_root),
+                mock.patch.object(MODULE, "MIN_ROLLOUT_CHUNK_BYTES", 1),
             ):
                 buffer = io.StringIO()
                 with redirect_stdout(buffer):
@@ -318,6 +406,7 @@ class RemoteCodexProbeChunkTests(unittest.TestCase):
                             limit_per_chunk=20,
                             tail_records=4,
                             max_text_chars=200,
+                            **identity_kwargs(identity),
                         )
                     )
 
@@ -364,8 +453,9 @@ class RemoteCodexProbeChunkTests(unittest.TestCase):
             meta = MODULE._chunk_meta_record(
                 chunk=chunk,
                 records=[],
-                source_bytes=65,
+                source_identity=MODULE.RolloutIdentity(65, 1, 2, 3, 4),
                 chunk_bytes=64,
+                authorized_source_bytes=None,
             )
 
         self.assertEqual(meta["source_bytes"], 65)
@@ -416,9 +506,11 @@ class RemoteCodexProbeChunkTests(unittest.TestCase):
                     )
                 ],
             )
+            identity = rollout_identity(codex_root, rollout)
             with (
                 mock.patch.object(MODULE, "_local_codex_root", return_value=codex_root),
                 mock.patch.object(MODULE, "MAX_FETCH_ROLLOUT_CHUNK_BYTES", 80),
+                mock.patch.object(MODULE, "MIN_ROLLOUT_CHUNK_BYTES", 1),
             ):
                 buffer = io.StringIO()
                 with redirect_stdout(buffer):
@@ -431,6 +523,7 @@ class RemoteCodexProbeChunkTests(unittest.TestCase):
                             limit_per_chunk=20,
                             tail_records=4,
                             max_text_chars=200,
+                            **identity_kwargs(identity),
                         )
                     )
 
@@ -472,6 +565,7 @@ class RemoteCodexProbeChunkTests(unittest.TestCase):
             )
             source_path = codex_root / rollout
             source_data = source_path.read_bytes()
+            identity = rollout_identity(codex_root, rollout)
             first_line_size = len(source_data.splitlines(keepends=True)[0])
             os.chdir(workspace)
             try:
@@ -487,6 +581,7 @@ class RemoteCodexProbeChunkTests(unittest.TestCase):
                                 byte_start=0,
                                 byte_end=first_line_size,
                                 output="chunk.jsonl",
+                                **identity_kwargs(identity),
                             )
                         )
                 output_path = workspace / ".codex-tmp/remote-host-context/chunk.jsonl"
@@ -569,8 +664,10 @@ class RemoteCodexProbeChunkTests(unittest.TestCase):
             codex_root = Path(temp_dir) / ".codex"
             rollout = write_rollout(codex_root, rollout_lines)
             source_data = (codex_root / rollout).read_bytes()
-            with mock.patch.object(
-                MODULE, "_local_codex_root", return_value=codex_root
+            identity = rollout_identity(codex_root, rollout)
+            with (
+                mock.patch.object(MODULE, "_local_codex_root", return_value=codex_root),
+                mock.patch.object(MODULE, "MIN_ROLLOUT_CHUNK_BYTES", 1),
             ):
                 summary_buffer = io.StringIO()
                 with redirect_stdout(summary_buffer):
@@ -583,6 +680,7 @@ class RemoteCodexProbeChunkTests(unittest.TestCase):
                             limit_per_chunk=20,
                             tail_records=0,
                             max_text_chars=200,
+                            **identity_kwargs(identity),
                         )
                     )
                 summary_records = [
@@ -594,6 +692,11 @@ class RemoteCodexProbeChunkTests(unittest.TestCase):
                     for record in summary_records
                     if record["kind"] == "chunk_meta"
                 ]
+                rollout_meta = next(
+                    record
+                    for record in summary_records
+                    if record["kind"] == "rollout_meta"
+                )
                 chunk_meta_rows.sort(key=lambda record: record["byte_start"])
                 self.assertGreaterEqual(len(chunk_meta_rows), 2)
                 self.assertTrue(
@@ -675,6 +778,7 @@ class RemoteCodexProbeChunkTests(unittest.TestCase):
                                         byte_start=byte_start,
                                         byte_end=byte_end,
                                         output=output_name,
+                                        **identity_kwargs(identity),
                                     )
                                 )
                             )
@@ -688,6 +792,17 @@ class RemoteCodexProbeChunkTests(unittest.TestCase):
                         json.loads(line)
                         for line in reconstructed_data.decode("utf-8").splitlines()
                     ]
+                    with redirect_stdout(io.StringIO()):
+                        final_stat_rc = MODULE.cmd_rollout_stat(
+                            argparse.Namespace(
+                                host="local",
+                                rollout=rollout,
+                                expected_source_bytes=identity.size,
+                                expected_source_identity=(
+                                    MODULE._rollout_identity_token(identity)
+                                ),
+                            )
+                        )
                 finally:
                     os.chdir(original_cwd)
 
@@ -706,6 +821,11 @@ class RemoteCodexProbeChunkTests(unittest.TestCase):
         self.assertTrue(all(rc == 0 for rc in fetch_rcs))
         self.assertEqual(fetched_ranges, expected_ranges)
         self.assertEqual(reconstructed_data, source_data)
+        self.assertEqual(
+            hashlib.sha256(reconstructed_data).hexdigest(),
+            rollout_meta["source_sha256"],
+        )
+        self.assertEqual(final_stat_rc, 0)
         self.assertIn(first_followup, fetched_user_texts)
         self.assertIn(second_followup, fetched_user_texts)
         self.assertLess(
@@ -713,7 +833,300 @@ class RemoteCodexProbeChunkTests(unittest.TestCase):
             fetched_user_texts.index(second_followup),
         )
 
+    def test_rollout_stat_preflight_and_final_verification(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            codex_root = Path(temp_dir) / ".codex"
+            rollout = write_rollout(
+                codex_root,
+                ['{"type":"session_meta","payload":{"id":"abc"}}'],
+            )
+            source_path = codex_root / rollout
+            with mock.patch.object(
+                MODULE, "_local_codex_root", return_value=codex_root
+            ):
+                preflight_output = io.StringIO()
+                with redirect_stdout(preflight_output):
+                    preflight_rc = MODULE.cmd_rollout_stat(
+                        argparse.Namespace(
+                            host="local",
+                            rollout=rollout,
+                            expected_source_bytes=None,
+                            expected_source_identity=None,
+                        )
+                    )
+                record = json.loads(preflight_output.getvalue())
+                identity = MODULE._rollout_identity_from_record(record)
+                with redirect_stdout(io.StringIO()):
+                    final_rc = MODULE.cmd_rollout_stat(
+                        argparse.Namespace(
+                            host="local",
+                            rollout=rollout,
+                            expected_source_bytes=identity.size,
+                            expected_source_identity=(
+                                MODULE._rollout_identity_token(identity)
+                            ),
+                        )
+                    )
+                with source_path.open("ab") as handle:
+                    handle.write(b"{}\n")
+                final_error = io.StringIO()
+                with redirect_stderr(final_error):
+                    changed_rc = MODULE.cmd_rollout_stat(
+                        argparse.Namespace(
+                            host="local",
+                            rollout=rollout,
+                            expected_source_bytes=identity.size,
+                            expected_source_identity=(
+                                MODULE._rollout_identity_token(identity)
+                            ),
+                        )
+                    )
+
+        self.assertEqual(preflight_rc, 0)
+        self.assertEqual(record["kind"], "rollout_stat")
+        self.assertEqual(record["host"], "local")
+        self.assertEqual(final_rc, 0)
+        self.assertEqual(changed_rc, 1)
+        self.assertIn("identity changed", final_error.getvalue())
+
+    def test_overlimit_summary_refuses_before_scan_and_exact_auth_lifts(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            codex_root = Path(temp_dir) / ".codex"
+            rollout = write_rollout(
+                codex_root,
+                ['{"type":"session_meta","payload":{"id":"abc"}}'],
+            )
+            identity = rollout_identity(codex_root, rollout)
+            kwargs = {
+                "codex_root": codex_root,
+                "rollout_relative_path": MODULE._resolve_rollout_relative_path(rollout),
+                "chunk_bytes": identity.size,
+                "keywords": [],
+                "limit_per_chunk": 20,
+                "tail_records": 0,
+                "max_text_chars": 200,
+                "host": "local",
+                "expected_identity": identity,
+            }
+            with (
+                mock.patch.object(MODULE, "MAX_FETCH_ROLLOUT_BYTES", identity.size - 1),
+                mock.patch.object(MODULE, "MIN_ROLLOUT_CHUNK_BYTES", 1),
+            ):
+                with mock.patch.object(MODULE, "_iter_rollout_chunks") as iterator:
+                    with self.assertRaisesRegex(
+                        ValueError, "exact --authorized-source-bytes"
+                    ):
+                        MODULE._chunked_rollout_summary_records(
+                            **kwargs,
+                            authorized_source_bytes=None,
+                        )
+                    with self.assertRaisesRegex(
+                        ValueError, "must equal expected source size"
+                    ):
+                        MODULE._chunked_rollout_summary_records(
+                            **kwargs,
+                            authorized_source_bytes=identity.size - 1,
+                        )
+                    iterator.assert_not_called()
+                records = MODULE._chunked_rollout_summary_records(
+                    **kwargs,
+                    authorized_source_bytes=identity.size,
+                )
+
+        self.assertEqual(records[0]["kind"], "rollout_meta")
+        self.assertEqual(records[0]["authorized_source_bytes"], identity.size)
+        self.assertTrue(records[0]["full_reconstruction_allowed"])
+
+    def test_chunk_summary_rejects_tiny_chunks_before_opening_rollout(self) -> None:
+        identity = MODULE.RolloutIdentity(100, 1, 2, 3, 4)
+        with mock.patch.object(MODULE, "_safe_rollout_path") as safe_path:
+            with self.assertRaisesRegex(ValueError, "--chunk-bytes must stay between"):
+                MODULE._chunked_rollout_summary_records(
+                    codex_root=Path("/unused"),
+                    rollout_relative_path=Path("sessions/2026/05/26/rollout-a.jsonl"),
+                    chunk_bytes=MODULE.MIN_ROLLOUT_CHUNK_BYTES - 1,
+                    keywords=[],
+                    limit_per_chunk=20,
+                    tail_records=0,
+                    max_text_chars=200,
+                    host="local",
+                    expected_identity=identity,
+                    authorized_source_bytes=None,
+                )
+            safe_path.assert_not_called()
+
+    def test_chunk_summary_output_cap_fails_without_partial_stdout(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            codex_root = Path(temp_dir) / ".codex"
+            rollout = write_rollout(
+                codex_root,
+                ['{"type":"session_meta","payload":{"id":"abc"}}'],
+            )
+            identity = rollout_identity(codex_root, rollout)
+            output = io.StringIO()
+            error_output = io.StringIO()
+            with (
+                mock.patch.object(MODULE, "_local_codex_root", return_value=codex_root),
+                mock.patch.object(MODULE, "MIN_ROLLOUT_CHUNK_BYTES", 1),
+                mock.patch.object(
+                    MODULE, "MAX_CHUNKED_ROLLOUT_SUMMARY_OUTPUT_BYTES", 64
+                ),
+                redirect_stdout(output),
+                redirect_stderr(error_output),
+            ):
+                rc = MODULE.cmd_chunked_rollout_summary(
+                    argparse.Namespace(
+                        host="local",
+                        rollout=rollout,
+                        keyword=[],
+                        chunk_bytes=identity.size,
+                        limit_per_chunk=20,
+                        tail_records=0,
+                        max_text_chars=200,
+                        **identity_kwargs(identity),
+                    )
+                )
+
+        self.assertEqual(rc, 1)
+        self.assertEqual(output.getvalue(), "")
+        self.assertIn("chunked summary output too large", error_output.getvalue())
+
+    def test_chunk_fetch_rejects_append_and_replacement_after_preflight(self) -> None:
+        for mutation in ("append", "replace"):
+            with (
+                self.subTest(mutation=mutation),
+                tempfile.TemporaryDirectory() as temp_dir,
+            ):
+                codex_root = Path(temp_dir) / ".codex"
+                rollout = write_rollout(
+                    codex_root,
+                    ['{"type":"session_meta","payload":{"id":"abc"}}'],
+                )
+                source_path = codex_root / rollout
+                source_data = source_path.read_bytes()
+                identity = rollout_identity(codex_root, rollout)
+                if mutation == "append":
+                    with source_path.open("ab") as handle:
+                        handle.write(b"{}\n")
+                else:
+                    replacement = source_path.with_suffix(".replacement")
+                    replacement.write_bytes(source_data)
+                    os.replace(replacement, source_path)
+
+                with self.assertRaisesRegex(ValueError, "identity changed before read"):
+                    MODULE._read_local_rollout_byte_range(
+                        codex_root,
+                        MODULE._resolve_rollout_relative_path(rollout),
+                        byte_start=0,
+                        byte_end=len(source_data),
+                        max_bytes=MODULE.MAX_FETCH_ROLLOUT_CHUNK_BYTES,
+                        expected_identity=identity,
+                    )
+
+    def test_chunk_fetch_rechecks_path_identity_after_read(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            codex_root = Path(temp_dir) / ".codex"
+            rollout = write_rollout(
+                codex_root,
+                ['{"type":"session_meta","payload":{"id":"abc"}}'],
+            )
+            source_path = codex_root / rollout
+            source_data = source_path.read_bytes()
+            identity = rollout_identity(codex_root, rollout)
+            real_fstat = MODULE.os.fstat
+            calls = 0
+
+            def fstat_then_append(fd: int) -> os.stat_result:
+                nonlocal calls
+                calls += 1
+                result = real_fstat(fd)
+                if calls == 2:
+                    with source_path.open("ab") as handle:
+                        handle.write(b"{}\n")
+                return result
+
+            with mock.patch.object(MODULE.os, "fstat", side_effect=fstat_then_append):
+                with self.assertRaisesRegex(ValueError, "identity changed after read"):
+                    MODULE._read_local_rollout_byte_range(
+                        codex_root,
+                        MODULE._resolve_rollout_relative_path(rollout),
+                        byte_start=0,
+                        byte_end=len(source_data),
+                        max_bytes=MODULE.MAX_FETCH_ROLLOUT_CHUNK_BYTES,
+                        expected_identity=identity,
+                    )
+
+    def test_chunk_summary_rejects_append_during_scan_without_output(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            codex_root = Path(temp_dir) / ".codex"
+            rollout = write_rollout(
+                codex_root,
+                [
+                    '{"type":"session_meta","payload":{"id":"abc"}}',
+                    '{"type":"event_msg","payload":{"type":"task_complete","last_agent_message":"done"}}',
+                ],
+            )
+            source_path = codex_root / rollout
+            identity = rollout_identity(codex_root, rollout)
+            original_iterator = MODULE._iter_rollout_chunks
+
+            def mutating_iterator(*args: object, **kwargs: object):
+                mutated = False
+                for chunk in original_iterator(*args, **kwargs):
+                    yield chunk
+                    if not mutated:
+                        with source_path.open("ab") as handle:
+                            handle.write(b"{}\n")
+                        mutated = True
+
+            output = io.StringIO()
+            error_output = io.StringIO()
+            with (
+                mock.patch.object(MODULE, "_local_codex_root", return_value=codex_root),
+                mock.patch.object(MODULE, "MIN_ROLLOUT_CHUNK_BYTES", 1),
+                mock.patch.object(
+                    MODULE, "_iter_rollout_chunks", side_effect=mutating_iterator
+                ),
+                redirect_stdout(output),
+                redirect_stderr(error_output),
+            ):
+                rc = MODULE.cmd_chunked_rollout_summary(
+                    argparse.Namespace(
+                        host="local",
+                        rollout=rollout,
+                        keyword=[],
+                        chunk_bytes=identity.size,
+                        limit_per_chunk=20,
+                        tail_records=0,
+                        max_text_chars=200,
+                        **identity_kwargs(identity),
+                    )
+                )
+
+        self.assertEqual(rc, 1)
+        self.assertEqual(output.getvalue(), "")
+        self.assertIn("identity changed after summary scan", error_output.getvalue())
+
+    def test_parent_bounded_reader_stops_noisy_stdout_and_stderr(self) -> None:
+        for stream_name, fd in (("stdout", 1), ("stderr", 2)):
+            with self.subTest(stream=stream_name):
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    rf"command {stream_name} exceeded 1024-byte capture limit",
+                ):
+                    MODULE._run_subprocess_text_bounded(
+                        [
+                            sys.executable,
+                            "-c",
+                            f"import os; os.write({fd}, b'x' * 4096)",
+                        ],
+                        timeout_seconds=5,
+                        max_stdout_bytes=1024,
+                        max_stderr_bytes=1024,
+                    )
+
     def test_fetch_rollout_chunk_rejects_oversized_range_before_reading(self) -> None:
+        identity = MODULE.RolloutIdentity(9, 1, 2, 3, 4)
         buffer = io.StringIO()
         with mock.patch.object(MODULE, "MAX_FETCH_ROLLOUT_CHUNK_BYTES", 8):
             with redirect_stderr(buffer):
@@ -724,6 +1137,7 @@ class RemoteCodexProbeChunkTests(unittest.TestCase):
                         byte_start=0,
                         byte_end=9,
                         output="chunk.jsonl",
+                        **identity_kwargs(identity),
                     )
                 )
 

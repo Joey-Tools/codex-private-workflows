@@ -104,17 +104,20 @@ The canonical rollout remains under its creation date when a thread continues ac
 
 Treat the bounded latest turn and both summary commands as locator and triage output, not as permission to discard task history. A summary may emit only a representative or last user message from a chunk, so a later wrapper or noise record can obscure a substantive follow-up in that same chunk. Summary content may choose candidates for coarse triage only; it must never decide omissions for full task reconstruction.
 
+Begin a chunked full-reconstruction attempt with metadata-only `rollout-stat`. Save the returned versioned `source_identity` and exact `source_bytes`; this operation opens and validates the file but does not scan or hash its content. Supply those exact values to `chunked-rollout-summary` and every `fetch-rollout-chunk` call. The summary scan accepts `--chunk-bytes` only from 64 KiB through 2 MiB, freezes the scan at the preflight size, computes `rollout_meta.source_sha256` from the same identity-checked file descriptor, and fails closed if the final serialized JSONL summary would exceed 4 MiB. Its remote parent also terminates capture if stdout or stderr exceeds the command-specific bound.
+
 For full task reconstruction, sort every `chunk_meta` row by `byte_start`, consume all of them, and build the complete fetch plan before issuing the first chunk fetch. Validate all of these conditions first:
 
 - Every row reports the same `source_bytes` and `full_fetch_limit_bytes`.
+- `rollout_meta` and every `chunk_meta` row report the same `source_identity` and `source_bytes` returned by the preflight stat.
 - Each row contributes every listed `fetch_ranges[]` entry in order, or its complete `byte_start`/`byte_end` range when no split ranges are listed.
 - The globally ordered ranges start at byte 0, remain gap-free and non-overlapping, and end at `source_bytes` exactly.
 - The sum of all planned range lengths equals `source_bytes`.
-- `source_bytes` is at most 16 MiB (16,777,216 bytes) and every row reports `full_reconstruction_allowed=true`.
+- Every row reports `full_reconstruction_allowed=true`, and either the automatic path has `source_bytes` at most 16 MiB (16,777,216 bytes) or the over-limit path carries Joey's exact-rollout, exact-byte-count authorization.
 
-If `source_bytes` exceeds 16,777,216 bytes, issue zero chunk fetches. Report the exact rollout, exact `source_bytes`, and exact `full_fetch_limit_bytes`, then request Joey's explicit authorization for that exact rollout and byte count or use a future server-side lossless filter. Never silently loop over the ranges of an over-limit rollout. After explicit authorization, keep an exact cumulative byte count, preserve gap-free non-overlapping coverage, and stop when the authorized `source_bytes` has been fetched; if the source size or range plan changes, abort and rebuild the plan instead of extending the authorization.
+If `source_bytes` exceeds 16,777,216 bytes, the helper rejects the summary scan and chunk fetches before reading content unless the caller supplies `--authorized-source-bytes` equal to that exact preflight size. Before doing so, issue zero chunk fetches, report the exact rollout, exact `source_bytes`, and exact `full_fetch_limit_bytes`, then request Joey's explicit authorization for that exact rollout and byte count or use a future server-side lossless filter. Never silently loop over the ranges of an over-limit rollout. After explicit authorization, keep an exact cumulative byte count, preserve gap-free non-overlapping coverage, and stop when the authorized `source_bytes` has been fetched; authorization for another byte count is invalid, and if the source identity or range plan changes, abort and rebuild the plan instead of extending the authorization.
 
-When the complete plan is allowed, use sequential bounded `fetch-rollout-chunk` calls, reassemble the complete exact JSONL record stream in byte order, and hand that complete stream to `codex-session-mining` for replay-prefix and wrapper filtering. Do not pre-filter chunks based on summary text, `raw_fetch_recommended`, or whether the summary exposed a user message.
+When the complete plan is allowed, use sequential bounded `fetch-rollout-chunk` calls with the original expected size and identity, reassemble the complete exact JSONL record stream in byte order, verify its byte count and SHA-256 against `source_bytes` and `rollout_meta.source_sha256`, and then run a final `rollout-stat` with those original expected values. Only after all three checks pass may the complete stream be handed to `codex-session-mining` for replay-prefix and wrapper filtering. Do not pre-filter chunks based on summary text, `raw_fetch_recommended`, or whether the summary exposed a user message. An append, truncation, pathname replacement, short read, digest mismatch, or final-stat mismatch invalidates the snapshot; discard all partial chunks and restart from byte 0 with a new stat.
 
 Current dedicated helper path for those repeated remote Codex reads:
 
@@ -138,7 +141,7 @@ python3 "$HOME/.codex/skills/remote-host-context/scripts/remote_codex_probe.py" 
 
 `session-meta` takes `--date YYYY/MM/DD`, not `YYYY-MM-DD`.
 `fetch-rollout` takes one destination file via `--output`; point it at a task-scoped file path, not a directory.
-Use `rollout-summary` only for fast bounded prefix triage. If a rollout is too large to copy cleanly, use `chunked-rollout-summary` for the complete whole-rollout range map. Each `chunk_meta` row repeats `source_bytes`, `full_fetch_limit_bytes`, and `full_reconstruction_allowed` so the whole plan can be checked before any chunk fetch. For full task reconstruction, apply the 16 MiB complete-plan gate above, then fetch every allowed range from every `chunk_meta` row with sequential `fetch-rollout-chunk` calls; summary rows alone are not sufficient evidence of all human follow-ups and must not choose omissions.
+Use `rollout-summary` only for fast bounded prefix triage. If a rollout is too large to copy cleanly, run `rollout-stat` and then use `chunked-rollout-summary` for the complete whole-rollout range map bound to that exact identity. Each `chunk_meta` row repeats `source_bytes`, `source_identity`, `full_fetch_limit_bytes`, and `full_reconstruction_allowed` so the whole plan can be checked before any chunk fetch. For full task reconstruction, apply the 16 MiB complete-plan gate above, then fetch every allowed range from every `chunk_meta` row with sequential identity-bound `fetch-rollout-chunk` calls; summary rows alone are not sufficient evidence of all human follow-ups and must not choose omissions.
 Concrete bounded-read shape:
 
 ```bash
@@ -153,4 +156,34 @@ python3 "$HOME/.codex/skills/remote-host-context/scripts/remote_codex_probe.py" 
 ```
 
 `rollout-summary` scans only a bounded prefix and emits a small structured skim. `chunked-rollout-summary` scans the file in bounded chunks but still emits lossy summaries; for full reconstruction, validate the complete coordinate plan and its global byte budget before fetching anything, then use all allowed coordinates to fetch the complete exact record stream before delegating interpretation to `codex-session-mining`.
+
+Identity-bound command sequence (substitute the values emitted by the first command; include `--authorized-source-bytes <SOURCE_BYTES>` on summary and fetch calls only after exact over-limit authorization):
+
+```bash
+python3 "$HOME/.codex/skills/remote-host-context/scripts/remote_codex_probe.py" rollout-stat \
+  --host miku-bot-dev \
+  --rollout sessions/2026/03/25/rollout-example.jsonl
+
+python3 "$HOME/.codex/skills/remote-host-context/scripts/remote_codex_probe.py" chunked-rollout-summary \
+  --host miku-bot-dev \
+  --rollout sessions/2026/03/25/rollout-example.jsonl \
+  --expected-source-bytes <SOURCE_BYTES> \
+  --expected-source-identity <SOURCE_IDENTITY>
+
+python3 "$HOME/.codex/skills/remote-host-context/scripts/remote_codex_probe.py" fetch-rollout-chunk \
+  --host miku-bot-dev \
+  --rollout sessions/2026/03/25/rollout-example.jsonl \
+  --byte-start <BYTE_START> \
+  --byte-end <BYTE_END> \
+  --expected-source-bytes <SOURCE_BYTES> \
+  --expected-source-identity <SOURCE_IDENTITY> \
+  --output .codex-tmp/remote-host-context/part.jsonl
+
+python3 "$HOME/.codex/skills/remote-host-context/scripts/remote_codex_probe.py" rollout-stat \
+  --host miku-bot-dev \
+  --rollout sessions/2026/03/25/rollout-example.jsonl \
+  --expected-source-bytes <SOURCE_BYTES> \
+  --expected-source-identity <SOURCE_IDENTITY>
+```
+
 If a host has an explicitly verified `archived_sessions/rollout-*.jsonl` path, use `fetch-rollout` directly for that one file instead of turning `session-meta` into a broad archived-session search.

@@ -8,15 +8,18 @@ import binascii
 import collections
 import dataclasses
 import datetime as dt
+import hashlib
 import json
 import os
 import pathlib
 import re
+import selectors
 import shlex
 import socket
 import subprocess
 import stat
 import sys
+import time
 from collections.abc import Iterable
 from typing import Any
 
@@ -24,9 +27,15 @@ DATE_FORMAT = "%Y/%m/%d"
 MAX_SESSION_META_LIMIT = 500
 MAX_SESSION_META_DATE_COUNT = 31
 MAX_FETCH_ROLLOUT_BYTES = 16 * 1024 * 1024
+MIN_ROLLOUT_CHUNK_BYTES = 64 * 1024
 DEFAULT_ROLLOUT_CHUNK_BYTES = 1024 * 1024
 MAX_ROLLOUT_CHUNK_BYTES = 2 * 1024 * 1024
 MAX_FETCH_ROLLOUT_CHUNK_BYTES = 2 * 1024 * 1024
+MAX_CHUNKED_ROLLOUT_SUMMARY_OUTPUT_BYTES = 4 * 1024 * 1024
+MAX_SOURCE_IDENTITY_TOKEN_CHARS = 256
+MAX_REMOTE_METADATA_STDOUT_BYTES = 64 * 1024
+MAX_REMOTE_STDERR_BYTES = 64 * 1024
+REMOTE_CHUNKED_SUMMARY_FRAME_OVERHEAD_BYTES = 64 * 1024
 MAX_ROLLOUT_SUMMARY_LIMIT = 200
 MAX_ROLLOUT_SUMMARY_SCAN_BYTES = 2 * 1024 * 1024
 MAX_ROLLOUT_SUMMARY_LINE_BYTES = 1024 * 1024
@@ -88,6 +97,8 @@ REMOTE_FETCH_ROLLOUT_BEGIN = "__REMOTE_CODEX_PROBE_FETCH_ROLLOUT_BEGIN__"
 REMOTE_FETCH_ROLLOUT_END = "__REMOTE_CODEX_PROBE_FETCH_ROLLOUT_END__"
 REMOTE_FETCH_ROLLOUT_CHUNK_BEGIN = "__REMOTE_CODEX_PROBE_FETCH_ROLLOUT_CHUNK_BEGIN__"
 REMOTE_FETCH_ROLLOUT_CHUNK_END = "__REMOTE_CODEX_PROBE_FETCH_ROLLOUT_CHUNK_END__"
+REMOTE_ROLLOUT_STAT_BEGIN = "__REMOTE_CODEX_PROBE_ROLLOUT_STAT_BEGIN__"
+REMOTE_ROLLOUT_STAT_END = "__REMOTE_CODEX_PROBE_ROLLOUT_STAT_END__"
 REMOTE_ROLLOUT_SUMMARY_BEGIN = "__REMOTE_CODEX_PROBE_ROLLOUT_SUMMARY_BEGIN__"
 REMOTE_ROLLOUT_SUMMARY_END = "__REMOTE_CODEX_PROBE_ROLLOUT_SUMMARY_END__"
 REMOTE_CHUNKED_ROLLOUT_SUMMARY_BEGIN = "__REMOTE_CODEX_PROBE_CHUNKED_ROLLOUT_SUMMARY_BEGIN__"
@@ -145,6 +156,15 @@ class RolloutChunk:
     last_timestamp: str
     oversized_record: bool
     lines: tuple[str, ...]
+
+
+@dataclasses.dataclass(frozen=True)
+class RolloutIdentity:
+    size: int
+    device: int
+    inode: int
+    mtime_ns: int
+    ctime_ns: int
 
 
 class SessionMetaRolloutError(ValueError):
@@ -378,15 +398,191 @@ def _safe_directory_path(
     return _safe_relative_path(codex_root, relative_path, expect_directory=True)
 
 
+def _rollout_identity_from_stat(stat_result: os.stat_result) -> RolloutIdentity:
+    if not stat.S_ISREG(stat_result.st_mode):
+        raise ValueError("rollout path is not a regular file")
+    return RolloutIdentity(
+        size=stat_result.st_size,
+        device=stat_result.st_dev,
+        inode=stat_result.st_ino,
+        mtime_ns=stat_result.st_mtime_ns,
+        ctime_ns=stat_result.st_ctime_ns,
+    )
+
+
+def _rollout_identity_token(identity: RolloutIdentity) -> str:
+    return (
+        f"v1:{identity.size}:{identity.device}:{identity.inode}:"
+        f"{identity.mtime_ns}:{identity.ctime_ns}"
+    )
+
+
+def _parse_rollout_identity_token(value: str) -> RolloutIdentity:
+    if not value or len(value) > MAX_SOURCE_IDENTITY_TOKEN_CHARS:
+        raise ValueError("invalid --expected-source-identity")
+    parts = value.split(":")
+    if len(parts) != 6 or parts[0] != "v1":
+        raise ValueError("invalid --expected-source-identity")
+    try:
+        numbers = [int(part) for part in parts[1:]]
+    except ValueError as error:
+        raise ValueError("invalid --expected-source-identity") from error
+    if any(number < 0 for number in numbers):
+        raise ValueError("invalid --expected-source-identity")
+    identity = RolloutIdentity(*numbers)
+    if _rollout_identity_token(identity) != value:
+        raise ValueError("invalid --expected-source-identity")
+    return identity
+
+
+def _parse_expected_rollout_identity(
+    token: str,
+    expected_source_bytes: int,
+) -> RolloutIdentity:
+    if expected_source_bytes < 0:
+        raise ValueError("--expected-source-bytes must be non-negative")
+    identity = _parse_rollout_identity_token(token)
+    if identity.size != expected_source_bytes:
+        raise ValueError(
+            "--expected-source-bytes must match --expected-source-identity: "
+            f"{expected_source_bytes} != {identity.size}"
+        )
+    return identity
+
+
+def _expected_rollout_identity_from_args(
+    args: argparse.Namespace,
+    *,
+    required: bool,
+) -> RolloutIdentity | None:
+    token = getattr(args, "expected_source_identity", None)
+    expected_source_bytes = getattr(args, "expected_source_bytes", None)
+    if token is None and expected_source_bytes is None:
+        if required:
+            raise ValueError(
+                "--expected-source-identity and --expected-source-bytes are required"
+            )
+        return None
+    if token is None or expected_source_bytes is None:
+        raise ValueError(
+            "--expected-source-identity and --expected-source-bytes must be provided together"
+        )
+    return _parse_expected_rollout_identity(token, expected_source_bytes)
+
+
+def _assert_rollout_identity(
+    actual: RolloutIdentity,
+    expected: RolloutIdentity,
+    *,
+    phase: str,
+) -> None:
+    if actual != expected:
+        raise ValueError(f"rollout identity changed {phase}")
+
+
+def _rollout_path_identity(target: pathlib.Path) -> RolloutIdentity:
+    return _rollout_identity_from_stat(target.lstat())
+
+
+def _assert_rollout_path_identity(
+    target: pathlib.Path,
+    expected: RolloutIdentity,
+    *,
+    phase: str,
+) -> None:
+    try:
+        actual = _rollout_path_identity(target)
+    except (FileNotFoundError, ValueError) as error:
+        raise ValueError(f"rollout identity changed {phase}") from error
+    _assert_rollout_identity(actual, expected, phase=phase)
+
+
+def _validate_source_read_budget(
+    identity: RolloutIdentity,
+    authorized_source_bytes: int | None,
+) -> bool:
+    if authorized_source_bytes is not None:
+        if authorized_source_bytes < 0:
+            raise ValueError("--authorized-source-bytes must be non-negative")
+        if authorized_source_bytes != identity.size:
+            raise ValueError(
+                "--authorized-source-bytes must equal expected source size: "
+                f"{authorized_source_bytes} != {identity.size}"
+            )
+    if identity.size > MAX_FETCH_ROLLOUT_BYTES:
+        if authorized_source_bytes != identity.size:
+            raise ValueError(
+                "rollout exceeds automatic full-reconstruction limit: "
+                f"{identity.size} bytes > {MAX_FETCH_ROLLOUT_BYTES}; exact "
+                f"--authorized-source-bytes {identity.size} is required"
+            )
+        return True
+    return authorized_source_bytes == identity.size
+
+
+def _rollout_identity_record(identity: RolloutIdentity) -> dict[str, Any]:
+    automatic_allowed = identity.size <= MAX_FETCH_ROLLOUT_BYTES
+    return {
+        "kind": "rollout_stat",
+        "source_bytes": identity.size,
+        "source_identity": _rollout_identity_token(identity),
+        "source_dev": identity.device,
+        "source_inode": identity.inode,
+        "source_mtime_ns": identity.mtime_ns,
+        "source_ctime_ns": identity.ctime_ns,
+        "full_fetch_limit_bytes": MAX_FETCH_ROLLOUT_BYTES,
+        "automatic_full_reconstruction_allowed": automatic_allowed,
+        "full_reconstruction_allowed": automatic_allowed,
+    }
+
+
+def _rollout_identity_from_record(record: dict[str, Any]) -> RolloutIdentity:
+    identity = _parse_rollout_identity_token(str(record.get("source_identity", "")))
+    expected_fields = {
+        "source_bytes": identity.size,
+        "source_dev": identity.device,
+        "source_inode": identity.inode,
+        "source_mtime_ns": identity.mtime_ns,
+        "source_ctime_ns": identity.ctime_ns,
+    }
+    for key, value in expected_fields.items():
+        try:
+            actual = int(record[key])
+        except (KeyError, TypeError, ValueError) as error:
+            raise ValueError(f"rollout stat record has invalid {key}") from error
+        if actual != value:
+            raise ValueError(f"rollout stat record has mismatched {key}")
+    return identity
+
+
+def _stat_local_rollout_identity(
+    codex_root: pathlib.Path,
+    rollout_relative_path: pathlib.PurePosixPath,
+) -> RolloutIdentity:
+    target = _safe_rollout_path(codex_root, rollout_relative_path)
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(str(target), flags)
+    try:
+        identity = _rollout_identity_from_stat(os.fstat(fd))
+        _assert_rollout_path_identity(target, identity, phase="during metadata stat")
+        return identity
+    finally:
+        os.close(fd)
+
+
 def _open_local_rollout_text(
-    codex_root: pathlib.Path, rollout_relative_path: pathlib.PurePosixPath
+    codex_root: pathlib.Path,
+    rollout_relative_path: pathlib.PurePosixPath,
+    *,
+    expected_identity: RolloutIdentity | None = None,
 ):
     target = _safe_rollout_path(codex_root, rollout_relative_path)
     flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
     fd = os.open(str(target), flags)
     try:
-        if not stat.S_ISREG(os.fstat(fd).st_mode):
-            raise ValueError("rollout path is not a regular file")
+        identity = _rollout_identity_from_stat(os.fstat(fd))
+        if expected_identity is not None:
+            _assert_rollout_identity(identity, expected_identity, phase="before read")
         handle = os.fdopen(fd, "rb")
         fd = -1
         return handle
@@ -426,6 +622,7 @@ def _read_local_rollout_byte_range(
     byte_start: int,
     byte_end: int,
     max_bytes: int,
+    expected_identity: RolloutIdentity,
 ) -> bytes:
     if byte_start < 0:
         raise ValueError("--byte-start must be non-negative")
@@ -438,15 +635,29 @@ def _read_local_rollout_byte_range(
     flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
     fd = os.open(str(target), flags)
     try:
-        stat_result = os.fstat(fd)
-        if not stat.S_ISREG(stat_result.st_mode):
-            raise ValueError("rollout path is not a regular file")
-        if byte_end > stat_result.st_size:
-            raise ValueError(f"--byte-end exceeds rollout size: {byte_end} > {stat_result.st_size}")
+        identity = _rollout_identity_from_stat(os.fstat(fd))
+        _assert_rollout_identity(identity, expected_identity, phase="before read")
+        if byte_end > identity.size:
+            raise ValueError(f"--byte-end exceeds rollout size: {byte_end} > {identity.size}")
         with os.fdopen(fd, "rb") as handle:
             fd = -1
             handle.seek(byte_start)
-            return handle.read(length)
+            data = handle.read(length)
+            _assert_rollout_identity(
+                _rollout_identity_from_stat(os.fstat(handle.fileno())),
+                expected_identity,
+                phase="after read",
+            )
+            _assert_rollout_path_identity(
+                target,
+                expected_identity,
+                phase="after read",
+            )
+            if len(data) != length:
+                raise ValueError(
+                    f"rollout chunk read was truncated: {len(data)} bytes != {length}"
+                )
+            return data
     finally:
         if fd != -1:
             os.close(fd)
@@ -525,10 +736,31 @@ def _raw_line_endswith_newline(raw_line: Any) -> bool:
     return bytes(raw_line).endswith(b"\n")
 
 
+class _HashingRolloutReader:
+    def __init__(self, handle: Any) -> None:
+        self.handle = handle
+        self.bytes_read = 0
+        self._hasher = hashlib.sha256()
+
+    def readline(self, size: int = -1) -> Any:
+        data = self.handle.readline(size)
+        raw_bytes = data.encode("utf-8", "surrogatepass") if isinstance(data, str) else bytes(data)
+        self._hasher.update(raw_bytes)
+        self.bytes_read += len(raw_bytes)
+        return data
+
+    def fileno(self) -> int:
+        return self.handle.fileno()
+
+    def hexdigest(self) -> str:
+        return self._hasher.hexdigest()
+
+
 def _iter_rollout_chunks(
     handle: Any,
     *,
     chunk_bytes: int,
+    source_bytes: int | None = None,
 ) -> Iterable[RolloutChunk]:
     if chunk_bytes < 1:
         raise ValueError("--chunk-bytes must be positive")
@@ -573,7 +805,14 @@ def _iter_rollout_chunks(
     read_limit = chunk_bytes + 1
 
     while True:
-        raw_line = handle.readline(read_limit)
+        remaining = None if source_bytes is None else source_bytes - offset
+        if remaining is not None and remaining <= 0:
+            chunk = flush()
+            if chunk is not None:
+                yield chunk
+            return
+        current_read_limit = read_limit if remaining is None else min(read_limit, remaining)
+        raw_line = handle.readline(current_read_limit)
         if not raw_line:
             chunk = flush()
             if chunk is not None:
@@ -582,7 +821,14 @@ def _iter_rollout_chunks(
         raw_bytes, line = _raw_line_parts(raw_line)
         line_start = offset
         record_no += 1
-        line_truncated = len(raw_line) == read_limit and not _raw_line_endswith_newline(raw_line)
+        at_source_end = source_bytes is not None and (
+            line_start + len(raw_bytes) >= source_bytes
+        )
+        line_truncated = (
+            not at_source_end
+            and len(raw_line) == current_read_limit
+            and not _raw_line_endswith_newline(raw_line)
+        )
         if len(raw_bytes) > chunk_bytes or line_truncated:
             if lines:
                 chunk = flush()
@@ -591,12 +837,29 @@ def _iter_rollout_chunks(
 
             total_bytes = len(raw_bytes)
             while line_truncated:
-                segment = handle.readline(read_limit)
+                remaining = (
+                    None
+                    if source_bytes is None
+                    else source_bytes - (line_start + total_bytes)
+                )
+                if remaining is not None and remaining <= 0:
+                    break
+                current_read_limit = (
+                    read_limit if remaining is None else min(read_limit, remaining)
+                )
+                segment = handle.readline(current_read_limit)
                 if not segment:
                     break
                 segment_bytes, _ = _raw_line_parts(segment)
                 total_bytes += len(segment_bytes)
-                line_truncated = len(segment) == read_limit and not _raw_line_endswith_newline(segment)
+                at_source_end = source_bytes is not None and (
+                    line_start + total_bytes >= source_bytes
+                )
+                line_truncated = (
+                    not at_source_end
+                    and len(segment) == current_read_limit
+                    and not _raw_line_endswith_newline(segment)
+                )
 
             offset += total_bytes
             yield RolloutChunk(
@@ -693,6 +956,112 @@ def _run_subprocess_text(
         ) from exc
 
 
+def _run_subprocess_text_bounded(
+    argv: list[str],
+    *,
+    input_text: str | None = None,
+    timeout_seconds: int,
+    max_stdout_bytes: int,
+    max_stderr_bytes: int,
+) -> subprocess.CompletedProcess[str]:
+    if max_stdout_bytes < 1 or max_stderr_bytes < 1:
+        raise ValueError("bounded subprocess output limits must be positive")
+    try:
+        process = subprocess.Popen(
+            argv,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+    except FileNotFoundError as exc:
+        raise RuntimeError(f"command not found: {argv[0]}") from exc
+
+    assert process.stdin is not None
+    assert process.stdout is not None
+    assert process.stderr is not None
+    input_bytes = (input_text or "").encode("utf-8")
+    input_offset = 0
+    stdout = bytearray()
+    stderr = bytearray()
+    selector = selectors.DefaultSelector()
+    for stream, events, label in (
+        (process.stdout, selectors.EVENT_READ, "stdout"),
+        (process.stderr, selectors.EVENT_READ, "stderr"),
+    ):
+        os.set_blocking(stream.fileno(), False)
+        selector.register(stream, events, label)
+    if input_bytes:
+        os.set_blocking(process.stdin.fileno(), False)
+        selector.register(process.stdin, selectors.EVENT_WRITE, "stdin")
+    else:
+        process.stdin.close()
+
+    deadline = time.monotonic() + timeout_seconds
+    try:
+        while selector.get_map():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise RuntimeError(f"command timed out after {timeout_seconds}s")
+            for key, _ in selector.select(min(0.25, remaining)):
+                stream = key.fileobj
+                if key.data == "stdin":
+                    try:
+                        written = os.write(
+                            stream.fileno(), input_bytes[input_offset : input_offset + 65536]
+                        )
+                    except BrokenPipeError:
+                        written = 0
+                        input_offset = len(input_bytes)
+                    else:
+                        input_offset += written
+                    if input_offset >= len(input_bytes):
+                        selector.unregister(stream)
+                        stream.close()
+                    continue
+
+                try:
+                    chunk = os.read(stream.fileno(), 65536)
+                except BlockingIOError:
+                    continue
+                if not chunk:
+                    selector.unregister(stream)
+                    stream.close()
+                    continue
+                buffer = stdout if key.data == "stdout" else stderr
+                limit = (
+                    max_stdout_bytes if key.data == "stdout" else max_stderr_bytes
+                )
+                if len(buffer) + len(chunk) > limit:
+                    raise RuntimeError(
+                        f"command {key.data} exceeded {limit}-byte capture limit"
+                    )
+                buffer.extend(chunk)
+
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise RuntimeError(f"command timed out after {timeout_seconds}s")
+        returncode = process.wait(timeout=remaining)
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError(f"command timed out after {timeout_seconds}s") from exc
+    except Exception:
+        if process.poll() is None:
+            process.kill()
+        process.wait()
+        raise
+    finally:
+        selector.close()
+        for stream in (process.stdin, process.stdout, process.stderr):
+            if not stream.closed:
+                stream.close()
+
+    return subprocess.CompletedProcess(
+        argv,
+        returncode,
+        stdout.decode("utf-8", "replace"),
+        stderr.decode("utf-8", "replace"),
+    )
+
+
 def _local_preflight_row(alias: str) -> dict[str, str]:
     codex_root = _local_codex_root()
     return {
@@ -743,6 +1112,7 @@ def _remote_python_script(payload: dict[str, object]) -> str:
     return f"""
 import base64
 import collections
+import hashlib
 import json
 import os
 import pathlib
@@ -756,6 +1126,14 @@ LIMIT = int(CONFIG.get("limit", 0))
 ROOT = pathlib.Path(CONFIG["codex_root"]).expanduser()
 MAX_FETCH_ROLLOUT_BYTES = int(CONFIG.get("max_fetch_rollout_bytes", 0))
 MAX_FETCH_ROLLOUT_CHUNK_BYTES = int(CONFIG.get("max_fetch_rollout_chunk_bytes", 0))
+MIN_ROLLOUT_CHUNK_BYTES = int(CONFIG.get("min_rollout_chunk_bytes", 0))
+MAX_ROLLOUT_CHUNK_BYTES = int(CONFIG.get("max_rollout_chunk_bytes", 0))
+MAX_CHUNKED_ROLLOUT_SUMMARY_OUTPUT_BYTES = int(CONFIG.get("max_chunked_summary_output_bytes", 0))
+EXPECTED_SOURCE_IDENTITY_TOKEN = str(CONFIG.get("expected_source_identity", ""))
+EXPECTED_SOURCE_BYTES = int(CONFIG.get("expected_source_bytes", -1))
+AUTHORIZED_SOURCE_BYTES_RAW = CONFIG.get("authorized_source_bytes")
+AUTHORIZED_SOURCE_BYTES = None if AUTHORIZED_SOURCE_BYTES_RAW is None else int(AUTHORIZED_SOURCE_BYTES_RAW)
+OUTPUT_HOST = str(CONFIG.get("output_host", ""))
 SESSION_META_SCAN_BYTES = int(CONFIG.get("session_meta_scan_bytes", 0))
 SUMMARY_LIMIT = int(CONFIG.get("summary_limit", 0))
 SUMMARY_SCAN_BYTES = int(CONFIG.get("summary_scan_bytes", 0))
@@ -785,6 +1163,8 @@ FETCH_ROLLOUT_BEGIN = {REMOTE_FETCH_ROLLOUT_BEGIN!r}
 FETCH_ROLLOUT_END = {REMOTE_FETCH_ROLLOUT_END!r}
 FETCH_ROLLOUT_CHUNK_BEGIN = {REMOTE_FETCH_ROLLOUT_CHUNK_BEGIN!r}
 FETCH_ROLLOUT_CHUNK_END = {REMOTE_FETCH_ROLLOUT_CHUNK_END!r}
+ROLLOUT_STAT_BEGIN = {REMOTE_ROLLOUT_STAT_BEGIN!r}
+ROLLOUT_STAT_END = {REMOTE_ROLLOUT_STAT_END!r}
 ROLLOUT_SUMMARY_BEGIN = {REMOTE_ROLLOUT_SUMMARY_BEGIN!r}
 ROLLOUT_SUMMARY_END = {REMOTE_ROLLOUT_SUMMARY_END!r}
 CHUNKED_ROLLOUT_SUMMARY_BEGIN = {REMOTE_CHUNKED_ROLLOUT_SUMMARY_BEGIN!r}
@@ -841,12 +1221,119 @@ def safe_directory_path(rel):
     return safe_relative_path(rel, expect_directory=True)
 
 
-def open_rollout_text(target):
+def rollout_identity_from_stat(stat_result):
+    if not stat.S_ISREG(stat_result.st_mode):
+        raise ValueError("rollout path is not a regular file")
+    return {{
+        "size": int(stat_result.st_size),
+        "device": int(stat_result.st_dev),
+        "inode": int(stat_result.st_ino),
+        "mtime_ns": int(stat_result.st_mtime_ns),
+        "ctime_ns": int(stat_result.st_ctime_ns),
+    }}
+
+
+def rollout_identity_token(identity):
+    return "v1:" + ":".join(str(identity[key]) for key in ("size", "device", "inode", "mtime_ns", "ctime_ns"))
+
+
+def parse_rollout_identity_token(value):
+    if not value or len(value) > {MAX_SOURCE_IDENTITY_TOKEN_CHARS}:
+        raise ValueError("invalid expected source identity")
+    parts = value.split(":")
+    if len(parts) != 6 or parts[0] != "v1":
+        raise ValueError("invalid expected source identity")
+    try:
+        numbers = [int(part) for part in parts[1:]]
+    except ValueError as error:
+        raise ValueError("invalid expected source identity") from error
+    if any(number < 0 for number in numbers):
+        raise ValueError("invalid expected source identity")
+    identity = dict(zip(("size", "device", "inode", "mtime_ns", "ctime_ns"), numbers))
+    if rollout_identity_token(identity) != value:
+        raise ValueError("invalid expected source identity")
+    return identity
+
+
+def parse_expected_rollout_identity():
+    if EXPECTED_SOURCE_BYTES < 0:
+        raise ValueError("expected source bytes must be non-negative")
+    identity = parse_rollout_identity_token(EXPECTED_SOURCE_IDENTITY_TOKEN)
+    if identity["size"] != EXPECTED_SOURCE_BYTES:
+        raise ValueError("expected source bytes must match expected source identity")
+    return identity
+
+
+def assert_rollout_identity(actual, expected, phase):
+    if actual != expected:
+        raise ValueError("rollout identity changed " + phase)
+
+
+def rollout_path_identity(target):
+    return rollout_identity_from_stat(target.lstat())
+
+
+def assert_rollout_path_identity(target, expected, phase):
+    try:
+        actual = rollout_path_identity(target)
+    except (FileNotFoundError, ValueError) as error:
+        raise ValueError("rollout identity changed " + phase) from error
+    assert_rollout_identity(actual, expected, phase)
+
+
+def validate_source_read_budget(identity):
+    if AUTHORIZED_SOURCE_BYTES is not None:
+        if AUTHORIZED_SOURCE_BYTES < 0:
+            raise ValueError("authorized source bytes must be non-negative")
+        if AUTHORIZED_SOURCE_BYTES != identity["size"]:
+            raise ValueError("authorized source bytes must equal expected source size")
+    if identity["size"] > MAX_FETCH_ROLLOUT_BYTES:
+        if AUTHORIZED_SOURCE_BYTES != identity["size"]:
+            raise ValueError(
+                "rollout exceeds automatic full-reconstruction limit: "
+                + str(identity["size"])
+                + " bytes > "
+                + str(MAX_FETCH_ROLLOUT_BYTES)
+                + "; exact authorized source bytes required"
+            )
+        return True
+    return AUTHORIZED_SOURCE_BYTES == identity["size"]
+
+
+def rollout_identity_record(identity):
+    automatic_allowed = identity["size"] <= MAX_FETCH_ROLLOUT_BYTES
+    return {{
+        "kind": "rollout_stat",
+        "source_bytes": identity["size"],
+        "source_identity": rollout_identity_token(identity),
+        "source_dev": identity["device"],
+        "source_inode": identity["inode"],
+        "source_mtime_ns": identity["mtime_ns"],
+        "source_ctime_ns": identity["ctime_ns"],
+        "full_fetch_limit_bytes": MAX_FETCH_ROLLOUT_BYTES,
+        "automatic_full_reconstruction_allowed": automatic_allowed,
+        "full_reconstruction_allowed": automatic_allowed,
+    }}
+
+
+def stat_rollout_identity(target):
     flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
     fd = os.open(str(target), flags)
     try:
-        if not stat.S_ISREG(os.fstat(fd).st_mode):
-            raise ValueError("rollout path is not a regular file")
+        identity = rollout_identity_from_stat(os.fstat(fd))
+        assert_rollout_path_identity(target, identity, "during metadata stat")
+        return identity
+    finally:
+        os.close(fd)
+
+
+def open_rollout_text(target, expected_identity=None):
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(str(target), flags)
+    try:
+        identity = rollout_identity_from_stat(os.fstat(fd))
+        if expected_identity is not None:
+            assert_rollout_identity(identity, expected_identity, "before read")
         handle = os.fdopen(fd, "rb")
         fd = -1
         return handle
@@ -873,7 +1360,7 @@ def read_rollout_bytes(target, max_bytes):
             os.close(fd)
 
 
-def read_rollout_byte_range(target, byte_start, byte_end, max_bytes):
+def read_rollout_byte_range(target, byte_start, byte_end, max_bytes, expected_identity):
     if byte_start < 0:
         raise ValueError("byte start must be non-negative")
     if byte_end <= byte_start:
@@ -884,15 +1371,23 @@ def read_rollout_byte_range(target, byte_start, byte_end, max_bytes):
     flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
     fd = os.open(str(target), flags)
     try:
-        stat_result = os.fstat(fd)
-        if not stat.S_ISREG(stat_result.st_mode):
-            raise ValueError("rollout path is not a regular file")
-        if byte_end > stat_result.st_size:
-            raise ValueError("byte end exceeds rollout size: " + str(byte_end) + " > " + str(stat_result.st_size))
+        identity = rollout_identity_from_stat(os.fstat(fd))
+        assert_rollout_identity(identity, expected_identity, "before read")
+        if byte_end > identity["size"]:
+            raise ValueError("byte end exceeds rollout size: " + str(byte_end) + " > " + str(identity["size"]))
         with os.fdopen(fd, "rb") as handle:
             fd = -1
             handle.seek(byte_start)
-            return handle.read(length)
+            data = handle.read(length)
+            assert_rollout_identity(
+                rollout_identity_from_stat(os.fstat(handle.fileno())),
+                expected_identity,
+                "after read",
+            )
+            assert_rollout_path_identity(target, expected_identity, "after read")
+            if len(data) != length:
+                raise ValueError("rollout chunk read was truncated")
+            return data
     finally:
         if fd != -1:
             os.close(fd)
@@ -935,7 +1430,27 @@ def raw_line_endswith_newline(raw_line):
     return bytes(raw_line).endswith(b"\\n")
 
 
-def iter_rollout_chunks(handle, chunk_bytes):
+class HashingRolloutReader:
+    def __init__(self, handle):
+        self.handle = handle
+        self.bytes_read = 0
+        self.hasher = hashlib.sha256()
+
+    def readline(self, size=-1):
+        data = self.handle.readline(size)
+        raw_bytes = data.encode("utf-8", "surrogatepass") if isinstance(data, str) else bytes(data)
+        self.hasher.update(raw_bytes)
+        self.bytes_read += len(raw_bytes)
+        return data
+
+    def fileno(self):
+        return self.handle.fileno()
+
+    def hexdigest(self):
+        return self.hasher.hexdigest()
+
+
+def iter_rollout_chunks(handle, chunk_bytes, source_bytes=None):
     if chunk_bytes < 1:
         raise ValueError("chunk bytes must be positive")
     chunk_index = 0
@@ -978,7 +1493,14 @@ def iter_rollout_chunks(handle, chunk_bytes):
     read_limit = chunk_bytes + 1
 
     while True:
-        raw_line = handle.readline(read_limit)
+        remaining = None if source_bytes is None else source_bytes - offset
+        if remaining is not None and remaining <= 0:
+            chunk = flush()
+            if chunk is not None:
+                yield chunk
+            return
+        current_read_limit = read_limit if remaining is None else min(read_limit, remaining)
+        raw_line = handle.readline(current_read_limit)
         if not raw_line:
             chunk = flush()
             if chunk is not None:
@@ -987,7 +1509,12 @@ def iter_rollout_chunks(handle, chunk_bytes):
         raw_bytes, line = raw_line_parts(raw_line)
         line_start = offset
         record_no += 1
-        line_truncated = len(raw_line) == read_limit and not raw_line_endswith_newline(raw_line)
+        at_source_end = source_bytes is not None and line_start + len(raw_bytes) >= source_bytes
+        line_truncated = (
+            not at_source_end
+            and len(raw_line) == current_read_limit
+            and not raw_line_endswith_newline(raw_line)
+        )
         if len(raw_bytes) > chunk_bytes or line_truncated:
             if lines:
                 chunk = flush()
@@ -996,12 +1523,21 @@ def iter_rollout_chunks(handle, chunk_bytes):
 
             total_bytes = len(raw_bytes)
             while line_truncated:
-                segment = handle.readline(read_limit)
+                remaining = None if source_bytes is None else source_bytes - (line_start + total_bytes)
+                if remaining is not None and remaining <= 0:
+                    break
+                current_read_limit = read_limit if remaining is None else min(read_limit, remaining)
+                segment = handle.readline(current_read_limit)
                 if not segment:
                     break
                 segment_bytes, _ = raw_line_parts(segment)
                 total_bytes += len(segment_bytes)
-                line_truncated = len(segment) == read_limit and not raw_line_endswith_newline(segment)
+                at_source_end = source_bytes is not None and line_start + total_bytes >= source_bytes
+                line_truncated = (
+                    not at_source_end
+                    and len(segment) == current_read_limit
+                    and not raw_line_endswith_newline(segment)
+                )
 
             offset += total_bytes
             yield {{
@@ -1379,7 +1915,7 @@ def chunk_reason_codes(chunk, records):
     return codes
 
 
-def chunk_meta_record(chunk, records, source_bytes, chunk_bytes):
+def chunk_meta_record(chunk, records, source_identity, chunk_bytes):
     reason_codes = chunk_reason_codes(chunk, records)
     redacted_or_signal_only_records = sum(1 for record in records if summary_record_has_signal(record))
     raw_fetch_recommended = (
@@ -1387,12 +1923,16 @@ def chunk_meta_record(chunk, records, source_bytes, chunk_bytes):
         or "no_structured_evidence" in reason_codes
         or redacted_or_signal_only_records > 0
     )
+    automatic_allowed = source_identity["size"] <= MAX_FETCH_ROLLOUT_BYTES
     meta = {{
         "kind": "chunk_meta",
         "line": chunk["record_start"],
-        "source_bytes": source_bytes,
+        "source_bytes": source_identity["size"],
+        "source_identity": rollout_identity_token(source_identity),
         "full_fetch_limit_bytes": MAX_FETCH_ROLLOUT_BYTES,
-        "full_reconstruction_allowed": source_bytes <= MAX_FETCH_ROLLOUT_BYTES,
+        "automatic_full_reconstruction_allowed": automatic_allowed,
+        "full_reconstruction_allowed": automatic_allowed or AUTHORIZED_SOURCE_BYTES == source_identity["size"],
+        "authorized_source_bytes": AUTHORIZED_SOURCE_BYTES,
         "chunk_bytes": chunk_bytes,
         "coverage_status": "partial" if raw_fetch_recommended else "complete",
         "reason_codes": reason_codes,
@@ -1414,6 +1954,72 @@ def chunk_meta_record(chunk, records, source_bytes, chunk_bytes):
     return meta
 
 
+def serialized_summary_line(record, rel):
+    payload = dict(record)
+    payload["host"] = OUTPUT_HOST
+    payload["rollout"] = rel.as_posix()
+    line = json.dumps(payload, separators=(",", ":"), sort_keys=True)
+    return line, len(line.encode("utf-8")) + 1
+
+
+def rollout_summary_meta_record(source_identity, source_sha256):
+    record = rollout_identity_record(source_identity)
+    record.update({{
+        "kind": "rollout_meta",
+        "source_sha256": source_sha256,
+        "authorized_source_bytes": AUTHORIZED_SOURCE_BYTES,
+        "full_reconstruction_allowed": (
+            source_identity["size"] <= MAX_FETCH_ROLLOUT_BYTES
+            or AUTHORIZED_SOURCE_BYTES == source_identity["size"]
+        ),
+        "min_chunk_bytes": MIN_ROLLOUT_CHUNK_BYTES,
+        "chunk_summary_output_limit_bytes": MAX_CHUNKED_ROLLOUT_SUMMARY_OUTPUT_BYTES,
+    }})
+    return record
+
+
+def stat_rollout():
+    rel = pathlib.PurePosixPath(str(CONFIG["rollout"]))
+    normalized = rel.as_posix()
+    print(ROLLOUT_STAT_BEGIN)
+    if not (
+        ACTIVE_ROLLOUT_RELATIVE_RE.fullmatch(normalized)
+        or ARCHIVED_ROLLOUT_RELATIVE_RE.fullmatch(normalized)
+    ):
+        print(json.dumps({{"ok": False, "error": "invalid rollout path"}}, separators=(",", ":"), sort_keys=True))
+        print(ROLLOUT_STAT_END)
+        return
+    try:
+        target = safe_rollout_path(rel)
+        identity = stat_rollout_identity(target)
+        if EXPECTED_SOURCE_IDENTITY_TOKEN or EXPECTED_SOURCE_BYTES >= 0:
+            if not EXPECTED_SOURCE_IDENTITY_TOKEN or EXPECTED_SOURCE_BYTES < 0:
+                raise ValueError("expected source bytes and identity must be provided together")
+            assert_rollout_identity(
+                identity,
+                parse_expected_rollout_identity(),
+                "during final metadata verification",
+            )
+    except FileNotFoundError:
+        print(json.dumps({{"ok": False, "error": "rollout not found"}}, separators=(",", ":"), sort_keys=True))
+        print(ROLLOUT_STAT_END)
+        return
+    except OSError:
+        print(json.dumps({{"ok": False, "error": "rollout unreadable"}}, separators=(",", ":"), sort_keys=True))
+        print(ROLLOUT_STAT_END)
+        return
+    except ValueError as error:
+        print(json.dumps({{"ok": False, "error": str(error)}}, separators=(",", ":"), sort_keys=True))
+        print(ROLLOUT_STAT_END)
+        return
+    record = rollout_identity_record(identity)
+    record["host"] = OUTPUT_HOST
+    record["rollout"] = rel.as_posix()
+    print(json.dumps({{"ok": True}}, separators=(",", ":"), sort_keys=True))
+    print(json.dumps(record, separators=(",", ":"), sort_keys=True))
+    print(ROLLOUT_STAT_END)
+
+
 def summarize_rollout_chunks():
     rel = pathlib.PurePosixPath(str(CONFIG["rollout"]))
     normalized = rel.as_posix()
@@ -1422,8 +2028,12 @@ def summarize_rollout_chunks():
         print(json.dumps({{"ok": False, "error": "summary max text chars out of range"}}, separators=(",", ":"), sort_keys=True))
         print(CHUNKED_ROLLOUT_SUMMARY_END)
         return
-    if CHUNK_BYTES < 1:
+    if CHUNK_BYTES < MIN_ROLLOUT_CHUNK_BYTES or CHUNK_BYTES > MAX_ROLLOUT_CHUNK_BYTES:
         print(json.dumps({{"ok": False, "error": "chunk bytes out of range"}}, separators=(",", ":"), sort_keys=True))
+        print(CHUNKED_ROLLOUT_SUMMARY_END)
+        return
+    if MAX_CHUNKED_ROLLOUT_SUMMARY_OUTPUT_BYTES < 1:
+        print(json.dumps({{"ok": False, "error": "chunked summary output limit out of range"}}, separators=(",", ":"), sort_keys=True))
         print(CHUNKED_ROLLOUT_SUMMARY_END)
         return
     if not (
@@ -1434,6 +2044,7 @@ def summarize_rollout_chunks():
         print(CHUNKED_ROLLOUT_SUMMARY_END)
         return
     try:
+        expected_identity = parse_expected_rollout_identity()
         target = safe_rollout_path(rel)
     except FileNotFoundError:
         print(json.dumps({{"ok": False, "error": "rollout not found"}}, separators=(",", ":"), sort_keys=True))
@@ -1444,26 +2055,68 @@ def summarize_rollout_chunks():
         print(CHUNKED_ROLLOUT_SUMMARY_END)
         return
     try:
-        source_bytes = target.stat().st_size
-        handle = open_rollout_text(target)
+        serialized_records = []
+        serialized_bytes = 0
+        with open_rollout_text(target, expected_identity) as handle:
+            validate_source_read_budget(expected_identity)
+            hashing_reader = HashingRolloutReader(handle)
+            chunks = iter_rollout_chunks(
+                hashing_reader,
+                CHUNK_BYTES,
+                source_bytes=expected_identity["size"],
+            )
+            for chunk in chunks:
+                records = summarize_records(chunk["lines"], line_offset=int(chunk["record_start"]) - 1)
+                common = chunk_common_fields(chunk)
+                line, line_bytes = serialized_summary_line(
+                    chunk_meta_record(chunk, records, expected_identity, CHUNK_BYTES),
+                    rel,
+                )
+                if serialized_bytes + line_bytes > MAX_CHUNKED_ROLLOUT_SUMMARY_OUTPUT_BYTES:
+                    raise ValueError("chunked summary output too large")
+                serialized_records.append(line)
+                serialized_bytes += line_bytes
+                for record in records:
+                    payload = dict(record)
+                    payload.update(common)
+                    line, line_bytes = serialized_summary_line(payload, rel)
+                    if serialized_bytes + line_bytes > MAX_CHUNKED_ROLLOUT_SUMMARY_OUTPUT_BYTES:
+                        raise ValueError("chunked summary output too large")
+                    serialized_records.append(line)
+                    serialized_bytes += line_bytes
+            assert_rollout_identity(
+                rollout_identity_from_stat(os.fstat(handle.fileno())),
+                expected_identity,
+                "after summary scan",
+            )
+            assert_rollout_path_identity(target, expected_identity, "after summary scan")
+            if hashing_reader.bytes_read != expected_identity["size"]:
+                raise ValueError("chunked summary scan did not cover expected source bytes")
+            source_sha256 = hashing_reader.hexdigest()
+        meta_line, meta_bytes = serialized_summary_line(
+            rollout_summary_meta_record(expected_identity, source_sha256),
+            rel,
+        )
+        if meta_bytes + serialized_bytes > MAX_CHUNKED_ROLLOUT_SUMMARY_OUTPUT_BYTES:
+            raise ValueError("chunked summary output too large")
     except OSError:
         print(json.dumps({{"ok": False, "error": "rollout unreadable"}}, separators=(",", ":"), sort_keys=True))
         print(CHUNKED_ROLLOUT_SUMMARY_END)
         return
-    print(json.dumps({{"ok": True}}, separators=(",", ":"), sort_keys=True))
-    with handle:
-        try:
-            chunks = iter_rollout_chunks(handle, CHUNK_BYTES)
-            for chunk in chunks:
-                records = summarize_records(chunk["lines"], line_offset=int(chunk["record_start"]) - 1)
-                common = chunk_common_fields(chunk)
-                print(json.dumps(chunk_meta_record(chunk, records, source_bytes, CHUNK_BYTES), separators=(",", ":"), sort_keys=True))
-                for record in records:
-                    payload = dict(record)
-                    payload.update(common)
-                    print(json.dumps(payload, separators=(",", ":"), sort_keys=True))
-        except ValueError as error:
-            print(json.dumps({{"kind": "error", "error": str(error)}}, separators=(",", ":"), sort_keys=True))
+    except ValueError as error:
+        print(json.dumps({{"ok": False, "error": str(error)}}, separators=(",", ":"), sort_keys=True))
+        print(CHUNKED_ROLLOUT_SUMMARY_END)
+        return
+    print(json.dumps({{
+        "ok": True,
+        "source_bytes": expected_identity["size"],
+        "source_identity": rollout_identity_token(expected_identity),
+        "source_sha256": source_sha256,
+        "summary_output_bytes": meta_bytes + serialized_bytes,
+    }}, separators=(",", ":"), sort_keys=True))
+    print(meta_line)
+    for line in serialized_records:
+        print(line)
     print(CHUNKED_ROLLOUT_SUMMARY_END)
 
 
@@ -1759,12 +2412,15 @@ def fetch_rollout_chunk():
         print(FETCH_ROLLOUT_CHUNK_END)
         return
     try:
+        expected_identity = parse_expected_rollout_identity()
+        validate_source_read_budget(expected_identity)
         target = safe_rollout_path(rel)
         data = read_rollout_byte_range(
             target,
             FETCH_CHUNK_BYTE_START,
             FETCH_CHUNK_BYTE_END,
             MAX_FETCH_ROLLOUT_CHUNK_BYTES,
+            expected_identity,
         )
     except FileNotFoundError:
         print(json.dumps({{"ok": False, "error": "rollout not found"}}, separators=(",", ":"), sort_keys=True))
@@ -1779,7 +2435,12 @@ def fetch_rollout_chunk():
         print(FETCH_ROLLOUT_CHUNK_END)
         return
     payload = base64.b64encode(data).decode("ascii")
-    print(json.dumps({{"ok": True, "bytes": len(data)}}, separators=(",", ":"), sort_keys=True))
+    print(json.dumps({{
+        "ok": True,
+        "bytes": len(data),
+        "source_bytes": expected_identity["size"],
+        "source_identity": rollout_identity_token(expected_identity),
+    }}, separators=(",", ":"), sort_keys=True))
     print(payload)
     print(FETCH_ROLLOUT_CHUNK_END)
 
@@ -1794,6 +2455,8 @@ elif CONFIG["mode"] == "fetch-rollout":
     fetch_rollout()
 elif CONFIG["mode"] == "fetch-rollout-chunk":
     fetch_rollout_chunk()
+elif CONFIG["mode"] == "rollout-stat":
+    stat_rollout()
 elif CONFIG["mode"] == "rollout-summary":
     summarize_rollout()
 elif CONFIG["mode"] == "chunked-rollout-summary":
@@ -1803,21 +2466,40 @@ else:
 """.lstrip()
 
 
-def _run_remote_python(alias: str, payload: dict[str, object]) -> subprocess.CompletedProcess[str]:
+def _remote_python_argv(alias: str) -> list[str]:
     ssh_target = HOSTS[alias]["ssh_target"]
+    return [
+        "ssh",
+        "-o",
+        "BatchMode=yes",
+        "-o",
+        "ConnectTimeout=10",
+        ssh_target,
+        "python3",
+        "-",
+    ]
+
+
+def _run_remote_python(alias: str, payload: dict[str, object]) -> subprocess.CompletedProcess[str]:
     return _run_subprocess_text(
-        [
-            "ssh",
-            "-o",
-            "BatchMode=yes",
-            "-o",
-            "ConnectTimeout=10",
-            ssh_target,
-            "python3",
-            "-",
-        ],
+        _remote_python_argv(alias),
         input_text=_remote_python_script(payload),
         timeout_seconds=REMOTE_COMMAND_TIMEOUT_SECONDS,
+    )
+
+
+def _run_remote_python_bounded(
+    alias: str,
+    payload: dict[str, object],
+    *,
+    max_stdout_bytes: int,
+) -> subprocess.CompletedProcess[str]:
+    return _run_subprocess_text_bounded(
+        _remote_python_argv(alias),
+        input_text=_remote_python_script(payload),
+        timeout_seconds=REMOTE_COMMAND_TIMEOUT_SECONDS,
+        max_stdout_bytes=max_stdout_bytes,
+        max_stderr_bytes=MAX_REMOTE_STDERR_BYTES,
     )
 
 
@@ -1950,6 +2632,7 @@ def _fetch_local_rollout_chunk(
     *,
     byte_start: int,
     byte_end: int,
+    expected_identity: RolloutIdentity,
 ) -> bytes:
     return _read_local_rollout_byte_range(
         codex_root,
@@ -1957,6 +2640,7 @@ def _fetch_local_rollout_chunk(
         byte_start=byte_start,
         byte_end=byte_end,
         max_bytes=MAX_FETCH_ROLLOUT_CHUNK_BYTES,
+        expected_identity=expected_identity,
     )
 
 
@@ -2024,6 +2708,7 @@ def _extract_framed_fetch_rollout_payload(
     host: str,
     command: str,
     max_bytes: int = MAX_FETCH_ROLLOUT_BYTES,
+    expected_source_identity: str | None = None,
 ) -> bytes:
     payload_lines = _extract_framed_lines(
         text,
@@ -2057,6 +2742,11 @@ def _extract_framed_fetch_rollout_payload(
         raise ValueError(
             f"remote {command} output on host {host} had a negative payload size"
         )
+    if expected_source_identity is not None:
+        if str(header.get("source_identity", "")) != expected_source_identity:
+            raise ValueError(
+                f"remote {command} output on host {host} had a mismatched source identity"
+            )
     payload = "".join(line.strip() for line in payload_lines[1:] if line.strip())
     if not payload:
         if expected_bytes != 0:
@@ -2088,6 +2778,9 @@ def _extract_framed_rollout_summary_records(
     end_marker: str,
     host: str,
     command: str,
+    max_serialized_bytes: int | None = None,
+    expected_source_identity: str | None = None,
+    expected_source_bytes: int | None = None,
 ) -> list[dict[str, Any]]:
     payload_lines = _extract_framed_lines(
         text,
@@ -2112,12 +2805,79 @@ def _extract_framed_rollout_summary_records(
             raise FileNotFoundError(error)
         raise ValueError(error)
 
+    record_lines = [line for line in payload_lines[1:] if line.strip()]
+    serialized_bytes = sum(len(line.encode("utf-8")) + 1 for line in record_lines)
+    if max_serialized_bytes is not None:
+        if serialized_bytes > max_serialized_bytes:
+            raise ValueError(
+                f"remote {command} output on host {host} exceeded "
+                f"{max_serialized_bytes} serialized bytes"
+            )
+        try:
+            reported_bytes = int(header["summary_output_bytes"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError(
+                f"remote {command} output on host {host} had an invalid output size"
+            ) from exc
+        if reported_bytes != serialized_bytes:
+            raise ValueError(
+                f"remote {command} output on host {host} had a mismatched output size"
+            )
+    if expected_source_identity is not None:
+        if str(header.get("source_identity", "")) != expected_source_identity:
+            raise ValueError(
+                f"remote {command} output on host {host} had a mismatched source identity"
+            )
+    if expected_source_bytes is not None:
+        try:
+            reported_source_bytes = int(header["source_bytes"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError(
+                f"remote {command} output on host {host} had an invalid source size"
+            ) from exc
+        if reported_source_bytes != expected_source_bytes:
+            raise ValueError(
+                f"remote {command} output on host {host} had a mismatched source size"
+            )
+    source_sha256 = ""
+    if expected_source_identity is not None:
+        source_sha256 = str(header.get("source_sha256", ""))
+        if not re.fullmatch(r"[0-9a-f]{64}", source_sha256):
+            raise ValueError(
+                f"remote {command} output on host {host} had an invalid source digest"
+            )
+
     records: list[dict[str, Any]] = []
-    for line in payload_lines[1:]:
-        if not line.strip():
-            continue
+    for line in record_lines:
         item = _json_line_to_dict(line, host=host)
         records.append(item)
+    if expected_source_identity is not None:
+        rollout_meta = [
+            record for record in records if record.get("kind") == "rollout_meta"
+        ]
+        if len(rollout_meta) != 1:
+            raise ValueError(
+                f"remote {command} output on host {host} must contain one rollout_meta record"
+            )
+        meta = rollout_meta[0]
+        if (
+            str(meta.get("source_identity", "")) != expected_source_identity
+            or int(meta.get("source_bytes", -1)) != expected_source_bytes
+            or str(meta.get("source_sha256", "")) != source_sha256
+        ):
+            raise ValueError(
+                f"remote {command} output on host {host} had mismatched rollout metadata"
+            )
+        for record in records:
+            if record.get("kind") != "chunk_meta":
+                continue
+            if (
+                str(record.get("source_identity", "")) != expected_source_identity
+                or int(record.get("source_bytes", -1)) != expected_source_bytes
+            ):
+                raise ValueError(
+                    f"remote {command} output on host {host} had mismatched chunk metadata"
+                )
     return records
 
 
@@ -2373,12 +3133,115 @@ def cmd_fetch_rollout(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_rollout_stat(args: argparse.Namespace) -> int:
+    try:
+        hosts = _resolve_hosts([args.host])
+        alias = hosts[0]
+        rollout_relative_path = _resolve_rollout_relative_path(args.rollout)
+        expected_identity = _expected_rollout_identity_from_args(args, required=False)
+    except ValueError as error:
+        return _error(str(error))
+
+    try:
+        if HOSTS[alias]["kind"] == "local":
+            identity = _stat_local_rollout_identity(
+                _local_codex_root(), rollout_relative_path
+            )
+            if expected_identity is not None:
+                _assert_rollout_identity(
+                    identity,
+                    expected_identity,
+                    phase="during final metadata verification",
+                )
+            record = _rollout_identity_record(identity)
+            record["host"] = alias
+            record["rollout"] = rollout_relative_path.as_posix()
+        else:
+            payload = {
+                "mode": "rollout-stat",
+                "rollout": rollout_relative_path.as_posix(),
+                "codex_root": HOSTS[alias]["codex_root"],
+                "max_fetch_rollout_bytes": MAX_FETCH_ROLLOUT_BYTES,
+                "expected_source_identity": (
+                    _rollout_identity_token(expected_identity)
+                    if expected_identity is not None
+                    else ""
+                ),
+                "expected_source_bytes": (
+                    expected_identity.size if expected_identity is not None else -1
+                ),
+                "output_host": alias,
+            }
+            try:
+                result = _run_remote_python_bounded(
+                    alias,
+                    payload,
+                    max_stdout_bytes=MAX_REMOTE_METADATA_STDOUT_BYTES,
+                )
+            except RuntimeError as error:
+                print(f"host={alias}", file=sys.stderr)
+                print(f"rollout={rollout_relative_path.as_posix()}", file=sys.stderr)
+                print(f"error={error}", file=sys.stderr)
+                return 1
+            if result.returncode != 0:
+                message = (
+                    result.stderr.strip()
+                    or result.stdout.strip()
+                    or "remote rollout-stat failed"
+                )
+                print(f"host={alias}", file=sys.stderr)
+                print(f"rollout={rollout_relative_path.as_posix()}", file=sys.stderr)
+                print(f"error={message}", file=sys.stderr)
+                return 1
+            records = _extract_framed_rollout_summary_records(
+                result.stdout,
+                begin_marker=REMOTE_ROLLOUT_STAT_BEGIN,
+                end_marker=REMOTE_ROLLOUT_STAT_END,
+                host=alias,
+                command="rollout-stat",
+            )
+            if len(records) != 1 or records[0].get("kind") != "rollout_stat":
+                raise ValueError(
+                    f"remote rollout-stat output on host {alias} must contain one rollout_stat record"
+                )
+            record = records[0]
+            identity = _rollout_identity_from_record(record)
+            if expected_identity is not None:
+                _assert_rollout_identity(
+                    identity,
+                    expected_identity,
+                    phase="during final metadata verification",
+                )
+    except FileNotFoundError:
+        print(f"host={alias}", file=sys.stderr)
+        print(f"rollout={rollout_relative_path.as_posix()}", file=sys.stderr)
+        print("error=rollout not found", file=sys.stderr)
+        return 1
+    except OSError:
+        print(f"host={alias}", file=sys.stderr)
+        print(f"rollout={rollout_relative_path.as_posix()}", file=sys.stderr)
+        print("error=rollout unreadable", file=sys.stderr)
+        return 1
+    except ValueError as error:
+        print(f"host={alias}", file=sys.stderr)
+        print(f"rollout={rollout_relative_path.as_posix()}", file=sys.stderr)
+        print(f"error={error}", file=sys.stderr)
+        return 1
+
+    print(json.dumps(record, separators=(",", ":"), sort_keys=True))
+    return 0
+
+
 def cmd_fetch_rollout_chunk(args: argparse.Namespace) -> int:
     try:
         hosts = _resolve_hosts([args.host])
         alias = hosts[0]
         rollout_relative_path = _resolve_rollout_relative_path(args.rollout)
         output = _resolve_output_path(args.output)
+        expected_identity = _expected_rollout_identity_from_args(args, required=True)
+        assert expected_identity is not None
+        authorized_source_bytes = getattr(args, "authorized_source_bytes", None)
+        _validate_source_read_budget(expected_identity, authorized_source_bytes)
         if args.byte_start < 0:
             raise ValueError("--byte-start must be non-negative")
         if args.byte_end <= args.byte_start:
@@ -2397,6 +3260,7 @@ def cmd_fetch_rollout_chunk(args: argparse.Namespace) -> int:
                 rollout_relative_path,
                 byte_start=args.byte_start,
                 byte_end=args.byte_end,
+                expected_identity=expected_identity,
             )
         else:
             payload = {
@@ -2405,7 +3269,13 @@ def cmd_fetch_rollout_chunk(args: argparse.Namespace) -> int:
                 "codex_root": HOSTS[alias]["codex_root"],
                 "byte_start": args.byte_start,
                 "byte_end": args.byte_end,
+                "max_fetch_rollout_bytes": MAX_FETCH_ROLLOUT_BYTES,
                 "max_fetch_rollout_chunk_bytes": MAX_FETCH_ROLLOUT_CHUNK_BYTES,
+                "expected_source_identity": _rollout_identity_token(
+                    expected_identity
+                ),
+                "expected_source_bytes": expected_identity.size,
+                "authorized_source_bytes": authorized_source_bytes,
             }
             try:
                 result = _run_remote_python(alias, payload)
@@ -2428,6 +3298,9 @@ def cmd_fetch_rollout_chunk(args: argparse.Namespace) -> int:
                     host=alias,
                     command="fetch-rollout-chunk",
                     max_bytes=MAX_FETCH_ROLLOUT_CHUNK_BYTES,
+                    expected_source_identity=_rollout_identity_token(
+                        expected_identity
+                    ),
                 )
             except FileNotFoundError:
                 print(f"host={alias}", file=sys.stderr)
@@ -2466,6 +3339,8 @@ def cmd_fetch_rollout_chunk(args: argparse.Namespace) -> int:
     print(f"rollout={rollout_relative_path.as_posix()}")
     print(f"byte_start={args.byte_start}")
     print(f"byte_end={args.byte_end}")
+    print(f"source_identity={_rollout_identity_token(expected_identity)}")
+    print(f"source_bytes={expected_identity.size}")
     print(f"output={output}")
     print(f"bytes={len(data)}")
     return 0
@@ -2857,8 +3732,9 @@ def _chunk_meta_record(
     *,
     chunk: RolloutChunk,
     records: list[dict[str, Any]],
-    source_bytes: int,
+    source_identity: RolloutIdentity,
     chunk_bytes: int,
+    authorized_source_bytes: int | None,
 ) -> dict[str, Any]:
     reason_codes = _chunk_reason_codes(chunk, records)
     redacted_or_signal_only_records = sum(
@@ -2869,12 +3745,18 @@ def _chunk_meta_record(
         or "no_structured_evidence" in reason_codes
         or redacted_or_signal_only_records > 0
     )
+    automatic_allowed = source_identity.size <= MAX_FETCH_ROLLOUT_BYTES
     meta = {
         "kind": "chunk_meta",
         "line": chunk.record_start,
-        "source_bytes": source_bytes,
+        "source_bytes": source_identity.size,
+        "source_identity": _rollout_identity_token(source_identity),
         "full_fetch_limit_bytes": MAX_FETCH_ROLLOUT_BYTES,
-        "full_reconstruction_allowed": source_bytes <= MAX_FETCH_ROLLOUT_BYTES,
+        "automatic_full_reconstruction_allowed": automatic_allowed,
+        "full_reconstruction_allowed": (
+            automatic_allowed or authorized_source_bytes == source_identity.size
+        ),
+        "authorized_source_bytes": authorized_source_bytes,
         "chunk_bytes": chunk_bytes,
         "coverage_status": "partial" if raw_fetch_recommended else "complete",
         "reason_codes": reason_codes,
@@ -2896,6 +3778,49 @@ def _chunk_meta_record(
     return meta
 
 
+def _append_bounded_summary_record(
+    output: list[dict[str, Any]],
+    record: dict[str, Any],
+    serialized_bytes: int,
+) -> int:
+    encoded_bytes = len(
+        json.dumps(record, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    ) + 1
+    updated_bytes = serialized_bytes + encoded_bytes
+    if updated_bytes > MAX_CHUNKED_ROLLOUT_SUMMARY_OUTPUT_BYTES:
+        raise ValueError(
+            "chunked summary output too large: serialized JSONL exceeds "
+            f"{MAX_CHUNKED_ROLLOUT_SUMMARY_OUTPUT_BYTES} bytes"
+        )
+    output.append(record)
+    return updated_bytes
+
+
+def _rollout_summary_meta_record(
+    *,
+    source_identity: RolloutIdentity,
+    source_sha256: str,
+    authorized_source_bytes: int | None,
+) -> dict[str, Any]:
+    record = _rollout_identity_record(source_identity)
+    record.update(
+        {
+            "kind": "rollout_meta",
+            "source_sha256": source_sha256,
+            "authorized_source_bytes": authorized_source_bytes,
+            "full_reconstruction_allowed": (
+                source_identity.size <= MAX_FETCH_ROLLOUT_BYTES
+                or authorized_source_bytes == source_identity.size
+            ),
+            "min_chunk_bytes": MIN_ROLLOUT_CHUNK_BYTES,
+            "chunk_summary_output_limit_bytes": (
+                MAX_CHUNKED_ROLLOUT_SUMMARY_OUTPUT_BYTES
+            ),
+        }
+    )
+    return record
+
+
 def _chunked_rollout_summary_records(
     *,
     codex_root: pathlib.Path,
@@ -2905,12 +3830,30 @@ def _chunked_rollout_summary_records(
     limit_per_chunk: int,
     tail_records: int,
     max_text_chars: int,
+    host: str,
+    expected_identity: RolloutIdentity,
+    authorized_source_bytes: int | None,
 ) -> list[dict[str, Any]]:
+    if chunk_bytes < MIN_ROLLOUT_CHUNK_BYTES or chunk_bytes > MAX_ROLLOUT_CHUNK_BYTES:
+        raise ValueError(
+            f"--chunk-bytes must stay between {MIN_ROLLOUT_CHUNK_BYTES} "
+            f"and {MAX_ROLLOUT_CHUNK_BYTES}"
+        )
     target = _safe_rollout_path(codex_root, rollout_relative_path)
-    source_bytes = target.stat().st_size
+    _validate_source_read_budget(expected_identity, authorized_source_bytes)
     output: list[dict[str, Any]] = []
-    with _open_local_rollout_text(codex_root, rollout_relative_path) as handle:
-        for chunk in _iter_rollout_chunks(handle, chunk_bytes=chunk_bytes):
+    serialized_bytes = 0
+    with _open_local_rollout_text(
+        codex_root,
+        rollout_relative_path,
+        expected_identity=expected_identity,
+    ) as handle:
+        hashing_reader = _HashingRolloutReader(handle)
+        for chunk in _iter_rollout_chunks(
+            hashing_reader,
+            chunk_bytes=chunk_bytes,
+            source_bytes=expected_identity.size,
+        ):
             records = _summarize_rollout_records(
                 lines=chunk.lines,
                 keywords=keywords,
@@ -2920,18 +3863,60 @@ def _chunked_rollout_summary_records(
                 line_offset=chunk.record_start - 1,
             )
             common = _chunk_common_fields(chunk)
-            output.append(
-                _chunk_meta_record(
-                    chunk=chunk,
-                    records=records,
-                    source_bytes=source_bytes,
-                    chunk_bytes=chunk_bytes,
-                )
+            meta = _chunk_meta_record(
+                chunk=chunk,
+                records=records,
+                source_identity=expected_identity,
+                chunk_bytes=chunk_bytes,
+                authorized_source_bytes=authorized_source_bytes,
+            )
+            meta["host"] = host
+            meta["rollout"] = rollout_relative_path.as_posix()
+            serialized_bytes = _append_bounded_summary_record(
+                output,
+                meta,
+                serialized_bytes,
             )
             for record in records:
                 item = dict(record)
                 item.update(common)
-                output.append(item)
+                item["host"] = host
+                item["rollout"] = rollout_relative_path.as_posix()
+                serialized_bytes = _append_bounded_summary_record(
+                    output,
+                    item,
+                    serialized_bytes,
+                )
+        _assert_rollout_identity(
+            _rollout_identity_from_stat(os.fstat(handle.fileno())),
+            expected_identity,
+            phase="after summary scan",
+        )
+        _assert_rollout_path_identity(
+            target,
+            expected_identity,
+            phase="after summary scan",
+        )
+        if hashing_reader.bytes_read != expected_identity.size:
+            raise ValueError(
+                "chunked summary scan did not cover expected source bytes: "
+                f"{hashing_reader.bytes_read} != {expected_identity.size}"
+            )
+        rollout_meta = _rollout_summary_meta_record(
+            source_identity=expected_identity,
+            source_sha256=hashing_reader.hexdigest(),
+            authorized_source_bytes=authorized_source_bytes,
+        )
+        rollout_meta["host"] = host
+        rollout_meta["rollout"] = rollout_relative_path.as_posix()
+        meta_output: list[dict[str, Any]] = []
+        meta_bytes = _append_bounded_summary_record(meta_output, rollout_meta, 0)
+        if meta_bytes + serialized_bytes > MAX_CHUNKED_ROLLOUT_SUMMARY_OUTPUT_BYTES:
+            raise ValueError(
+                "chunked summary output too large: serialized JSONL exceeds "
+                f"{MAX_CHUNKED_ROLLOUT_SUMMARY_OUTPUT_BYTES} bytes"
+            )
+        output.insert(0, rollout_meta)
     return output
 
 
@@ -3053,9 +4038,17 @@ def cmd_chunked_rollout_summary(args: argparse.Namespace) -> int:
         hosts = _resolve_hosts([args.host])
         alias = hosts[0]
         rollout_relative_path = _resolve_rollout_relative_path(args.rollout)
-        if args.chunk_bytes < 1 or args.chunk_bytes > MAX_ROLLOUT_CHUNK_BYTES:
+        expected_identity = _expected_rollout_identity_from_args(args, required=True)
+        assert expected_identity is not None
+        authorized_source_bytes = getattr(args, "authorized_source_bytes", None)
+        _validate_source_read_budget(expected_identity, authorized_source_bytes)
+        if (
+            args.chunk_bytes < MIN_ROLLOUT_CHUNK_BYTES
+            or args.chunk_bytes > MAX_ROLLOUT_CHUNK_BYTES
+        ):
             raise ValueError(
-                f"--chunk-bytes must stay between 1 and {MAX_ROLLOUT_CHUNK_BYTES}"
+                f"--chunk-bytes must stay between {MIN_ROLLOUT_CHUNK_BYTES} "
+                f"and {MAX_ROLLOUT_CHUNK_BYTES}"
             )
         if args.limit_per_chunk < 1 or args.limit_per_chunk > MAX_ROLLOUT_SUMMARY_LIMIT:
             raise ValueError(
@@ -3084,6 +4077,9 @@ def cmd_chunked_rollout_summary(args: argparse.Namespace) -> int:
                 limit_per_chunk=args.limit_per_chunk,
                 tail_records=args.tail_records,
                 max_text_chars=args.max_text_chars,
+                host=alias,
+                expected_identity=expected_identity,
+                authorized_source_bytes=authorized_source_bytes,
             )
         else:
             payload = {
@@ -3092,6 +4088,17 @@ def cmd_chunked_rollout_summary(args: argparse.Namespace) -> int:
                 "codex_root": HOSTS[alias]["codex_root"],
                 "max_fetch_rollout_bytes": MAX_FETCH_ROLLOUT_BYTES,
                 "max_fetch_rollout_chunk_bytes": MAX_FETCH_ROLLOUT_CHUNK_BYTES,
+                "min_rollout_chunk_bytes": MIN_ROLLOUT_CHUNK_BYTES,
+                "max_rollout_chunk_bytes": MAX_ROLLOUT_CHUNK_BYTES,
+                "max_chunked_summary_output_bytes": (
+                    MAX_CHUNKED_ROLLOUT_SUMMARY_OUTPUT_BYTES
+                ),
+                "expected_source_identity": _rollout_identity_token(
+                    expected_identity
+                ),
+                "expected_source_bytes": expected_identity.size,
+                "authorized_source_bytes": authorized_source_bytes,
+                "output_host": alias,
                 "summary_keywords": list(args.keyword),
                 "summary_limit": args.limit_per_chunk,
                 "summary_tail_records": args.tail_records,
@@ -3099,7 +4106,14 @@ def cmd_chunked_rollout_summary(args: argparse.Namespace) -> int:
                 "chunk_bytes": args.chunk_bytes,
             }
             try:
-                result = _run_remote_python(alias, payload)
+                result = _run_remote_python_bounded(
+                    alias,
+                    payload,
+                    max_stdout_bytes=(
+                        MAX_CHUNKED_ROLLOUT_SUMMARY_OUTPUT_BYTES
+                        + REMOTE_CHUNKED_SUMMARY_FRAME_OVERHEAD_BYTES
+                    ),
+                )
             except RuntimeError as error:
                 print(f"host={alias}", file=sys.stderr)
                 print(f"rollout={rollout_relative_path.as_posix()}", file=sys.stderr)
@@ -3122,6 +4136,11 @@ def cmd_chunked_rollout_summary(args: argparse.Namespace) -> int:
                     end_marker=REMOTE_CHUNKED_ROLLOUT_SUMMARY_END,
                     host=alias,
                     command="chunked-rollout-summary",
+                    max_serialized_bytes=MAX_CHUNKED_ROLLOUT_SUMMARY_OUTPUT_BYTES,
+                    expected_source_identity=_rollout_identity_token(
+                        expected_identity
+                    ),
+                    expected_source_bytes=expected_identity.size,
                 )
             except FileNotFoundError:
                 print(f"host={alias}", file=sys.stderr)
@@ -3198,6 +4217,20 @@ def build_parser() -> argparse.ArgumentParser:
     )
     fetch_rollout.set_defaults(func=cmd_fetch_rollout)
 
+    rollout_stat = subparsers.add_parser(
+        "rollout-stat",
+        help="Return bounded rollout identity metadata before or after an identity-bound read.",
+    )
+    rollout_stat.add_argument("--host", required=True)
+    rollout_stat.add_argument(
+        "--rollout",
+        required=True,
+        help="Relative rollout path under the remote Codex root (sessions/... or archived_sessions/...).",
+    )
+    rollout_stat.add_argument("--expected-source-bytes", type=int)
+    rollout_stat.add_argument("--expected-source-identity")
+    rollout_stat.set_defaults(func=cmd_rollout_stat)
+
     fetch_rollout_chunk = subparsers.add_parser(
         "fetch-rollout-chunk",
         help="Copy one bounded byte-range chunk from a validated rollout file.",
@@ -3210,6 +4243,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     fetch_rollout_chunk.add_argument("--byte-start", type=int, required=True)
     fetch_rollout_chunk.add_argument("--byte-end", type=int, required=True)
+    fetch_rollout_chunk.add_argument("--expected-source-bytes", type=int, required=True)
+    fetch_rollout_chunk.add_argument("--expected-source-identity", required=True)
+    fetch_rollout_chunk.add_argument("--authorized-source-bytes", type=int)
     fetch_rollout_chunk.add_argument(
         "--output",
         required=True,
@@ -3245,6 +4281,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     chunked_rollout_summary.add_argument("--keyword", action="append", default=[])
     chunked_rollout_summary.add_argument("--chunk-bytes", type=int, default=DEFAULT_ROLLOUT_CHUNK_BYTES)
+    chunked_rollout_summary.add_argument(
+        "--expected-source-bytes", type=int, required=True
+    )
+    chunked_rollout_summary.add_argument("--expected-source-identity", required=True)
+    chunked_rollout_summary.add_argument("--authorized-source-bytes", type=int)
     chunked_rollout_summary.add_argument("--limit-per-chunk", type=int, default=40)
     chunked_rollout_summary.add_argument("--tail-records", type=int, default=8)
     chunked_rollout_summary.add_argument("--max-text-chars", type=int, default=400)
