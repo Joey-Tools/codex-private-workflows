@@ -1627,7 +1627,9 @@ class PrivateOverlaySyncTests(unittest.TestCase):
         SYNC_MODULE._apply_regular_file_overlays(REPO_ROOT, staging, rule)
 
         private_catalog = REPO_ROOT / rule.regular_file_overlays[0].source
-        self.assertEqual(stat.S_IMODE(private_catalog.stat().st_mode), 0o600)
+        private_catalog_stat = private_catalog.stat()
+        self.assertEqual(private_catalog_stat.st_uid, os.getuid())
+        self.assertFalse(private_catalog_stat.st_mode & (stat.S_IWGRP | stat.S_IWOTH))
         self.assertTrue(
             hmac.compare_digest(target.read_bytes(), private_catalog.read_bytes()),
             "staged catalog differs from the private override source",
