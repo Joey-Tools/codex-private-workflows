@@ -85,6 +85,18 @@ class PrivateOverlaySyncTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.tmpdir.cleanup()
 
+    def _assert_no_regular_file_overlay_temporaries(
+        self,
+        *directories: Path,
+    ) -> None:
+        for directory in directories:
+            self.assertFalse(
+                any(
+                    path.name.startswith(SYNC_MODULE.REGULAR_FILE_OVERLAY_TEMP_PREFIX)
+                    for path in directory.iterdir()
+                )
+            )
+
     def test_sync_rule_copies_and_transforms_text(self) -> None:
         source = self.source_root / "example-repo" / "skill" / "SKILL.md"
         source.parent.mkdir(parents=True)
@@ -661,6 +673,7 @@ class PrivateOverlaySyncTests(unittest.TestCase):
         private_catalog.parent.mkdir(parents=True)
         expected = b'{"owner":"the user","pool":"private","bytes":"\\u2603"}\n'
         private_catalog.write_bytes(expected)
+        private_catalog.chmod(0o600)
         rule = SYNC_MODULE.SyncRule(
             repo="example-repo",
             source=Path("skill"),
@@ -679,6 +692,11 @@ class PrivateOverlaySyncTests(unittest.TestCase):
         target = self.repo_root / "personal_codex" / "skills" / "example"
         self.assertEqual((target / "catalog.json").read_bytes(), expected)
         self.assertEqual(private_catalog.read_bytes(), expected)
+        self.assertEqual(stat.S_IMODE(private_catalog.stat().st_mode), 0o600)
+        self.assertEqual(
+            stat.S_IMODE((target / "catalog.json").stat().st_mode),
+            SYNC_MODULE.REGULAR_FILE_OVERLAY_TARGET_MODE,
+        )
         self.assertEqual(
             (target / "SKILL.md").read_text(encoding="utf-8"),
             "Use this when Joey asks.\n",
@@ -941,7 +959,7 @@ class PrivateOverlaySyncTests(unittest.TestCase):
         ):
             with self.assertRaisesRegex(
                 SYNC_MODULE.SyncError,
-                "cannot securely open regular-file overlay source parent",
+                "regular-file overlay source directory chain binding changed",
             ):
                 SYNC_MODULE._read_regular_file_overlay_source(
                     self.repo_root,
@@ -976,7 +994,7 @@ class PrivateOverlaySyncTests(unittest.TestCase):
         ):
             with self.assertRaisesRegex(
                 SYNC_MODULE.SyncError,
-                "cannot securely open regular-file overlay target parent",
+                "regular-file overlay target directory chain binding changed",
             ):
                 SYNC_MODULE._write_regular_file_overlay_target(
                     staging,
@@ -985,6 +1003,89 @@ class PrivateOverlaySyncTests(unittest.TestCase):
                 )
 
         self.assertEqual(outside_catalog.read_text(encoding="utf-8"), "outside\n")
+
+    def test_regular_file_overlay_blocks_source_descendant_swap_after_preflight(
+        self,
+    ) -> None:
+        nested = self.repo_root / "private" / "nested"
+        nested.mkdir(parents=True)
+        (nested / "catalog.json").write_text("original\n", encoding="utf-8")
+        replacement = self.root / "replacement-source-descendant"
+        replacement.mkdir()
+        (replacement / "catalog.json").write_text("replaced\n", encoding="utf-8")
+        saved = nested.with_name("nested-before-swap")
+        real_ensure_safe_source = SYNC_MODULE._ensure_safe_source
+
+        def swap_descendant(source_root, source):
+            real_ensure_safe_source(source_root, source)
+            nested.rename(saved)
+            replacement.rename(nested)
+
+        with mock.patch.object(
+            SYNC_MODULE,
+            "_ensure_safe_source",
+            side_effect=swap_descendant,
+        ):
+            with self.assertRaisesRegex(
+                SYNC_MODULE.SyncError,
+                "regular-file overlay source directory chain binding changed",
+            ):
+                SYNC_MODULE._read_regular_file_overlay_source(
+                    self.repo_root,
+                    Path("private/nested/catalog.json"),
+                )
+
+        self.assertEqual(
+            (saved / "catalog.json").read_text(encoding="utf-8"),
+            "original\n",
+        )
+        self.assertEqual(
+            (nested / "catalog.json").read_text(encoding="utf-8"),
+            "replaced\n",
+        )
+
+    def test_regular_file_overlay_blocks_target_descendant_swap_after_preflight(
+        self,
+    ) -> None:
+        staging = (self.repo_root / "staging-descendant-preflight").resolve()
+        nested = staging / "nested" / "inner"
+        nested.mkdir(parents=True)
+        (nested / "catalog.json").write_text("public\n", encoding="utf-8")
+        replacement = self.root / "replacement-target-descendant"
+        replacement.mkdir()
+        (replacement / "catalog.json").write_text("replaced\n", encoding="utf-8")
+        saved = nested.with_name("inner-before-swap")
+        real_ensure_safe_target = SYNC_MODULE._ensure_safe_target
+
+        def swap_descendant(repo_root, target):
+            real_ensure_safe_target(repo_root, target)
+            nested.rename(saved)
+            replacement.rename(nested)
+
+        with mock.patch.object(
+            SYNC_MODULE,
+            "_ensure_safe_target",
+            side_effect=swap_descendant,
+        ):
+            with self.assertRaisesRegex(
+                SYNC_MODULE.SyncError,
+                "regular-file overlay target directory chain binding changed",
+            ):
+                SYNC_MODULE._write_regular_file_overlay_target(
+                    staging,
+                    Path("nested/inner/catalog.json"),
+                    b"private\n",
+                )
+
+        self.assertEqual(
+            (saved / "catalog.json").read_text(encoding="utf-8"),
+            "public\n",
+        )
+        self.assertEqual(
+            (nested / "catalog.json").read_text(encoding="utf-8"),
+            "replaced\n",
+        )
+        self._assert_no_regular_file_overlay_temporaries(saved, nested)
 
     def test_regular_file_overlay_blocks_source_root_swap_after_preflight(
         self,
@@ -1012,7 +1113,7 @@ class PrivateOverlaySyncTests(unittest.TestCase):
         ):
             with self.assertRaisesRegex(
                 SYNC_MODULE.SyncError,
-                "regular-file overlay source root binding changed",
+                "regular-file overlay source directory chain binding changed",
             ):
                 SYNC_MODULE._read_regular_file_overlay_source(
                     self.repo_root,
@@ -1046,7 +1147,7 @@ class PrivateOverlaySyncTests(unittest.TestCase):
         ):
             with self.assertRaisesRegex(
                 SYNC_MODULE.SyncError,
-                "regular-file overlay target root binding changed",
+                "regular-file overlay target directory chain binding changed",
             ):
                 SYNC_MODULE._write_regular_file_overlay_target(
                     staging,
@@ -1084,7 +1185,7 @@ class PrivateOverlaySyncTests(unittest.TestCase):
         ):
             with self.assertRaisesRegex(
                 SYNC_MODULE.SyncError,
-                "regular-file overlay source root binding changed",
+                "regular-file overlay source directory chain binding changed",
             ):
                 SYNC_MODULE._read_regular_file_overlay_source(
                     self.repo_root,
@@ -1123,7 +1224,7 @@ class PrivateOverlaySyncTests(unittest.TestCase):
         ):
             with self.assertRaisesRegex(
                 SYNC_MODULE.SyncError,
-                "regular-file overlay target root binding changed",
+                "regular-file overlay target directory chain binding changed",
             ):
                 SYNC_MODULE._write_regular_file_overlay_target(
                     staging,
@@ -1150,14 +1251,16 @@ class PrivateOverlaySyncTests(unittest.TestCase):
             encoding="utf-8",
         )
         saved = self.root / "target-before-late-root-swap"
-        real_assert_binding = SYNC_MODULE._assert_regular_file_overlay_root_binding
+        real_assert_binding = (
+            SYNC_MODULE._assert_regular_file_overlay_directory_chain_binding
+        )
         real_read = SYNC_MODULE.os.read
         calls = 0
         read_inodes: list[int] = []
 
-        def swap_after_binding(root_descriptor, root, *, label):
+        def swap_after_binding(chain, *, label):
             nonlocal calls
-            real_assert_binding(root_descriptor, root, label=label)
+            real_assert_binding(chain, label=label)
             calls += 1
             if calls == 1:
                 self.repo_root.rename(saved)
@@ -1172,14 +1275,14 @@ class PrivateOverlaySyncTests(unittest.TestCase):
         with (
             mock.patch.object(
                 SYNC_MODULE,
-                "_assert_regular_file_overlay_root_binding",
+                "_assert_regular_file_overlay_directory_chain_binding",
                 side_effect=swap_after_binding,
             ),
             mock.patch.object(SYNC_MODULE.os, "read", side_effect=record_read),
         ):
             with self.assertRaisesRegex(
                 SYNC_MODULE.SyncError,
-                "regular-file overlay source root binding changed",
+                "regular-file overlay source directory chain binding changed",
             ):
                 SYNC_MODULE._read_regular_file_overlay_source(
                     self.repo_root,
@@ -1209,12 +1312,14 @@ class PrivateOverlaySyncTests(unittest.TestCase):
             encoding="utf-8",
         )
         saved = self.repo_root / "staging-before-late-root-swap"
-        real_assert_binding = SYNC_MODULE._assert_regular_file_overlay_root_binding
+        real_assert_binding = (
+            SYNC_MODULE._assert_regular_file_overlay_directory_chain_binding
+        )
         calls = 0
 
-        def swap_after_binding(root_descriptor, root, *, label):
+        def swap_after_binding(chain, *, label):
             nonlocal calls
-            real_assert_binding(root_descriptor, root, label=label)
+            real_assert_binding(chain, label=label)
             calls += 1
             if calls == 1:
                 staging.rename(saved)
@@ -1222,12 +1327,12 @@ class PrivateOverlaySyncTests(unittest.TestCase):
 
         with mock.patch.object(
             SYNC_MODULE,
-            "_assert_regular_file_overlay_root_binding",
+            "_assert_regular_file_overlay_directory_chain_binding",
             side_effect=swap_after_binding,
         ):
             with self.assertRaisesRegex(
                 SYNC_MODULE.SyncError,
-                "regular-file overlay target root binding changed",
+                "regular-file overlay target directory chain binding changed",
             ):
                 SYNC_MODULE._write_regular_file_overlay_target(
                     staging,
@@ -1241,8 +1346,112 @@ class PrivateOverlaySyncTests(unittest.TestCase):
         )
         self.assertEqual(
             (saved / "catalog.json").read_text(encoding="utf-8"),
-            "private\n",
+            "public\n",
         )
+        self._assert_no_regular_file_overlay_temporaries(saved)
+
+    def test_regular_file_overlay_detects_source_descendant_swap_after_binding_check(
+        self,
+    ) -> None:
+        nested = self.repo_root / "private" / "nested"
+        nested.mkdir(parents=True)
+        (nested / "catalog.json").write_text("original\n", encoding="utf-8")
+        replacement = self.root / "late-replacement-source-descendant"
+        replacement.mkdir()
+        (replacement / "catalog.json").write_text("replaced\n", encoding="utf-8")
+        saved = nested.with_name("nested-before-late-swap")
+        real_assert_binding = (
+            SYNC_MODULE._assert_regular_file_overlay_directory_chain_binding
+        )
+        real_read = SYNC_MODULE.os.read
+        calls = 0
+        read_inodes: list[int] = []
+
+        def swap_after_binding(chain, *, label):
+            nonlocal calls
+            real_assert_binding(chain, label=label)
+            calls += 1
+            if calls == 1:
+                nested.rename(saved)
+                replacement.rename(nested)
+
+        def record_read(descriptor, size):
+            metadata = SYNC_MODULE.os.fstat(descriptor)
+            if stat.S_ISREG(metadata.st_mode):
+                read_inodes.append(metadata.st_ino)
+            return real_read(descriptor, size)
+
+        with (
+            mock.patch.object(
+                SYNC_MODULE,
+                "_assert_regular_file_overlay_directory_chain_binding",
+                side_effect=swap_after_binding,
+            ),
+            mock.patch.object(SYNC_MODULE.os, "read", side_effect=record_read),
+        ):
+            with self.assertRaisesRegex(
+                SYNC_MODULE.SyncError,
+                "regular-file overlay source directory chain binding changed",
+            ):
+                SYNC_MODULE._read_regular_file_overlay_source(
+                    self.repo_root,
+                    Path("private/nested/catalog.json"),
+                )
+
+        original_inode = (saved / "catalog.json").stat().st_ino
+        replacement_inode = (nested / "catalog.json").stat().st_ino
+        self.assertTrue(read_inodes)
+        self.assertEqual(set(read_inodes), {original_inode})
+        self.assertNotEqual(original_inode, replacement_inode)
+
+    def test_regular_file_overlay_detects_target_descendant_swap_after_binding_check(
+        self,
+    ) -> None:
+        staging = (self.repo_root / "staging-late-descendant-swap").resolve()
+        nested = staging / "nested" / "inner"
+        nested.mkdir(parents=True)
+        (nested / "catalog.json").write_text("public\n", encoding="utf-8")
+        replacement = self.root / "late-replacement-target-descendant"
+        replacement.mkdir()
+        (replacement / "catalog.json").write_text("replaced\n", encoding="utf-8")
+        saved = nested.with_name("inner-before-late-swap")
+        real_assert_binding = (
+            SYNC_MODULE._assert_regular_file_overlay_directory_chain_binding
+        )
+        calls = 0
+
+        def swap_after_binding(chain, *, label):
+            nonlocal calls
+            real_assert_binding(chain, label=label)
+            calls += 1
+            if calls == 1:
+                nested.rename(saved)
+                replacement.rename(nested)
+
+        with mock.patch.object(
+            SYNC_MODULE,
+            "_assert_regular_file_overlay_directory_chain_binding",
+            side_effect=swap_after_binding,
+        ):
+            with self.assertRaisesRegex(
+                SYNC_MODULE.SyncError,
+                "regular-file overlay target directory chain binding changed",
+            ):
+                SYNC_MODULE._write_regular_file_overlay_target(
+                    staging,
+                    Path("nested/inner/catalog.json"),
+                    b"private\n",
+                )
+
+        self.assertEqual(
+            (saved / "catalog.json").read_text(encoding="utf-8"),
+            "public\n",
+        )
+        self.assertEqual(
+            (nested / "catalog.json").read_text(encoding="utf-8"),
+            "replaced\n",
+        )
+        self._assert_no_regular_file_overlay_temporaries(saved, nested)
 
     def test_regular_file_overlay_secure_open_requires_dir_fd_support(self) -> None:
         with mock.patch.object(SYNC_MODULE.os, "supports_dir_fd", set()):
@@ -1254,6 +1463,33 @@ class PrivateOverlaySyncTests(unittest.TestCase):
                     self.repo_root,
                     label="source",
                 )
+
+    def test_regular_file_overlay_atomic_replace_requires_dir_fd_support(self) -> None:
+        supported = set(SYNC_MODULE.os.supports_dir_fd)
+        for missing in (SYNC_MODULE.os.rename, SYNC_MODULE.os.unlink):
+            with self.subTest(missing=missing.__name__):
+                staging = (
+                    self.repo_root / f"staging-missing-{missing.__name__}"
+                ).resolve()
+                staging.mkdir()
+                target = staging / "catalog.json"
+                target.write_text("public\n", encoding="utf-8")
+                with mock.patch.object(
+                    SYNC_MODULE.os,
+                    "supports_dir_fd",
+                    supported - {missing},
+                ):
+                    with self.assertRaisesRegex(
+                        SYNC_MODULE.SyncError,
+                        "secure regular-file overlay atomic replace is unavailable",
+                    ):
+                        SYNC_MODULE._write_regular_file_overlay_target(
+                            staging,
+                            Path("catalog.json"),
+                            b"private\n",
+                        )
+                self.assertEqual(target.read_text(encoding="utf-8"), "public\n")
+                self._assert_no_regular_file_overlay_temporaries(staging)
 
     def test_regular_file_overlay_bounds_target_readback(self) -> None:
         staging = (self.repo_root / "staging-bounded-readback").resolve()
@@ -1271,7 +1507,7 @@ class PrivateOverlaySyncTests(unittest.TestCase):
         with mock.patch.object(SYNC_MODULE.os, "read", side_effect=appending_read):
             with self.assertRaisesRegex(
                 SYNC_MODULE.SyncError,
-                "target byte verification failed",
+                "temporary byte verification failed",
             ):
                 SYNC_MODULE._write_regular_file_overlay_target(
                     staging,
@@ -1280,42 +1516,65 @@ class PrivateOverlaySyncTests(unittest.TestCase):
                 )
 
         self.assertEqual(calls, [len(b"private\n") + 1])
+        self.assertEqual(target.read_text(encoding="utf-8"), "public\n")
+        self._assert_no_regular_file_overlay_temporaries(staging)
 
-    def test_regular_file_overlay_detects_target_mutation_after_readback(
+    def test_regular_file_overlay_atomically_replaces_preopened_old_target(
         self,
     ) -> None:
-        staging = (self.repo_root / "staging-readback-mutation").resolve()
+        staging = (self.repo_root / "staging-preopened-old-target").resolve()
         staging.mkdir()
         target = staging / "catalog.json"
         target.write_text("public\n", encoding="utf-8")
-        real_read = SYNC_MODULE.os.read
+        old_descriptor = os.open(target, os.O_RDWR)
+        old_identity = os.fstat(old_descriptor)
+        real_rename = SYNC_MODULE.os.rename
         mutated = False
 
-        def mutate_after_eof(descriptor, size):
-            nonlocal mutated
-            chunk = real_read(descriptor, size)
-            if not chunk and not mutated:
-                mutated = True
-                os.pwrite(descriptor, b"attacker", 0)
-            return chunk
-
-        with mock.patch.object(
-            SYNC_MODULE.os,
-            "read",
-            side_effect=mutate_after_eof,
+        def mutate_old_then_rename(
+            source,
+            destination,
+            *,
+            src_dir_fd=None,
+            dst_dir_fd=None,
         ):
-            with self.assertRaisesRegex(
-                SYNC_MODULE.SyncError,
-                "target byte verification failed",
-            ):
-                SYNC_MODULE._write_regular_file_overlay_target(
-                    staging,
-                    Path("catalog.json"),
-                    b"private\n",
-                )
+            nonlocal mutated
+            os.pwrite(old_descriptor, b"attacker", 0)
+            mutated = True
+            real_rename(
+                source,
+                destination,
+                src_dir_fd=src_dir_fd,
+                dst_dir_fd=dst_dir_fd,
+            )
+
+        try:
+            with mock.patch.object(
+                SYNC_MODULE.os,
+                "rename",
+                side_effect=mutate_old_then_rename,
+            ) as rename_mock:
+                with mock.patch.object(
+                    SYNC_MODULE.os,
+                    "supports_dir_fd",
+                    set(SYNC_MODULE.os.supports_dir_fd) | {rename_mock},
+                ):
+                    SYNC_MODULE._write_regular_file_overlay_target(
+                        staging,
+                        Path("catalog.json"),
+                        b"private\n",
+                    )
+        finally:
+            os.close(old_descriptor)
 
         self.assertTrue(mutated)
-        self.assertEqual(target.read_bytes(), b"attacker")
+        self.assertEqual(target.read_bytes(), b"private\n")
+        self.assertNotEqual(target.stat().st_ino, old_identity.st_ino)
+        self.assertEqual(
+            stat.S_IMODE(target.stat().st_mode),
+            SYNC_MODULE.REGULAR_FILE_OVERLAY_TARGET_MODE,
+        )
+        self._assert_no_regular_file_overlay_temporaries(staging)
 
     def test_regular_file_overlay_enforces_size_limit(self) -> None:
         source = self.source_root / "example-repo" / "skill"
@@ -1368,6 +1627,7 @@ class PrivateOverlaySyncTests(unittest.TestCase):
         SYNC_MODULE._apply_regular_file_overlays(REPO_ROOT, staging, rule)
 
         private_catalog = REPO_ROOT / rule.regular_file_overlays[0].source
+        self.assertEqual(stat.S_IMODE(private_catalog.stat().st_mode), 0o600)
         self.assertTrue(
             hmac.compare_digest(target.read_bytes(), private_catalog.read_bytes()),
             "staged catalog differs from the private override source",
@@ -1376,6 +1636,14 @@ class PrivateOverlaySyncTests(unittest.TestCase):
             REPO_ROOT / rule.target / rule.regular_file_overlays[0].target
         )
         self.assertTrue(generated_catalog.is_file())
+        self.assertEqual(
+            stat.S_IMODE(target.stat().st_mode),
+            SYNC_MODULE.REGULAR_FILE_OVERLAY_TARGET_MODE,
+        )
+        self.assertEqual(
+            stat.S_IMODE(generated_catalog.stat().st_mode),
+            SYNC_MODULE.REGULAR_FILE_OVERLAY_TARGET_MODE,
+        )
         self.assertTrue(
             hmac.compare_digest(
                 generated_catalog.read_bytes(),
@@ -1456,22 +1724,36 @@ class PrivateOverlaySyncTests(unittest.TestCase):
             exemption.identifier: exemption for exemption in catalog.legacy_exemptions
         }
         pat_id = "codex-workflow-hygiene-session-retrospective-github-pat-v1"
+        jwt_id = "codex-workflow-hygiene-jwt"
         portable_id = "portable-codex-runtime-master-generic-fixtures-v1"
-        self.assertEqual(set(exemptions), {pat_id, portable_id})
+        self.assertEqual(set(exemptions), {pat_id, jwt_id, portable_id})
         pat = exemptions[pat_id]
+        jwt = exemptions[jwt_id]
         portable = exemptions[portable_id]
         self.assertEqual(pat.repository, "Joey-Tools/codex-workflow-hygiene")
+        self.assertEqual(jwt.repository, "Joey-Tools/codex-workflow-hygiene")
         self.assertEqual(portable.repository, "cha-op/portable-codex-runtime")
         self.assertEqual(
             pat.verified_master_tip, "95befb966cd93e0161ecb45099c124eac56cb52f"
+        )
+        self.assertEqual(
+            jwt.verified_master_tip, "95befb966cd93e0161ecb45099c124eac56cb52f"
         )
         self.assertEqual(
             portable.verified_master_tip,
             "83542fa2a29661c1422c108887bc13cb5bddd7eb",
         )
         self.assertEqual(len(pat.values), 1)
+        self.assertEqual(len(jwt.values), 1)
         self.assertEqual(len(portable.values), 16)
         self.assertEqual(sum(token.source_occurrences for token in pat.values), 1)
+        self.assertEqual(
+            [
+                (token.identifier, token.rule, token.source_occurrences)
+                for token in jwt.values
+            ],
+            [("session-retrospective-redaction-jwt", "jwt", 1)],
+        )
         expected_portable_counts = {
             "portable-runtime-legacy-v1-001": 1,
             "portable-runtime-legacy-v1-002": 2,
@@ -1509,9 +1791,22 @@ class PrivateOverlaySyncTests(unittest.TestCase):
             }.isdisjoint(actual_portable_counts)
         )
         self.assertEqual({token.rule for token in pat.values}, {"github-token"})
+        self.assertEqual({token.rule for token in jwt.values}, {"jwt"})
         self.assertEqual(
             {token.rule for token in portable.values},
             {"generic-secret-assignment"},
+        )
+        self.assertEqual(
+            sum(len(exemption.values) for exemption in catalog.legacy_exemptions),
+            18,
+        )
+        self.assertEqual(
+            sum(
+                token.source_occurrences
+                for exemption in catalog.legacy_exemptions
+                for token in exemption.values
+            ),
+            39,
         )
 
         raw_exemptions = {

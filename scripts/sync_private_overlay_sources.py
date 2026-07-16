@@ -2,9 +2,12 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
+from collections.abc import Iterator
 from dataclasses import dataclass
 import os
 from pathlib import Path
+import secrets
 import shutil
 import stat
 import sys
@@ -458,6 +461,9 @@ RETIRED_REVIEW_REFERENCES = (
 EXCLUDED_NAMES = frozenset({".git", ".github", "__pycache__"})
 EXCLUDED_SUFFIXES = (".pyc",)
 MAX_REGULAR_FILE_OVERLAY_BYTES = 64 * 1024
+REGULAR_FILE_OVERLAY_TARGET_MODE = 0o644
+REGULAR_FILE_OVERLAY_TEMP_ATTEMPTS = 16
+REGULAR_FILE_OVERLAY_TEMP_PREFIX = ".codex-private-overlay-"
 
 
 def _is_text_candidate(path: Path, extensions: tuple[str, ...]) -> bool:
@@ -798,60 +804,161 @@ def _overlay_root_identity(metadata: os.stat_result) -> tuple[int, int, int, int
     )
 
 
-def _assert_regular_file_overlay_root_binding(
-    root_descriptor: int,
-    root: Path,
+@dataclass(frozen=True)
+class _PinnedRegularFileOverlayDirectoryChain:
+    root: Path
+    relative: Path
+    name: str
+    descriptors: tuple[int, ...]
+    identities: tuple[tuple[int, int, int, int], ...]
+
+    @property
+    def parent_descriptor(self) -> int:
+        return self.descriptors[-1]
+
+
+def _regular_file_overlay_directory_identity(
+    descriptor: int,
     *,
     label: str,
-) -> None:
+    path: Path,
+) -> tuple[int, int, int, int]:
     try:
-        pinned = os.fstat(root_descriptor)
+        metadata = os.fstat(descriptor)
     except OSError as exc:
         raise SyncError(
-            f"cannot inspect pinned regular-file overlay {label} root: {root}: {exc}"
+            f"cannot inspect regular-file overlay {label} directory: {path}: {exc}"
         ) from exc
-    try:
-        visible_descriptor = _open_regular_file_overlay_root(root, label=label)
-    except SyncError as exc:
-        raise SyncError(
-            f"regular-file overlay {label} root binding changed: {root}"
-        ) from exc
-    try:
-        visible = os.fstat(visible_descriptor)
-    except OSError as exc:
-        raise SyncError(
-            f"cannot inspect visible regular-file overlay {label} root: {root}: {exc}"
-        ) from exc
-    finally:
-        os.close(visible_descriptor)
-    if _overlay_root_identity(pinned) != _overlay_root_identity(visible):
-        raise SyncError(f"regular-file overlay {label} root binding changed: {root}")
+    if not stat.S_ISDIR(metadata.st_mode):
+        raise SyncError(f"regular-file overlay {label} path is not a directory: {path}")
+    return _overlay_root_identity(metadata)
 
 
-def _open_regular_file_overlay_parent(
-    root_descriptor: int,
+@contextlib.contextmanager
+def _pin_regular_file_overlay_directory_chain(
+    root: Path,
     relative: Path,
     *,
     label: str,
-) -> tuple[int, str]:
+) -> Iterator[_PinnedRegularFileOverlayDirectoryChain]:
     _require_overlay_relative_path(relative, field=label)
     flags = _regular_file_overlay_directory_flags(label=label)
-    descriptor: int | None = None
+    with contextlib.ExitStack() as stack:
+        root_descriptor = _open_regular_file_overlay_root(root, label=label)
+        stack.callback(os.close, root_descriptor)
+        descriptors = [root_descriptor]
+        identities = [
+            _regular_file_overlay_directory_identity(
+                root_descriptor,
+                label=label,
+                path=root,
+            )
+        ]
+        current = root_descriptor
+        current_path = root
+        try:
+            for component in relative.parts[:-1]:
+                current_path = current_path / component
+                current = os.open(component, flags, dir_fd=current)
+                stack.callback(os.close, current)
+                descriptors.append(current)
+                identities.append(
+                    _regular_file_overlay_directory_identity(
+                        current,
+                        label=label,
+                        path=current_path,
+                    )
+                )
+        except FileNotFoundError as exc:
+            raise SyncError(
+                f"regular-file overlay {label} missing: {root / relative}"
+            ) from exc
+        except OSError as exc:
+            raise SyncError(
+                "cannot securely pin regular-file overlay "
+                f"{label} directory chain: {relative}: {exc}"
+            ) from exc
+        yield _PinnedRegularFileOverlayDirectoryChain(
+            root=root,
+            relative=relative,
+            name=relative.name,
+            descriptors=tuple(descriptors),
+            identities=tuple(identities),
+        )
+
+
+def _regular_file_overlay_directory_chain_changed(
+    *,
+    label: str,
+    path: Path,
+) -> SyncError:
+    return SyncError(
+        f"regular-file overlay {label} directory chain binding changed: {path}"
+    )
+
+
+def _assert_regular_file_overlay_directory_chain_binding(
+    chain: _PinnedRegularFileOverlayDirectoryChain,
+    *,
+    label: str,
+) -> None:
+    flags = _regular_file_overlay_directory_flags(label=label)
+    visible_descriptors: list[int] = []
+    visible_path = chain.root
     try:
-        descriptor = os.dup(root_descriptor)
-        for component in relative.parts[:-1]:
-            next_descriptor = os.open(component, flags, dir_fd=descriptor)
-            previous_descriptor = descriptor
-            descriptor = next_descriptor
-            os.close(previous_descriptor)
-    except OSError as exc:
-        if descriptor is not None:
+        try:
+            visible = _open_regular_file_overlay_root(chain.root, label=label)
+        except SyncError as exc:
+            raise _regular_file_overlay_directory_chain_changed(
+                label=label,
+                path=visible_path,
+            ) from exc
+        visible_descriptors.append(visible)
+        try:
+            visible_identity = _regular_file_overlay_directory_identity(
+                visible,
+                label=label,
+                path=visible_path,
+            )
+        except SyncError as exc:
+            raise _regular_file_overlay_directory_chain_changed(
+                label=label,
+                path=visible_path,
+            ) from exc
+        if visible_identity != chain.identities[0]:
+            raise _regular_file_overlay_directory_chain_changed(
+                label=label,
+                path=visible_path,
+            )
+        for index, component in enumerate(chain.relative.parts[:-1], start=1):
+            visible_path = visible_path / component
+            try:
+                visible = os.open(component, flags, dir_fd=visible)
+            except OSError as exc:
+                raise _regular_file_overlay_directory_chain_changed(
+                    label=label,
+                    path=visible_path,
+                ) from exc
+            visible_descriptors.append(visible)
+            try:
+                visible_identity = _regular_file_overlay_directory_identity(
+                    visible,
+                    label=label,
+                    path=visible_path,
+                )
+            except SyncError as exc:
+                raise _regular_file_overlay_directory_chain_changed(
+                    label=label,
+                    path=visible_path,
+                ) from exc
+            if visible_identity != chain.identities[index]:
+                raise _regular_file_overlay_directory_chain_changed(
+                    label=label,
+                    path=visible_path,
+                )
+    finally:
+        for descriptor in reversed(visible_descriptors):
             os.close(descriptor)
-        raise SyncError(
-            "cannot securely open regular-file overlay "
-            f"{label} parent: {relative}: {exc}"
-        ) from exc
-    return descriptor, relative.name
 
 
 def _stat_regular_file_overlay_entry(
@@ -879,33 +986,89 @@ def _stat_regular_file_overlay_entry(
     return metadata
 
 
+def _require_regular_file_overlay_atomic_replace() -> None:
+    if (
+        not hasattr(os, "O_CREAT")
+        or not hasattr(os, "O_EXCL")
+        or not hasattr(os, "O_NOFOLLOW")
+        or not hasattr(os, "fchmod")
+        or os.rename not in os.supports_dir_fd
+        or os.unlink not in os.supports_dir_fd
+    ):
+        raise SyncError("secure regular-file overlay atomic replace is unavailable")
+
+
+def _open_regular_file_overlay_temporary(
+    parent_descriptor: int,
+) -> tuple[int, str]:
+    _require_regular_file_overlay_atomic_replace()
+    flags = (
+        os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+    )
+    for _attempt in range(REGULAR_FILE_OVERLAY_TEMP_ATTEMPTS):
+        name = f"{REGULAR_FILE_OVERLAY_TEMP_PREFIX}{secrets.token_hex(16)}"
+        try:
+            descriptor = os.open(
+                name,
+                flags,
+                0o600,
+                dir_fd=parent_descriptor,
+            )
+        except FileExistsError:
+            continue
+        except OSError as exc:
+            raise SyncError(
+                f"cannot create regular-file overlay temporary file: {exc}"
+            ) from exc
+        return descriptor, name
+    raise SyncError("cannot allocate a unique regular-file overlay temporary file")
+
+
+def _read_regular_file_overlay_descriptor(
+    descriptor: int,
+    *,
+    byte_limit: int,
+) -> bytes:
+    os.lseek(descriptor, 0, os.SEEK_SET)
+    chunks: list[bytes] = []
+    remaining = byte_limit + 1
+    while remaining:
+        chunk = os.read(descriptor, min(remaining, 64 * 1024))
+        if not chunk:
+            break
+        chunks.append(chunk)
+        remaining -= len(chunk)
+    return b"".join(chunks)
+
+
+def _write_regular_file_overlay_descriptor(descriptor: int, data: bytes) -> None:
+    offset = 0
+    while offset < len(data):
+        written = os.write(descriptor, data[offset:])
+        if written <= 0:
+            raise SyncError("short write for regular-file overlay temporary file")
+        offset += written
+
+
 def _read_regular_file_overlay_source(repo_root: Path, relative: Path) -> bytes:
     source = repo_root / relative
-    root_descriptor = _open_regular_file_overlay_root(repo_root, label="source")
-    try:
+    with _pin_regular_file_overlay_directory_chain(
+        repo_root,
+        relative,
+        label="source",
+    ) as chain:
         if source.is_symlink():
             raise SyncError(f"refusing regular-file overlay source symlink: {source}")
         if not source.exists():
             raise SyncError(f"regular-file overlay source missing: {source}")
         _ensure_safe_source(repo_root, source)
-        _assert_regular_file_overlay_root_binding(
-            root_descriptor,
-            repo_root,
+        _assert_regular_file_overlay_directory_chain_binding(
+            chain,
             label="source",
         )
-        parent_descriptor, name = _open_regular_file_overlay_parent(
-            root_descriptor,
-            relative,
-            label="source",
-        )
-    except BaseException:
-        os.close(root_descriptor)
-        raise
-
-    try:
         initial = _stat_regular_file_overlay_entry(
-            parent_descriptor,
-            name,
+            chain.parent_descriptor,
+            chain.name,
             label="source",
             path=source,
         )
@@ -916,7 +1079,11 @@ def _read_regular_file_overlay_source(repo_root: Path, relative: Path) -> bytes:
             | getattr(os, "O_NONBLOCK", 0)
         )
         try:
-            descriptor = os.open(name, flags, dir_fd=parent_descriptor)
+            descriptor = os.open(
+                chain.name,
+                flags,
+                dir_fd=chain.parent_descriptor,
+            )
         except OSError as exc:
             raise SyncError(
                 f"cannot open regular-file overlay source: {source}: {exc}"
@@ -959,8 +1126,8 @@ def _read_regular_file_overlay_source(repo_root: Path, relative: Path) -> bytes:
                 f"regular-file overlay source changed while reading: {source}"
             )
         final = _stat_regular_file_overlay_entry(
-            parent_descriptor,
-            name,
+            chain.parent_descriptor,
+            chain.name,
             label="source",
             path=source,
         )
@@ -968,16 +1135,10 @@ def _read_regular_file_overlay_source(repo_root: Path, relative: Path) -> bytes:
             raise SyncError(
                 f"regular-file overlay source changed after reading: {source}"
             )
-        _assert_regular_file_overlay_root_binding(
-            root_descriptor,
-            repo_root,
+        _assert_regular_file_overlay_directory_chain_binding(
+            chain,
             label="source",
         )
-    finally:
-        try:
-            os.close(parent_descriptor)
-        finally:
-            os.close(root_descriptor)
     if len(data) > MAX_REGULAR_FILE_OVERLAY_BYTES:
         raise SyncError(
             "regular-file overlay source exceeds "
@@ -989,101 +1150,162 @@ def _read_regular_file_overlay_source(repo_root: Path, relative: Path) -> bytes:
 def _write_regular_file_overlay_target(
     staging: Path, relative: Path, data: bytes
 ) -> None:
-    target = staging / relative
-    root_descriptor = _open_regular_file_overlay_root(staging, label="target")
-    try:
-        _ensure_safe_target(staging, target)
-        _assert_regular_file_overlay_root_binding(
-            root_descriptor,
-            staging,
-            label="target",
-        )
-        parent_descriptor, name = _open_regular_file_overlay_parent(
-            root_descriptor,
-            relative,
-            label="target",
-        )
-    except BaseException:
-        os.close(root_descriptor)
-        raise
-
-    try:
-        target_stat = _stat_regular_file_overlay_entry(
-            parent_descriptor,
-            name,
-            label="target",
-            path=relative,
-        )
-        flags = os.O_RDWR | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
-        try:
-            descriptor = os.open(name, flags, dir_fd=parent_descriptor)
-        except OSError as exc:
-            raise SyncError(
-                f"cannot open regular-file overlay target: {relative}: {exc}"
-            ) from exc
-        try:
-            opened = os.fstat(descriptor)
-            _validate_overlay_regular_file(opened, label="target", path=relative)
-            if _overlay_file_identity(opened) != _overlay_file_identity(target_stat):
-                raise SyncError(
-                    f"regular-file overlay target changed before writing: {relative}"
-                )
-            os.ftruncate(descriptor, 0)
-            offset = 0
-            while offset < len(data):
-                written = os.write(descriptor, data[offset:])
-                if written <= 0:
-                    raise SyncError(
-                        f"short write for regular-file overlay target: {relative}"
-                    )
-                offset += written
-            write_complete = os.fstat(descriptor)
-            os.lseek(descriptor, 0, os.SEEK_SET)
-            chunks: list[bytes] = []
-            remaining = len(data) + 1
-            while remaining:
-                chunk = os.read(descriptor, min(remaining, 64 * 1024))
-                if not chunk:
-                    break
-                chunks.append(chunk)
-                remaining -= len(chunk)
-            written_data = b"".join(chunks)
-            after = os.fstat(descriptor)
-        except OSError as exc:
-            raise SyncError(
-                f"cannot write regular-file overlay target: {relative}: {exc}"
-            ) from exc
-        finally:
-            os.close(descriptor)
-
-        final = _stat_regular_file_overlay_entry(
-            parent_descriptor,
-            name,
-            label="target",
-            path=relative,
-        )
-        _assert_regular_file_overlay_root_binding(
-            root_descriptor,
-            staging,
-            label="target",
-        )
-    finally:
-        try:
-            os.close(parent_descriptor)
-        finally:
-            os.close(root_descriptor)
-    if (
-        written_data != data
-        or _overlay_file_identity(after) != _overlay_file_identity(target_stat)
-        or _overlay_file_content_identity(write_complete)
-        != _overlay_file_content_identity(after)
-        or after.st_size != len(data)
-        or _overlay_file_content_identity(final)
-        != _overlay_file_content_identity(after)
-    ):
+    if len(data) > MAX_REGULAR_FILE_OVERLAY_BYTES:
         raise SyncError(
-            f"regular-file overlay target byte verification failed: {relative}"
+            "regular-file overlay target data exceeds "
+            f"{MAX_REGULAR_FILE_OVERLAY_BYTES} bytes: {relative}"
         )
+    target = staging / relative
+    with _pin_regular_file_overlay_directory_chain(
+        staging,
+        relative,
+        label="target",
+    ) as chain:
+        _ensure_safe_target(staging, target)
+        _assert_regular_file_overlay_directory_chain_binding(
+            chain,
+            label="target",
+        )
+        target_stat = _stat_regular_file_overlay_entry(
+            chain.parent_descriptor,
+            chain.name,
+            label="target",
+            path=relative,
+        )
+        temporary_descriptor, temporary_name = _open_regular_file_overlay_temporary(
+            chain.parent_descriptor
+        )
+        installed = False
+        try:
+            try:
+                _write_regular_file_overlay_descriptor(temporary_descriptor, data)
+                written = os.fstat(temporary_descriptor)
+                _validate_overlay_regular_file(
+                    written,
+                    label="temporary target",
+                    path=Path(temporary_name),
+                )
+                written_data = _read_regular_file_overlay_descriptor(
+                    temporary_descriptor,
+                    byte_limit=len(data),
+                )
+                after_read = os.fstat(temporary_descriptor)
+                if (
+                    written_data != data
+                    or written.st_size != len(data)
+                    or _overlay_file_content_identity(written)
+                    != _overlay_file_content_identity(after_read)
+                ):
+                    raise SyncError(
+                        "regular-file overlay temporary byte verification failed: "
+                        f"{relative}"
+                    )
+                os.fchmod(temporary_descriptor, REGULAR_FILE_OVERLAY_TARGET_MODE)
+                ready = os.fstat(temporary_descriptor)
+            except OSError as exc:
+                raise SyncError(
+                    f"cannot prepare regular-file overlay temporary target: {exc}"
+                ) from exc
+            _validate_overlay_regular_file(
+                ready,
+                label="temporary target",
+                path=Path(temporary_name),
+            )
+            if (
+                ready.st_size != len(data)
+                or stat.S_IMODE(ready.st_mode) != REGULAR_FILE_OVERLAY_TARGET_MODE
+            ):
+                raise SyncError(
+                    f"regular-file overlay temporary target mode or size drift: {relative}"
+                )
+
+            current_target = _stat_regular_file_overlay_entry(
+                chain.parent_descriptor,
+                chain.name,
+                label="target",
+                path=relative,
+            )
+            if _overlay_file_identity(current_target) != _overlay_file_identity(
+                target_stat
+            ):
+                raise SyncError(
+                    f"regular-file overlay target changed before replace: {relative}"
+                )
+            _assert_regular_file_overlay_directory_chain_binding(
+                chain,
+                label="target",
+            )
+            try:
+                os.rename(
+                    temporary_name,
+                    chain.name,
+                    src_dir_fd=chain.parent_descriptor,
+                    dst_dir_fd=chain.parent_descriptor,
+                )
+            except OSError as exc:
+                raise SyncError(
+                    f"cannot atomically replace regular-file overlay target: {relative}: {exc}"
+                ) from exc
+            installed = True
+
+            installed_descriptor = os.fstat(temporary_descriptor)
+            installed_named = _stat_regular_file_overlay_entry(
+                chain.parent_descriptor,
+                chain.name,
+                label="target",
+                path=relative,
+            )
+            installed_data = _read_regular_file_overlay_descriptor(
+                temporary_descriptor,
+                byte_limit=len(data),
+            )
+            installed_after = os.fstat(temporary_descriptor)
+            if (
+                _overlay_file_identity(installed_named)
+                != _overlay_file_identity(installed_descriptor)
+                or installed_data != data
+                or _overlay_file_content_identity(installed_descriptor)
+                != _overlay_file_content_identity(installed_after)
+                or installed_after.st_size != len(data)
+                or stat.S_IMODE(installed_after.st_mode)
+                != REGULAR_FILE_OVERLAY_TARGET_MODE
+            ):
+                raise SyncError(
+                    f"regular-file overlay installed target verification failed: {relative}"
+                )
+            final_named = _stat_regular_file_overlay_entry(
+                chain.parent_descriptor,
+                chain.name,
+                label="target",
+                path=relative,
+            )
+            if _overlay_file_content_identity(
+                final_named
+            ) != _overlay_file_content_identity(installed_after):
+                raise SyncError(
+                    f"regular-file overlay installed target changed after verification: {relative}"
+                )
+            _assert_regular_file_overlay_directory_chain_binding(
+                chain,
+                label="target",
+            )
+        finally:
+            try:
+                os.close(temporary_descriptor)
+            finally:
+                if not installed:
+                    try:
+                        os.unlink(
+                            temporary_name,
+                            dir_fd=chain.parent_descriptor,
+                        )
+                    except FileNotFoundError:
+                        pass
+                    except OSError as exc:
+                        raise SyncError(
+                            "cannot remove uninstalled regular-file overlay "
+                            f"temporary file: {exc}"
+                        ) from exc
 
 
 def _apply_regular_file_overlays(
