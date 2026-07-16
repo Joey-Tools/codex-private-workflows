@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import base64
+import hashlib
 import json
 from pathlib import Path
 import unittest
@@ -73,6 +75,39 @@ class PrivateSyntheticCatalogTest(unittest.TestCase):
             "49dc9bb8af8256b5c39ff870ec6b682ff08bd5a8",
         )
         self.assertEqual(jwt_value["source_occurrences"], 1)
+
+    def test_private_catalog_does_not_reuse_public_example_values(self) -> None:
+        catalog = json.loads(OVERRIDE_CATALOG.read_bytes())
+        public_examples = (
+            "codex_public_synth_v1_access_a",
+            "codex_public_synth_v1_access_b",
+            "codex_public_synth_v1_access_expired",
+            "codex_public_synth_v1_refresh_a",
+            "codex_public_synth_v1_refresh_b",
+            "codex_public_synth_v1_refresh_consumed",
+            "codex_public_synth_v1_id_a",
+            "codex_public_synth_v1_id_b",
+            "codex_public_synth_v1_api_key_a",
+            "codex_public_synth_v1_bearer_a",
+        )
+        public_digests = {
+            hashlib.sha256(value.encode("ascii")).hexdigest()
+            for value in public_examples
+        }
+        private_values = [
+            token["value"].encode("ascii")
+            for token in catalog["authoring_pool"]["tokens"]
+        ]
+        private_values.extend(
+            base64.b64decode(value["value_base64"], validate=True)
+            for exemption in catalog["legacy_exemptions"]
+            for value in exemption["values"]
+        )
+        private_digests = {
+            hashlib.sha256(value).hexdigest() for value in private_values
+        }
+
+        self.assertTrue(public_digests.isdisjoint(private_digests))
 
 
 if __name__ == "__main__":

@@ -118,11 +118,16 @@ class PrivateOverlaySyncTests(unittest.TestCase):
                 staging,
                 label="staged target",
             )
+            manifest = SYNC_MODULE._capture_regular_file_overlay_tree_manifest(
+                staging_root.descriptor,
+                label="test staged target",
+            )
             bindings = SYNC_MODULE._pin_regular_file_overlay_targets(
                 stack,
                 staging,
                 staging_root,
                 {Path("catalog.json"): b"private\n"},
+                manifest,
             )
         except BaseException:
             stack.close()
@@ -136,10 +141,33 @@ class PrivateOverlaySyncTests(unittest.TestCase):
         (target / "catalog.json").write_text("public\n", encoding="utf-8")
         return target
 
-    def _prepare_scoped_regular_file_overlay_candidate(self, scope):
+    def _regular_file_overlay_manifest_entry_for_file(
+        self,
+        path: Path,
+    ) -> SYNC_MODULE._RegularFileOverlayTreeEntry:
+        metadata = path.stat()
+        data = path.read_bytes()
+        return SYNC_MODULE._RegularFileOverlayTreeEntry(
+            relative_parts=(path.name,),
+            kind="file",
+            identity=SYNC_MODULE._overlay_file_identity(metadata),
+            size=len(data),
+            sha256=SYNC_MODULE.hashlib.sha256(data).hexdigest(),
+        )
+
+    def _prepare_scoped_regular_file_overlay_candidate(
+        self,
+        scope,
+        *,
+        extra_files: dict[Path, bytes] | None = None,
+    ):
         staging = scope.path / "candidate"
         staging.mkdir()
         (staging / "catalog.json").write_text("private\n", encoding="utf-8")
+        for relative, data in (extra_files or {}).items():
+            path = staging / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(data)
         stack = contextlib.ExitStack()
         try:
             staging_root = SYNC_MODULE._pin_regular_file_overlay_child_directory(
@@ -149,11 +177,16 @@ class PrivateOverlaySyncTests(unittest.TestCase):
                 path=staging,
                 label="staged target",
             )
+            manifest = SYNC_MODULE._capture_regular_file_overlay_tree_manifest(
+                staging_root.descriptor,
+                label="test staged target",
+            )
             bindings = SYNC_MODULE._pin_regular_file_overlay_targets(
                 stack,
                 staging,
                 staging_root,
                 {Path("catalog.json"): b"private\n"},
+                manifest,
             )
         except BaseException:
             stack.close()
@@ -824,6 +857,89 @@ class PrivateOverlaySyncTests(unittest.TestCase):
             [call.args[2] for call in public_copy_mock.call_args_list],
         )
 
+    def test_secure_replacements_bypass_plain_path_helpers(self) -> None:
+        secure_source = self.source_root / "secure-replacement-repo" / "skill"
+        secure_source.mkdir(parents=True)
+        (secure_source / "SKILL.md").write_text("replace-old\n", encoding="utf-8")
+        (secure_source / "catalog.json").write_bytes(b"public\n")
+        private = self.repo_root / "private/catalog.json"
+        private.parent.mkdir()
+        private.write_bytes(b"private\n")
+        secure_target = Path("personal_codex/skills/secure-replacement")
+        secure_rule = SYNC_MODULE.SyncRule(
+            repo="secure-replacement-repo",
+            source=Path("skill"),
+            target=secure_target,
+            replacements=(SYNC_MODULE.Replacement("replace-old", "replace-new"),),
+            forbidden_residuals=("replace-old",),
+            regular_file_overlays=(
+                SYNC_MODULE.RegularFileOverlay(
+                    source=Path("private/catalog.json"),
+                    target=Path("catalog.json"),
+                ),
+            ),
+        )
+
+        with (
+            mock.patch.object(
+                SYNC_MODULE,
+                "_apply_rule_replacements",
+                side_effect=AssertionError("secure replacement used path helper"),
+            ),
+            mock.patch.object(
+                SYNC_MODULE,
+                "_reject_forbidden_residuals",
+                side_effect=AssertionError("secure residual used path helper"),
+            ),
+        ):
+            SYNC_MODULE.sync_sources(
+                self.repo_root,
+                self.source_root,
+                (secure_rule,),
+            )
+
+        self.assertEqual(
+            (self.repo_root / secure_target / "SKILL.md").read_text(encoding="utf-8"),
+            "replace-new\n",
+        )
+
+        plain_source = self.source_root / "plain-replacement-repo" / "skill"
+        plain_source.mkdir(parents=True)
+        (plain_source / "SKILL.md").write_text("replace-old\n", encoding="utf-8")
+        plain_target = Path("personal_codex/skills/plain-replacement")
+        plain_rule = SYNC_MODULE.SyncRule(
+            repo="plain-replacement-repo",
+            source=Path("skill"),
+            target=plain_target,
+            replacements=(SYNC_MODULE.Replacement("replace-old", "replace-new"),),
+            forbidden_residuals=("replace-old",),
+        )
+
+        with (
+            mock.patch.object(
+                SYNC_MODULE,
+                "_apply_rule_replacements",
+                wraps=SYNC_MODULE._apply_rule_replacements,
+            ) as replacement_mock,
+            mock.patch.object(
+                SYNC_MODULE,
+                "_reject_forbidden_residuals",
+                wraps=SYNC_MODULE._reject_forbidden_residuals,
+            ) as residual_mock,
+        ):
+            SYNC_MODULE.sync_sources(
+                self.repo_root,
+                self.source_root,
+                (plain_rule,),
+            )
+
+        replacement_mock.assert_called_once()
+        residual_mock.assert_called_once()
+        self.assertEqual(
+            (self.repo_root / plain_target / "SKILL.md").read_text(encoding="utf-8"),
+            "replace-new\n",
+        )
+
     def test_regular_file_overlay_repo_swap_after_source_read_blocks_write(
         self,
     ) -> None:
@@ -875,16 +991,14 @@ class PrivateOverlaySyncTests(unittest.TestCase):
                 wraps=SYNC_MODULE._rename_regular_file_overlay_noreplace,
             ) as rename_mock,
         ):
-            with self.assertRaisesRegex(
-                SYNC_MODULE.SyncError,
-                "repository root.*binding changed",
-            ):
+            with self.assertRaises(SYNC_MODULE.SyncError) as raised:
                 SYNC_MODULE.sync_sources(
                     self.repo_root,
                     self.source_root,
                     (rule,),
                 )
 
+        self.assertRegex(str(raised.exception), "repository root.*binding changed")
         self.assertEqual(rename_mock.call_count, 0)
         self.assertEqual(
             (saved_root / rule.target / "catalog.json").read_bytes(),
@@ -983,16 +1097,17 @@ class PrivateOverlaySyncTests(unittest.TestCase):
                 wraps=SYNC_MODULE._rename_regular_file_overlay_noreplace,
             ) as rename_mock,
         ):
-            with self.assertRaisesRegex(
-                SYNC_MODULE.SyncError,
-                "repository root.*binding changed",
-            ):
+            with self.assertRaises(SYNC_MODULE.SyncError) as raised:
                 SYNC_MODULE.sync_sources(
                     self.repo_root,
                     self.source_root,
                     (rule,),
                 )
 
+        self.assertRegex(str(raised.exception), "repository root.*binding changed")
+        self.assertIn("pathname binding is unknown", str(raised.exception))
+        self.assertIn("last-known path", str(raised.exception))
+        self.assertIn("is untrusted", str(raised.exception))
         self.assertEqual(rename_mock.call_count, 0)
         self.assertEqual(
             (saved_root / rule.target / "catalog.json").read_bytes(),
@@ -1055,6 +1170,12 @@ class PrivateOverlaySyncTests(unittest.TestCase):
         self,
     ) -> None:
         target = self._create_regular_file_overlay_target("scope-rebind")
+        source_manifest = (
+            SYNC_MODULE._capture_regular_file_overlay_tree_manifest_at_path(
+                target,
+                label="test prepared source",
+            )
+        )
         saved_scope: Path | None = None
         replacement_scope: Path | None = None
 
@@ -1063,10 +1184,7 @@ class PrivateOverlaySyncTests(unittest.TestCase):
             "_rename_regular_file_overlay_noreplace",
             wraps=SYNC_MODULE._rename_regular_file_overlay_noreplace,
         ) as rename_mock:
-            with self.assertRaisesRegex(
-                SYNC_MODULE.SyncError,
-                "scope lineage changed",
-            ):
+            with self.assertRaises(SYNC_MODULE.SyncError) as raised:
                 with self._regular_file_overlay_staging_directory(target) as scope:
                     saved_scope = scope.path.with_name(f"{scope.path.name}-saved")
                     replacement_scope = scope.path
@@ -1082,10 +1200,14 @@ class PrivateOverlaySyncTests(unittest.TestCase):
                             target,
                             scope.path / "candidate",
                             staging_scope=scope,
-                            exclude_names=(),
+                            policy_target=Path("test/candidate"),
                             overlay_data={Path("catalog.json"): b"private\n"},
+                            expected_source_manifest=source_manifest,
                         )
 
+        self.assertIn("scope lineage changed", str(raised.exception))
+        self.assertIn("pathname binding is unknown", str(raised.exception))
+        self.assertIn("is untrusted", str(raised.exception))
         self.assertEqual(rename_mock.call_count, 0)
         self.assertEqual((target / "catalog.json").read_bytes(), b"public\n")
         self.assertIsNotNone(saved_scope)
@@ -1229,7 +1351,7 @@ class PrivateOverlaySyncTests(unittest.TestCase):
             with self.assertRaisesRegex(
                 SYNC_MODULE.SyncError,
                 "prior target binding is unknown",
-            ):
+            ) as raised:
                 SYNC_MODULE.sync_sources(
                     self.repo_root,
                     self.source_root,
@@ -1237,6 +1359,12 @@ class PrivateOverlaySyncTests(unittest.TestCase):
                 )
 
         self.assertEqual(calls, 1)
+        message = str(raised.exception)
+        self.assertIn("original transaction error:", message)
+        self.assertIn("moved prior target backup binding changed", message)
+        self.assertIn("only the candidate root identity matched", message)
+        self.assertIn("exact contents are unverified", message)
+        self.assertIn("must be treated as untrusted", message)
         self.assertFalse(target.exists())
         self.assertEqual(
             (target.parent / saved_original_name / "catalog.json").read_bytes(),
@@ -1581,17 +1709,20 @@ class PrivateOverlaySyncTests(unittest.TestCase):
         )
         events: list[str] = []
         prepared_secure: Path | None = None
-        real_public_copy = SYNC_MODULE._copy_source_to_staging
+        real_public_copy = (
+            SYNC_MODULE._copy_regular_file_overlay_public_source_to_prepared
+        )
         real_cleanup = SYNC_MODULE._remove_retired_targets
         real_load = SYNC_MODULE._load_regular_file_overlay_data
         real_validate = SYNC_MODULE._validate_no_retired_review_references
 
-        def record_public_prepare(source, staging, *, exclude_names):
+        def record_public_prepare(source, staging, *, prepared_root, rule):
             nonlocal prepared_secure
             result = real_public_copy(
                 source,
                 staging,
-                exclude_names=exclude_names,
+                prepared_root=prepared_root,
+                rule=rule,
             )
             if source == secure_source:
                 prepared_secure = staging
@@ -1632,7 +1763,7 @@ class PrivateOverlaySyncTests(unittest.TestCase):
         with (
             mock.patch.object(
                 SYNC_MODULE,
-                "_copy_source_to_staging",
+                "_copy_regular_file_overlay_public_source_to_prepared",
                 side_effect=record_public_prepare,
             ),
             mock.patch.object(
@@ -1678,26 +1809,34 @@ class PrivateOverlaySyncTests(unittest.TestCase):
     ) -> None:
         rule, target = self._create_canonical_regular_file_overlay_rule()
         events: list[str] = []
-        real_validate = SYNC_MODULE._validate_canonical_review_target_contents
+        real_validate = (
+            SYNC_MODULE._validate_regular_file_overlay_required_manifest_paths
+        )
         real_pin = SYNC_MODULE._pin_regular_file_overlay_targets
-        real_rmtree = SYNC_MODULE.shutil.rmtree
+        real_remove = (
+            SYNC_MODULE._remove_external_prepared_regular_file_overlay_tree
+        )
         real_rename = SYNC_MODULE._rename_regular_file_overlay_noreplace
 
-        def record_validation(path):
+        def record_validation(manifest, policy_target, *, surface):
             events.append(
                 "staging-validation"
-                if path.is_relative_to(self.repo_root)
+                if surface == "staged target"
                 else "external-validation"
             )
-            return real_validate(path)
+            return real_validate(
+                manifest,
+                policy_target,
+                surface=surface,
+            )
 
         def record_pin(*args, **kwargs):
             events.append("private-pin")
             return real_pin(*args, **kwargs)
 
-        def record_cleanup(path, *args, **kwargs):
+        def record_cleanup(*args, **kwargs):
             events.append("external-cleanup")
-            return real_rmtree(path, *args, **kwargs)
+            return real_remove(*args, **kwargs)
 
         def record_rename(*args, **kwargs):
             events.append("live-rename")
@@ -1706,7 +1845,7 @@ class PrivateOverlaySyncTests(unittest.TestCase):
         with (
             mock.patch.object(
                 SYNC_MODULE,
-                "_validate_canonical_review_target_contents",
+                "_validate_regular_file_overlay_required_manifest_paths",
                 side_effect=record_validation,
             ),
             mock.patch.object(
@@ -1715,8 +1854,8 @@ class PrivateOverlaySyncTests(unittest.TestCase):
                 side_effect=record_pin,
             ),
             mock.patch.object(
-                SYNC_MODULE.shutil,
-                "rmtree",
+                SYNC_MODULE,
+                "_remove_external_prepared_regular_file_overlay_tree",
                 side_effect=record_cleanup,
             ),
             mock.patch.object(
@@ -1754,21 +1893,116 @@ class PrivateOverlaySyncTests(unittest.TestCase):
     ) -> None:
         rule, target = self._create_canonical_regular_file_overlay_rule()
         target_inode = target.stat().st_ino
-        real_validate = SYNC_MODULE._validate_canonical_review_target_contents
+        real_validate = (
+            SYNC_MODULE._validate_regular_file_overlay_required_manifest_paths
+        )
         validations = 0
 
-        def fail_staging_validation(path):
+        def fail_staging_validation(manifest, policy_target, *, surface):
             nonlocal validations
             validations += 1
-            real_validate(path)
-            if path.is_relative_to(self.repo_root):
+            real_validate(manifest, policy_target, surface=surface)
+            if surface == "staged target":
                 raise SYNC_MODULE.SyncError("injected staging validation failure")
 
         with (
             mock.patch.object(
                 SYNC_MODULE,
-                "_validate_canonical_review_target_contents",
+                "_validate_regular_file_overlay_required_manifest_paths",
                 side_effect=fail_staging_validation,
+            ),
+            mock.patch.object(
+                SYNC_MODULE,
+                "_rename_regular_file_overlay_noreplace",
+                wraps=SYNC_MODULE._rename_regular_file_overlay_noreplace,
+            ) as rename_mock,
+        ):
+            with self.assertRaises(SYNC_MODULE.SyncError) as raised:
+                SYNC_MODULE.sync_sources(
+                    self.repo_root,
+                    self.source_root,
+                    (rule,),
+                )
+
+        self.assertEqual(validations, 2)
+        recovery_root = self.repo_root / SYNC_MODULE.REGULAR_FILE_OVERLAY_RECOVERY_ROOT
+        scopes = list(recovery_root.iterdir())
+        self.assertEqual(len(scopes), 1)
+        self.assertIn("injected staging validation failure", str(raised.exception))
+        self.assertIn(str(scopes[0]), str(raised.exception))
+        self.assertTrue((scopes[0] / target.name).is_dir())
+        self.assertEqual(rename_mock.call_count, 0)
+        self.assertEqual(target.stat().st_ino, target_inode)
+        self.assertEqual((target / "old-marker").read_bytes(), b"old\n")
+
+    def test_canonical_staging_validation_cannot_admit_late_injection(
+        self,
+    ) -> None:
+        source = self.source_root / "staged-policy-repo" / "skill"
+        source.mkdir(parents=True)
+        (source / "README.md").write_text("clean\n", encoding="utf-8")
+        private = self.repo_root / "private/README.md"
+        private.parent.mkdir()
+        bad_reference = SYNC_MODULE.RETIRED_REVIEW_REFERENCES[0]
+        private.write_text(f"{bad_reference}\n", encoding="utf-8")
+        target = self.repo_root / "personal_codex/skills/staged-policy"
+        target.mkdir(parents=True)
+        (target / "old-marker").write_bytes(b"old\n")
+        target_inode = target.stat().st_ino
+        rule = SYNC_MODULE.SyncRule(
+            repo="staged-policy-repo",
+            source=Path("skill"),
+            target=Path("personal_codex/skills/staged-policy"),
+            regular_file_overlays=(
+                SYNC_MODULE.RegularFileOverlay(
+                    source=Path("private/README.md"),
+                    target=Path("README.md"),
+                ),
+            ),
+        )
+        real_validate = SYNC_MODULE._validate_regular_file_overlay_policy_bytes
+        swapped_during_validation = False
+
+        def validate_with_decoy(data, relative, policy_target, *, surface):
+            nonlocal swapped_during_validation
+            if surface == "staged target" and relative == Path("README.md"):
+                recovery_root = (
+                    self.repo_root
+                    / SYNC_MODULE.REGULAR_FILE_OVERLAY_RECOVERY_ROOT
+                )
+                scopes = list(recovery_root.iterdir())
+                self.assertEqual(len(scopes), 1)
+                candidate = scopes[0] / target.name
+                saved = scopes[0] / f".{target.name}.expected"
+                candidate.rename(saved)
+                candidate.mkdir(mode=0o700)
+                (candidate / "README.md").write_text(
+                    "clean decoy\n",
+                    encoding="utf-8",
+                )
+                swapped_during_validation = True
+                try:
+                    return real_validate(
+                        data,
+                        relative,
+                        policy_target,
+                        surface=surface,
+                    )
+                finally:
+                    shutil.rmtree(candidate)
+                    saved.rename(candidate)
+            return real_validate(
+                data,
+                relative,
+                policy_target,
+                surface=surface,
+            )
+
+        with (
+            mock.patch.object(
+                SYNC_MODULE,
+                "_validate_regular_file_overlay_policy_bytes",
+                side_effect=validate_with_decoy,
             ),
             mock.patch.object(
                 SYNC_MODULE,
@@ -1778,7 +2012,7 @@ class PrivateOverlaySyncTests(unittest.TestCase):
         ):
             with self.assertRaisesRegex(
                 SYNC_MODULE.SyncError,
-                "injected staging validation failure",
+                "retains retired reference",
             ):
                 SYNC_MODULE.sync_sources(
                     self.repo_root,
@@ -1786,30 +2020,598 @@ class PrivateOverlaySyncTests(unittest.TestCase):
                     (rule,),
                 )
 
-        self.assertEqual(validations, 2)
+        self.assertTrue(swapped_during_validation)
         self.assertEqual(rename_mock.call_count, 0)
         self.assertEqual(target.stat().st_ino, target_inode)
         self.assertEqual((target / "old-marker").read_bytes(), b"old\n")
+
+    def test_external_validation_cannot_admit_late_injection(self) -> None:
+        rule, target = self._create_canonical_regular_file_overlay_rule()
+        source = self.source_root / "canonical-repo" / "skill"
+        bad_reference = SYNC_MODULE.RETIRED_REVIEW_REFERENCES[0]
+        (source / "SKILL.md").write_text(
+            f"{bad_reference}\n",
+            encoding="utf-8",
+        )
+        target_inode = target.stat().st_ino
+        real_validate = SYNC_MODULE._validate_regular_file_overlay_policy_bytes
+        swapped_during_validation = False
+
+        def validate_with_decoy(data, relative, policy_target, *, surface):
+            nonlocal swapped_during_validation
+            if (
+                surface == "prepared public source"
+                and relative == Path("SKILL.md")
+            ):
+                saved = source.with_name(f".{source.name}.expected")
+                source.rename(saved)
+                shutil.copytree(saved, source)
+                (source / "SKILL.md").write_text(
+                    "clean decoy\n",
+                    encoding="utf-8",
+                )
+                swapped_during_validation = True
+                try:
+                    return real_validate(
+                        data,
+                        relative,
+                        policy_target,
+                        surface=surface,
+                    )
+                finally:
+                    shutil.rmtree(source)
+                    saved.rename(source)
+            return real_validate(
+                data,
+                relative,
+                policy_target,
+                surface=surface,
+            )
+
+        with mock.patch.object(
+            SYNC_MODULE,
+            "_validate_regular_file_overlay_policy_bytes",
+            side_effect=validate_with_decoy,
+        ):
+            with self.assertRaisesRegex(
+                SYNC_MODULE.SyncError,
+                "retains retired reference",
+            ):
+                SYNC_MODULE.sync_sources(
+                    self.repo_root,
+                    self.source_root,
+                    (rule,),
+                )
+
+        self.assertTrue(swapped_during_validation)
+        self.assertEqual(target.stat().st_ino, target_inode)
+        self.assertEqual((target / "old-marker").read_bytes(), b"old\n")
+
+    def test_secure_public_prepare_rejects_transient_file_rebind(self) -> None:
+        source = self.source_root / "public-rebind-repo" / "skill"
+        source.mkdir(parents=True)
+        (source / "catalog.json").write_bytes(b"public\n")
+        payload = source / "payload.py"
+        payload.write_bytes(b"trusted\n")
+        private = self.repo_root / "private/catalog.json"
+        private.parent.mkdir()
+        private.write_bytes(b"private\n")
+        target = self.repo_root / "personal_codex/skills/public-rebind"
+        target.mkdir(parents=True)
+        (target / "marker").write_bytes(b"old\n")
+        target_inode = target.stat().st_ino
+        rule = SYNC_MODULE.SyncRule(
+            repo="public-rebind-repo",
+            source=Path("skill"),
+            target=Path("personal_codex/skills/public-rebind"),
+            regular_file_overlays=(
+                SYNC_MODULE.RegularFileOverlay(
+                    source=Path("private/catalog.json"),
+                    target=Path("catalog.json"),
+                ),
+            ),
+        )
+        saved = source.parent / ".payload.py.expected"
+        swapped = False
+        swap_performed = False
+        restored_during_copy = False
+        real_capture = SYNC_MODULE._capture_regular_file_overlay_tree_manifest
+        real_stat = SYNC_MODULE.os.stat
+
+        def capture_then_swap(*args, label, **kwargs):
+            nonlocal swapped, swap_performed
+            manifest = real_capture(*args, label=label, **kwargs)
+            if label == "initial public source" and not swapped:
+                payload.rename(saved)
+                payload.write_bytes(b"malicious\n")
+                swapped = True
+                swap_performed = True
+            return manifest
+
+        def stat_then_restore(path, *args, **kwargs):
+            nonlocal swapped, restored_during_copy
+            metadata = real_stat(path, *args, **kwargs)
+            if swapped and path == payload.name and kwargs.get("dir_fd") is not None:
+                payload.unlink()
+                saved.rename(payload)
+                swapped = False
+                restored_during_copy = True
+            return metadata
+
+        stat_mock = mock.Mock(side_effect=stat_then_restore)
+        supports_dir_fd = frozenset(
+            (set(SYNC_MODULE.os.supports_dir_fd) - {real_stat}) | {stat_mock}
+        )
+        supports_follow_symlinks = frozenset(
+            (set(SYNC_MODULE.os.supports_follow_symlinks) - {real_stat})
+            | {stat_mock}
+        )
+
+        try:
+            with (
+                mock.patch.object(
+                    SYNC_MODULE,
+                    "_capture_regular_file_overlay_tree_manifest",
+                    side_effect=capture_then_swap,
+                ),
+                mock.patch.object(
+                    SYNC_MODULE.os,
+                    "stat",
+                    stat_mock,
+                ),
+                mock.patch.object(
+                    SYNC_MODULE.os,
+                    "supports_dir_fd",
+                    supports_dir_fd,
+                ),
+                mock.patch.object(
+                    SYNC_MODULE.os,
+                    "supports_follow_symlinks",
+                    supports_follow_symlinks,
+                ),
+            ):
+                with self.assertRaisesRegex(
+                    SYNC_MODULE.SyncError,
+                    "public source file binding changed",
+                ):
+                    SYNC_MODULE.sync_sources(
+                        self.repo_root,
+                        self.source_root,
+                        (rule,),
+                    )
+        finally:
+            if saved.exists():
+                payload.unlink(missing_ok=True)
+                saved.rename(payload)
+
+        self.assertTrue(swap_performed)
+        self.assertTrue(restored_during_copy)
+        self.assertFalse(swapped)
+        self.assertEqual(payload.read_bytes(), b"trusted\n")
+        self.assertEqual(target.stat().st_ino, target_inode)
+        self.assertEqual((target / "marker").read_bytes(), b"old\n")
+
+    def test_secure_public_prepare_rejects_transient_entry_add_and_remove(
+        self,
+    ) -> None:
+        source = self.source_root / "public-entry-race-repo" / "skill"
+        source.mkdir(parents=True)
+        (source / "catalog.json").write_bytes(b"public\n")
+        (source / "payload.py").write_bytes(b"trusted\n")
+        private = self.repo_root / "private/catalog.json"
+        private.parent.mkdir()
+        private.write_bytes(b"private\n")
+        target = self.repo_root / "personal_codex/skills/public-entry-race"
+        target.mkdir(parents=True)
+        (target / "marker").write_bytes(b"old\n")
+        target_inode = target.stat().st_ino
+        rule = SYNC_MODULE.SyncRule(
+            repo="public-entry-race-repo",
+            source=Path("skill"),
+            target=Path("personal_codex/skills/public-entry-race"),
+            regular_file_overlays=(
+                SYNC_MODULE.RegularFileOverlay(
+                    source=Path("private/catalog.json"),
+                    target=Path("catalog.json"),
+                ),
+            ),
+        )
+        transient = source / "transient.py"
+        real_capture = SYNC_MODULE._capture_regular_file_overlay_tree_manifest
+        real_names = SYNC_MODULE._bounded_regular_file_overlay_tree_names
+        added = False
+        removed_before_detection = False
+
+        def capture_then_add(*args, label, **kwargs):
+            nonlocal added
+            manifest = real_capture(*args, label=label, **kwargs)
+            if label == "initial public source" and not added:
+                transient.write_bytes(b"transient\n")
+                added = True
+            return manifest
+
+        def names_then_remove(*args, maximum, label):
+            nonlocal removed_before_detection
+            names = real_names(*args, maximum=maximum, label=label)
+            if label == "public source" and transient.name in names:
+                transient.unlink()
+                removed_before_detection = True
+            return names
+
+        with (
+            mock.patch.object(
+                SYNC_MODULE,
+                "_capture_regular_file_overlay_tree_manifest",
+                side_effect=capture_then_add,
+            ),
+            mock.patch.object(
+                SYNC_MODULE,
+                "_bounded_regular_file_overlay_tree_names",
+                side_effect=names_then_remove,
+            ),
+        ):
+            with self.assertRaisesRegex(
+                SYNC_MODULE.SyncError,
+                "cannot inspect regular-file overlay public source entry transient.py",
+            ):
+                SYNC_MODULE.sync_sources(
+                    self.repo_root,
+                    self.source_root,
+                    (rule,),
+                )
+
+        self.assertTrue(added)
+        self.assertTrue(removed_before_detection)
+        self.assertFalse(transient.exists())
+        self.assertEqual(target.stat().st_ino, target_inode)
+        self.assertEqual((target / "marker").read_bytes(), b"old\n")
+
+    def test_prepared_copy_rejects_transient_file_rebind_and_restore(self) -> None:
+        source = self.source_root / "prepared-file-rebind-repo" / "skill"
+        source.mkdir(parents=True)
+        (source / "catalog.json").write_bytes(b"public\n")
+        (source / "payload.py").write_bytes(b"trusted\n")
+        private = self.repo_root / "private/catalog.json"
+        private.parent.mkdir()
+        private.write_bytes(b"private\n")
+        target = self.repo_root / "personal_codex/skills/prepared-file-rebind"
+        target.mkdir(parents=True)
+        (target / "marker").write_bytes(b"old\n")
+        target_inode = target.stat().st_ino
+        rule = SYNC_MODULE.SyncRule(
+            repo="prepared-file-rebind-repo",
+            source=Path("skill"),
+            target=Path("personal_codex/skills/prepared-file-rebind"),
+            regular_file_overlays=(
+                SYNC_MODULE.RegularFileOverlay(
+                    source=Path("private/catalog.json"),
+                    target=Path("catalog.json"),
+                ),
+            ),
+        )
+        real_copy = SYNC_MODULE._copy_prepared_regular_file_overlay_staging
+        real_stat = SYNC_MODULE.os.stat
+        inside_copy = False
+        swapped = False
+        swap_performed = False
+        restored_during_copy = False
+        catalog_stat_calls = 0
+        swapped_root: Path | None = None
+        saved: Path | None = None
+
+        def swap_catalog(root: Path) -> None:
+            nonlocal swapped, swap_performed, swapped_root, saved
+            if swapped:
+                return
+            catalog = root / "catalog.json"
+            saved = root.parent / f".{root.name}.catalog.expected"
+            catalog.rename(saved)
+            catalog.write_bytes(b"malicious\n")
+            swapped_root = root
+            swapped = True
+            swap_performed = True
+
+        def restore_catalog() -> None:
+            nonlocal swapped, restored_during_copy
+            if not swapped or swapped_root is None or saved is None:
+                return
+            (swapped_root / "catalog.json").unlink()
+            saved.rename(swapped_root / "catalog.json")
+            swapped = False
+            restored_during_copy = True
+
+        def copy_with_window(*args, **kwargs):
+            nonlocal inside_copy
+            inside_copy = True
+            try:
+                swap_catalog(Path(args[1]))
+                return real_copy(*args, **kwargs)
+            finally:
+                inside_copy = False
+
+        def stat_then_restore(path, *args, **kwargs):
+            nonlocal catalog_stat_calls
+            metadata = real_stat(path, *args, **kwargs)
+            if inside_copy and swapped and path == "catalog.json":
+                catalog_stat_calls += 1
+                if catalog_stat_calls == 1:
+                    restore_catalog()
+            return metadata
+
+        stat_mock = mock.Mock(side_effect=stat_then_restore)
+        supports_dir_fd = frozenset(
+            (set(SYNC_MODULE.os.supports_dir_fd) - {real_stat}) | {stat_mock}
+        )
+        supports_follow_symlinks = frozenset(
+            (set(SYNC_MODULE.os.supports_follow_symlinks) - {real_stat})
+            | {stat_mock}
+        )
+
+        with (
+            mock.patch.object(
+                SYNC_MODULE,
+                "_copy_prepared_regular_file_overlay_staging",
+                side_effect=copy_with_window,
+            ),
+            mock.patch.object(
+                SYNC_MODULE.os,
+                "stat",
+                stat_mock,
+            ),
+            mock.patch.object(
+                SYNC_MODULE.os,
+                "supports_dir_fd",
+                supports_dir_fd,
+            ),
+            mock.patch.object(
+                SYNC_MODULE.os,
+                "supports_follow_symlinks",
+                supports_follow_symlinks,
+            ),
+        ):
+            with self.assertRaisesRegex(
+                SYNC_MODULE.SyncError,
+                "prepared overlay source changed while opening",
+            ):
+                SYNC_MODULE.sync_sources(
+                    self.repo_root,
+                    self.source_root,
+                    (rule,),
+                )
+
+        self.assertTrue(swap_performed)
+        self.assertTrue(restored_during_copy)
+        self.assertFalse(swapped)
+        self.assertEqual(target.stat().st_ino, target_inode)
+        self.assertEqual((target / "marker").read_bytes(), b"old\n")
+
+    def test_prepared_copy_rejects_transient_root_rebind_and_restore(self) -> None:
+        source = self.source_root / "prepared-root-rebind-repo" / "skill"
+        source.mkdir(parents=True)
+        (source / "catalog.json").write_bytes(b"public\n")
+        (source / "payload.py").write_bytes(b"trusted\n")
+        private = self.repo_root / "private/catalog.json"
+        private.parent.mkdir()
+        private.write_bytes(b"private\n")
+        target = self.repo_root / "personal_codex/skills/prepared-root-rebind"
+        target.mkdir(parents=True)
+        (target / "marker").write_bytes(b"old\n")
+        target_inode = target.stat().st_ino
+        rule = SYNC_MODULE.SyncRule(
+            repo="prepared-root-rebind-repo",
+            source=Path("skill"),
+            target=Path("personal_codex/skills/prepared-root-rebind"),
+            regular_file_overlays=(
+                SYNC_MODULE.RegularFileOverlay(
+                    source=Path("private/catalog.json"),
+                    target=Path("catalog.json"),
+                ),
+            ),
+        )
+        real_copy = SYNC_MODULE._copy_prepared_regular_file_overlay_staging
+        real_assert_directory = (
+            SYNC_MODULE._assert_regular_file_overlay_directory_binding
+        )
+        inside_copy = False
+        source_binding_checks = 0
+        swapped = False
+        swap_performed = False
+        restored_during_copy = False
+        swapped_root: Path | None = None
+        saved_root: Path | None = None
+
+        def swap_root(root: Path) -> None:
+            nonlocal swapped, swap_performed, swapped_root, saved_root
+            if swapped:
+                return
+            saved_root = root.with_name(f".{root.name}.expected")
+            root.rename(saved_root)
+            root.mkdir(mode=0o700)
+            (root / "catalog.json").write_bytes(b"public\n")
+            (root / "payload.py").write_bytes(b"malicious\n")
+            swapped_root = root
+            swapped = True
+            swap_performed = True
+
+        def restore_root() -> None:
+            nonlocal swapped, restored_during_copy
+            if not swapped or swapped_root is None or saved_root is None:
+                return
+            shutil.rmtree(swapped_root)
+            saved_root.rename(swapped_root)
+            swapped = False
+            restored_during_copy = True
+
+        def copy_with_window(*args, **kwargs):
+            nonlocal inside_copy
+            inside_copy = True
+            try:
+                return real_copy(*args, **kwargs)
+            finally:
+                inside_copy = False
+
+        def assert_with_transient_root(pinned, *, label):
+            nonlocal source_binding_checks
+            if inside_copy and label == "validated external prepared source":
+                source_binding_checks += 1
+                if source_binding_checks == 2:
+                    restore_root()
+                result = real_assert_directory(pinned, label=label)
+                if source_binding_checks == 1:
+                    swap_root(pinned.path)
+                return result
+            return real_assert_directory(pinned, label=label)
+
+        with (
+            mock.patch.object(
+                SYNC_MODULE,
+                "_copy_prepared_regular_file_overlay_staging",
+                side_effect=copy_with_window,
+            ),
+            mock.patch.object(
+                SYNC_MODULE,
+                "_assert_regular_file_overlay_directory_binding",
+                side_effect=assert_with_transient_root,
+            ),
+        ):
+            SYNC_MODULE.sync_sources(
+                self.repo_root,
+                self.source_root,
+                (rule,),
+            )
+
+        self.assertTrue(swap_performed)
+        self.assertTrue(restored_during_copy)
+        self.assertFalse(swapped)
+        self.assertNotEqual(target.stat().st_ino, target_inode)
+        self.assertFalse((target / "marker").exists())
+        self.assertEqual((target / "payload.py").read_bytes(), b"trusted\n")
+        self.assertEqual((target / "catalog.json").read_bytes(), b"private\n")
+
+    def test_secure_public_prepare_bounds_entries_before_repo_candidate(self) -> None:
+        source = self.source_root / "bounded-entry-repo" / "skill"
+        source.mkdir(parents=True)
+        for index in range(3):
+            (source / f"ignored-{index}.pyc").write_bytes(b"ignored\n")
+        (source / "catalog.json").write_bytes(b"public\n")
+        private = self.repo_root / "private/catalog.json"
+        private.parent.mkdir()
+        private.write_bytes(b"private\n")
+        target = self.repo_root / "personal_codex/skills/bounded-entry"
+        target.mkdir(parents=True)
+        (target / "marker").write_bytes(b"old\n")
+        target_inode = target.stat().st_ino
+        rule = SYNC_MODULE.SyncRule(
+            repo="bounded-entry-repo",
+            source=Path("skill"),
+            target=Path("personal_codex/skills/bounded-entry"),
+            regular_file_overlays=(
+                SYNC_MODULE.RegularFileOverlay(
+                    source=Path("private/catalog.json"),
+                    target=Path("catalog.json"),
+                ),
+            ),
+        )
+
+        with (
+            mock.patch.object(
+                SYNC_MODULE,
+                "MAX_REGULAR_FILE_OVERLAY_TREE_ENTRIES",
+                2,
+            ),
+            mock.patch.object(
+                SYNC_MODULE,
+                "_copy_prepared_regular_file_overlay_staging",
+                side_effect=AssertionError("repo candidate copy must not start"),
+            ),
+        ):
+            with self.assertRaisesRegex(
+                SYNC_MODULE.SyncError,
+                "bounded entry capacity",
+            ):
+                SYNC_MODULE.sync_sources(
+                    self.repo_root,
+                    self.source_root,
+                    (rule,),
+                )
+
+        self.assertEqual(target.stat().st_ino, target_inode)
+        self.assertEqual((target / "marker").read_bytes(), b"old\n")
+
+    def test_secure_public_prepare_bounds_bytes_before_read(self) -> None:
+        source = self.source_root / "bounded-byte-repo" / "skill"
+        source.mkdir(parents=True)
+        (source / "catalog.json").write_bytes(b"12345")
+        private = self.repo_root / "private/catalog.json"
+        private.parent.mkdir()
+        private.write_bytes(b"private\n")
+        target = self.repo_root / "personal_codex/skills/bounded-byte"
+        target.mkdir(parents=True)
+        (target / "marker").write_bytes(b"old\n")
+        target_inode = target.stat().st_ino
+        rule = SYNC_MODULE.SyncRule(
+            repo="bounded-byte-repo",
+            source=Path("skill"),
+            target=Path("personal_codex/skills/bounded-byte"),
+            regular_file_overlays=(
+                SYNC_MODULE.RegularFileOverlay(
+                    source=Path("private/catalog.json"),
+                    target=Path("catalog.json"),
+                ),
+            ),
+        )
+
+        with (
+            mock.patch.object(
+                SYNC_MODULE,
+                "MAX_REGULAR_FILE_OVERLAY_TREE_BYTES",
+                4,
+            ),
+            mock.patch.object(
+                SYNC_MODULE.os,
+                "read",
+                side_effect=AssertionError("oversized public source must not be read"),
+            ),
+            mock.patch.object(
+                SYNC_MODULE,
+                "_copy_prepared_regular_file_overlay_staging",
+                side_effect=AssertionError("repo candidate copy must not start"),
+            ),
+        ):
+            with self.assertRaisesRegex(
+                SYNC_MODULE.SyncError,
+                "public source tree exceeds 4 bytes",
+            ):
+                SYNC_MODULE.sync_sources(
+                    self.repo_root,
+                    self.source_root,
+                    (rule,),
+                )
+
+        self.assertEqual(target.stat().st_ino, target_inode)
+        self.assertEqual((target / "marker").read_bytes(), b"old\n")
 
     def test_external_prepared_cleanup_failure_precedes_live_mutation(
         self,
     ) -> None:
         rule, target = self._create_canonical_regular_file_overlay_rule()
         target_inode = target.stat().st_ino
-        real_rmtree = SYNC_MODULE.shutil.rmtree
+        real_remove = (
+            SYNC_MODULE._remove_external_prepared_regular_file_overlay_tree
+        )
         cleanup_calls = 0
 
         def fail_first_cleanup(*args, **kwargs):
             nonlocal cleanup_calls
             cleanup_calls += 1
             if cleanup_calls == 1:
-                raise OSError("injected prepared cleanup failure")
-            return real_rmtree(*args, **kwargs)
+                raise SYNC_MODULE.SyncError("injected exact cleanup failure")
+            return real_remove(*args, **kwargs)
 
         with (
             mock.patch.object(
-                SYNC_MODULE.shutil,
-                "rmtree",
+                SYNC_MODULE,
+                "_remove_external_prepared_regular_file_overlay_tree",
                 side_effect=fail_first_cleanup,
             ),
             mock.patch.object(
@@ -1820,9 +2622,8 @@ class PrivateOverlaySyncTests(unittest.TestCase):
         ):
             with self.assertRaisesRegex(
                 SYNC_MODULE.SyncError,
-                "cannot remove external prepared tree before secure commit.*"
-                "candidate retained in recovery scope.*"
-                "injected prepared cleanup failure",
+                "injected exact cleanup failure.*"
+                "recovery scope retained for inspection",
             ):
                 SYNC_MODULE.sync_sources(
                     self.repo_root,
@@ -1830,6 +2631,302 @@ class PrivateOverlaySyncTests(unittest.TestCase):
                     (rule,),
                 )
 
+        self.assertEqual(cleanup_calls, 2)
+        self.assertEqual(rename_mock.call_count, 0)
+        self.assertEqual(target.stat().st_ino, target_inode)
+        self.assertEqual((target / "old-marker").read_bytes(), b"old\n")
+
+    def test_external_prepared_partial_tree_is_retained_without_cleanup_authority(
+        self,
+    ) -> None:
+        rule, target = self._create_canonical_regular_file_overlay_rule()
+        target_inode = target.stat().st_ino
+        retained_container: Path | None = None
+        marker: Path | None = None
+
+        def inject_unproven_entry(source, prepared, *, prepared_root, rule):
+            nonlocal retained_container, marker
+            retained_container = prepared.parent
+            marker = prepared / "unproven-marker"
+            marker.write_bytes(b"must-survive\n")
+            raise SYNC_MODULE.SyncError("injected public-copy failure")
+
+        try:
+            with (
+                mock.patch.object(
+                    SYNC_MODULE,
+                    "_copy_regular_file_overlay_public_source_to_prepared",
+                    side_effect=inject_unproven_entry,
+                ),
+                mock.patch.object(
+                    SYNC_MODULE,
+                    "_rename_regular_file_overlay_noreplace",
+                    wraps=SYNC_MODULE._rename_regular_file_overlay_noreplace,
+                ) as rename_mock,
+            ):
+                with self.assertRaisesRegex(
+                    SYNC_MODULE.SyncError,
+                    "injected public-copy failure.*exact cleanup failed.*"
+                    "retained last-known path",
+                ):
+                    SYNC_MODULE.sync_sources(
+                        self.repo_root,
+                        self.source_root,
+                        (rule,),
+                    )
+
+            self.assertIsNotNone(marker)
+            self.assertEqual(marker.read_bytes(), b"must-survive\n")
+            self.assertEqual(rename_mock.call_count, 0)
+            self.assertEqual(target.stat().st_ino, target_inode)
+            self.assertEqual((target / "old-marker").read_bytes(), b"old\n")
+        finally:
+            if retained_container is not None and retained_container.exists():
+                shutil.rmtree(retained_container)
+
+    def test_external_prepared_initial_manifest_rejects_injected_entry(self) -> None:
+        rule, target = self._create_canonical_regular_file_overlay_rule()
+        target_inode = target.stat().st_ino
+        real_pin = SYNC_MODULE._pin_regular_file_overlay_child_directory
+        retained_container: Path | None = None
+        marker: Path | None = None
+
+        def pin_then_inject(stack, parent, name, *, path, label):
+            nonlocal retained_container, marker
+            pinned = real_pin(
+                stack,
+                parent,
+                name,
+                path=path,
+                label=label,
+            )
+            if label == "prepared public root":
+                retained_container = path.parent
+                marker = path / "pre-manifest-marker"
+                marker.write_bytes(b"must-survive\n")
+            return pinned
+
+        try:
+            with (
+                mock.patch.object(
+                    SYNC_MODULE,
+                    "_pin_regular_file_overlay_child_directory",
+                    side_effect=pin_then_inject,
+                ),
+                mock.patch.object(
+                    SYNC_MODULE,
+                    "_rename_regular_file_overlay_noreplace",
+                    wraps=SYNC_MODULE._rename_regular_file_overlay_noreplace,
+                ) as rename_mock,
+            ):
+                with self.assertRaisesRegex(
+                    SYNC_MODULE.SyncError,
+                    "initial external prepared root is not empty.*"
+                    "exact cleanup failed.*retained last-known path",
+                ):
+                    SYNC_MODULE.sync_sources(
+                        self.repo_root,
+                        self.source_root,
+                        (rule,),
+                    )
+
+            self.assertIsNotNone(marker)
+            self.assertEqual(marker.read_bytes(), b"must-survive\n")
+            self.assertEqual(rename_mock.call_count, 0)
+            self.assertEqual(target.stat().st_ino, target_inode)
+            self.assertEqual((target / "old-marker").read_bytes(), b"old\n")
+        finally:
+            if retained_container is not None and retained_container.exists():
+                shutil.rmtree(retained_container)
+
+    def test_external_prepared_container_symlink_rebind_is_not_followed(self) -> None:
+        rule, target = self._create_canonical_regular_file_overlay_rule()
+        target_inode = target.stat().st_ino
+        decoy = self.root / "external-prepared-decoy"
+        decoy.mkdir(mode=0o700)
+        (decoy / "do-not-delete").write_bytes(b"decoy\n")
+        real_pin = SYNC_MODULE._pin_regular_file_overlay_child_directory
+        retained_container: Path | None = None
+
+        def rebind_before_pin(stack, parent, name, *, path, label):
+            nonlocal retained_container
+            if label != "external prepared container":
+                return real_pin(
+                    stack,
+                    parent,
+                    name,
+                    path=path,
+                    label=label,
+                )
+            retained_container = path
+            saved = path.with_name(f".{path.name}.created")
+            path.rename(saved)
+            path.symlink_to(decoy, target_is_directory=True)
+            try:
+                return real_pin(
+                    stack,
+                    parent,
+                    name,
+                    path=path,
+                    label=label,
+                )
+            finally:
+                path.unlink()
+                saved.rename(path)
+
+        try:
+            with (
+                mock.patch.object(
+                    SYNC_MODULE,
+                    "_pin_regular_file_overlay_child_directory",
+                    side_effect=rebind_before_pin,
+                ),
+                mock.patch.object(
+                    SYNC_MODULE,
+                    "_rename_regular_file_overlay_noreplace",
+                    wraps=SYNC_MODULE._rename_regular_file_overlay_noreplace,
+                ) as rename_mock,
+            ):
+                with self.assertRaisesRegex(
+                    SYNC_MODULE.SyncError,
+                    "cannot pin regular-file overlay external prepared container.*"
+                    "retaining last-known path",
+                ):
+                    SYNC_MODULE.sync_sources(
+                        self.repo_root,
+                        self.source_root,
+                        (rule,),
+                    )
+
+            self.assertEqual((decoy / "do-not-delete").read_bytes(), b"decoy\n")
+            self.assertEqual(rename_mock.call_count, 0)
+            self.assertEqual(target.stat().st_ino, target_inode)
+            self.assertEqual((target / "old-marker").read_bytes(), b"old\n")
+        finally:
+            if retained_container is not None and retained_container.exists():
+                shutil.rmtree(retained_container)
+
+    def test_external_prepared_root_pin_failure_reports_retained_path(self) -> None:
+        rule, target = self._create_canonical_regular_file_overlay_rule()
+        target_inode = target.stat().st_ino
+        real_pin = SYNC_MODULE._pin_regular_file_overlay_child_directory
+        retained_container: Path | None = None
+
+        def fail_root_pin(stack, parent, name, *, path, label):
+            nonlocal retained_container
+            if label == "prepared public root":
+                retained_container = path.parent
+                raise SYNC_MODULE.SyncError("injected prepared-root pin failure")
+            return real_pin(
+                stack,
+                parent,
+                name,
+                path=path,
+                label=label,
+            )
+
+        try:
+            with (
+                mock.patch.object(
+                    SYNC_MODULE,
+                    "_pin_regular_file_overlay_child_directory",
+                    side_effect=fail_root_pin,
+                ),
+                mock.patch.object(
+                    SYNC_MODULE,
+                    "_rename_regular_file_overlay_noreplace",
+                    wraps=SYNC_MODULE._rename_regular_file_overlay_noreplace,
+                ) as rename_mock,
+            ):
+                with self.assertRaisesRegex(
+                    SYNC_MODULE.SyncError,
+                    "injected prepared-root pin failure.*exact cleanup failed.*"
+                    "retained last-known path",
+                ):
+                    SYNC_MODULE.sync_sources(
+                        self.repo_root,
+                        self.source_root,
+                        (rule,),
+                    )
+
+            self.assertIsNotNone(retained_container)
+            self.assertTrue((retained_container / target.name).is_dir())
+            self.assertEqual(rename_mock.call_count, 0)
+            self.assertEqual(target.stat().st_ino, target_inode)
+            self.assertEqual((target / "old-marker").read_bytes(), b"old\n")
+        finally:
+            if retained_container is not None and retained_container.exists():
+                shutil.rmtree(retained_container)
+
+    def test_external_prepared_cleanup_rejects_root_rebind_before_live_mutation(
+        self,
+    ) -> None:
+        rule, target = self._create_canonical_regular_file_overlay_rule()
+        target_inode = target.stat().st_ino
+        real_remove = (
+            SYNC_MODULE._remove_external_prepared_regular_file_overlay_tree
+        )
+        cleanup_calls = 0
+        rebound = False
+        decoy_survived = False
+
+        def rebind_first_cleanup(parent, container, root, manifest, *, root_name):
+            nonlocal cleanup_calls, rebound, decoy_survived
+            cleanup_calls += 1
+            if cleanup_calls != 1:
+                return real_remove(
+                    parent,
+                    container,
+                    root,
+                    manifest,
+                    root_name=root_name,
+                )
+            saved_name = f".{container.path.name}.{root_name}.expected"
+            saved = container.path.parent / saved_name
+            visible = container.path / root_name
+            visible.rename(saved)
+            visible.mkdir(mode=0o700)
+            marker = visible / "do-not-delete"
+            marker.write_bytes(b"decoy\n")
+            rebound = True
+            try:
+                return real_remove(
+                    parent,
+                    container,
+                    root,
+                    manifest,
+                    root_name=root_name,
+                )
+            finally:
+                decoy_survived = marker.read_bytes() == b"decoy\n"
+                shutil.rmtree(visible)
+                saved.rename(visible)
+
+        with (
+            mock.patch.object(
+                SYNC_MODULE,
+                "_remove_external_prepared_regular_file_overlay_tree",
+                side_effect=rebind_first_cleanup,
+            ),
+            mock.patch.object(
+                SYNC_MODULE,
+                "_rename_regular_file_overlay_noreplace",
+                wraps=SYNC_MODULE._rename_regular_file_overlay_noreplace,
+            ) as rename_mock,
+        ):
+            with self.assertRaisesRegex(
+                SYNC_MODULE.SyncError,
+                "external prepared root binding changed.*"
+                "recovery scope retained for inspection",
+            ):
+                SYNC_MODULE.sync_sources(
+                    self.repo_root,
+                    self.source_root,
+                    (rule,),
+                )
+
+        self.assertTrue(rebound)
+        self.assertTrue(decoy_survived)
         self.assertEqual(cleanup_calls, 2)
         self.assertEqual(rename_mock.call_count, 0)
         self.assertEqual(target.stat().st_ino, target_inode)
@@ -2014,6 +3111,39 @@ class PrivateOverlaySyncTests(unittest.TestCase):
                     self.repo_root,
                     Path("private/catalog.json"),
                 )
+
+    def test_regular_file_overlay_source_read_rejects_append_at_initial_size_plus_one(
+        self,
+    ) -> None:
+        source = self.repo_root / "private" / "catalog.json"
+        source.parent.mkdir()
+        source.write_bytes(b"private\n")
+        real_read = SYNC_MODULE.os.read
+        requested_sizes: list[int] = []
+        appended = False
+
+        def append_after_first_read(descriptor, size):
+            nonlocal appended
+            requested_sizes.append(size)
+            data = real_read(descriptor, size)
+            if not appended:
+                with source.open("ab") as stream:
+                    stream.write(b"x")
+                appended = True
+            return data
+
+        with mock.patch.object(
+            SYNC_MODULE.os,
+            "read",
+            side_effect=append_after_first_read,
+        ):
+            with self.assertRaisesRegex(SYNC_MODULE.SyncError, "changed while reading"):
+                SYNC_MODULE._read_regular_file_overlay_source(
+                    self.repo_root,
+                    Path("private/catalog.json"),
+                )
+
+        self.assertEqual(requested_sizes, [len(b"private\n") + 1, 1])
 
     def test_regular_file_overlay_blocks_source_ancestor_swap_after_preflight(
         self,
@@ -2433,7 +3563,9 @@ class PrivateOverlaySyncTests(unittest.TestCase):
                             b"private\n",
                             staging,
                             "catalog.json",
+                            relative=Path("catalog.json"),
                             staging_scope=scope,
+                            manifest_builder=SYNC_MODULE._RegularFileOverlayManifestBuilder(),
                         )
 
         self.assertEqual(calls, [len(b"private\n") + 1])
@@ -2441,6 +3573,271 @@ class PrivateOverlaySyncTests(unittest.TestCase):
             (scope.path / "candidate/catalog.json").read_bytes(),
             b"private\n",
         )
+
+    def test_regular_file_overlay_prepared_copy_rejects_append_at_initial_size_plus_one(
+        self,
+    ) -> None:
+        source = self.root / "prepared-copy-source.txt"
+        source.write_bytes(b"prepared\n")
+        target = self.repo_root / "prepared-copy-target"
+        real_read = SYNC_MODULE.os.read
+        requested_sizes: list[int] = []
+        appended = False
+
+        def append_after_first_read(descriptor, size):
+            nonlocal appended
+            requested_sizes.append(size)
+            data = real_read(descriptor, size)
+            if not appended:
+                with source.open("ab") as stream:
+                    stream.write(b"x")
+                appended = True
+            return data
+
+        with self.assertRaisesRegex(
+            SYNC_MODULE.SyncError,
+            "prepared overlay source grew while copying",
+        ):
+            with self._regular_file_overlay_staging_directory(target) as scope:
+                with contextlib.ExitStack() as stack:
+                    source_parent = SYNC_MODULE._pin_regular_file_overlay_directory(
+                        stack,
+                        source.parent,
+                        label="prepared source parent",
+                    )
+                    destination = (
+                        SYNC_MODULE._pin_or_create_regular_file_overlay_directory(
+                            stack,
+                            scope.container,
+                            "candidate",
+                            path=scope.path / "candidate",
+                            label="staged target",
+                            private=True,
+                        )
+                    )
+                    expected = self._regular_file_overlay_manifest_entry_for_file(
+                        source
+                    )
+                    with mock.patch.object(
+                        SYNC_MODULE.os,
+                        "read",
+                        side_effect=append_after_first_read,
+                    ):
+                        SYNC_MODULE._copy_prepared_regular_file_overlay_file(
+                            source_parent,
+                            source.name,
+                            destination,
+                            "copied.txt",
+                            relative=Path("copied.txt"),
+                            expected=expected,
+                            policy_target=Path("test/candidate"),
+                            staging_scope=scope,
+                            copy_budget=SYNC_MODULE._RegularFileOverlayCopyBudget(),
+                            manifest_builder=SYNC_MODULE._RegularFileOverlayManifestBuilder(),
+                        )
+
+        self.assertEqual(requested_sizes, [len(b"prepared\n") + 1, 1])
+        self.assertFalse((scope.path / "candidate/copied.txt").exists())
+
+    def test_regular_file_overlay_prepared_copy_fifo_swap_cannot_block(self) -> None:
+        source = self.root / "prepared-copy-fifo-source.txt"
+        source.write_bytes(b"prepared\n")
+        target = self.repo_root / "prepared-copy-fifo-target"
+        real_open = SYNC_MODULE.os.open
+        swapped = False
+
+        def swap_source_then_open(path, flags, *args, **kwargs):
+            nonlocal swapped
+            if path == source.name and not swapped:
+                source.unlink()
+                os.mkfifo(source)
+                swapped = True
+                self.assertTrue(flags & os.O_NONBLOCK)
+            return real_open(path, flags, *args, **kwargs)
+
+        with self.assertRaisesRegex(
+            SYNC_MODULE.SyncError,
+            "prepared overlay source changed while opening",
+        ):
+            with self._regular_file_overlay_staging_directory(target) as scope:
+                with contextlib.ExitStack() as stack:
+                    source_parent = SYNC_MODULE._pin_regular_file_overlay_directory(
+                        stack,
+                        source.parent,
+                        label="prepared source parent",
+                    )
+                    destination = (
+                        SYNC_MODULE._pin_or_create_regular_file_overlay_directory(
+                            stack,
+                            scope.container,
+                            "candidate",
+                            path=scope.path / "candidate",
+                            label="staged target",
+                            private=True,
+                        )
+                    )
+                    expected = self._regular_file_overlay_manifest_entry_for_file(
+                        source
+                    )
+                    with mock.patch.object(
+                        SYNC_MODULE.os,
+                        "open",
+                        side_effect=swap_source_then_open,
+                    ):
+                        SYNC_MODULE._copy_prepared_regular_file_overlay_file(
+                            source_parent,
+                            source.name,
+                            destination,
+                            "copied.txt",
+                            relative=Path("copied.txt"),
+                            expected=expected,
+                            policy_target=Path("test/candidate"),
+                            staging_scope=scope,
+                            copy_budget=SYNC_MODULE._RegularFileOverlayCopyBudget(),
+                            manifest_builder=SYNC_MODULE._RegularFileOverlayManifestBuilder(),
+                        )
+
+        self.assertTrue(swapped)
+        self.assertTrue(stat.S_ISFIFO(source.lstat().st_mode))
+        self.assertFalse((scope.path / "candidate/copied.txt").exists())
+
+    def test_regular_file_overlay_prepared_copy_rejects_tree_byte_limit_before_read(
+        self,
+    ) -> None:
+        source = self.root / "oversized-prepared-copy-source.txt"
+        source.touch()
+        os.truncate(source, SYNC_MODULE.MAX_REGULAR_FILE_OVERLAY_TREE_BYTES + 1)
+        target = self.repo_root / "oversized-prepared-copy-target"
+
+        with self.assertRaisesRegex(
+            SYNC_MODULE.SyncError,
+            "prepared target tree exceeds",
+        ):
+            with self._regular_file_overlay_staging_directory(target) as scope:
+                with contextlib.ExitStack() as stack:
+                    source_parent = SYNC_MODULE._pin_regular_file_overlay_directory(
+                        stack,
+                        source.parent,
+                        label="prepared source parent",
+                    )
+                    destination = (
+                        SYNC_MODULE._pin_or_create_regular_file_overlay_directory(
+                            stack,
+                            scope.container,
+                            "candidate",
+                            path=scope.path / "candidate",
+                            label="staged target",
+                            private=True,
+                        )
+                    )
+                    metadata = source.stat()
+                    expected = SYNC_MODULE._RegularFileOverlayTreeEntry(
+                        relative_parts=(source.name,),
+                        kind="file",
+                        identity=SYNC_MODULE._overlay_file_identity(metadata),
+                        size=metadata.st_size,
+                        sha256="0" * 64,
+                    )
+                    with mock.patch.object(
+                        SYNC_MODULE.os,
+                        "read",
+                        side_effect=AssertionError("oversized source must not be read"),
+                    ):
+                        SYNC_MODULE._copy_prepared_regular_file_overlay_file(
+                            source_parent,
+                            source.name,
+                            destination,
+                            "copied.txt",
+                            relative=Path("copied.txt"),
+                            expected=expected,
+                            policy_target=Path("test/candidate"),
+                            staging_scope=scope,
+                            copy_budget=SYNC_MODULE._RegularFileOverlayCopyBudget(),
+                            manifest_builder=SYNC_MODULE._RegularFileOverlayManifestBuilder(),
+                        )
+
+        self.assertFalse((scope.path / "candidate/copied.txt").exists())
+
+    def test_regular_file_overlay_prepared_scan_bounds_ignored_entries(self) -> None:
+        source = self.root / "bounded-prepared-scan"
+        source.mkdir()
+        for index in range(3):
+            (source / f"ignored-{index}.pyc").write_bytes(b"ignored\n")
+        target = self.repo_root / "bounded-prepared-scan-target"
+        budget = SYNC_MODULE._RegularFileOverlayCopyBudget()
+
+        with self.assertRaisesRegex(
+            SYNC_MODULE.SyncError,
+            "bounded entry capacity",
+        ):
+            with self._regular_file_overlay_staging_directory(target) as scope:
+                with contextlib.ExitStack() as stack:
+                    source_root = SYNC_MODULE._pin_regular_file_overlay_directory(
+                        stack,
+                        source,
+                        label="prepared source root",
+                    )
+                    destination = (
+                        SYNC_MODULE._pin_or_create_regular_file_overlay_directory(
+                            stack,
+                            scope.container,
+                            "candidate",
+                            path=scope.path / "candidate",
+                            label="staged target",
+                            private=True,
+                        )
+                    )
+                    with mock.patch.object(
+                        SYNC_MODULE,
+                        "MAX_REGULAR_FILE_OVERLAY_TREE_ENTRIES",
+                        2,
+                    ):
+                        SYNC_MODULE._copy_prepared_regular_file_overlay_directory(
+                            stack,
+                            source_root,
+                            destination,
+                            staging_scope=scope,
+                            relative=Path(),
+                            policy_target=Path("test/candidate"),
+                            expected_entries={},
+                            visited_entries=set(),
+                            overlay_data={},
+                            applied_overlays=set(),
+                            copy_budget=budget,
+                            manifest_builder=SYNC_MODULE._RegularFileOverlayManifestBuilder(),
+                        )
+
+        self.assertEqual(budget.scanned_entries, 0)
+        self.assertEqual(budget.entries, 0)
+        self.assertEqual(list((scope.path / "candidate").iterdir()), [])
+
+    def test_regular_file_overlay_manifest_shares_entry_budget_across_depth(
+        self,
+    ) -> None:
+        source = self.root / "bounded-manifest-scan"
+        (source / "nested").mkdir(parents=True)
+        (source / "sibling.txt").write_bytes(b"sibling\n")
+        (source / "nested" / "child.txt").write_bytes(b"child\n")
+        descriptor = SYNC_MODULE._open_regular_file_overlay_root(
+            source,
+            label="bounded manifest",
+        )
+        try:
+            with mock.patch.object(
+                SYNC_MODULE,
+                "MAX_REGULAR_FILE_OVERLAY_TREE_ENTRIES",
+                2,
+            ):
+                with self.assertRaisesRegex(
+                    SYNC_MODULE.SyncError,
+                    "bounded entry capacity",
+                ):
+                    SYNC_MODULE._capture_regular_file_overlay_tree_manifest(
+                        descriptor,
+                        label="bounded manifest",
+                    )
+        finally:
+            os.close(descriptor)
 
     def test_regular_file_overlay_visible_fifo_fails_without_blocking(self) -> None:
         stack, _target, staging, binding = (
@@ -2505,6 +3902,101 @@ class PrivateOverlaySyncTests(unittest.TestCase):
                     )
 
         self.assertEqual((target / "catalog.json").read_bytes(), b"public\n")
+
+    def test_regular_file_overlay_rejects_whole_tree_mutation_before_install(
+        self,
+    ) -> None:
+        for mutation in ("add", "modify", "remove"):
+            with self.subTest(mutation=mutation):
+                target = self._create_regular_file_overlay_target(
+                    f"whole-tree-{mutation}"
+                )
+                with self.assertRaisesRegex(
+                    SYNC_MODULE.SyncError,
+                    "exact tree manifest changed",
+                ):
+                    with self._regular_file_overlay_staging_directory(target) as scope:
+                        stack, staging, binding = (
+                            self._prepare_scoped_regular_file_overlay_candidate(
+                                scope,
+                                extra_files={Path("fixtures/value.txt"): b"safe\n"},
+                            )
+                        )
+                        with stack:
+                            if mutation == "add":
+                                (staging / "fixtures/unexpected.txt").write_bytes(
+                                    b"added\n"
+                                )
+                            elif mutation == "modify":
+                                (staging / "fixtures/value.txt").write_bytes(
+                                    b"changed\n"
+                                )
+                            else:
+                                (staging / "fixtures/value.txt").unlink()
+                            SYNC_MODULE._replace_target_with_regular_file_overlays(
+                                target,
+                                staging,
+                                (binding,),
+                                staging_scope=scope,
+                            )
+
+                self.assertEqual((target / "catalog.json").read_bytes(), b"public\n")
+
+    def test_regular_file_overlay_rejects_whole_tree_mutation_after_install(
+        self,
+    ) -> None:
+        target = self._create_regular_file_overlay_target("whole-tree-post-install")
+        real_rename = SYNC_MODULE._rename_regular_file_overlay_noreplace
+        rename_calls = 0
+
+        def mutate_after_install(*args):
+            nonlocal rename_calls
+            real_rename(*args)
+            rename_calls += 1
+            if rename_calls == 2:
+                (target / "fixtures/value.txt").write_bytes(b"changed\n")
+
+        with self.assertRaisesRegex(
+            SYNC_MODULE.SyncError,
+            "installed candidate left live",
+        ) as raised:
+            with self._regular_file_overlay_staging_directory(target) as scope:
+                stack, staging, binding = (
+                    self._prepare_scoped_regular_file_overlay_candidate(
+                        scope,
+                        extra_files={Path("fixtures/value.txt"): b"safe\n"},
+                    )
+                )
+                with (
+                    stack,
+                    mock.patch.object(
+                        SYNC_MODULE,
+                        "_rename_regular_file_overlay_noreplace",
+                        side_effect=mutate_after_install,
+                    ),
+                ):
+                    SYNC_MODULE._replace_target_with_regular_file_overlays(
+                        target,
+                        staging,
+                        (binding,),
+                        staging_scope=scope,
+                    )
+
+        self.assertEqual(rename_calls, 2)
+        message = str(raised.exception)
+        self.assertIn("original transaction error:", message)
+        self.assertIn("exact tree manifest changed", message)
+        self.assertIn("only the candidate root identity matched", message)
+        self.assertIn("exact contents are unverified", message)
+        self.assertIn("must be treated as untrusted", message)
+        self.assertIn("prior target root identity retained at", message)
+        self.assertIn("contents are unverified", message)
+        self.assertNotIn("pinned candidate", message)
+        self.assertNotIn("verified prior target", message)
+        self.assertEqual(
+            (target / "fixtures/value.txt").read_bytes(),
+            b"changed\n",
+        )
 
     def test_regular_file_overlay_rejects_staging_root_replacement_before_install(
         self,
@@ -2822,16 +4314,76 @@ class PrivateOverlaySyncTests(unittest.TestCase):
             (scope_path / "candidate/catalog.json").read_bytes(), b"private\n"
         )
 
+    def test_regular_file_overlay_recovery_error_reports_transaction_error(
+        self,
+    ) -> None:
+        target = self._create_regular_file_overlay_target("recovery-error-detail")
+        real_register = SYNC_MODULE._register_regular_file_overlay_retained_entry
+        rebound = False
+
+        def register_then_rebind(scope, name, entry):
+            nonlocal rebound
+            real_register(scope, name, entry)
+            if not name.startswith(SYNC_MODULE.REGULAR_FILE_OVERLAY_BACKUP_PREFIX):
+                return
+            os.rename(
+                name,
+                f"{name}-saved",
+                src_dir_fd=scope.container.descriptor,
+                dst_dir_fd=scope.container.descriptor,
+            )
+            descriptor = os.open(
+                name,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                0o600,
+                dir_fd=scope.container.descriptor,
+            )
+            try:
+                os.write(descriptor, b"unknown\n")
+            finally:
+                os.close(descriptor)
+            rebound = True
+
+        with self.assertRaisesRegex(
+            SYNC_MODULE.SyncError,
+            "prior target binding is unknown",
+        ) as raised:
+            with self._regular_file_overlay_staging_directory(target) as scope:
+                stack, staging, binding = (
+                    self._prepare_scoped_regular_file_overlay_candidate(scope)
+                )
+                with (
+                    stack,
+                    mock.patch.object(
+                        SYNC_MODULE,
+                        "_register_regular_file_overlay_retained_entry",
+                        side_effect=register_then_rebind,
+                    ),
+                ):
+                    SYNC_MODULE._replace_target_with_regular_file_overlays(
+                        target,
+                        staging,
+                        (binding,),
+                        staging_scope=scope,
+                    )
+
+        message = str(raised.exception)
+        self.assertTrue(rebound)
+        self.assertIn("original transaction error:", message)
+        self.assertIn("retained recovery entry binding changed", message)
+        self.assertIn("only the candidate root identity matched", message)
+        self.assertIn("exact contents are unverified", message)
+        self.assertIn("must be treated as untrusted", message)
+
     def test_regular_file_overlay_noreplace_capability_fails_before_target_mutation(
         self,
     ) -> None:
         target = self._create_regular_file_overlay_target("missing-noreplace")
         old_target_inode = target.stat().st_ino
-        with self.assertRaisesRegex(
-            SYNC_MODULE.SyncError,
-            "noreplace unavailable",
-        ):
+        scope_path: Path | None = None
+        with self.assertRaises(SYNC_MODULE.SyncError) as raised:
             with self._regular_file_overlay_staging_directory(target) as scope:
+                scope_path = scope.path
                 stack, staging, binding = (
                     self._prepare_scoped_regular_file_overlay_candidate(scope)
                 )
@@ -2850,10 +4402,33 @@ class PrivateOverlaySyncTests(unittest.TestCase):
                         staging_scope=scope,
                     )
 
+        self.assertIn("noreplace unavailable", str(raised.exception))
+        self.assertIsNotNone(scope_path)
+        self.assertIn(str(scope_path), str(raised.exception))
+        self.assertTrue((scope_path / "candidate").is_dir())
         self.assertEqual(target.stat().st_ino, old_target_inode)
         self.assertEqual((target / "catalog.json").read_bytes(), b"public\n")
 
-    def test_regular_file_overlay_preserves_verified_recovery_without_path_cleanup(
+    def test_regular_file_overlay_plain_exception_reports_recovery_scope(
+        self,
+    ) -> None:
+        target = self._create_regular_file_overlay_target("plain-exception")
+        scope_path: Path | None = None
+
+        with self.assertRaises(SYNC_MODULE.SyncError) as raised:
+            with self._regular_file_overlay_staging_directory(target) as scope:
+                scope_path = scope.path
+                (scope.path / "candidate").mkdir()
+                raise ValueError("injected non-sync failure")
+
+        self.assertIsInstance(raised.exception.__cause__, ValueError)
+        self.assertIn("ValueError: injected non-sync failure", str(raised.exception))
+        self.assertIsNotNone(scope_path)
+        self.assertIn(str(scope_path), str(raised.exception))
+        self.assertTrue((scope_path / "candidate").is_dir())
+        self.assertEqual((target / "catalog.json").read_bytes(), b"public\n")
+
+    def test_regular_file_overlay_preserves_root_bound_recovery_without_path_cleanup(
         self,
     ) -> None:
         target = self._create_regular_file_overlay_target("pinned-recovery")
@@ -2896,7 +4471,7 @@ class PrivateOverlaySyncTests(unittest.TestCase):
             {
                 "prior target before backup move",
                 "moved prior target backup",
-                "verified recovery backup",
+                "root-bound recovery backup",
                 "retained recovery entry",
             }.issubset(labels)
         )
