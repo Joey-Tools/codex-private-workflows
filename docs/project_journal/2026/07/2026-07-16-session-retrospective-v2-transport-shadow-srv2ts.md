@@ -43,7 +43,7 @@ superseded_by:
 - `personal_codex/automations/weekly-session-retrospective/automation.toml`
 - `tests/test_remote_session_shards.py`
 - `tests/test_session_retrospective_v2_shadow_automation.py`
-- Python 3.10.19 with `tomli==2.2.1`: 5 targeted CI regression tests passed in 0.206 seconds.
-- Focused transport/shadow suite: 98 tests passed in 6.923 seconds with 1 platform-dependent skip.
-- Full test suite: 570 tests passed in 103.885 seconds with 3 platform-dependent skips.
+- Python 3.10.19 with `tomli==2.2.1` on the Linux code path: 33 shadow tests passed in 3.114 seconds with 1 platform-dependent skip.
+- Focused transport/shadow suite: 99 tests passed in 7.152 seconds with 1 platform-dependent skip.
+- Full test suite: 571 tests passed in 132.883 seconds with 3 platform-dependent skips.
 - Changed-file Ruff format/check, Python compileall, remote-host skill validation, actionlint, and project journal validation passed.

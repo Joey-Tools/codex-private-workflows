@@ -74,6 +74,18 @@ def load_automation(path: Path) -> dict[str, object]:
         return tomllib.load(handle)
 
 
+def create_trusted_coordinator_stub(directory: Path) -> Path:
+    directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+    directory.chmod(0o700)
+    coordinator_path = directory / "coordinator.py"
+    coordinator_path.write_text("raise SystemExit(0)\n", encoding="utf-8")
+    coordinator_path.chmod(0o600)
+    metadata = coordinator_path.stat()
+    if metadata.st_uid != os.getuid() or metadata.st_nlink != 1:
+        raise RuntimeError("trusted coordinator fixture is not owner-controlled")
+    return coordinator_path
+
+
 def protocol_ref(prefix: str, label: str) -> str:
     return prefix + hashlib.sha256(label.encode("ascii")).hexdigest()
 
@@ -334,6 +346,13 @@ class SessionRetrospectiveV2ShadowAutomationTests(unittest.TestCase):
         cls.shadow = load_automation(SHADOW_PATH)
         cls.prompt = str(cls.shadow["prompt"])
         cls.manifest = json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
+        coordinator_fixture = tempfile.TemporaryDirectory(
+            prefix="shadow-coordinator-fixture."
+        )
+        cls.addClassCleanup(coordinator_fixture.cleanup)
+        cls.coordinator_path = create_trusted_coordinator_stub(
+            Path(coordinator_fixture.name)
+        )
 
     def test_identity_schedule_and_runtime_convention_are_unique(self) -> None:
         automation_paths = sorted(AUTOMATIONS_ROOT.glob("*/automation.toml"))
@@ -559,6 +578,19 @@ class SessionRetrospectiveV2ShadowAutomationTests(unittest.TestCase):
                     ["run", "--invocation-d", str(invocation_dir)]
                 )
 
+    def test_runner_rejects_a_hardlinked_coordinator(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="shadow-coordinator-hardlink.") as raw:
+            root = Path(raw)
+            coordinator_path = create_trusted_coordinator_stub(root)
+            hardlink_path = root / "coordinator-hardlink.py"
+            os.link(coordinator_path, hardlink_path)
+
+            with self.assertRaisesRegex(
+                RUNNER.ShadowPolicyError,
+                "trusted single-link regular file",
+            ):
+                RUNNER._validate_coordinator_path(coordinator_path)
+
     def test_runner_help_and_identity_bootstrap_enable_a_fresh_doctor(self) -> None:
         with tempfile.TemporaryDirectory(prefix="shadow-runner-bootstrap.") as raw:
             shadow_root = Path(raw) / "shadow"
@@ -586,7 +618,7 @@ class SessionRetrospectiveV2ShadowAutomationTests(unittest.TestCase):
                 ("help",),
                 invocation_dir=invocation_dir,
                 shadow_root=shadow_root,
-                coordinator_path=Path(sys.executable),
+                coordinator_path=self.coordinator_path,
                 executor=executor,
             )
             identity_result = RUNNER.run_guarded_coordinator(
@@ -599,7 +631,7 @@ class SessionRetrospectiveV2ShadowAutomationTests(unittest.TestCase):
                 ),
                 invocation_dir=invocation_dir,
                 shadow_root=shadow_root,
-                coordinator_path=Path(sys.executable),
+                coordinator_path=self.coordinator_path,
                 executor=executor,
             )
             doctor_result = RUNNER.run_guarded_coordinator(
@@ -618,7 +650,7 @@ class SessionRetrospectiveV2ShadowAutomationTests(unittest.TestCase):
                 ),
                 invocation_dir=invocation_dir,
                 shadow_root=shadow_root,
-                coordinator_path=Path(sys.executable),
+                coordinator_path=self.coordinator_path,
                 executor=executor,
             )
             capture_environment = RUNNER._source_capture_environment(invocation_dir)
@@ -749,7 +781,7 @@ class SessionRetrospectiveV2ShadowAutomationTests(unittest.TestCase):
                     ("help",),
                     invocation_dir=invocation_dir,
                     shadow_root=shadow_root,
-                    coordinator_path=Path(sys.executable),
+                    coordinator_path=self.coordinator_path,
                     executor=executor,
                 )
 
@@ -787,7 +819,7 @@ class SessionRetrospectiveV2ShadowAutomationTests(unittest.TestCase):
                     invocation_dir=invocation_dir,
                     host="miku-bot-dev",
                     shadow_root=shadow_root,
-                    coordinator_path=Path(sys.executable),
+                    coordinator_path=self.coordinator_path,
                     executor=lambda *_args: self.fail(
                         "source acceptance must not follow a dirty status"
                     ),
@@ -825,7 +857,7 @@ class SessionRetrospectiveV2ShadowAutomationTests(unittest.TestCase):
                 "simulation history must remain empty",
             ):
                 RUNNER._status_for_run(
-                    coordinator_path=Path(sys.executable),
+                    coordinator_path=self.coordinator_path,
                     coordinator_identity_path=invocation_dir / "identity-v2.json",
                     run_dir=invocation_dir / "run",
                     invocation_dir=invocation_dir,
@@ -879,7 +911,7 @@ class SessionRetrospectiveV2ShadowAutomationTests(unittest.TestCase):
                 window_start=window_start,
                 window_end=window_end,
                 shadow_root=shadow_root,
-                coordinator_path=Path(sys.executable),
+                coordinator_path=self.coordinator_path,
                 transport_module=transport,
                 executor=executor,
                 now_utc=now_utc,
@@ -968,7 +1000,7 @@ class SessionRetrospectiveV2ShadowAutomationTests(unittest.TestCase):
                     coordinator_identity_path=coordinator_identity_path,
                     partial_run_ref=partial_run_ref,
                     shadow_root=shadow_root,
-                    coordinator_path=Path(sys.executable),
+                    coordinator_path=self.coordinator_path,
                     transport_module=transport,
                     executor=executor,
                     status_query=lambda *_args: self.fail(
@@ -1020,7 +1052,7 @@ class SessionRetrospectiveV2ShadowAutomationTests(unittest.TestCase):
                     coordinator_identity_path=coordinator_identity_path,
                     partial_run_ref=partial_run_ref,
                     shadow_root=shadow_root,
-                    coordinator_path=Path(sys.executable),
+                    coordinator_path=self.coordinator_path,
                     transport_module=transport,
                     executor=executor,
                     status_query=status_query,
@@ -1042,7 +1074,7 @@ class SessionRetrospectiveV2ShadowAutomationTests(unittest.TestCase):
                 coordinator_identity_path=coordinator_identity_path,
                 partial_run_ref=partial_run_ref,
                 shadow_root=shadow_root,
-                coordinator_path=Path(sys.executable),
+                coordinator_path=self.coordinator_path,
                 transport_module=transport,
                 executor=executor,
                 status_query=status_query,
@@ -1090,7 +1122,7 @@ class SessionRetrospectiveV2ShadowAutomationTests(unittest.TestCase):
                     coordinator_identity_path=coordinator_identity_path,
                     partial_run_ref=partial_run_ref,
                     shadow_root=shadow_root,
-                    coordinator_path=Path(sys.executable),
+                    coordinator_path=self.coordinator_path,
                     transport_module=transport,
                     executor=executor,
                     status_query=status_query,
@@ -1546,7 +1578,7 @@ raise SystemExit(0 if not failures else 74)
                     invocation_dir=invocation_dir,
                     host="miku-bot-dev",
                     shadow_root=shadow_root,
-                    coordinator_path=Path(sys.executable),
+                    coordinator_path=self.coordinator_path,
                     executor=serialized_executor,
                     capture_executor=serialized_capture_executor,
                     status_query=status_query,
@@ -1610,7 +1642,7 @@ raise SystemExit(0 if not failures else 74)
                     invocation_dir=invocation_dir,
                     host=host,
                     shadow_root=shadow_root,
-                    coordinator_path=Path(sys.executable),
+                    coordinator_path=self.coordinator_path,
                     executor=lambda _path, argv, _cwd: subprocess.CompletedProcess(
                         argv,
                         0,
@@ -1719,7 +1751,7 @@ raise SystemExit(0 if not failures else 74)
                     invocation_dir=invocation_dir,
                     host="miku-bot-dev",
                     shadow_root=shadow_root,
-                    coordinator_path=Path(sys.executable),
+                    coordinator_path=self.coordinator_path,
                     executor=lambda _path, argv, _cwd: subprocess.CompletedProcess(
                         argv,
                         0,
@@ -1793,7 +1825,7 @@ raise SystemExit(0 if not failures else 74)
                 invocation_dir=invocation_dir,
                 host="miku-bot-dev",
                 shadow_root=shadow_root,
-                coordinator_path=Path(sys.executable),
+                coordinator_path=self.coordinator_path,
                 executor=accept_executor,
                 capture_executor=capture_executor,
                 status_query=status_query,
@@ -1858,7 +1890,7 @@ raise SystemExit(0 if not failures else 74)
                     invocation_dir=invocation_dir,
                     host="miku-bot-dev",
                     shadow_root=shadow_root,
-                    coordinator_path=Path(sys.executable),
+                    coordinator_path=self.coordinator_path,
                     executor=forbidden_accept,
                     capture_executor=failed_capture,
                     status_query=status_query,
@@ -1905,7 +1937,7 @@ raise SystemExit(0 if not failures else 74)
                     invocation_dir=invocation_dir,
                     host="miku-bot-dev",
                     shadow_root=shadow_root,
-                    coordinator_path=Path(sys.executable),
+                    coordinator_path=self.coordinator_path,
                     executor=slow_executor,
                     capture_executor=successful_capture_executor,
                     status_query=status_query,
@@ -1918,7 +1950,7 @@ raise SystemExit(0 if not failures else 74)
                     invocation_dir=invocation_dir,
                     host="hoteng-srv-01",
                     shadow_root=shadow_root,
-                    coordinator_path=Path(sys.executable),
+                    coordinator_path=self.coordinator_path,
                     executor=slow_executor,
                     capture_executor=successful_capture_executor,
                     status_query=status_query,
@@ -2274,7 +2306,7 @@ raise SystemExit(0 if not failures else 74)
                 "partial_run_dir": partial_run_dir,
                 "backfill_run_dir": backfill_run_dir,
                 "shadow_root": shadow_root,
-                "coordinator_path": Path(sys.executable),
+                "coordinator_path": self.coordinator_path,
                 "transport_module": transport,
                 "status_query": status_query,
                 "coverage_verifier": verify_coverage,
@@ -2540,7 +2572,7 @@ raise SystemExit(0 if not failures else 74)
                     invocation_dir=invocation_dir,
                     host="miku-bot-dev",
                     shadow_root=shadow_root,
-                    coordinator_path=Path(sys.executable),
+                    coordinator_path=self.coordinator_path,
                     executor=executor,
                     capture_executor=successful_capture_executor,
                     status_query=status_query,
@@ -2553,7 +2585,7 @@ raise SystemExit(0 if not failures else 74)
                         invocation_dir=invocation_dir,
                         host="hoteng-srv-01",
                         shadow_root=shadow_root,
-                        coordinator_path=Path(sys.executable),
+                        coordinator_path=self.coordinator_path,
                         executor=lambda *_args: subprocess.CompletedProcess([], 99),
                         capture_executor=successful_capture_executor,
                         status_query=status_query,
