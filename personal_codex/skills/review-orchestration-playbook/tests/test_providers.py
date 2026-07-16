@@ -701,6 +701,26 @@ class ProviderPolicyTest(unittest.TestCase):
             },
         )
 
+    def test_claude_auth_metadata_validates_before_parent_parsing(self) -> None:
+        secret = "credential-shaped-but-not-a-uuid"
+        self.claude_auth_config.write_text(
+            json.dumps(
+                {
+                    "oauthAccount": {
+                        **self.claude_auth_metadata,
+                        "accountUuid": secret,
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        with mock.patch.object(providers, "_strict_json_object") as parent_parser:
+            with self.assertRaises(providers.ClaudeKeychainCredentialUnavailable):
+                providers._read_claude_auth_metadata_environment()
+
+        parent_parser.assert_not_called()
+
     def test_claude_auth_metadata_rejects_unsafe_file_identity(self) -> None:
         self.claude_auth_config.chmod(0o640)
         with self.assertRaisesRegex(

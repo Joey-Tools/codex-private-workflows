@@ -230,6 +230,8 @@ import os
 import resource
 import stat
 import sys
+import unicodedata
+import uuid
 
 fd = None
 raw = bytearray()
@@ -277,7 +279,7 @@ try:
     expected_owner = int(sys.argv[2])
     limit = int(sys.argv[3])
     output_limit = int(sys.argv[4])
-    fields = tuple(sys.argv[5:])
+    specs = tuple(sys.argv[5:])
     flags = os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK
     fd = os.open(source, flags)
     before = os.fstat(fd)
@@ -320,9 +322,34 @@ try:
     oauth_account = config.get("oauthAccount") if isinstance(config, dict) else None
     if not isinstance(oauth_account, dict):
         finish(64)
-    selected = {field: oauth_account.get(field) for field in fields}
-    if any(not isinstance(value, str) or not value for value in selected.values()):
-        finish(64)
+    selected = {}
+    for spec in specs:
+        field, separator, kind = spec.partition(":")
+        if not separator or not field or field in selected:
+            finish(64)
+        value = oauth_account.get(field)
+        if not isinstance(value, str) or not value:
+            finish(64)
+        if kind == "uuid":
+            canonical = str(uuid.UUID(value))
+            if value.lower() != canonical:
+                finish(64)
+            value = canonical
+        elif kind == "email":
+            value.encode("utf-8", errors="strict")
+            if (
+                len(value) > 320
+                or value.count("@") != 1
+                or any(
+                    character.isspace()
+                    or unicodedata.category(character).startswith("C")
+                    for character in value
+                )
+            ):
+                finish(64)
+        else:
+            finish(64)
+        selected[field] = value
     encoded = json.dumps(selected, separators=(",", ":")).encode("utf-8")
     if len(encoded) >= output_limit:
         finish(64)
@@ -962,7 +989,10 @@ def _read_claude_auth_metadata_environment() -> dict[str, str]:
                 str(os.geteuid()),
                 str(CLAUDE_AUTH_CONFIG_LIMIT_BYTES),
                 str(CLAUDE_AUTH_METADATA_OUTPUT_LIMIT_BYTES),
-                *(field for field, _env_key, _kind in CLAUDE_AUTH_METADATA_FIELDS),
+                *(
+                    f"{field}:{kind}"
+                    for field, _env_key, kind in CLAUDE_AUTH_METADATA_FIELDS
+                ),
             ),
             cwd=_claude_host_home(),
             env={"LANG": "C", "LC_ALL": "C", "PATH": TRUSTED_PATH},
