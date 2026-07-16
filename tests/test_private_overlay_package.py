@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import contextlib
 import hashlib
+import hmac
 import importlib.util
 import io
 import json
@@ -33,7 +34,9 @@ PRIVATE_SHA = "2" * 40
 
 
 def automation_prompt(automation_id: str) -> str:
-    path = REPO_ROOT / "personal_codex" / "automations" / automation_id / "automation.toml"
+    path = (
+        REPO_ROOT / "personal_codex" / "automations" / automation_id / "automation.toml"
+    )
     for line in path.read_text(encoding="utf-8").splitlines():
         if line.startswith("prompt = "):
             return ast.literal_eval(line.partition("=")[2].strip())
@@ -124,11 +127,31 @@ class PrivateOverlayPackageTests(unittest.TestCase):
         ]
         if manifest is not None:
             args.extend(["--manifest", manifest])
-        subprocess.run(args, check=True, text=True, capture_output=True)
+        completed = subprocess.run(
+            args,
+            check=False,
+            text=True,
+            capture_output=True,
+        )
+        self.assertEqual(
+            completed.returncode,
+            0,
+            completed.stderr or completed.stdout,
+        )
         return dist_dir / f"personal-codex-{sha}.tar.gz"
 
     def test_private_manifest_packages_overlay_targets(self) -> None:
-        archive_path = self.build_private_package()
+        temporary_root = REPO_ROOT / ".codex-tmp"
+        temporary_root.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(
+            prefix="private-overlay-recovery-package-test.",
+            dir=temporary_root,
+        ) as recovery:
+            (Path(recovery) / "must-not-package").write_text(
+                "recovery\n",
+                encoding="utf-8",
+            )
+            archive_path = self.build_private_package()
         extract_root = self.root / "extract"
         release_root = MODULE.safe_extract_archive(archive_path, extract_root)
         entries = MODULE.validate_release_tree(release_root)
@@ -163,6 +186,35 @@ class PrivateOverlayPackageTests(unittest.TestCase):
                 }
             ],
         )
+        generated_catalog = (
+            release_root
+            / "personal_codex"
+            / "skills"
+            / "review-orchestration-playbook"
+            / "scripts"
+            / "review_runtime"
+            / "synthetic-token-catalog.json"
+        )
+        private_catalog = (
+            REPO_ROOT
+            / "personal_codex"
+            / "private-overrides"
+            / "review-orchestration-playbook"
+            / "synthetic-token-catalog.json"
+        )
+        self.assertTrue(generated_catalog.is_file())
+        self.assertTrue(
+            hmac.compare_digest(
+                generated_catalog.read_bytes(),
+                private_catalog.read_bytes(),
+            ),
+            "packaged generated catalog differs from the private override source",
+        )
+        with tarfile.open(archive_path, "r:gz") as archive:
+            self.assertFalse(any(".codex-tmp" in name for name in archive.getnames()))
+            self.assertFalse(
+                any("private-overrides" in name for name in archive.getnames())
+            )
 
     def test_manifest_validator_defaults_to_private_manifest(self) -> None:
         result = subprocess.run(
@@ -189,14 +241,108 @@ class PrivateOverlayPackageTests(unittest.TestCase):
 
         self.assertTrue(all(entry.owner == "private" for entry in entries))
         self.assertFalse(
-            any(entry.target.as_posix() == "bin/codex-personal-sync" for entry in entries)
+            any(
+                entry.target.as_posix() == "bin/codex-personal-sync"
+                for entry in entries
+            )
         )
+
+    def test_package_excludes_private_override_source(self) -> None:
+        repo_root = self.root / "repo"
+        review_skill = (
+            repo_root
+            / "personal_codex"
+            / "skills"
+            / "review-orchestration-playbook"
+        )
+        generated_catalog = (
+            review_skill
+            / "scripts"
+            / "review_runtime"
+            / "synthetic-token-catalog.json"
+        )
+        generated_catalog.parent.mkdir(parents=True)
+        (review_skill / "SKILL.md").write_text(
+            "---\nname: review-orchestration-playbook\n---\n",
+            encoding="utf-8",
+        )
+        expected = b'{"pool":"private"}\n'
+        generated_catalog.write_bytes(expected)
+        override_catalog = (
+            repo_root
+            / "personal_codex"
+            / "private-overrides"
+            / "review-orchestration-playbook"
+            / "synthetic-token-catalog.json"
+        )
+        override_catalog.parent.mkdir(parents=True)
+        override_catalog.write_bytes(expected)
+        synthetic_skill = (
+            repo_root / "personal_codex" / "skills" / "synthetic-token-fixtures"
+        )
+        synthetic_skill.mkdir(parents=True)
+        (synthetic_skill / "SKILL.md").write_text(
+            "---\nname: synthetic-token-fixtures\n---\n",
+            encoding="utf-8",
+        )
+        manifest_path = repo_root / "personal_codex" / "private-sync-manifest.json"
+        manifest_path.write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "owner": "private",
+                    "links": [
+                        {
+                            "source": "personal_codex/skills/review-orchestration-playbook",
+                            "target": "skills/review-orchestration-playbook",
+                            "kind": "skill",
+                        },
+                        {
+                            "source": "personal_codex/skills/synthetic-token-fixtures",
+                            "target": "skills/synthetic-token-fixtures",
+                            "kind": "skill",
+                        },
+                    ],
+                    "reference_only": [],
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+        archive_path = self.build_private_package(repo_root=repo_root)
+
+        with tarfile.open(archive_path, "r:gz") as archive:
+            names = archive.getnames()
+            catalog_member = next(
+                member
+                for member in archive.getmembers()
+                if member.name.endswith(
+                    "personal_codex/skills/review-orchestration-playbook/"
+                    "scripts/review_runtime/synthetic-token-catalog.json"
+                )
+            )
+            extracted = archive.extractfile(catalog_member)
+            assert extracted is not None
+            self.assertEqual(extracted.read(), expected)
+            self.assertTrue(
+                any(
+                    member.name.endswith(
+                        "personal_codex/skills/synthetic-token-fixtures/SKILL.md"
+                    )
+                    for member in archive.getmembers()
+                )
+            )
+
+        self.assertFalse(any("private-overrides" in name for name in names))
 
     def test_package_builder_rejects_nested_directory_symlinks(self) -> None:
         repo_root = self.root / "repo"
         source_root = repo_root / "personal_codex" / "skills" / "example"
         source_root.mkdir(parents=True)
-        (source_root / "SKILL.md").write_text("---\nname: example\n---\n", encoding="utf-8")
+        (source_root / "SKILL.md").write_text(
+            "---\nname: example\n---\n", encoding="utf-8"
+        )
         (source_root / "leak").symlink_to(Path.home())
         manifest_path = repo_root / "personal_codex" / "private-sync-manifest.json"
         manifest_path.write_text(
@@ -283,7 +429,9 @@ class PrivateOverlayPackageTests(unittest.TestCase):
 
     def test_package_builder_rejects_generated_manifest_file_sources(self) -> None:
         repo_root = self.root / "repo"
-        source_file = repo_root / "personal_codex" / "skills" / "example" / "generated.pyc"
+        source_file = (
+            repo_root / "personal_codex" / "skills" / "example" / "generated.pyc"
+        )
         source_file.parent.mkdir(parents=True)
         source_file.write_bytes(b"bytecode")
         manifest_path = repo_root / "personal_codex" / "private-sync-manifest.json"
@@ -330,7 +478,9 @@ class PrivateOverlayPackageTests(unittest.TestCase):
         source_root = repo_root / "personal_codex" / "skills" / "example"
         cache_root = source_root / "__pycache__"
         cache_root.mkdir(parents=True)
-        (source_root / "SKILL.md").write_text("---\nname: example\n---\n", encoding="utf-8")
+        (source_root / "SKILL.md").write_text(
+            "---\nname: example\n---\n", encoding="utf-8"
+        )
         (cache_root / "leak.pyc").symlink_to(Path.home())
         manifest_path = repo_root / "personal_codex" / "private-sync-manifest.json"
         manifest_path.write_text(
@@ -378,7 +528,9 @@ class PrivateOverlayPackageTests(unittest.TestCase):
         cache_root.mkdir(parents=True)
         fixture_asset = source_root / "assets" / "example.pyc" / "fixture.txt"
         fixture_asset.parent.mkdir(parents=True)
-        (source_root / "SKILL.md").write_text("---\nname: example\n---\n", encoding="utf-8")
+        (source_root / "SKILL.md").write_text(
+            "---\nname: example\n---\n", encoding="utf-8"
+        )
         (source_root / ".DS_Store").write_text("metadata\n", encoding="utf-8")
         (cache_root / "session_retrospective.cpython-314.pyc").write_bytes(b"bytecode")
         fixture_asset.write_text("not bytecode\n", encoding="utf-8")
@@ -407,9 +559,15 @@ class PrivateOverlayPackageTests(unittest.TestCase):
             names = archive.getnames()
 
         self.assertTrue(any(name.endswith("/SKILL.md") for name in names))
-        self.assertTrue(any(name.endswith("/assets/example.pyc/fixture.txt") for name in names))
+        self.assertTrue(
+            any(name.endswith("/assets/example.pyc/fixture.txt") for name in names)
+        )
         self.assertFalse(any("__pycache__" in name for name in names))
-        self.assertFalse(any(name.endswith("session_retrospective.cpython-314.pyc") for name in names))
+        self.assertFalse(
+            any(
+                name.endswith("session_retrospective.cpython-314.pyc") for name in names
+            )
+        )
         self.assertFalse(any(name.endswith(".DS_Store") for name in names))
 
     def test_verify_checksum_enforces_input_size_limits(self) -> None:
@@ -1392,7 +1550,9 @@ class PrivateAutomationPromptTests(unittest.TestCase):
 
         self.assertIn("When reading this automation's memory", prompt)
         self.assertIn("do not dump the whole file or a fixed 200-line head", prompt)
-        self.assertIn("widen only when needed for the candidate-day calculation", prompt)
+        self.assertIn(
+            "widen only when needed for the candidate-day calculation", prompt
+        )
 
     def test_daily_skill_friction_bounds_memory_reads(self) -> None:
         prompt = automation_prompt("daily-skill-friction")
@@ -1400,6 +1560,29 @@ class PrivateAutomationPromptTests(unittest.TestCase):
         self.assertIn("When reading this automation's memory", prompt)
         self.assertIn("structured parser or narrowly bounded extraction", prompt)
         self.assertIn("latest completed-run End timestamp", prompt)
+
+    def test_daily_skill_friction_scans_active_and_archived_rollouts(self) -> None:
+        prompt = automation_prompt("daily-skill-friction")
+
+        self.assertIn("both `~/.codex/sessions` and `~/.codex/archived_sessions`", prompt)
+        self.assertIn("dated `YYYY/MM/DD/rollout-*.jsonl` directories", prompt)
+        self.assertIn("flat `archived_sessions/rollout-*.jsonl` layouts", prompt)
+        self.assertIn(
+            "rollout lifecycle identity and normalized content fingerprint",
+            prompt,
+        )
+        self.assertIn(
+            "In the final report, state the active, archived, and union candidate, "
+            "parsed, and accepted counts, plus the cross-root duplicate groups, "
+            "duplicate rollouts collapsed, and replayed-prefix record counts produced "
+            "by the session corpus helper.",
+            prompt,
+        )
+        self.assertIn(
+            "do not discard later human follow-up turns in the same thread solely "
+            "because the rollout began with the automation wrapper",
+            prompt,
+        )
 
 
 if __name__ == "__main__":

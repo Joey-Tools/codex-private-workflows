@@ -21,6 +21,11 @@
       "kind": "skill"
     },
     {
+      "source": "personal_codex/skills/bounded-command-output",
+      "target": "skills/bounded-command-output",
+      "kind": "skill"
+    },
+    {
       "source": "personal_codex/skills/bug-triage-playbook",
       "target": "skills/bug-triage-playbook",
       "kind": "skill"
@@ -68,6 +73,11 @@
     {
       "source": "personal_codex/skills/review-orchestration-playbook",
       "target": "skills/review-orchestration-playbook",
+      "kind": "skill"
+    },
+    {
+      "source": "personal_codex/skills/synthetic-token-fixtures",
+      "target": "skills/synthetic-token-fixtures",
       "kind": "skill"
     },
     {

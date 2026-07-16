@@ -12,7 +12,8 @@
 - Apple Notes Work Report overlay
 - private automation `automation.toml` references
 - private automation workspace routing, including Daily Skill Friction's
-  `Joey-Tools/codex-workspace` canonical repo mirror wrapper
+  `Joey-Tools/codex-workspace` canonical repo mirror wrapper and its active-plus-
+  archived rollout corpus contract
 - private session retrospective automation routing for cross-host, redacted
   retrospective history capture
 
@@ -21,6 +22,10 @@ installs into `~/.codex/personal-sync/overlays/private/current` and manages only
 private-owned symlinks.
 
 ## Test
+
+The synced review helper requires Python 3.10 or later. CI exercises its full
+test suite on both Ubuntu and macOS at that minimum runtime, while the private
+overlay packaging and sync tests run on the Linux matrix leg.
 
 ```bash
 python3 -m py_compile \
@@ -89,6 +94,13 @@ Scheduled fallback runs skip when a non-scheduled complete release was published
 in the previous eight hours. Ordinary manual runs also observe the eight-hour cooldown.
 Post-merge dispatches should use `force=true` so consecutive source PR merges are
 not suppressed by cooldown.
+
+For the secure review-skill rule, source sync intentionally retains one randomized
+`0700` public-only preparation tree under the system temporary directory and prints
+its absolute path. This avoids unsafe pathname deletion under same-UID races; private
+catalog bytes are created only in the repository-side recovery scope and never enter
+the retained external tree. Normal system-temporary-directory lifecycle handles the
+retained copy.
 
 The private manifest declares the public base release repo through `base_release.repo`.
 Private machines should bootstrap the public runner from a `Joey-Tools/codex-toolbox`

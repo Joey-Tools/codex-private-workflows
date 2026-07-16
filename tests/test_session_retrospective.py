@@ -340,11 +340,17 @@ class SessionRetrospectiveTests(unittest.TestCase):
 
         self.assertEqual(
             [source.host for source in sources],
-            ["local", "miku-bot-dev", "hoteng-srv-01"],
+            [
+                "local",
+                "BL-mac-mini-m4-hoteng",
+                "miku-bot-dev",
+                "hoteng-srv-01",
+                "codex-hoteng-srv-01",
+            ],
         )
         self.assertIsNone(sources[0].missing_reason)
-        self.assertEqual(sources[1].missing_reason, "remote_source_not_materialized")
-        self.assertEqual(sources[2].missing_reason, "remote_source_not_materialized")
+        for source in sources[1:]:
+            self.assertEqual(source.missing_reason, "remote_source_not_materialized")
 
     def test_common_scan_source_help_lists_default_remote_hosts(self) -> None:
         parser = MODULE.argparse.ArgumentParser()
@@ -360,7 +366,7 @@ class SessionRetrospectiveTests(unittest.TestCase):
         skill_text = (SCRIPT.parents[1] / "SKILL.md").read_text(encoding="utf-8")
         retained_guidance = next(line for line in skill_text.splitlines() if "Retained host labels" in line)
 
-        self.assertIn("the two default remote hosts", retained_guidance)
+        self.assertIn("the four default remote hosts", retained_guidance)
         self.assertIn("local", retained_guidance)
         self.assertIn("custom_source", retained_guidance)
 
@@ -370,6 +376,14 @@ class SessionRetrospectiveTests(unittest.TestCase):
 
         self.assertTrue(helper.is_file())
         self.assertIn("scripts/remote_codex_probe.py", skill.read_text(encoding="utf-8"))
+        self.assertEqual(
+            REMOTE_PROBE.HOSTS["BL-mac-mini-m4-hoteng"]["codex_root"],
+            "/Users/hoteng/.codex",
+        )
+        self.assertEqual(
+            REMOTE_PROBE.HOSTS["codex-hoteng-srv-01"]["codex_root"],
+            "/home/codex/.codex",
+        )
 
     def test_remote_probe_fetch_rejects_symlink_rollout(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
@@ -1462,9 +1476,16 @@ class SessionRetrospectiveTests(unittest.TestCase):
 
         self.assertEqual(
             [source.host for source in sources],
-            ["local", "miku-bot-dev", "hoteng-srv-01"],
+            [
+                "local",
+                "miku-bot-dev",
+                "BL-mac-mini-m4-hoteng",
+                "hoteng-srv-01",
+                "codex-hoteng-srv-01",
+            ],
         )
-        self.assertEqual(sources[2].missing_reason, "remote_source_not_materialized")
+        for source in sources[2:]:
+            self.assertEqual(source.missing_reason, "remote_source_not_materialized")
         self.assertEqual(
             [source.host for source in MODULE.parse_sources(["local=/tmp/local"], require_default_hosts=False)],
             ["local"],
@@ -1475,11 +1496,28 @@ class SessionRetrospectiveTests(unittest.TestCase):
 
         self.assertEqual(
             [source.host for source in sources],
-            ["local", "miku-bot-dev", "hoteng-srv-01"],
+            [
+                "local",
+                "miku-bot-dev",
+                "BL-mac-mini-m4-hoteng",
+                "hoteng-srv-01",
+                "codex-hoteng-srv-01",
+            ],
         )
         self.assertTrue(sources[1].explicit)
         self.assertIsNone(sources[1].missing_reason)
-        self.assertEqual(sources[2].missing_reason, "remote_source_not_materialized")
+        for source in sources[2:]:
+            self.assertEqual(source.missing_reason, "remote_source_not_materialized")
+
+    def test_new_default_remote_hosts_retain_distinct_labels(self) -> None:
+        self.assertEqual(
+            MODULE.retained_source_host("BL-mac-mini-m4-hoteng"),
+            "BL-mac-mini-m4-hoteng",
+        )
+        self.assertEqual(
+            MODULE.retained_source_host("codex-hoteng-srv-01"),
+            "codex-hoteng-srv-01",
+        )
 
     def test_partial_host_default_sources_use_local_only(self) -> None:
         sources = MODULE.parse_sources(None, require_default_hosts=False)
@@ -10257,7 +10295,7 @@ class SessionRetrospectiveTests(unittest.TestCase):
             "Use sk-proj-abcdefghijklmnop123456",
             github_token,
             aws_access_key,
-            "eyJabcdefghijkl.eyJmnopqrstuv.eyJwxyzabcdef",
+            ".".join(("eyJabcdefghijkl", "eyJmnopqrstuv", "eyJwxyzabcdef")),
             "a" * 64,
             "169.254.169.254",
             "100.64.0.1",
@@ -10290,7 +10328,7 @@ class SessionRetrospectiveTests(unittest.TestCase):
             "Use sk-proj-abcdefghijklmnop123456",
             github_token,
             aws_access_key,
-            "eyJabcdefghijkl.eyJmnopqrstuv.eyJwxyzabcdef",
+            ".".join(("eyJabcdefghijkl", "eyJmnopqrstuv", "eyJwxyzabcdef")),
             "a" * 64,
             "169.254.169.254",
             "100.64.0.1",

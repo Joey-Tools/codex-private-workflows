@@ -1,0 +1,43 @@
+---
+id: 20260715-bco003
+title: Bounded Command Output Overlay
+status: completed
+created: 2026-07-15
+updated: 2026-07-15
+branch: codex/daily-skill-friction-20260715-codex-private-workflows-bounded-command-output-overlay
+pr: https://github.com/Joey-Tools/codex-private-workflows/pull/81
+supersedes: []
+superseded_by:
+---
+
+# Bounded Command Output Overlay
+
+## Summary
+
+- Added the canonical bounded command output skill to the private overlay and routed Joey's AGENTS guidance to it.
+- Added a fail-closed named exemption for the exact synthetic GitHub token fixture that otherwise prevents frozen review of the source PR.
+
+## Current State
+
+- The private sync rule and manifest install `bounded-command-output` from `codex-workflow-hygiene`.
+- The bundled copy matches the merged canonical source at `codex-workflow-hygiene@95befb9`: initial inventories use a total count plus an explicit sample cap, and retained logs enforce aggregate byte/segment ceilings rather than relying on ordinary rotation.
+- Detailed cross-workflow command recipes no longer live in the private AGENTS file.
+- Domain skills remain responsible for debugging, delivery, and review decisions.
+- The exemption requires an explicit CLI ID and binds the fixture path, base-side blob OID, scanner rule, and exact value; drift or any additional secret still blocks review.
+- Diff scanning masks only the registered value's single expected deleted occurrence inside the exact bound path section; the same value in another path, side, header, context line, or duplicate deletion still blocks, and raw-blob streaming handles chunk-split values without offset-dependent results.
+- Successful helper preflight records the applied exemption ID without storing the synthetic value in audit evidence.
+- External validation performs the symlink prepass before reading the exemption manifest, then uses directory-fd-relative `O_NOFOLLOW`/`O_NONBLOCK` access with a 64 KiB cap and regular single-link-file requirement so symlink, FIFO, oversized-file, and path-swap attacks fail closed.
+
+## Next Steps
+
+- Monitor implicit-trigger behavior after the released overlay is installed.
+
+## Evidence
+
+- `personal_codex/skills/bounded-command-output/`
+- `scripts/sync_private_overlay_sources.py`
+- `personal_codex/private-sync-manifest.json`
+- `tests/test_private_overlay_sync.py`
+- `personal_codex/skills/review-orchestration-playbook/scripts/review_runtime/workspace.py`
+- `personal_codex/skills/review-orchestration-playbook/tests/test_workspace.py`
+- `https://github.com/Joey-Tools/codex-workflow-hygiene/pull/41`

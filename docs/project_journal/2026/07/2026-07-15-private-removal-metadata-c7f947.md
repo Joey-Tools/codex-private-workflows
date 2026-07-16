@@ -3,7 +3,7 @@ id: 20260715-c7f947
 title: Private Sync Removal Metadata
 status: completed
 created: 2026-07-15
-updated: 2026-07-16
+updated: 2026-07-17
 branch: codex/sync-removed-link-metadata
 pr:
 supersedes: []
@@ -95,7 +95,7 @@ superseded_by:
 - Add a combined public/private manifest capacity gate when the private release job has both exact manifests; the installer already performs this aggregate preflight and fails safely, while repository CI currently proves capacity one owner at a time.
 
 ## Evidence
-- `/usr/bin/python3 -m unittest discover -s tests` — 903 tests completed successfully, with 2 skipped, using Python 3.9.6 and test-only Git configuration that disables commit signing to avoid a host keybox dependency.
+- `/usr/bin/python3 -m unittest discover -s tests` — 1000 tests completed successfully, with 2 skipped, using Python 3.9.6 and test-only Git configuration that disables commit signing to avoid a host keybox dependency, after integrating the latest `origin/master`.
 - Reconciliation safety module — 252 tests passed.
 - Package builder safety module — 55 tests passed.
 - Manifest change validation module — 75 tests passed.
