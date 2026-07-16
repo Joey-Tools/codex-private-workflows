@@ -995,6 +995,32 @@ class PrivateOverlaySyncTests(unittest.TestCase):
                     label="source",
                 )
 
+    def test_regular_file_overlay_bounds_target_readback(self) -> None:
+        staging = (self.repo_root / "staging-bounded-readback").resolve()
+        staging.mkdir()
+        target = staging / "catalog.json"
+        target.write_text("public\n", encoding="utf-8")
+        calls: list[int] = []
+
+        def appending_read(_descriptor, size):
+            calls.append(size)
+            if len(calls) > 1:
+                raise AssertionError("target read-back exceeded its byte budget")
+            return b"x" * size
+
+        with mock.patch.object(SYNC_MODULE.os, "read", side_effect=appending_read):
+            with self.assertRaisesRegex(
+                SYNC_MODULE.SyncError,
+                "target byte verification failed",
+            ):
+                SYNC_MODULE._write_regular_file_overlay_target(
+                    staging,
+                    Path("catalog.json"),
+                    b"private\n",
+                )
+
+        self.assertEqual(calls, [len(b"private\n") + 1])
+
     def test_regular_file_overlay_enforces_size_limit(self) -> None:
         source = self.source_root / "example-repo" / "skill"
         source.mkdir(parents=True)

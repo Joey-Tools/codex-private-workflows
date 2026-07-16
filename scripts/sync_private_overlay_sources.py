@@ -955,11 +955,13 @@ def _write_regular_file_overlay_target(
                 offset += written
             os.lseek(descriptor, 0, os.SEEK_SET)
             chunks: list[bytes] = []
-            while True:
-                chunk = os.read(descriptor, 64 * 1024)
+            remaining = len(data) + 1
+            while remaining:
+                chunk = os.read(descriptor, min(remaining, 64 * 1024))
                 if not chunk:
                     break
                 chunks.append(chunk)
+                remaining -= len(chunk)
             written_data = b"".join(chunks)
             after = os.fstat(descriptor)
         except OSError as exc:
