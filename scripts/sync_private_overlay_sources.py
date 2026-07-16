@@ -331,6 +331,11 @@ SYNC_RULES = (
         common_joey_text=True,
     ),
     _rule(
+        "codex-review-workflows",
+        "skills/synthetic-token-fixtures",
+        "personal_codex/skills/synthetic-token-fixtures",
+    ),
+    _rule(
         "codex-waited-delivery",
         "skills/waited-delivery",
         "personal_codex/skills/waited-delivery",

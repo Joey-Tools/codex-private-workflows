@@ -20,6 +20,10 @@ private-owned symlinks.
 
 ## Test
 
+The synced review helper requires Python 3.10 or later. CI exercises its full
+test suite on both Ubuntu and macOS at that minimum runtime, while the private
+overlay packaging and sync tests run on the Linux matrix leg.
+
 ```bash
 python3 -m py_compile \
   scripts/codex_personal_sync.py \

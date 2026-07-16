@@ -180,6 +180,48 @@ class PrivateOverlaySyncTests(unittest.TestCase):
             "Use this when Joey asks.\nState the core Joey-visible behavior.\n",
         )
 
+    def test_synthetic_token_fixture_sync_rule_copies_templates(self) -> None:
+        source = (
+            self.source_root
+            / "codex-review-workflows"
+            / "skills"
+            / "synthetic-token-fixtures"
+        )
+        agents = source / "agents"
+        references = source / "references"
+        agents.mkdir(parents=True)
+        references.mkdir(parents=True)
+        (source / "SKILL.md").write_text("synthetic fixture skill\n", encoding="utf-8")
+        (agents / "openai.yaml").write_text(
+            "interface:\n  display_name: Synthetic Token Fixtures\n",
+            encoding="utf-8",
+        )
+        (references / "fixture-templates.md").write_text(
+            "<SYNTHETIC_ACCESS_TOKEN>\n",
+            encoding="utf-8",
+        )
+        rule = next(
+            rule
+            for rule in SYNC_MODULE.SYNC_RULES
+            if rule.target == Path("personal_codex/skills/synthetic-token-fixtures")
+        )
+
+        SYNC_MODULE.sync_sources(self.repo_root, self.source_root, (rule,))
+
+        target = self.repo_root / rule.target
+        self.assertEqual(
+            (target / "SKILL.md").read_text(encoding="utf-8"),
+            "synthetic fixture skill\n",
+        )
+        self.assertEqual(
+            (target / "agents/openai.yaml").read_text(encoding="utf-8"),
+            "interface:\n  display_name: Synthetic Token Fixtures\n",
+        )
+        self.assertEqual(
+            (target / "references/fixture-templates.md").read_text(encoding="utf-8"),
+            "<SYNTHETIC_ACCESS_TOKEN>\n",
+        )
+
     def test_session_mining_sync_rule_builds_remote_host_private_variant(self) -> None:
         source = self.source_root / "codex-workflow-hygiene" / "skills" / "codex-session-mining"
         references = source / "references"
@@ -532,6 +574,42 @@ class PrivateOverlaySyncTests(unittest.TestCase):
         self.assertEqual(checked_out_repos, sync_rule_repos)
         self.assertEqual(checked_out_paths, sync_rule_repos)
 
+    def test_ci_validates_review_helper_on_minimum_python_across_platforms(
+        self,
+    ) -> None:
+        workflow = (REPO_ROOT / ".github" / "workflows" / "ci.yml").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn("\n  platform_tests:\n", workflow)
+        self.assertIn("name: platform-tests (${{ matrix.os }})", workflow)
+        self.assertIn("ubuntu-latest", workflow)
+        self.assertIn("macos-latest", workflow)
+        self.assertIn('python-version: "3.10"', workflow)
+        self.assertIn("tomli==2.2.1", workflow)
+        self.assertIn("review-orchestration-playbook/tests", workflow)
+        self.assertIn(
+            "-fsyntax-only personal_codex/skills/review-orchestration-playbook/"
+            "scripts/review_runtime/claude_linux_launcher.c",
+            workflow,
+        )
+        self.assertIn(
+            "python3 -m unittest -v personal_codex/skills/"
+            "review-orchestration-playbook/tests/test_claude_linux.py",
+            workflow,
+        )
+        self.assertNotIn("when present", workflow)
+        self.assertNotIn('if [[ -f "$launcher" ]]', workflow)
+        self.assertIn("\n  test:\n", workflow)
+        self.assertIn("\n    name: test\n", workflow)
+        self.assertIn("if: ${{ always() }}", workflow)
+        self.assertIn("needs: platform_tests", workflow)
+        self.assertIn(
+            "PLATFORM_TESTS_RESULT: ${{ needs.platform_tests.result }}",
+            workflow,
+        )
+        self.assertIn('test "$PLATFORM_TESTS_RESULT" = "success"', workflow)
+
     def test_manifest_canonical_skills_are_backed_by_sync_rules(self) -> None:
         manifest = json.loads(
             (REPO_ROOT / "personal_codex" / "private-sync-manifest.json").read_text(encoding="utf-8")
@@ -562,6 +640,9 @@ class PrivateOverlaySyncTests(unittest.TestCase):
         self.assertIn("personal_codex/skills/codex-session-retrospective", manifest_sources)
         self.assertIn("skills/codex-session-retrospective", manifest_targets)
         self.assertIn("personal_codex/skills/codex-session-retrospective", sync_targets)
+        self.assertIn("personal_codex/skills/synthetic-token-fixtures", manifest_sources)
+        self.assertIn("skills/synthetic-token-fixtures", manifest_targets)
+        self.assertIn("personal_codex/skills/synthetic-token-fixtures", sync_targets)
 
     def test_bounded_command_output_is_installed_and_routed(self) -> None:
         agents = (REPO_ROOT / "personal_codex" / "AGENTS.md").read_text(encoding="utf-8")

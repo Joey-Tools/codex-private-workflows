@@ -3,8 +3,12 @@ from __future__ import annotations
 import pathlib
 import subprocess
 import sys
-import tomllib
 import unittest
+
+try:
+    import tomllib
+except ModuleNotFoundError:  # pragma: no cover - exercised by Python 3.10 CI
+    import tomli as tomllib
 
 
 SKILL_ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -13,7 +17,7 @@ REPO_ROOT = OVERLAY_ROOT.parent
 SCRIPTS = SKILL_ROOT / "scripts"
 sys.path.insert(0, str(SCRIPTS))
 
-from review_runtime import providers, workspace  # noqa: E402
+from review_runtime import claude_linux, providers  # noqa: E402
 
 
 class RepositoryContractTest(unittest.TestCase):
@@ -69,22 +73,84 @@ class RepositoryContractTest(unittest.TestCase):
             helper_contract,
         )
         self.assertIn(
-            "noninteractive process cannot approve any unmatched access",
+            "helper-owned outer sandbox",
             helper_contract,
         )
         self.assertNotIn("safe mode with `dontAsk` permissions", helper_contract)
-        self.assertIn("complete SHA-256 digests", helper_contract)
+        self.assertIn("per-version signed manifest", helper_contract)
+        self.assertIn("manifest checksum", helper_contract)
         self.assertIn("downloads.claude.ai", helper_contract)
-        self.assertIn("separate default-deny `sandbox-exec` profile", helper_contract)
-        self.assertIn("ordinary macOS OAuth/keychain login", helper_contract)
-        self.assertIn("localhost CONNECT proxy", helper_contract)
+        self.assertIn("deny-by-default Seatbelt profile", helper_contract)
+        self.assertIn("current-account Keychain item", helper_contract)
+        self.assertIn("helper-controlled proxy", helper_contract)
+        self.assertIn(">=2.1.187,<3.0.0", helper_contract)
+        self.assertIn("Linux and WSL2", helper_contract)
         self.assertNotIn("requires `ANTHROPIC_API_KEY`", skill)
+
+    def test_claude_linux_file_tools_are_workspace_only_across_supported_versions(
+        self,
+    ) -> None:
+        self.assertEqual(claude_linux.CLAUDE_LINUX_REVIEW_VISIBLE_TOOLS, "Read")
+        self.assertEqual(
+            claude_linux.CLAUDE_LINUX_REVIEW_ALLOWED_TOOLS,
+            "Read(./**)",
+        )
+        self.assertEqual(
+            claude_linux.CLAUDE_LINUX_REVIEW_PERMISSION_MODE,
+            "dontAsk",
+        )
+        cli_denies = set(
+            claude_linux.CLAUDE_LINUX_REVIEW_DISALLOWED_TOOLS.split(",")
+        )
+        self.assertTrue({"Grep", "Glob"}.issubset(cli_denies))
+        self.assertIn(
+            "Read(//config/**)",
+            claude_linux.CLAUDE_LINUX_FILE_TOOL_DENY_RULES,
+        )
+        self.assertIn(
+            "Read(//proc/**)",
+            claude_linux.CLAUDE_LINUX_FILE_TOOL_DENY_RULES,
+        )
+        self.assertNotIn(
+            "Read(/config/**)",
+            claude_linux.CLAUDE_LINUX_FILE_TOOL_DENY_RULES,
+        )
 
     def test_ci_targets_only_the_canonical_runtime_and_tests(self) -> None:
         workflow = (REPO_ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
         self.assertIn("review-orchestration-playbook/tests", workflow)
         self.assertNotIn("external-review-playbook", workflow)
         self.assertNotIn("copilot-review-playbook", workflow)
+
+    def test_ci_preserves_the_required_test_status_context(self) -> None:
+        workflow = (REPO_ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+
+        self.assertIn("\n  platform_tests:\n", workflow)
+        self.assertIn("name: platform-tests (${{ matrix.os }})", workflow)
+        self.assertIn("\n  test:\n", workflow)
+        self.assertIn("\n    name: test\n", workflow)
+        self.assertIn("if: ${{ always() }}", workflow)
+        self.assertIn("needs: platform_tests", workflow)
+        self.assertIn(
+            "PLATFORM_TESTS_RESULT: ${{ needs.platform_tests.result }}",
+            workflow,
+        )
+        self.assertIn(
+            'test "$PLATFORM_TESTS_RESULT" = "success"',
+            workflow,
+        )
+
+    def test_helper_declares_and_tests_its_minimum_python_runtime(self) -> None:
+        entrypoint = (SCRIPTS / "isolated_review").read_text(encoding="utf-8")
+        workflow = (REPO_ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+        readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
+
+        guard = "if sys.version_info < (3, 10):"
+        self.assertIn(guard, entrypoint)
+        self.assertLess(entrypoint.index(guard), entrypoint.index("from review_runtime"))
+        self.assertIn('python-version: "3.10"', workflow)
+        self.assertIn("tomli==2.2.1", workflow)
+        self.assertIn("requires Python 3.10 or later", readme)
 
     def test_full_pr_readiness_retains_both_local_codex_gates(self) -> None:
         readiness = (SKILL_ROOT / "references/pr-readiness.md").read_text(
@@ -102,32 +168,6 @@ class RepositoryContractTest(unittest.TestCase):
             readiness.index("4. After the helper preflight passes"),
         )
         self.assertIn("Require its retained `preflight.json`", readiness)
-
-    def test_synthetic_fixture_exemption_is_exact_and_documented(self) -> None:
-        identifier = (
-            "codex-workflow-hygiene-session-retrospective-github-pat-v1"
-        )
-        exemption = workspace.KNOWN_SYNTHETIC_SECRET_EXEMPTIONS[identifier]
-        skill = (SKILL_ROOT / "SKILL.md").read_text(encoding="utf-8")
-        helper_contract = (SKILL_ROOT / "references/helper-contract.md").read_text(
-            encoding="utf-8"
-        )
-        readiness = (SKILL_ROOT / "references/pr-readiness.md").read_text(
-            encoding="utf-8"
-        )
-
-        self.assertEqual(exemption.identifier, identifier)
-        self.assertEqual(exemption.path, "tests/test_session_retrospective.py")
-        self.assertEqual(exemption.side, "base")
-        self.assertEqual(
-            exemption.blob_oid,
-            "a7f3c30fad480a3c31b47a18acd2bd3afef08cc3",
-        )
-        self.assertEqual(exemption.rule, "github-token")
-        self.assertIn("never add a generic token", skill)
-        self.assertIn("--synthetic-secret-exemption", helper_contract)
-        self.assertIn("value digest", helper_contract)
-        self.assertIn("path-only or test-directory allowlist", readiness)
 
     def test_independent_codex_process_output_is_task_scoped_and_bounded(self) -> None:
         readiness = (SKILL_ROOT / "references/pr-readiness.md").read_text(

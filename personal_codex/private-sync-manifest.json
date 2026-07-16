@@ -76,6 +76,11 @@
       "kind": "skill"
     },
     {
+      "source": "personal_codex/skills/synthetic-token-fixtures",
+      "target": "skills/synthetic-token-fixtures",
+      "kind": "skill"
+    },
+    {
       "source": "personal_codex/skills/waited-delivery",
       "target": "skills/waited-delivery",
       "kind": "skill"
