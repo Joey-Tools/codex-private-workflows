@@ -13,7 +13,7 @@ REPO_ROOT = OVERLAY_ROOT.parent
 SCRIPTS = SKILL_ROOT / "scripts"
 sys.path.insert(0, str(SCRIPTS))
 
-from review_runtime import providers, workspace  # noqa: E402
+from review_runtime import common, providers, workspace  # noqa: E402
 
 
 class RepositoryContractTest(unittest.TestCase):
@@ -38,9 +38,13 @@ class RepositoryContractTest(unittest.TestCase):
             providers.CLAUDE_MODELS,
             ("claude-opus-4-8", "claude-opus-4-7"),
         )
+        self.assertEqual(providers.CLAUDE_SUPPORTED_VERSION, "2.1.202")
         self.assertEqual(
-            providers.COPILOT_MODELS,
-            ("claude-opus-4.8", "claude-opus-4.7"),
+            providers.CLAUDE_TRUSTED_SHA256_BY_MACHINE,
+            {
+                "arm64": "7414f707861e2fe5afef33a466f888a8d2170e5028f5e9d2858f1d3ef45ffca5",
+                "x86_64": "0dc578bb294094f5041e99a0444030ac6ae7236b387e56f00d4a5214816763bd",
+            },
         )
         for candidate in (
             SKILL_ROOT / "SKILL.md",
@@ -63,7 +67,11 @@ class RepositoryContractTest(unittest.TestCase):
         )
 
         self.assertIn("ordinary local Claude login by default", skill)
+        self.assertIn("Claude Code `2.1.202`", skill)
         self.assertIn("runs in safe mode", helper_contract)
+        self.assertIn("`2.1.202 (Claude Code)`", helper_contract)
+        self.assertNotIn("2.1.187", skill)
+        self.assertNotIn("2.1.187", helper_contract)
         self.assertIn(
             "hardening-compatible `default` permission mode",
             helper_contract,
@@ -78,7 +86,176 @@ class RepositoryContractTest(unittest.TestCase):
         self.assertIn("separate default-deny `sandbox-exec` profile", helper_contract)
         self.assertIn("ordinary macOS OAuth/keychain login", helper_contract)
         self.assertIn("localhost CONNECT proxy", helper_contract)
+        self.assertIn("verifies unconditional roots", helper_contract)
+        self.assertIn("Every non-empty non-deny array", helper_contract)
+        self.assertIn(
+            "conservatively treated as an excluded SHA-1 root rather than flattened",
+            helper_contract,
+        )
+        self.assertIn("fixed system-PEM input", helper_contract)
+        self.assertIn("`CLAUDE_CODE_CERT_STORE=bundled`", helper_contract)
+        self.assertIn("extracts the exact pinned bundled PEM roots", helper_contract)
+        self.assertIn(
+            "copies it into a 0700 helper-owned runtime directory as a 0500 executable",
+            helper_contract,
+        )
+        self.assertIn(
+            "same snapshot is used for identity/help probes, optional warmup, and every "
+            "final model attempt",
+            helper_contract,
+        )
+        self.assertIn(
+            "replacement of the installation path after validation cannot change the "
+            "launched artifact",
+            helper_contract,
+        )
+        self.assertIn(
+            "Expiry-shortfall is the only result that may enter warmup",
+            helper_contract,
+        )
+        self.assertIn(
+            "authentication block before network launch, never a refresh signal",
+            helper_contract,
+        )
+        self.assertIn(
+            "merged with the system PEM, validated unconditional trust roots",
+            helper_contract,
+        )
+        self.assertIn(
+            "excluded SHA-1 fingerprint overlapping a pinned bundled root",
+            helper_contract,
+        )
+        self.assertIn(
+            "any pinned SHA-256 root missing from the final bundle",
+            helper_contract,
+        )
+        self.assertIn(
+            "executable digest, root count, duplicate-root, or aggregate-set "
+            "mismatch fails closed",
+            helper_contract,
+        )
+        self.assertNotIn("`CLAUDE_CODE_CERT_STORE=system`", helper_contract)
+        self.assertNotIn(
+            "`system` certificate store is the authoritative platform trust source",
+            helper_contract,
+        )
+        self.assertNotIn(
+            "selected `system` store remains the platform trust authority",
+            helper_contract,
+        )
+        self.assertIn("not exposed through `SSL_CERT_DIR`", helper_contract)
+        self.assertIn("`keyUsage` with `keyCertSign`", helper_contract)
+        self.assertIn(
+            "`/usr/bin/openssl verify -x509_strict -check_ss_sig`", helper_contract
+        )
+        self.assertIn("trust-policy-unrepresentable", helper_contract)
+        self.assertIn("Any explicit deny is a distinct hard stop", helper_contract)
+        self.assertIn("checks later trust domains", helper_contract)
+        self.assertIn("`claude-trust-policy.json`", helper_contract)
+        self.assertIn("never retains fingerprints", helper_contract)
+        self.assertIn("the default Keychain search list", helper_contract)
+        self.assertIn("`/Library/Keychains/System.keychain`", helper_contract)
+        self.assertIn(
+            "`/System/Library/Keychains/SystemRootCertificates.keychain`",
+            helper_contract,
+        )
+        self.assertIn("more than 4,096 entries", helper_contract)
+        self.assertIn("At most 256 distinct additional roots", helper_contract)
+        self.assertIn("30-second deadline", helper_contract)
+        self.assertIn("recognizable exact Deny takes precedence", helper_contract)
+        self.assertIn("anchored to one file descriptor", helper_contract)
+        self.assertIn("fresh generation in `checking` state", helper_contract)
+        self.assertIn("`complete`, `denied`, `blocked`", helper_contract)
+        self.assertIn("final bundle has passed validation", helper_contract)
+        self.assertIn("one model attempt at a time", helper_contract)
+        self.assertIn("`claude-auth-warmup.json`", helper_contract)
+        self.assertIn("fixed-schema structural summary", helper_contract)
+        self.assertIn("never retains result/error text", helper_contract)
+        self.assertIn(
+            "open only the owner-only `~/.claude.json` with `O_NOFOLLOW`",
+            helper_contract,
+        )
+        self.assertIn("single-link regular file", helper_contract)
+        self.assertIn("no group/other permissions or extended ACL", helper_contract)
+        self.assertIn("`CLAUDE_CODE_ACCOUNT_UUID`", helper_contract)
+        self.assertIn("`CLAUDE_CODE_ORGANIZATION_UUID`", helper_contract)
+        self.assertIn("`CLAUDE_CODE_USER_EMAIL`", helper_contract)
+        self.assertIn(
+            "stripped from every executable identity/help probe", helper_contract
+        )
+        self.assertIn("API-key mode does not read", helper_contract)
+        self.assertIn(
+            "requires the two credential snapshots to be byte-identical",
+            helper_contract,
+        )
+        self.assertIn(
+            "any account or credential change during that window is an authentication block",
+            helper_contract,
+        )
+        self.assertIn("attempt-local", helper_contract)
+        self.assertIn(
+            "fresh full trust-policy preflight",
+            helper_contract,
+        )
+        self.assertIn("4.8-to-4.7 entitlement fallback", helper_contract)
+        self.assertIn("terminalized as `inconclusive`", helper_contract)
+        self.assertIn("verified effective model from `modelUsage`", helper_contract)
+        self.assertIn("only an actually observed model substitution", helper_contract)
+        self.assertIn(
+            "present non-object usage is retained as `invalid`", helper_contract
+        )
+        self.assertIn("`reason_category=authentication`", helper_contract)
+        self.assertIn(
+            "does not write `claude-skip.txt` or `claude-unavailable.json`",
+            helper_contract,
+        )
+        self.assertIn("`SSL_CERT_FILE` and `NODE_EXTRA_CA_CERTS`", helper_contract)
+        self.assertIn("validated helper-owned bundle", helper_contract)
+        self.assertIn("user, admin, and system trust domains", helper_contract)
+        self.assertIn("fixed bounded SecurityTool commands", helper_contract)
+        self.assertIn("explicit `file-read*` deny", helper_contract)
+        self.assertIn("after all broad read allows", helper_contract)
+        self.assertIn("missing `/usr/bin/security`", helper_contract)
         self.assertNotIn("requires `ANTHROPIC_API_KEY`", skill)
+
+    def test_local_login_account_egress_and_log_retention_are_explicit(self) -> None:
+        skill = (SKILL_ROOT / "SKILL.md").read_text(encoding="utf-8")
+        helper_contract = (SKILL_ROOT / "references/helper-contract.md").read_text(
+            encoding="utf-8"
+        )
+        consent = (SKILL_ROOT / "references/egress-consent.md").read_text(
+            encoding="utf-8"
+        )
+
+        for content in (skill, helper_contract, consent):
+            self.assertIn("account UUID", content)
+            self.assertIn("organization UUID", content)
+            self.assertIn("email address", content)
+            self.assertIn("Anthropic Claude process", content)
+            self.assertIn("original file", content)
+            self.assertIn("credentials", content)
+            self.assertIn("settings", content)
+
+        self.assertIn("owner-only host `~/.claude.json`", skill)
+        self.assertIn("owner-only host `~/.claude.json`", consent)
+        self.assertIn("Local-login egress consent authorizes", helper_contract)
+        self.assertIn(
+            "does not intentionally write the metadata values to the review prompt, "
+            "structured evidence, or its own diagnostic messages",
+            helper_contract,
+        )
+        self.assertIn("complete retained per-attempt files", helper_contract)
+        self.assertIn("currently receive no field redaction", helper_contract)
+        self.assertIn("currently does not redact those streams", consent)
+        self.assertIn(
+            "do not describe the fields as guaranteed absent from logs", consent
+        )
+        self.assertNotIn("never retained in helper evidence or logs", helper_contract)
+        self.assertNotIn("retained artifacts contain neither", skill)
+        self.assertNotIn(
+            "Claude receives only its explicit `ANTHROPIC_API_KEY` authentication override",
+            helper_contract,
+        )
 
     def test_ci_targets_only_the_canonical_runtime_and_tests(self) -> None:
         workflow = (REPO_ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
@@ -104,9 +281,7 @@ class RepositoryContractTest(unittest.TestCase):
         self.assertIn("Require its retained `preflight.json`", readiness)
 
     def test_synthetic_fixture_exemption_is_exact_and_documented(self) -> None:
-        identifier = (
-            "codex-workflow-hygiene-session-retrospective-github-pat-v1"
-        )
+        identifier = "codex-workflow-hygiene-session-retrospective-github-pat-v1"
         exemption = workspace.KNOWN_SYNTHETIC_SECRET_EXEMPTIONS[identifier]
         skill = (SKILL_ROOT / "SKILL.md").read_text(encoding="utf-8")
         helper_contract = (SKILL_ROOT / "references/helper-contract.md").read_text(
@@ -139,7 +314,9 @@ class RepositoryContractTest(unittest.TestCase):
 
         self.assertIn("stdout and stderr in task-scoped bounded sinks", readiness)
         self.assertIn("--output-last-message <task-scoped-target>", readiness)
-        self.assertIn("byte limits for each process log and the final-message", readiness)
+        self.assertIn(
+            "byte limits for each process log and the final-message", readiness
+        )
         self.assertIn("default 30-minute / 16-MiB / 64-KiB limits", readiness)
         self.assertIn("deadline expires or any output limit", readiness)
         self.assertIn("limit-terminated attempt is inconclusive", readiness)
@@ -176,7 +353,9 @@ class RepositoryContractTest(unittest.TestCase):
         self.assertIn("when the deadline expires", contracts)
         self.assertIn("hard per-file quota or bounded sink", contracts)
         self.assertIn("bounded FIFO/pipe reader", contracts)
-        self.assertIn("Direct-path monitoring or a post-exit size check alone", contracts)
+        self.assertIn(
+            "Direct-path monitoring or a post-exit size check alone", contracts
+        )
         self.assertIn("OS-enforced job, cgroup, or container", contracts)
         self.assertIn("survives `setsid` / `setpgid`", contracts)
         self.assertIn("kernel-enforced no-child-process policy", contracts)
@@ -192,7 +371,9 @@ class RepositoryContractTest(unittest.TestCase):
         self.assertIn("file byte or line counts", contracts)
         self.assertIn("attempt exits zero", contracts)
         self.assertIn("creates it as a nonempty file", contracts)
-        self.assertIn("stat both process logs and the ordinary final-message artifact", contracts)
+        self.assertIn(
+            "stat both process logs and the ordinary final-message artifact", contracts
+        )
         self.assertIn("Never use a FIFO's `st_size`", contracts)
         self.assertIn("even when it exited zero", contracts)
         self.assertIn("reaches or exceeds", contracts)
@@ -219,7 +400,10 @@ class RepositoryContractTest(unittest.TestCase):
 
     def test_review_prompts_do_not_use_unbounded_only_matching_samples(self) -> None:
         forbidden = "rg -o --max-count 80"
-        candidates = [SKILL_ROOT / "SKILL.md", SKILL_ROOT / "scripts/review_runtime/prompt.py"]
+        candidates = [
+            SKILL_ROOT / "SKILL.md",
+            SKILL_ROOT / "scripts/review_runtime/prompt.py",
+        ]
         candidates.extend((SKILL_ROOT / "references").glob("*.md"))
         for candidate in candidates:
             self.assertNotIn(
@@ -248,15 +432,49 @@ class RepositoryContractTest(unittest.TestCase):
         self.assertEqual(completed.returncode, 2)
         self.assertIn("--egress-consent", completed.stderr)
 
-    def test_approval_template_covers_both_copilot_fallback_reasons(self) -> None:
+    def test_claude_lane_has_no_copilot_provider_or_credentials(self) -> None:
         consent = (SKILL_ROOT / "references/egress-consent.md").read_text(
             encoding="utf-8"
         )
-        self.assertIn("if Claude Code is unavailable", consent)
-        self.assertIn(
-            "all pinned Claude models are entitlement-blocked",
-            consent,
+        helper_contract = (SKILL_ROOT / "references/helper-contract.md").read_text(
+            encoding="utf-8"
         )
+        provider_source = (
+            SKILL_ROOT / "scripts/review_runtime/providers.py"
+        ).read_text(encoding="utf-8")
+        common_source = (SKILL_ROOT / "scripts/review_runtime/common.py").read_text(
+            encoding="utf-8"
+        )
+        readiness = (SKILL_ROOT / "references/pr-readiness.md").read_text(
+            encoding="utf-8"
+        )
+        for content in (
+            consent,
+            helper_contract,
+            provider_source,
+            common_source,
+            readiness,
+        ):
+            self.assertNotIn("copilot", content.lower())
+        for credential in (
+            "COPILOT_GITHUB_TOKEN",
+            "GH_TOKEN",
+            "GITHUB_TOKEN",
+            "CODEX_REVIEW_COPILOT_PATH",
+        ):
+            self.assertNotIn(credential, provider_source)
+            self.assertNotIn(credential, common_source)
+        self.assertEqual(
+            providers.CLAUDE_ENV_KEYS,
+            ("ANTHROPIC_API_KEY", "NODE_EXTRA_CA_CERTS"),
+        )
+        self.assertFalse(hasattr(providers, "COPILOT_MODELS"))
+        self.assertFalse(hasattr(providers, "_copilot_attempt"))
+        with self.assertRaisesRegex(common.ReviewError, "unknown review executable"):
+            common.resolve_reviewer_executable("copi" + "lot")
+        self.assertIn("native runtime, authentication, or pinned models", consent)
+        self.assertIn("explicit trust denies remain distinct hard stops", consent)
+        self.assertIn("stop the lane without changing provider", helper_contract)
 
     def test_triple_review_consent_names_all_provider_organizations(self) -> None:
         candidates = [
@@ -269,10 +487,11 @@ class RepositoryContractTest(unittest.TestCase):
         for candidate in candidates:
             content = candidate.read_text(encoding="utf-8")
             self.assertIn(
-                "OpenAI, Anthropic, and Microsoft/GitHub",
+                "OpenAI and Anthropic",
                 content,
                 str(candidate),
             )
+            self.assertIn("GitHub Codex review", content, str(candidate))
 
 
 if __name__ == "__main__":

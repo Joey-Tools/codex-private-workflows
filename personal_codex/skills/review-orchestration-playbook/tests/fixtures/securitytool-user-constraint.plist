@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>trustList</key>
+  <dict>
+    <key>CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC</key>
+    <dict>
+      <key>issuerName</key>
+      <data>MAAx</data>
+      <key>modDate</key>
+      <date>2026-07-15T00:00:00Z</date>
+      <key>serialNumber</key>
+      <data>Aw==</data>
+      <key>trustSettings</key>
+      <array>
+        <dict>
+          <key>kSecTrustSettingsPolicyName</key>
+          <string>sslServer</string>
+          <key>kSecTrustSettingsPolicyString</key>
+          <string>user.example.com</string>
+        </dict>
+      </array>
+    </dict>
+  </dict>
+  <key>trustVersion</key>
+  <integer>1</integer>
+</dict>
+</plist>
