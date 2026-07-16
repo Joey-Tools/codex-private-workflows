@@ -221,6 +221,121 @@ CLAUDE_KEYCHAIN_BROKER_TIMEOUT_SECONDS = 20.0
 CLAUDE_KEYCHAIN_BROKER_OUTPUT_LIMIT_BYTES = 64 * 1024
 CLAUDE_KEYCHAIN_QUERY_TIMEOUT_SECONDS = 5.0
 CLAUDE_KEYCHAIN_CREDENTIAL_LIMIT_BYTES = 1024 * 1024
+CLAUDE_AUTH_METADATA_OUTPUT_LIMIT_BYTES = 2048
+CLAUDE_AUTH_METADATA_EXTRACTOR = r"""
+import ctypes
+import errno
+import json
+import os
+import resource
+import stat
+import sys
+
+fd = None
+raw = bytearray()
+
+
+def finish(code):
+    global fd
+    raw[:] = b"\x00" * len(raw)
+    if fd is not None:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+        fd = None
+    os._exit(code)
+
+
+def unique_object(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("duplicate JSON key")
+        result[key] = value
+    return result
+
+
+def fingerprint(metadata):
+    return (
+        metadata.st_dev,
+        metadata.st_ino,
+        metadata.st_mode,
+        metadata.st_uid,
+        metadata.st_nlink,
+        metadata.st_size,
+        metadata.st_mtime_ns,
+        metadata.st_ctime_ns,
+    )
+
+
+try:
+    if len(sys.argv) != 8:
+        finish(64)
+    resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
+    source = sys.argv[1]
+    expected_owner = int(sys.argv[2])
+    limit = int(sys.argv[3])
+    output_limit = int(sys.argv[4])
+    fields = tuple(sys.argv[5:])
+    flags = os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK
+    fd = os.open(source, flags)
+    before = os.fstat(fd)
+    if (
+        not stat.S_ISREG(before.st_mode)
+        or before.st_uid != expected_owner
+        or before.st_nlink != 1
+        or before.st_mode & 0o077
+        or before.st_size > limit
+    ):
+        finish(64)
+    if sys.platform == "darwin":
+        libc = ctypes.CDLL(None, use_errno=True)
+        acl_get_fd = libc.acl_get_fd
+        acl_get_fd.argtypes = [ctypes.c_int]
+        acl_get_fd.restype = ctypes.c_void_p
+        acl_free = libc.acl_free
+        acl_free.argtypes = [ctypes.c_void_p]
+        acl_free.restype = ctypes.c_int
+        ctypes.set_errno(0)
+        acl = acl_get_fd(fd)
+        if acl:
+            acl_free(acl)
+            finish(64)
+        if ctypes.get_errno() != errno.ENOENT:
+            finish(64)
+    while len(raw) <= limit:
+        chunk = os.read(fd, min(64 * 1024, limit + 1 - len(raw)))
+        if not chunk:
+            break
+        raw.extend(chunk)
+    after = os.fstat(fd)
+    if (
+        len(raw) > limit
+        or len(raw) != after.st_size
+        or fingerprint(before) != fingerprint(after)
+    ):
+        finish(64)
+    config = json.loads(raw, object_pairs_hook=unique_object)
+    oauth_account = config.get("oauthAccount") if isinstance(config, dict) else None
+    if not isinstance(oauth_account, dict):
+        finish(64)
+    selected = {field: oauth_account.get(field) for field in fields}
+    if any(not isinstance(value, str) or not value for value in selected.values()):
+        finish(64)
+    encoded = json.dumps(selected, separators=(",", ":")).encode("utf-8")
+    if len(encoded) >= output_limit:
+        finish(64)
+    offset = 0
+    while offset < len(encoded):
+        written = os.write(1, encoded[offset:])
+        if written <= 0:
+            finish(64)
+        offset += written
+    finish(0)
+except BaseException:
+    finish(64)
+"""
 CLAUDE_AUTH_WARMUP_TIMEOUT_SECONDS = 120.0
 CLAUDE_AUTH_EXPIRY_MARGIN_SECONDS = 120.0
 CLAUDE_REVIEW_TOOL_EXECUTABLE_CANDIDATES = (
@@ -835,37 +950,50 @@ def _claude_host_home() -> pathlib.Path:
 def _read_claude_auth_metadata_environment() -> dict[str, str]:
     source = _claude_host_home() / CLAUDE_AUTH_CONFIG_NAME
     try:
-        raw = _read_bounded_regular_file(
-            source,
-            source="Claude local-login metadata",
-            limit_bytes=CLAUDE_AUTH_CONFIG_LIMIT_BYTES,
-            label="Claude local-login metadata",
-            required_owner=os.geteuid(),
-            require_single_link=True,
-            require_owner_only=True,
+        executable = pathlib.Path(sys.executable).resolve(strict=True)
+        completed = run_bounded_capture(
+            (
+                str(executable),
+                "-I",
+                "-S",
+                "-c",
+                CLAUDE_AUTH_METADATA_EXTRACTOR,
+                str(source),
+                str(os.geteuid()),
+                str(CLAUDE_AUTH_CONFIG_LIMIT_BYTES),
+                str(CLAUDE_AUTH_METADATA_OUTPUT_LIMIT_BYTES),
+                *(field for field, _env_key, _kind in CLAUDE_AUTH_METADATA_FIELDS),
+            ),
+            cwd=_claude_host_home(),
+            env={"LANG": "C", "LC_ALL": "C", "PATH": TRUSTED_PATH},
+            timeout_seconds=CLAUDE_KEYCHAIN_QUERY_TIMEOUT_SECONDS,
+            stdout_limit_bytes=CLAUDE_AUTH_METADATA_OUTPUT_LIMIT_BYTES,
+            stderr_limit_bytes=CLAUDE_AUTH_METADATA_OUTPUT_LIMIT_BYTES,
         )
-    except ReviewError as error:
+    except (OSError, ReviewError) as error:
         raise ClaudeKeychainCredentialUnavailable(
             "Claude local-login metadata is unavailable or unsafe"
         ) from error
     try:
-        try:
-            config = _strict_json_object(bytes(raw))
-        except MemoryError as error:
+        if completed.returncode != 0 or completed.stderr or not completed.stdout:
             raise ClaudeKeychainCredentialUnavailable(
-                "Claude local-login metadata exceeded the memory budget"
-            ) from error
+                "Claude local-login metadata is unavailable or unsafe"
+            )
+        selected = _strict_json_object(bytes(completed.stdout))
     finally:
-        raw[:] = b"\x00" * len(raw)
-    oauth_account = config.get("oauthAccount") if config is not None else None
-    if not isinstance(oauth_account, dict):
+        completed.stdout[:] = b"\x00" * len(completed.stdout)
+        completed.stderr[:] = b"\x00" * len(completed.stderr)
+    expected_fields = {
+        source_field for source_field, _env_key, _kind in CLAUDE_AUTH_METADATA_FIELDS
+    }
+    if selected is None or set(selected) != expected_fields:
         raise ClaudeKeychainCredentialUnavailable(
             "Claude local-login metadata is missing its OAuth account"
         )
 
     result: dict[str, str] = {}
     for source_field, env_key, kind in CLAUDE_AUTH_METADATA_FIELDS:
-        value = oauth_account.get(source_field)
+        value = selected.get(source_field)
         if not isinstance(value, str) or not value:
             raise ClaudeKeychainCredentialUnavailable(
                 "Claude local-login metadata is incomplete"

@@ -657,6 +657,50 @@ class ProviderPolicyTest(unittest.TestCase):
                 with self.assertRaises(providers.ClaudeKeychainCredentialUnavailable):
                     providers._read_claude_auth_metadata_environment()
 
+    def test_claude_auth_metadata_parent_only_parses_selected_fields(self) -> None:
+        secret = "excluded-secret-value"
+        self.claude_auth_config.write_text(
+            json.dumps(
+                {
+                    "oauthAccount": self.claude_auth_metadata,
+                    "credentials": {"accessToken": secret},
+                    "projects": {"customer-project": {"cache": secret}},
+                    "settings": {"privateValue": secret},
+                }
+            ),
+            encoding="utf-8",
+        )
+        parsed_inputs: list[bytes] = []
+        strict_json_object = providers._strict_json_object
+
+        def record_parent_input(value: bytes) -> dict[str, object] | None:
+            parsed_inputs.append(bytes(value))
+            return strict_json_object(value)
+
+        with (
+            mock.patch.object(
+                providers,
+                "_strict_json_object",
+                side_effect=record_parent_input,
+            ),
+            mock.patch.object(
+                providers,
+                "_read_bounded_regular_file",
+                side_effect=AssertionError("parent read the complete metadata file"),
+            ),
+        ):
+            metadata_env = providers._read_claude_auth_metadata_environment()
+
+        self.assertEqual(len(parsed_inputs), 1)
+        self.assertNotIn(secret.encode(), parsed_inputs[0])
+        self.assertEqual(
+            metadata_env,
+            {
+                env_key: self.claude_auth_metadata[field]
+                for field, env_key, _kind in providers.CLAUDE_AUTH_METADATA_FIELDS
+            },
+        )
+
     def test_claude_auth_metadata_rejects_unsafe_file_identity(self) -> None:
         self.claude_auth_config.chmod(0o640)
         with self.assertRaisesRegex(
