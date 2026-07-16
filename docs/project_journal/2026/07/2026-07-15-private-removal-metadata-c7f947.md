@@ -85,6 +85,7 @@ superseded_by:
 - Runtime, builder, and manifest-change validation now share owner, override, reserved-target, source-kind, `base_release`, removed-link field, and retirement-graph semantics, including exact `OWNER/REPOSITORY` validation and fail-closed unknown-field rejection for base releases; current validation revalidates the manifest plus every observed source/ancestor as one live worktree snapshot, while the baseline remains commit-bound.
 - Public package obligations are rejected before publication when a replacement is neither active nor retired; private cross-owner obligations remain deferred to the combined public/private release-set check.
 - GitHub release-history validation bounds each response, the page count, the total release count, and batch Git input/output; it normalizes malformed or over-deep JSON without traceback leakage and resolves commit-graph order with a fixed number of Git processes. Every authenticated complete Release manifest is deduplicated and batch-loaded to prove skip-upgrade target hierarchy and WAL capacity, while all declared historical removal targets remain subject to the same checks for legacy and not-yet-released state.
+- GitHub CLI JSON parsing normalizes oversized integers and recursion failures for both single and concatenated-page responses, so malformed remote data cannot escape the synchronizer error boundary with a traceback.
 - Cooperative installers lock the stable sync-home directory inode for the entire transaction, so replacing `personal-sync` or its named lock cannot admit a second synchronizer.
 - Current-release reads bind the owner root, `current`, `releases`, and the selected release through no-follow directory descriptors, then recheck every name and parent binding before returning a SHA; replacing the checked owner root can no longer redirect the read to a coherent attacker-controlled tree.
 - Same-content link and ledger inode racers moved during quarantine are restored exactly with no-replace renames; an occupied original name is preserved and reported instead of overwritten.
@@ -98,6 +99,7 @@ superseded_by:
 - Private package verification now checks the checksum and extracts from one immutable archive snapshot, closing the verification-to-extraction path replacement window.
 - The required aggregate `test` check now verifies every direct Python 3.9, platform-safety, and platform-test dependency result instead of relying on transitive skip behavior.
 - The canonical review-workflow contract accepts scalar, block-list, and inline-list `needs` forms, including quoted dependency names, so the stricter aggregate dependency list remains covered after private-overlay sync.
+- Aggregate result guards preserve GitHub Actions environment scope: step-local bindings must be checked in the same step, while job-level bindings remain reusable across steps.
 - Overlay verification accepts exact desired symlinks that intentionally remain outside the ownership ledger, while still rejecting conflicting recorded ownership and preserving those links on uninstall.
 
 ## Next Steps
@@ -105,8 +107,8 @@ superseded_by:
 - Add a combined public/private manifest capacity gate when the private release job has both exact manifests; the installer already performs this aggregate preflight and fails safely, while repository CI currently proves capacity one owner at a time.
 
 ## Evidence
-- `/usr/bin/env ... python3 -m unittest discover -s tests` — 1033 tests completed successfully, with 2 skipped, using Python 3.13.0 and test-only Git configuration that disables commit signing to avoid a host keybox dependency, after integrating the latest `origin/master`.
-- Reconciliation safety module — 263 tests passed as part of the repository suite.
+- `/usr/bin/env ... python3 -m unittest discover -s tests` — 1037 tests completed successfully, with 2 skipped, using Python 3.13.0 and test-only Git configuration that disables commit signing to avoid a host keybox dependency, after integrating the latest `origin/master`.
+- Reconciliation safety module — 267 tests passed as part of the repository suite.
 - Package builder safety module — 57 tests passed as part of the repository suite.
 - Manifest change validation module — 77 tests passed as part of the repository suite.
 - Release baseline validation module — 24 tests passed.
