@@ -25,6 +25,7 @@ import stat
 import sys
 import tempfile
 import threading
+import time
 from collections.abc import Iterable
 from typing import Any
 
@@ -52,7 +53,6 @@ MIN_SESSION_RECORD_PROCESSING_BUDGET_BYTES = 4 * 1024 * 1024
 MAX_SESSION_SHARDS_RANGE_BYTES = HARD_SESSION_RECORD_PROCESSING_CEILING_BYTES
 SESSION_SHARDS_RECORD_FRAGMENT_BYTES = 256 * 1024
 SESSION_SHARDS_RECORD_SCAN_CHUNK_BYTES = 64 * 1024
-SESSION_SHARDS_RECORD_SPOOL_MEMORY_BYTES = 64 * 1024
 SESSION_SHARDS_JSON_VALIDATION_CHUNK_BYTES = 64 * 1024
 SESSION_SHARDS_MAX_JSON_NESTING_DEPTH = 512
 SESSION_SHARDS_FRAME_METADATA_CHARS = 16 * 1024
@@ -62,7 +62,10 @@ MAX_SESSION_SHARDS_FRAME_CHARS = (
 )
 REMOTE_PREFLIGHT_TIMEOUT_SECONDS = 15
 REMOTE_COMMAND_TIMEOUT_SECONDS = 60
+REMOTE_SESSION_SHARDS_IDLE_TIMEOUT_SECONDS = 60
+REMOTE_SESSION_SHARDS_READ_CHUNK_BYTES = 64 * 1024
 MAX_REMOTE_SESSION_SHARDS_DIAGNOSTIC_BYTES = 512
+SESSION_SHARDS_CAPTURE_PROGRESS_PATH_ENV = "CODEX_SESSION_SHARDS_CAPTURE_PROGRESS_PATH"
 TASK_OUTPUT_RELATIVE_DIR = pathlib.Path(".codex-tmp/remote-host-context")
 ACTIVE_ROLLOUT_RELATIVE_RE = re.compile(
     r"^sessions/\d{4}/\d{2}/\d{2}/rollout-[^/]+\.jsonl$"
@@ -96,6 +99,7 @@ WRAPPER_PREFIXES = (
     "# Review findings:",
     "<turn_aborted>",
     "Persistent internal Codex readonly review contract:",
+    "Persistent isolated code-review contract:",
     "Review discipline:",
 )
 WRAPPER_END_MARKERS = (
@@ -457,7 +461,7 @@ class SessionShardRecord:
     byte_start: int
     byte_end: int
     record_index: int
-    record_storage: Any | None
+    source_handle: Any | None
     record_commitment: str | None
     delimiter_bytes: int
     gap_reason: str | None
@@ -761,20 +765,6 @@ class _IncrementalJSONObjectValidator:
             self._invalid("incomplete JSON token")
         if not self.root_complete or self.stack:
             self._invalid("incomplete root object")
-
-
-def _validate_session_shards_json_storage(storage: Any) -> None:
-    decoder = codecs.getincrementaldecoder("utf-8")("strict")
-    validator = _IncrementalJSONObjectValidator()
-    storage.seek(0)
-    while True:
-        chunk = storage.read(SESSION_SHARDS_JSON_VALIDATION_CHUNK_BYTES)
-        if not chunk:
-            break
-        validator.feed(decoder.decode(chunk, final=False))
-    validator.feed(decoder.decode(b"", final=True))
-    validator.finish()
-    storage.seek(0)
 
 
 def _session_shards_payload_delimiter_bytes(payload_tail: bytes) -> int:
@@ -1138,10 +1128,14 @@ class _RemoteSessionShardsValidator:
         )
         if status == "gap":
             reason = frame.get("gap_reason")
-            if frame.get("byte_count") != descriptor_bytes:
+            if frame.get("byte_count") != descriptor_bytes or record_count != 1:
                 raise RuntimeError(
-                    "remote session-shards gap descriptor byte count mismatch"
+                    "remote session-shards gap descriptor range is inconsistent"
                 )
+            self._validate_content_free_gap_bounds(
+                reason=reason,
+                byte_count=descriptor_bytes,
+            )
             if reason == "record_processing_budget_exceeded":
                 self._validate_processing_gap_metadata(
                     frame,
@@ -1305,6 +1299,30 @@ class _RemoteSessionShardsValidator:
                 "remote session-shards processing-budget gap is inconsistent"
             )
 
+    def _validate_content_free_gap_bounds(
+        self,
+        *,
+        reason: object,
+        byte_count: int,
+    ) -> None:
+        assert self.stream_meta is not None
+        processing_budget = self._integer(
+            self.stream_meta,
+            "record_processing_budget_bytes",
+            minimum=1,
+        )
+        hard_scan_ceiling = self._integer(
+            self.stream_meta,
+            "hard_record_scan_ceiling_bytes",
+            minimum=processing_budget,
+        )
+        if byte_count > hard_scan_ceiling or (
+            reason == "invalid_json" and byte_count > processing_budget
+        ):
+            raise RuntimeError(
+                "remote session-shards content-free gap exceeds its byte ceiling"
+            )
+
     def _accept_gap(self, frame: dict[str, Any]) -> None:
         if self.fragment_state is not None:
             raise RuntimeError("remote session-shards interrupted a fragmented record")
@@ -1312,6 +1330,10 @@ class _RemoteSessionShardsValidator:
         self._validate_source_token(frame)
         _, byte_end, byte_count, record_end = self._validate_whole_record_range(frame)
         reason = frame.get("reason")
+        self._validate_content_free_gap_bounds(
+            reason=reason,
+            byte_count=byte_count,
+        )
         if reason == "record_processing_budget_exceeded":
             self._validate_processing_gap_metadata(frame, byte_count=byte_count)
         self.accounting_hasher.update(_session_shards_accounting_bytes(frame))
@@ -1493,7 +1515,8 @@ class _RemoteSessionShardsValidator:
             "emitted_gap_bytes": self.emitted_gap_bytes,
             "emitted_fragment_bytes": self.emitted_fragment_bytes,
         }
-        if any(terminal.get(key) != value for key, value in expected_counts.items()):
+        actual_counts = {key: self._integer(terminal, key) for key in expected_counts}
+        if actual_counts != expected_counts:
             raise RuntimeError(
                 "remote session-shards terminal counters do not conserve the stream"
             )
@@ -1521,6 +1544,17 @@ class _RemoteSessionShardsValidator:
             _SESSION_SHARDS_CONSERVATION_PROOF_FIELDS,
             "conservation proof",
         )
+        for key in (
+            "byte_start",
+            "byte_end",
+            "byte_count",
+            "accounted_byte_count",
+            "record_start",
+            "record_end",
+            "record_count",
+            "accounted_record_count",
+        ):
+            self._integer(proof, key)
         expected_proof = {
             "schema": "session-shards-conservation-v1",
             "source_token": self.stream_meta.get("source_token"),
@@ -1560,16 +1594,25 @@ class _RemoteSessionShardsValidator:
             minimum=record_start,
         )
         complete = terminal.get("complete")
+        if not isinstance(complete, bool):
+            raise RuntimeError(
+                "remote session-shards descriptor terminal has invalid complete"
+            )
+        emitted_shards = self._integer(terminal, "emitted_shards")
+        accounted_byte_count = self._integer(terminal, "accounted_byte_count")
+        accounted_record_count = self._integer(
+            terminal,
+            "accounted_record_count",
+        )
         max_shards = self._integer(self.stream_meta, "max_shards", minimum=1)
         if (
-            not isinstance(complete, bool)
-            or terminal.get("emitted_shards") != self.emitted_shards
+            emitted_shards != self.emitted_shards
             or byte_start != self.stream_meta.get("byte_start")
             or byte_end != self.next_byte
             or record_start != self.stream_meta.get("record_start")
             or record_end != self.next_record
-            or terminal.get("accounted_byte_count") != byte_end - byte_start
-            or terminal.get("accounted_record_count") != record_end - record_start
+            or accounted_byte_count != byte_end - byte_start
+            or accounted_record_count != record_end - record_start
         ):
             raise RuntimeError(
                 "remote session-shards descriptor terminal does not conserve the page"
@@ -1585,17 +1628,27 @@ class _RemoteSessionShardsValidator:
                 raise RuntimeError(
                     "remote session-shards completed descriptor page is inconsistent"
                 )
-        elif (
-            terminal.get("reason") != "max_shards"
-            or self.emitted_shards != max_shards
-            or terminal.get("next_byte_start") != byte_end
-            or terminal.get("next_record_start") != record_end
-            or not isinstance(terminal.get("next_resume_cursor"), str)
-        ):
-            raise RuntimeError(
-                "remote session-shards paginated descriptor cursor is inconsistent"
+        else:
+            next_byte_start = self._integer(
+                terminal,
+                "next_byte_start",
+                minimum=byte_end,
             )
-        if not complete:
+            next_record_start = self._integer(
+                terminal,
+                "next_record_start",
+                minimum=record_end,
+            )
+            if (
+                terminal.get("reason") != "max_shards"
+                or self.emitted_shards != max_shards
+                or next_byte_start != byte_end
+                or next_record_start != record_end
+                or not isinstance(terminal.get("next_resume_cursor"), str)
+            ):
+                raise RuntimeError(
+                    "remote session-shards paginated descriptor cursor is inconsistent"
+                )
             self._validate_cursor_coordinates(
                 terminal.get("next_resume_cursor"),
                 source_token=terminal.get("source_token"),
@@ -2500,6 +2553,7 @@ def _session_shards_holdout_identity_key_id(identity_key: bytes) -> str:
 
 def _session_shards_holdout_core(
     *,
+    identity_key_id: str,
     host: str,
     window_start: str,
     window_end: str,
@@ -2510,6 +2564,7 @@ def _session_shards_holdout_core(
         "backfill_required": True,
         "content_free": True,
         "host": host,
+        "identity_key_id": identity_key_id,
         "kind": "transport_receipt",
         "qualification_mode": "shadow",
         "reason": SESSION_SHARDS_HOLDOUT_REASON,
@@ -2544,7 +2599,9 @@ def _session_shards_holdout_receipt(
     )
     _validate_session_shards_holdout_source_kind(source_kind)
     _validate_session_shards_holdout_lease_ref(source_lease_ref)
+    identity_key_id = _session_shards_holdout_identity_key_id(identity_key)
     core = _session_shards_holdout_core(
+        identity_key_id=identity_key_id,
         host=host,
         window_start=window_start,
         window_end=window_end,
@@ -2558,7 +2615,6 @@ def _session_shards_holdout_receipt(
     receipt = {
         **core,
         "holdout_ref": holdout_ref,
-        "identity_key_id": _session_shards_holdout_identity_key_id(identity_key),
     }
     receipt["authentication_tag"] = (
         SESSION_SHARDS_HOLDOUT_AUTH_PREFIX
@@ -2609,9 +2665,17 @@ def _verify_session_shards_holdout_receipt(
     window_end = receipt.get("window_end")
     source_kind = receipt.get("source_kind")
     source_lease_ref = receipt.get("source_lease_ref")
+    identity_key_id = receipt.get("identity_key_id")
     if not all(
         isinstance(value, str)
-        for value in (host, window_start, window_end, source_kind, source_lease_ref)
+        for value in (
+            host,
+            window_start,
+            window_end,
+            source_kind,
+            source_lease_ref,
+            identity_key_id,
+        )
     ):
         raise ValueError("holdout receipt binding fields must be strings")
     assert isinstance(host, str)
@@ -2619,6 +2683,7 @@ def _verify_session_shards_holdout_receipt(
     assert isinstance(window_end, str)
     assert isinstance(source_kind, str)
     assert isinstance(source_lease_ref, str)
+    assert isinstance(identity_key_id, str)
     _validate_session_shards_holdout_host(host)
     _session_shards_holdout_daily_window(
         window_start,
@@ -2627,8 +2692,12 @@ def _verify_session_shards_holdout_receipt(
     )
     _validate_session_shards_holdout_source_kind(source_kind)
     _validate_session_shards_holdout_lease_ref(source_lease_ref)
+    expected_identity_key_id = _session_shards_holdout_identity_key_id(identity_key)
+    if identity_key_id != expected_identity_key_id:
+        raise ValueError("holdout receipt identity key does not match")
 
     core = _session_shards_holdout_core(
+        identity_key_id=identity_key_id,
         host=host,
         window_start=window_start,
         window_end=window_end,
@@ -2641,10 +2710,6 @@ def _verify_session_shards_holdout_receipt(
     )
     if receipt.get("holdout_ref") != expected_holdout_ref:
         raise ValueError("holdout receipt ref does not match its binding")
-    if receipt.get("identity_key_id") != _session_shards_holdout_identity_key_id(
-        identity_key
-    ):
-        raise ValueError("holdout receipt identity key does not match")
     signed = dict(receipt)
     authentication_tag = signed.pop("authentication_tag")
     expected_tag = (
@@ -3098,6 +3163,20 @@ def _consume_session_shards_holdout_for_backfill(
         )
         connection.execute(
             """
+            CREATE TABLE IF NOT EXISTS source_transport_consumptions (
+                source_transport_receipt_ref TEXT PRIMARY KEY,
+                backfill_source_lease_ref TEXT NOT NULL UNIQUE,
+                holdout_ref TEXT NOT NULL UNIQUE
+                    REFERENCES holdout_consumptions(holdout_ref),
+                host TEXT NOT NULL,
+                window_start TEXT NOT NULL,
+                window_end TEXT NOT NULL,
+                source_kind TEXT NOT NULL
+            )
+            """
+        )
+        connection.execute(
+            """
             CREATE TABLE IF NOT EXISTS backfill_replacements (
                 holdout_ref TEXT PRIMARY KEY
                     REFERENCES holdout_consumptions(holdout_ref),
@@ -3108,7 +3187,7 @@ def _consume_session_shards_holdout_for_backfill(
                 evidence_digest TEXT NOT NULL,
                 backfill_source_lease_ref TEXT NOT NULL UNIQUE,
                 source_snapshot_ref TEXT NOT NULL,
-                source_transport_receipt_ref TEXT NOT NULL,
+                source_transport_receipt_ref TEXT NOT NULL UNIQUE,
                 terminal_completion_ref TEXT NOT NULL UNIQUE,
                 terminal_completion_authentication_tag TEXT NOT NULL,
                 terminal_completion_revision INTEGER NOT NULL,
@@ -3143,6 +3222,28 @@ def _consume_session_shards_holdout_for_backfill(
                 expected_source_kind,
                 expected_source_lease_ref,
                 consumed_at_utc,
+            ),
+        )
+        connection.execute(
+            """
+            INSERT INTO source_transport_consumptions(
+                source_transport_receipt_ref,
+                backfill_source_lease_ref,
+                holdout_ref,
+                host,
+                window_start,
+                window_end,
+                source_kind
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                verified_result["source_transport_receipt_ref"],
+                verified_result["backfill_source_lease_ref"],
+                holdout_ref,
+                expected_host,
+                expected_window_start,
+                expected_window_end,
+                expected_source_kind,
             ),
         )
         connection.execute(
@@ -3192,6 +3293,15 @@ def _consume_session_shards_holdout_for_backfill(
         ).fetchone()
         if consumed is not None:
             raise ValueError("holdout receipt replay rejected") from exc
+        transport_consumed = connection.execute(
+            """
+            SELECT 1 FROM source_transport_consumptions
+            WHERE source_transport_receipt_ref = ?
+            """,
+            (verified_result["source_transport_receipt_ref"],),
+        ).fetchone()
+        if transport_consumed is not None:
+            raise ValueError("source transport receipt replay rejected") from exc
         raise ValueError("authenticated backfill result is already recorded") from exc
     except Exception:
         connection.rollback()
@@ -3460,129 +3570,114 @@ def _iter_session_shard_records(
     byte_offset = byte_start
     record_index = record_start
     while byte_offset < byte_end:
-        storage: Any | None = tempfile.SpooledTemporaryFile(
-            max_size=SESSION_SHARDS_RECORD_SPOOL_MEMORY_BYTES,
-            mode="w+b",
-        )
-        try:
-            record_hasher = hashlib.sha256()
-            total_bytes = 0
-            over_processing_budget = False
-            spool_permissions_verified = False
-            final_segment = b""
-            record_tail = b""
-            while byte_offset + total_bytes < byte_end:
-                remaining = byte_end - byte_offset - total_bytes
-                hard_scan_remaining = (
-                    HARD_SESSION_RECORD_SCAN_CEILING_BYTES - total_bytes
+        record_hasher = hashlib.sha256()
+        decoder = codecs.getincrementaldecoder("utf-8")("strict")
+        validator = _IncrementalJSONObjectValidator()
+        validation_error: Exception | None = None
+        total_bytes = 0
+        final_segment = b""
+        record_tail = b""
+        while byte_offset + total_bytes < byte_end:
+            remaining = byte_end - byte_offset - total_bytes
+            hard_scan_remaining = HARD_SESSION_RECORD_SCAN_CEILING_BYTES - total_bytes
+            if hard_scan_remaining <= 0:
+                raise ValueError(
+                    "JSONL record scan exceeded the hard byte ceiling of "
+                    f"{HARD_SESSION_RECORD_SCAN_CEILING_BYTES} bytes"
                 )
-                if hard_scan_remaining <= 0:
-                    raise ValueError(
-                        "JSONL record scan exceeded the hard byte ceiling of "
-                        f"{HARD_SESSION_RECORD_SCAN_CEILING_BYTES} bytes"
-                    )
-                segment = handle.readline(
-                    min(
-                        SESSION_SHARDS_RECORD_SCAN_CHUNK_BYTES,
-                        remaining,
-                        hard_scan_remaining,
-                    )
+            segment = handle.readline(
+                min(
+                    SESSION_SHARDS_RECORD_SCAN_CHUNK_BYTES,
+                    remaining,
+                    hard_scan_remaining,
                 )
-                if not segment:
-                    raise ValueError(
-                        "rollout ended before the requested byte range was read"
-                    )
-                total_bytes += len(segment)
-                final_segment = segment
-                record_tail = (record_tail + segment)[-2:]
-                if not over_processing_budget:
-                    if total_bytes <= record_processing_budget_bytes:
-                        assert storage is not None
-                        storage.write(segment)
-                        record_hasher.update(segment)
-                        if (
-                            total_bytes > SESSION_SHARDS_RECORD_SPOOL_MEMORY_BYTES
-                            and not spool_permissions_verified
-                        ):
-                            spool_fd = storage.fileno()
-                            os.fchmod(spool_fd, stat.S_IRUSR | stat.S_IWUSR)
-                            if stat.S_IMODE(os.fstat(spool_fd).st_mode) & 0o077:
-                                raise RuntimeError(
-                                    "session-shards record spool is not owner-only"
-                                )
-                            spool_permissions_verified = True
-                    else:
-                        storage.close()
-                        storage = None
-                        over_processing_budget = True
-                if segment.endswith(b"\n"):
-                    break
-                if (
-                    total_bytes >= HARD_SESSION_RECORD_SCAN_CEILING_BYTES
-                    and byte_offset + total_bytes < byte_end
-                ):
-                    raise ValueError(
-                        "JSONL record scan exceeded the hard byte ceiling of "
-                        f"{HARD_SESSION_RECORD_SCAN_CEILING_BYTES} bytes"
-                    )
-
+            )
+            if not segment:
+                raise ValueError(
+                    "rollout ended before the requested byte range was read"
+                )
+            total_bytes += len(segment)
+            final_segment = segment
+            record_tail = (record_tail + segment)[-2:]
+            record_hasher.update(segment)
             if (
-                not final_segment.endswith(b"\n")
+                total_bytes <= record_processing_budget_bytes
+                and validation_error is None
+            ):
+                try:
+                    validator.feed(decoder.decode(segment, final=False))
+                except (
+                    _SessionShardsProcessingBudgetExceeded,
+                    UnicodeDecodeError,
+                    ValueError,
+                ) as exc:
+                    validation_error = exc
+            if segment.endswith(b"\n"):
+                break
+            if (
+                total_bytes >= HARD_SESSION_RECORD_SCAN_CEILING_BYTES
                 and byte_offset + total_bytes < byte_end
             ):
-                raise ValueError("rollout ended inside a JSONL record")
+                raise ValueError(
+                    "JSONL record scan exceeded the hard byte ceiling of "
+                    f"{HARD_SESSION_RECORD_SCAN_CEILING_BYTES} bytes"
+                )
 
-            gap_reason: str | None = None
-            record_commitment: str | None = None
-            processing_ceiling_kind: str | None = None
-            processing_ceiling_limit: int | None = None
-            processing_ceiling_observed: int | None = None
-            delimiter_bytes = (
-                2 if record_tail == b"\r\n" else int(record_tail.endswith(b"\n"))
-            )
-            if over_processing_budget:
-                gap_reason = "record_processing_budget_exceeded"
-                processing_ceiling_kind = "record_bytes"
-                processing_ceiling_limit = record_processing_budget_bytes
-                processing_ceiling_observed = total_bytes
-            else:
-                assert storage is not None
-                if storage.tell() != total_bytes:
-                    raise RuntimeError("session-shards record spool lost source bytes")
+        if not final_segment.endswith(b"\n") and byte_offset + total_bytes < byte_end:
+            raise ValueError("rollout ended inside a JSONL record")
+
+        gap_reason: str | None = None
+        record_commitment: str | None = None
+        processing_ceiling_kind: str | None = None
+        processing_ceiling_limit: int | None = None
+        processing_ceiling_observed: int | None = None
+        delimiter_bytes = (
+            2 if record_tail == b"\r\n" else int(record_tail.endswith(b"\n"))
+        )
+        if total_bytes > record_processing_budget_bytes:
+            gap_reason = "record_processing_budget_exceeded"
+            processing_ceiling_kind = "record_bytes"
+            processing_ceiling_limit = record_processing_budget_bytes
+            processing_ceiling_observed = total_bytes
+        else:
+            if validation_error is None:
                 try:
-                    _validate_session_shards_json_storage(storage)
-                except _SessionShardsProcessingBudgetExceeded as exc:
-                    gap_reason = "record_processing_budget_exceeded"
-                    processing_ceiling_kind = exc.kind
-                    processing_ceiling_limit = exc.limit
-                    processing_ceiling_observed = exc.observed
-                    storage.close()
-                    storage = None
-                except (UnicodeDecodeError, ValueError):
-                    gap_reason = "invalid_json"
-                    storage.close()
-                    storage = None
-                else:
-                    record_commitment = "sha256:" + record_hasher.hexdigest()
+                    validator.feed(decoder.decode(b"", final=True))
+                    validator.finish()
+                except (
+                    _SessionShardsProcessingBudgetExceeded,
+                    UnicodeDecodeError,
+                    ValueError,
+                ) as exc:
+                    validation_error = exc
+            if isinstance(
+                validation_error,
+                _SessionShardsProcessingBudgetExceeded,
+            ):
+                gap_reason = "record_processing_budget_exceeded"
+                processing_ceiling_kind = validation_error.kind
+                processing_ceiling_limit = validation_error.limit
+                processing_ceiling_observed = validation_error.observed
+            elif validation_error is not None:
+                gap_reason = "invalid_json"
+            else:
+                record_commitment = "sha256:" + record_hasher.hexdigest()
 
-            yield SessionShardRecord(
-                byte_start=byte_offset,
-                byte_end=byte_offset + total_bytes,
-                record_index=record_index,
-                record_storage=storage,
-                record_commitment=record_commitment,
-                delimiter_bytes=delimiter_bytes,
-                gap_reason=gap_reason,
-                processing_ceiling_kind=processing_ceiling_kind,
-                processing_ceiling_limit=processing_ceiling_limit,
-                processing_ceiling_observed=processing_ceiling_observed,
-            )
-            byte_offset += total_bytes
-            record_index += 1
-            handle.seek(byte_offset)
-        finally:
-            if storage is not None:
-                storage.close()
+        yield SessionShardRecord(
+            byte_start=byte_offset,
+            byte_end=byte_offset + total_bytes,
+            record_index=record_index,
+            source_handle=handle if gap_reason is None else None,
+            record_commitment=record_commitment,
+            delimiter_bytes=delimiter_bytes,
+            gap_reason=gap_reason,
+            processing_ceiling_kind=processing_ceiling_kind,
+            processing_ceiling_limit=processing_ceiling_limit,
+            processing_ceiling_observed=processing_ceiling_observed,
+        )
+        byte_offset += total_bytes
+        record_index += 1
+        handle.seek(byte_offset)
 
     if byte_offset != byte_end:
         raise ValueError("requested byte range did not end on a JSONL record boundary")
@@ -3790,9 +3885,9 @@ def _iter_session_record_transport_frames(
     source_token: str,
     request_binding: str,
 ) -> Iterable[dict[str, Any]]:
-    if item.record_storage is None or item.record_commitment is None:
+    if item.source_handle is None or item.record_commitment is None:
         raise RuntimeError("valid session-shards record lost its payload")
-    record_storage = item.record_storage
+    source_handle = item.source_handle
     record_byte_count = item.byte_end - item.byte_start
     common = {
         "schema": SESSION_SHARDS_SCHEMA,
@@ -3803,11 +3898,13 @@ def _iter_session_record_transport_frames(
         "record_end": item.record_index + 1,
         "delimiter_bytes": item.delimiter_bytes,
     }
+    source_handle.seek(item.byte_start)
     if record_byte_count <= shard_bytes:
-        record_storage.seek(0)
-        record_bytes = record_storage.read(record_byte_count)
+        record_bytes = source_handle.read(record_byte_count)
         if len(record_bytes) != record_byte_count:
-            raise RuntimeError("session-shards record spool ended unexpectedly")
+            raise RuntimeError("session-shards source ended during its second pass")
+        if _session_shards_content_commitment(record_bytes) != item.record_commitment:
+            raise RuntimeError("source changed during session-shards second pass")
         yield {
             "kind": "record",
             **common,
@@ -3823,16 +3920,17 @@ def _iter_session_record_transport_frames(
     fragment_count = (
         record_byte_count + SESSION_SHARDS_RECORD_FRAGMENT_BYTES - 1
     ) // SESSION_SHARDS_RECORD_FRAGMENT_BYTES
+    second_pass_hasher = hashlib.sha256()
     for fragment_index in range(fragment_count):
         local_start = fragment_index * SESSION_SHARDS_RECORD_FRAGMENT_BYTES
         local_end = min(
             local_start + SESSION_SHARDS_RECORD_FRAGMENT_BYTES,
             record_byte_count,
         )
-        record_storage.seek(local_start)
-        fragment = record_storage.read(local_end - local_start)
+        fragment = source_handle.read(local_end - local_start)
         if len(fragment) != local_end - local_start:
-            raise RuntimeError("session-shards record spool ended unexpectedly")
+            raise RuntimeError("session-shards source ended during its second pass")
+        second_pass_hasher.update(fragment)
         yield {
             "kind": "record_fragment",
             **common,
@@ -3849,6 +3947,8 @@ def _iter_session_record_transport_frames(
             "fragment_commitment": _session_shards_content_commitment(fragment),
             "record_commitment": item.record_commitment,
         }
+    if "sha256:" + second_pass_hasher.hexdigest() != item.record_commitment:
+        raise RuntimeError("source changed during session-shards second pass")
 
 
 def _iter_local_session_shard_frames(
@@ -5300,7 +5400,6 @@ def _remote_session_shards_script(payload: dict[str, object]) -> str:
             SessionShardRecord,
             _SessionShardsProcessingBudgetExceeded,
             _IncrementalJSONObjectValidator,
-            _validate_session_shards_json_storage,
             _path_is_relative_to,
             _resolve_safe_codex_root,
             _safe_relative_path,
@@ -5340,7 +5439,6 @@ import pathlib
 import re
 import stat
 import sys
-import tempfile
 from collections.abc import Iterable
 from typing import Any
 
@@ -5355,7 +5453,6 @@ HARD_SESSION_RECORD_SCAN_CEILING_BYTES = {HARD_SESSION_RECORD_SCAN_CEILING_BYTES
 MIN_SESSION_RECORD_PROCESSING_BUDGET_BYTES = {MIN_SESSION_RECORD_PROCESSING_BUDGET_BYTES}
 SESSION_SHARDS_RECORD_FRAGMENT_BYTES = {SESSION_SHARDS_RECORD_FRAGMENT_BYTES}
 SESSION_SHARDS_RECORD_SCAN_CHUNK_BYTES = {SESSION_SHARDS_RECORD_SCAN_CHUNK_BYTES}
-SESSION_SHARDS_RECORD_SPOOL_MEMORY_BYTES = {SESSION_SHARDS_RECORD_SPOOL_MEMORY_BYTES}
 SESSION_SHARDS_JSON_VALIDATION_CHUNK_BYTES = {SESSION_SHARDS_JSON_VALIDATION_CHUNK_BYTES}
 SESSION_SHARDS_MAX_JSON_NESTING_DEPTH = {SESSION_SHARDS_MAX_JSON_NESTING_DEPTH}
 MAX_SESSION_SHARDS_FRAME_CHARS = {MAX_SESSION_SHARDS_FRAME_CHARS}
@@ -5412,7 +5509,7 @@ def main():
         for frame in frames:
             encoded_frame = json.dumps(
                 frame,
-                ensure_ascii=False,
+                ensure_ascii=True,
                 separators=(",", ":"),
                 sort_keys=True,
             )
@@ -5460,6 +5557,107 @@ def _bounded_remote_session_shards_diagnostic(value: str) -> str:
     )
 
 
+def _open_session_shards_capture_progress_descriptor() -> int:
+    progress_value = os.environ.get(SESSION_SHARDS_CAPTURE_PROGRESS_PATH_ENV)
+    if not progress_value:
+        return -1
+    shadow_root_value = os.environ.get("CODEX_SESSION_SHARDS_SHADOW_ROOT")
+    if not shadow_root_value:
+        raise RuntimeError(
+            "session-shards capture progress requires the explicit shadow root"
+        )
+    progress_path = pathlib.Path(progress_value)
+    shadow_root = pathlib.Path(shadow_root_value)
+    if (
+        not progress_path.is_absolute()
+        or not shadow_root.is_absolute()
+        or any(part == ".." for part in progress_path.parts)
+        or any(part == ".." for part in shadow_root.parts)
+    ):
+        raise RuntimeError("session-shards capture progress path is unsafe")
+    for alias_root in (pathlib.Path("/tmp"), pathlib.Path("/var")):
+        resolved_alias_root = alias_root.resolve()
+        if _path_is_relative_to(progress_path, alias_root):
+            progress_path = resolved_alias_root / progress_path.relative_to(alias_root)
+        if _path_is_relative_to(shadow_root, alias_root):
+            shadow_root = resolved_alias_root / shadow_root.relative_to(alias_root)
+    _reject_symlink_components(shadow_root)
+    _reject_symlink_components(progress_path)
+    resolved_root = shadow_root.resolve(strict=True)
+    resolved_progress = progress_path.resolve(strict=True)
+    root_metadata = resolved_root.lstat()
+    if (
+        not stat.S_ISDIR(root_metadata.st_mode)
+        or root_metadata.st_uid != os.getuid()
+        or stat.S_IMODE(root_metadata.st_mode) != 0o700
+        or not _path_is_relative_to(resolved_progress, resolved_root)
+    ):
+        raise RuntimeError("session-shards capture progress path is unsafe")
+    descriptor = os.open(
+        resolved_progress,
+        os.O_WRONLY | os.O_APPEND | getattr(os, "O_NOFOLLOW", 0),
+    )
+    try:
+        descriptor_metadata = os.fstat(descriptor)
+        path_metadata = resolved_progress.lstat()
+        if (
+            not stat.S_ISREG(descriptor_metadata.st_mode)
+            or descriptor_metadata.st_uid != os.getuid()
+            or descriptor_metadata.st_nlink != 1
+            or stat.S_IMODE(descriptor_metadata.st_mode) != 0o600
+            or (descriptor_metadata.st_dev, descriptor_metadata.st_ino)
+            != (path_metadata.st_dev, path_metadata.st_ino)
+        ):
+            raise RuntimeError("session-shards capture progress file is unsafe")
+        return descriptor
+    except Exception:
+        os.close(descriptor)
+        raise
+
+
+def _iter_bounded_remote_session_shards_lines(
+    handle: Any,
+    progress_callback: Any,
+) -> Iterable[str]:
+    pending = bytearray()
+    reader = getattr(handle, "read1", None)
+    if not callable(reader):
+        reader = handle.read
+
+    def decoded_line(raw_line: bytes) -> str:
+        raw_line = raw_line.rstrip(b"\r")
+        value = raw_line.decode("utf-8", errors="replace")
+        if len(value) > MAX_SESSION_SHARDS_FRAME_CHARS:
+            raise RuntimeError(
+                "remote session-shards frame exceeded the bounded line limit"
+            )
+        return value
+
+    while True:
+        chunk = reader(REMOTE_SESSION_SHARDS_READ_CHUNK_BYTES)
+        if isinstance(chunk, str):
+            chunk = chunk.encode("utf-8", errors="replace")
+        else:
+            chunk = bytes(chunk)
+        if not chunk:
+            if pending:
+                yield decoded_line(bytes(pending))
+            return
+        progress_callback()
+        pending.extend(chunk)
+        while True:
+            newline = pending.find(b"\n")
+            if newline < 0:
+                break
+            raw_line = bytes(pending[:newline])
+            del pending[: newline + 1]
+            yield decoded_line(raw_line)
+        if len(pending) > MAX_SESSION_SHARDS_FRAME_CHARS + 1:
+            raise RuntimeError(
+                "remote session-shards frame exceeded the bounded line limit"
+            )
+
+
 def _parse_remote_session_shards_frame(value: str) -> dict[str, Any]:
     if len(value) > MAX_SESSION_SHARDS_FRAME_CHARS:
         raise RuntimeError(
@@ -5503,34 +5701,63 @@ def _iter_remote_session_shard_frames(
         "ConnectTimeout=10",
         ssh_target,
         "python3",
+        "-I",
+        "-B",
         "-",
     ]
+    progress_descriptor = _open_session_shards_capture_progress_descriptor()
     try:
         process = subprocess.Popen(
             argv,
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            bufsize=1,
+            bufsize=REMOTE_SESSION_SHARDS_READ_CHUNK_BYTES,
         )
     except FileNotFoundError as exc:
+        if progress_descriptor >= 0:
+            os.close(progress_descriptor)
         raise RuntimeError(f"command not found: {argv[0]}") from exc
+    except Exception:
+        if progress_descriptor >= 0:
+            os.close(progress_descriptor)
+        raise
 
     timed_out = False
+    timeout_stop = threading.Event()
+    progress_lock = threading.Lock()
+    last_progress = time.monotonic()
 
-    def terminate_on_timeout() -> None:
+    def mark_progress() -> None:
+        nonlocal last_progress
+        with progress_lock:
+            last_progress = time.monotonic()
+        if progress_descriptor >= 0 and os.write(progress_descriptor, b".") != 1:
+            raise RuntimeError("session-shards capture progress update failed")
+
+    def terminate_on_idle() -> None:
         nonlocal timed_out
-        if process.poll() is not None:
+        poll_seconds = min(
+            1.0,
+            max(0.01, REMOTE_SESSION_SHARDS_IDLE_TIMEOUT_SECONDS / 10),
+        )
+        while not timeout_stop.wait(poll_seconds):
+            if process.poll() is not None:
+                return
+            with progress_lock:
+                idle_seconds = time.monotonic() - last_progress
+            if idle_seconds < REMOTE_SESSION_SHARDS_IDLE_TIMEOUT_SECONDS:
+                continue
+            timed_out = True
+            process.kill()
             return
-        timed_out = True
-        process.kill()
 
-    timer = threading.Timer(REMOTE_COMMAND_TIMEOUT_SECONDS, terminate_on_timeout)
-    timer.daemon = True
-    timer.start()
+    watchdog = threading.Thread(
+        target=terminate_on_idle,
+        name="remote-session-shards-idle-watchdog",
+        daemon=True,
+    )
+    watchdog.start()
     diagnostics: collections.deque[str] = collections.deque(maxlen=1)
     saw_begin = False
     saw_end = False
@@ -5541,20 +5768,15 @@ def _iter_remote_session_shard_frames(
         if process.stdin is None or process.stdout is None:
             raise RuntimeError("remote session-shards pipe setup failed")
         try:
-            process.stdin.write(_remote_session_shards_script(payload))
+            process.stdin.write(_remote_session_shards_script(payload).encode("utf-8"))
             process.stdin.close()
         except BrokenPipeError:
             pass
 
-        while True:
-            line = process.stdout.readline(MAX_SESSION_SHARDS_FRAME_CHARS + 2)
-            if line == "":
-                break
-            value = line.rstrip("\r\n")
-            if len(value) > MAX_SESSION_SHARDS_FRAME_CHARS:
-                raise RuntimeError(
-                    "remote session-shards frame exceeded the bounded line limit"
-                )
+        for value in _iter_bounded_remote_session_shards_lines(
+            process.stdout,
+            mark_progress,
+        ):
             if not saw_begin:
                 if value == REMOTE_SESSION_SHARDS_BEGIN:
                     saw_begin = True
@@ -5592,17 +5814,20 @@ def _iter_remote_session_shard_frames(
             "remote session-shards did not terminate after its stream closed"
         ) from exc
     finally:
-        timer.cancel()
-        timer.join(timeout=1)
+        timeout_stop.set()
+        watchdog.join(timeout=1)
         if process.poll() is None:
             process.kill()
             process.wait()
         if process.stdout is not None:
             process.stdout.close()
+        if progress_descriptor >= 0:
+            os.close(progress_descriptor)
 
     if timed_out:
         raise RuntimeError(
-            f"remote session-shards timed out after {REMOTE_COMMAND_TIMEOUT_SECONDS}s"
+            "remote session-shards idle timed out after "
+            f"{REMOTE_SESSION_SHARDS_IDLE_TIMEOUT_SECONDS}s without output"
         )
     if returncode != 0:
         message = diagnostics[-1] if diagnostics else "remote session-shards failed"

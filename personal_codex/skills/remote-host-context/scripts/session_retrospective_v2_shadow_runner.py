@@ -8,7 +8,6 @@ import dataclasses
 import datetime as dt
 import fcntl
 import hashlib
-import importlib
 import importlib.util
 import json
 import os
@@ -27,7 +26,8 @@ from typing import Any, BinaryIO
 
 
 AUTOMATION_ID = "session-retrospective-v2-shadow"
-CANONICAL_HOSTS = frozenset({"local", "miku-bot-dev", "hoteng-srv-01"})
+CANONICAL_HOST_ORDER = ("local", "miku-bot-dev", "hoteng-srv-01")
+CANONICAL_HOSTS = frozenset(CANONICAL_HOST_ORDER)
 ALLOWED_COORDINATOR_COMMANDS = frozenset(
     (
         "help",
@@ -67,10 +67,18 @@ HOST_REF_RE = re.compile(r"^host_ref_v2:[0-9a-f]{64}$")
 SOURCE_SNAPSHOT_REF_RE = re.compile(r"^source_snapshot_v2:[0-9a-f]{64}$")
 SOURCE_RECEIPT_REF_RE = re.compile(r"^source_transport_receipt_v2:[0-9a-f]{64}$")
 SOURCE_EVIDENCE_RE = re.compile(r"^shadow_source_evidence_v2:[0-9a-f]{64}$")
+HOLDOUT_REF_RE = re.compile(r"^session_shards_holdout_v1:[0-9a-f]{64}$")
+HOLDOUT_IDENTITY_KEY_ID_RE = re.compile(r"^session_shards_holdout_key_v1:[0-9a-f]{64}$")
 COORDINATOR_IDENTITY_RE = re.compile(r"^identity_key_v2:[0-9a-f]{64}$")
 COORDINATOR_COVERAGE_SCHEMA = "shadow_coverage_receipt_v2"
-SOURCE_CAPTURE_TIMEOUT_SECONDS = 90
+SOURCE_CAPTURE_IDLE_TIMEOUT_SECONDS = 90
 SOURCE_CAPTURE_POLL_SECONDS = 0.05
+SOURCE_CAPTURE_MIN_WALL_TIMEOUT_SECONDS = 2 * 60
+SOURCE_CAPTURE_MAX_WALL_TIMEOUT_SECONDS = 15 * 60
+SOURCE_CAPTURE_MIN_THROUGHPUT_BYTES_PER_SECOND = 512 * 1024
+SOURCE_CAPTURE_WALL_TIMEOUT_OVERHEAD_SECONDS = 60
+SOURCE_CAPTURE_PROGRESS_PATH_ENV = "CODEX_SESSION_SHARDS_CAPTURE_PROGRESS_PATH"
+MAX_SOURCE_CAPTURE_PROGRESS_BYTES = 1024 * 1024
 COORDINATOR_STATUS_TIMEOUT_SECONDS = 30
 COORDINATOR_ACTION_TIMEOUT_SECONDS = 5 * 60
 MAX_COORDINATOR_STATUS_BYTES = 1024 * 1024
@@ -113,6 +121,33 @@ COORDINATOR_PATH = (
 )
 TRANSPORT_PATH = pathlib.Path(__file__).with_name("remote_codex_probe.py")
 SANDBOX_EXEC_PATH = pathlib.Path("/usr/bin/sandbox-exec")
+DAILY_PAIR_SCHEMA = "shadow_daily_pair_v2"
+DAILY_PAIR_FILENAME = "daily-pair.json"
+DAILY_PAIR_HOLDOUT_MECHANISM = "authenticated_status_lease_holdout"
+DAILY_PAIR_STATES = frozenset(
+    {"partial_starting", "partial_started", "backfill_starting", "backfill_started"}
+)
+_DAILY_PAIR_FIELDS = frozenset(
+    {
+        "automation_id",
+        "backfill_run_dir",
+        "controlled_gap_receipt_ref",
+        "coordinator_identity_path",
+        "coordinator_path",
+        "holdout_host",
+        "holdout_identity_key_id",
+        "holdout_mechanism",
+        "partial_run_dir",
+        "partial_run_ref",
+        "production_source_suppressed",
+        "run_config",
+        "schema",
+        "shadow",
+        "state",
+        "window_end",
+        "window_start",
+    }
+)
 
 _THREAD_LOCKS: dict[pathlib.Path, threading.Lock] = {}
 _THREAD_LOCKS_GUARD = threading.Lock()
@@ -405,6 +440,7 @@ def _parse_coordinator_command(
     *,
     host: str | None,
     invocation_dir: pathlib.Path,
+    now_utc: dt.datetime | None = None,
 ) -> _ParsedCoordinatorCommand:
     if not arguments:
         raise ShadowPolicyError("a coordinator command is required")
@@ -472,14 +508,38 @@ def _parse_coordinator_command(
     frozen = {option: tuple(values) for option, values in parsed.items()}
     phase = frozen["--phase"][0][0] if "--phase" in frozen else None
     result = _ParsedCoordinatorCommand(command=command, options=frozen, phase=phase)
-    _validate_command_relationships(result, invocation_dir=invocation_dir)
+    _validate_command_relationships(
+        result,
+        invocation_dir=invocation_dir,
+        now_utc=now_utc,
+    )
     return result
+
+
+def _assert_simulation_history_empty(
+    parsed: _ParsedCoordinatorCommand,
+    *,
+    invocation_dir: pathlib.Path,
+) -> None:
+    expected_history = (invocation_dir / "simulation-history").resolve(strict=False)
+    if parsed.command in {"doctor", "start", "finalize"}:
+        history_repo = pathlib.Path(parsed.one("--history-repo")).resolve(strict=False)
+        if history_repo != expected_history:
+            raise ShadowPolicyError(
+                "--history-repo must be the invocation simulation-history directory"
+            )
+    elif not expected_history.exists():
+        return
+    _validate_owner_only_directory(expected_history)
+    if any(expected_history.iterdir()):
+        raise ShadowPolicyError("shadow simulation history must remain empty")
 
 
 def _validate_command_relationships(
     parsed: _ParsedCoordinatorCommand,
     *,
     invocation_dir: pathlib.Path,
+    now_utc: dt.datetime | None = None,
 ) -> None:
     if parsed.command == "identity":
         identity_path = pathlib.Path(parsed.one("--identity-path")).resolve(
@@ -490,15 +550,7 @@ def _validate_command_relationships(
             raise ShadowPolicyError("coordinator identity already exists")
 
     if parsed.command in {"doctor", "start", "finalize"}:
-        history_repo = pathlib.Path(parsed.one("--history-repo")).resolve(strict=False)
-        expected_history = (invocation_dir / "simulation-history").resolve(strict=False)
-        if history_repo != expected_history:
-            raise ShadowPolicyError(
-                "--history-repo must be the invocation simulation-history directory"
-            )
-        _validate_owner_only_directory(history_repo)
-        if any(history_repo.iterdir()):
-            raise ShadowPolicyError("shadow simulation history must remain empty")
+        _assert_simulation_history_empty(parsed, invocation_dir=invocation_dir)
         if parsed.one("--history-target-ref") != SHADOW_HISTORY_TARGET_REF:
             raise ShadowPolicyError("shadow history target ref must use the inert ref")
 
@@ -513,6 +565,25 @@ def _validate_command_relationships(
         expected_duration = dt.timedelta(days=1 if mode == "daily" else 7)
         if end - start != expected_duration:
             raise ShadowPolicyError(f"{mode} shadow window has an invalid duration")
+        if mode == "weekly":
+            current = now_utc or dt.datetime.now(dt.timezone.utc)
+            if current.tzinfo is None:
+                raise ShadowPolicyError("weekly shadow clock must be timezone-aware")
+            expected_end = current.astimezone(dt.timezone.utc).replace(
+                hour=0,
+                minute=0,
+                second=0,
+                microsecond=0,
+            )
+            if (
+                end != expected_end
+                or start != expected_end - dt.timedelta(days=7)
+                or start.timetz() != dt.time(0, tzinfo=dt.timezone.utc)
+                or end.timetz() != dt.time(0, tzinfo=dt.timezone.utc)
+            ):
+                raise ShadowPolicyError(
+                    "weekly shadow must use the latest closed UTC seven-day window"
+                )
         hosts = tuple(value[0] for value in parsed.options["--host"])
         backfill = "--backfill-of" in parsed.options
         controlled_gap = "--controlled-gap-receipt" in parsed.options
@@ -565,11 +636,13 @@ def validate_coordinator_command(
     *,
     host: str | None,
     invocation_dir: pathlib.Path,
+    now_utc: dt.datetime | None = None,
 ) -> tuple[str, str | None]:
     parsed = _parse_coordinator_command(
         arguments,
         host=host,
         invocation_dir=invocation_dir,
+        now_utc=now_utc,
     )
     return parsed.command, parsed.phase
 
@@ -580,12 +653,17 @@ def _thread_lock(path: pathlib.Path) -> threading.Lock:
 
 
 @contextlib.contextmanager
-def host_mutex(shadow_root: pathlib.Path, host: str) -> Iterator[None]:
-    if host not in CANONICAL_HOSTS:
-        raise ShadowPolicyError(f"host is not allowlisted: {host}")
+def _shadow_mutex(
+    shadow_root: pathlib.Path,
+    *,
+    lock_name: str,
+    label: str,
+) -> Iterator[None]:
+    if re.fullmatch(r"[a-z0-9-]+", lock_name) is None:
+        raise ShadowPolicyError("shadow lock name is invalid")
     locks_dir = shadow_root / "locks"
     _ensure_owner_only_directory(locks_dir)
-    lock_path = locks_dir / f"{host}.lock"
+    lock_path = locks_dir / f"{lock_name}.lock"
     local_lock = _thread_lock(lock_path)
     with local_lock:
         flags = os.O_RDWR | os.O_CREAT
@@ -602,13 +680,27 @@ def host_mutex(shadow_root: pathlib.Path, host: str) -> Iterator[None]:
                 or stat.S_IMODE(metadata.st_mode) != 0o600
             ):
                 raise ShadowPolicyError(
-                    "per-host lock must be a single-link owner-only file"
+                    f"{label} lock must be a single-link owner-only file"
                 )
             fcntl.flock(descriptor, fcntl.LOCK_EX)
             yield
         finally:
             fcntl.flock(descriptor, fcntl.LOCK_UN)
             os.close(descriptor)
+
+
+@contextlib.contextmanager
+def host_mutex(shadow_root: pathlib.Path, host: str) -> Iterator[None]:
+    if host not in CANONICAL_HOSTS:
+        raise ShadowPolicyError(f"host is not allowlisted: {host}")
+    with _shadow_mutex(shadow_root, lock_name=host, label="per-host"):
+        yield
+
+
+@contextlib.contextmanager
+def daily_pair_mutex(shadow_root: pathlib.Path) -> Iterator[None]:
+    with _shadow_mutex(shadow_root, lock_name="daily-pair", label="Daily pair"):
+        yield
 
 
 def _sandbox_profile(
@@ -1073,6 +1165,24 @@ def _status_arguments(parsed: _ParsedCoordinatorCommand) -> tuple[str, ...]:
     )
 
 
+def _guarded_status_query(
+    *,
+    coordinator_path: pathlib.Path,
+    arguments: tuple[str, ...],
+    invocation_dir: pathlib.Path,
+    status_query: StatusQuery,
+) -> dict[str, Any]:
+    parsed = _parse_coordinator_command(
+        arguments,
+        host=None,
+        invocation_dir=invocation_dir,
+    )
+    try:
+        return status_query(coordinator_path, arguments, invocation_dir)
+    finally:
+        _assert_simulation_history_empty(parsed, invocation_dir=invocation_dir)
+
+
 def _status_result(value: dict[str, Any]) -> dict[str, Any]:
     if set(value) != {"command", "error", "exit_code", "ok", "result", "schema"}:
         raise ShadowPolicyError("coordinator status result violates its closed schema")
@@ -1238,9 +1348,11 @@ def _validated_source_transport_command(
         raise ShadowPolicyError(
             "source transport command must use the runner Python executable"
         )
-    script_index = 1
-    if len(raw_command) > script_index and raw_command[script_index] == "-I":
-        script_index += 1
+    if len(raw_command) <= 1 or raw_command[1] != "-I":
+        raise ShadowPolicyError(
+            "source transport command must use Python isolated mode"
+        )
+    script_index = 2
     if len(raw_command) <= script_index + 1:
         raise ShadowPolicyError("source transport command is incomplete")
     try:
@@ -1396,6 +1508,19 @@ def _source_capture_byte_limit(action: Mapping[str, Any]) -> int:
     return min(MAX_SOURCE_CAPTURE_BYTES, max(MIN_SOURCE_CAPTURE_BYTES, estimated))
 
 
+def _source_capture_wall_timeout_seconds(max_output_bytes: int) -> float:
+    transfer_seconds = (
+        max_output_bytes + SOURCE_CAPTURE_MIN_THROUGHPUT_BYTES_PER_SECOND - 1
+    ) // SOURCE_CAPTURE_MIN_THROUGHPUT_BYTES_PER_SECOND
+    derived_timeout = transfer_seconds + SOURCE_CAPTURE_WALL_TIMEOUT_OVERHEAD_SECONDS
+    return float(
+        min(
+            SOURCE_CAPTURE_MAX_WALL_TIMEOUT_SECONDS,
+            max(SOURCE_CAPTURE_MIN_WALL_TIMEOUT_SECONDS, derived_timeout),
+        )
+    )
+
+
 def _sandboxed_capture_executor(
     command: Sequence[str],
     output: BinaryIO,
@@ -1413,39 +1538,96 @@ def _sandboxed_capture_executor(
         *command,
     ]
     try:
-        process = subprocess.Popen(
-            _supervised_command(sandboxed_command),
-            cwd=invocation_dir,
-            env=_source_capture_environment(invocation_dir),
-            stdout=output,
-            stderr=subprocess.DEVNULL,
-            start_new_session=True,
+        progress_descriptor, progress_name = tempfile.mkstemp(
+            prefix=".session-shards-progress.",
+            dir=invocation_dir,
         )
     except OSError as exc:
-        raise ShadowPolicyError("source transport capture could not start") from exc
-
-    deadline = time.monotonic() + SOURCE_CAPTURE_TIMEOUT_SECONDS
+        raise ShadowPolicyError(
+            "source transport capture progress file could not be created"
+        ) from exc
+    progress_path = pathlib.Path(progress_name)
     try:
-        while process.poll() is None:
+        os.fchmod(progress_descriptor, 0o600)
+        environment = _source_capture_environment(invocation_dir)
+        environment[SOURCE_CAPTURE_PROGRESS_PATH_ENV] = str(progress_path)
+        try:
+            process = subprocess.Popen(
+                _supervised_command(sandboxed_command),
+                cwd=invocation_dir,
+                env=environment,
+                stdout=output,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+        except OSError as exc:
+            raise ShadowPolicyError("source transport capture could not start") from exc
+
+        last_output_size = 0
+        last_progress_size = 0
+        idle_deadline = time.monotonic() + SOURCE_CAPTURE_IDLE_TIMEOUT_SECONDS
+        wall_deadline = time.monotonic() + _source_capture_wall_timeout_seconds(
+            max_output_bytes
+        )
+        try:
+            while process.poll() is None:
+                output_size = os.fstat(output.fileno()).st_size
+                progress_size = os.fstat(progress_descriptor).st_size
+                if output_size > max_output_bytes:
+                    _terminate_process_group(process)
+                    raise ShadowPolicyError(
+                        "source transport capture exceeded its byte limit"
+                    )
+                if (
+                    progress_size < last_progress_size
+                    or progress_size > MAX_SOURCE_CAPTURE_PROGRESS_BYTES
+                ):
+                    _terminate_process_group(process)
+                    raise ShadowPolicyError(
+                        "source transport capture progress file is invalid"
+                    )
+                now = time.monotonic()
+                if output_size > last_output_size or progress_size > last_progress_size:
+                    last_output_size = output_size
+                    last_progress_size = progress_size
+                    idle_deadline = now + SOURCE_CAPTURE_IDLE_TIMEOUT_SECONDS
+                if now >= wall_deadline:
+                    _terminate_process_group(process)
+                    raise ShadowPolicyError(
+                        "source transport capture wall-clock timed out"
+                    )
+                if now >= idle_deadline:
+                    _terminate_process_group(process)
+                    raise ShadowPolicyError("source transport capture idle timed out")
+                time.sleep(SOURCE_CAPTURE_POLL_SECONDS)
+            if time.monotonic() >= wall_deadline:
+                raise ShadowPolicyError("source transport capture wall-clock timed out")
             if os.fstat(output.fileno()).st_size > max_output_bytes:
-                _terminate_process_group(process)
                 raise ShadowPolicyError(
                     "source transport capture exceeded its byte limit"
                 )
-            if time.monotonic() >= deadline:
+            final_progress_size = os.fstat(progress_descriptor).st_size
+            if (
+                final_progress_size < last_progress_size
+                or final_progress_size > MAX_SOURCE_CAPTURE_PROGRESS_BYTES
+            ):
+                raise ShadowPolicyError(
+                    "source transport capture progress file is invalid"
+                )
+            if _process_group_exists(process):
                 _terminate_process_group(process)
-                raise ShadowPolicyError("source transport capture timed out")
-            time.sleep(SOURCE_CAPTURE_POLL_SECONDS)
-        if os.fstat(output.fileno()).st_size > max_output_bytes:
-            raise ShadowPolicyError("source transport capture exceeded its byte limit")
-        if _process_group_exists(process):
+                raise ShadowPolicyError(
+                    "source transport capture retained a descendant process"
+                )
+        finally:
             _terminate_process_group(process)
-            raise ShadowPolicyError(
-                "source transport capture retained a descendant process"
-            )
+        return subprocess.CompletedProcess(
+            tuple(command),
+            int(process.returncode or 0),
+        )
     finally:
-        _terminate_process_group(process)
-    return subprocess.CompletedProcess(tuple(command), int(process.returncode or 0))
+        os.close(progress_descriptor)
+        progress_path.unlink(missing_ok=True)
 
 
 def _capture_source_transport(
@@ -1565,7 +1747,10 @@ def run_guarded_coordinator(
     )
     coordinator_path = _validate_coordinator_path(coordinator_path)
     if parsed.command == "identity":
-        result = executor(coordinator_path, tuple(arguments), invocation_dir)
+        try:
+            result = executor(coordinator_path, tuple(arguments), invocation_dir)
+        finally:
+            _assert_simulation_history_empty(parsed, invocation_dir=invocation_dir)
         if result.returncode == 0:
             _read_private_json(
                 pathlib.Path(parsed.one("--identity-path")),
@@ -1573,18 +1758,31 @@ def run_guarded_coordinator(
             )
         return result
     if parsed.command != "accept-source":
-        return executor(coordinator_path, tuple(arguments), invocation_dir)
+        try:
+            return executor(coordinator_path, tuple(arguments), invocation_dir)
+        finally:
+            _assert_simulation_history_empty(parsed, invocation_dir=invocation_dir)
 
     status_arguments = _status_arguments(parsed)
     first_action = _authenticated_source_action(
-        status_query(coordinator_path, status_arguments, invocation_dir),
+        _guarded_status_query(
+            coordinator_path=coordinator_path,
+            arguments=status_arguments,
+            invocation_dir=invocation_dir,
+            status_query=status_query,
+        ),
         parsed,
         invocation_dir=invocation_dir,
     )
     actual_host = str(first_action["host"])
     with host_mutex(shadow_root, actual_host):
         current_action = _authenticated_source_action(
-            status_query(coordinator_path, status_arguments, invocation_dir),
+            _guarded_status_query(
+                coordinator_path=coordinator_path,
+                arguments=status_arguments,
+                invocation_dir=invocation_dir,
+                status_query=status_query,
+            ),
             parsed,
             invocation_dir=invocation_dir,
         )
@@ -1606,6 +1804,7 @@ def run_guarded_coordinator(
             return executor(coordinator_path, tuple(arguments), invocation_dir)
         finally:
             output_path.unlink(missing_ok=True)
+            _assert_simulation_history_empty(parsed, invocation_dir=invocation_dir)
 
 
 def _load_transport_module() -> Any:
@@ -1651,6 +1850,165 @@ def _read_private_json(path: pathlib.Path, *, root: pathlib.Path) -> dict[str, A
     return value
 
 
+_PRIVATE_JSON_MISSING = object()
+
+
+def _write_private_json(
+    path: pathlib.Path,
+    value: Mapping[str, Any],
+    *,
+    root: pathlib.Path,
+    expected_current: object = _PRIVATE_JSON_MISSING,
+) -> None:
+    if not path.is_absolute() or any(part == ".." for part in path.parts):
+        raise ShadowPolicyError("private JSON path must be absolute without ..")
+    path = _normalize_system_alias_path(path)
+    _reject_symlink_components(path.parent)
+    parent = path.parent.resolve(strict=True)
+    if not _path_is_relative_to(parent, root):
+        raise ShadowPolicyError("private JSON path must stay inside the invocation")
+    _validate_owner_only_directory(parent)
+    if expected_current is _PRIVATE_JSON_MISSING:
+        if path.exists() or path.is_symlink():
+            raise ShadowPolicyError("private JSON state already exists")
+    else:
+        current = _read_private_json(path, root=root)
+        if current != expected_current:
+            raise ShadowPolicyError("private JSON state changed concurrently")
+    try:
+        payload = json.dumps(
+            dict(value),
+            allow_nan=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+    except (TypeError, ValueError) as exc:
+        raise ShadowPolicyError("private JSON state is not closed JSON") from exc
+    if len(payload) > 32 * 1024:
+        raise ShadowPolicyError("private JSON state is too large")
+
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{path.name}.",
+        dir=parent,
+    )
+    temporary_path = pathlib.Path(temporary_name)
+    try:
+        os.fchmod(descriptor, 0o600)
+        with os.fdopen(descriptor, "wb") as handle:
+            descriptor = -1
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary_path, path)
+        directory_flags = os.O_RDONLY | int(getattr(os, "O_DIRECTORY", 0))
+        directory_descriptor = os.open(parent, directory_flags)
+        try:
+            os.fsync(directory_descriptor)
+        finally:
+            os.close(directory_descriptor)
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        temporary_path.unlink(missing_ok=True)
+
+
+def _parse_utc_timestamp(value: str, *, label: str) -> dt.datetime:
+    if UTC_TIMESTAMP_RE.fullmatch(value) is None:
+        raise ShadowPolicyError(f"{label} requires a canonical UTC timestamp")
+    try:
+        parsed = dt.datetime.fromisoformat(value.removesuffix("Z") + "+00:00")
+    except ValueError as exc:
+        raise ShadowPolicyError(f"{label} requires a canonical UTC timestamp") from exc
+    return parsed
+
+
+def _validate_daily_window(
+    window_start: str,
+    window_end: str,
+) -> tuple[dt.datetime, dt.datetime]:
+    start = _parse_utc_timestamp(window_start, label="Daily pair start")
+    end = _parse_utc_timestamp(window_end, label="Daily pair end")
+    if (
+        end - start != dt.timedelta(days=1)
+        or start.timetz() != dt.time(0, tzinfo=dt.timezone.utc)
+        or end.timetz() != dt.time(0, tzinfo=dt.timezone.utc)
+    ):
+        raise ShadowPolicyError("Daily pair must use one exact closed UTC day")
+    return start, end
+
+
+def _validate_latest_closed_daily_window(
+    window_start: str,
+    window_end: str,
+    *,
+    now_utc: dt.datetime | None,
+) -> None:
+    start, end = _validate_daily_window(window_start, window_end)
+    current = now_utc or dt.datetime.now(dt.timezone.utc)
+    if current.tzinfo is None:
+        raise ShadowPolicyError("Daily pair clock must be timezone-aware")
+    current = current.astimezone(dt.timezone.utc)
+    expected_end = current.replace(hour=0, minute=0, second=0, microsecond=0)
+    if end != expected_end or start != expected_end - dt.timedelta(days=1):
+        raise ShadowPolicyError("Daily pair must use the latest closed UTC day")
+
+
+def _validate_daily_pair_manifest(
+    value: Mapping[str, Any],
+    *,
+    invocation_dir: pathlib.Path,
+) -> dict[str, Any]:
+    if set(value) != _DAILY_PAIR_FIELDS:
+        raise ShadowPolicyError("Daily pair state violates its closed schema")
+    if (
+        value.get("schema") != DAILY_PAIR_SCHEMA
+        or value.get("automation_id") != AUTOMATION_ID
+        or value.get("shadow") is not True
+        or value.get("production_source_suppressed") is not False
+        or value.get("holdout_mechanism") != DAILY_PAIR_HOLDOUT_MECHANISM
+        or value.get("holdout_host") not in CANONICAL_HOSTS - {"local"}
+        or not isinstance(value.get("holdout_identity_key_id"), str)
+        or HOLDOUT_IDENTITY_KEY_ID_RE.fullmatch(value["holdout_identity_key_id"])
+        is None
+        or value.get("state") not in DAILY_PAIR_STATES
+        or not isinstance(value.get("coordinator_path"), str)
+    ):
+        raise ShadowPolicyError("Daily pair state violates its shadow-only contract")
+    coordinator_path = pathlib.Path(str(value["coordinator_path"])).expanduser()
+    if not coordinator_path.is_absolute() or ".." in coordinator_path.parts:
+        raise ShadowPolicyError("Daily pair coordinator path must be absolute")
+    for field in (
+        "coordinator_identity_path",
+        "run_config",
+        "partial_run_dir",
+        "backfill_run_dir",
+    ):
+        raw_path = value.get(field)
+        if not isinstance(raw_path, str):
+            raise ShadowPolicyError(f"Daily pair {field} must be an absolute path")
+        _validate_path_argument(field, raw_path, invocation_dir=invocation_dir)
+    window_start = value.get("window_start")
+    window_end = value.get("window_end")
+    if not isinstance(window_start, str) or not isinstance(window_end, str):
+        raise ShadowPolicyError("Daily pair window must use canonical timestamps")
+    _validate_daily_window(window_start, window_end)
+
+    partial_run_ref = value.get("partial_run_ref")
+    controlled_gap_ref = value.get("controlled_gap_receipt_ref")
+    state = value["state"]
+    if state in {"partial_starting", "partial_started"}:
+        if partial_run_ref is not None or controlled_gap_ref is not None:
+            raise ShadowPolicyError("Daily pair partial state has premature lineage")
+    elif (
+        not isinstance(partial_run_ref, str)
+        or RUN_REF_RE.fullmatch(partial_run_ref) is None
+        or not isinstance(controlled_gap_ref, str)
+        or HOLDOUT_REF_RE.fullmatch(controlled_gap_ref) is None
+    ):
+        raise ShadowPolicyError("Daily pair backfill state lacks exact lineage")
+    return dict(value)
+
+
 _COORDINATOR_COVERAGE_FIELDS = frozenset(
     {
         "authentication_tag",
@@ -1682,84 +2040,163 @@ _COORDINATOR_COVERAGE_FIELDS = frozenset(
         "window_start",
     }
 )
+_SOURCE_STATUS_CELL_FIELDS = frozenset(
+    {"lease_ref", "snapshot_ref", "status", "transport_receipt_ref"}
+)
+COORDINATOR_VERIFIER_SCHEMA = "coordinator_verifier_result_v1"
+MAX_COORDINATOR_VERIFIER_PAYLOAD_BYTES = 64 * 1024
+_COORDINATOR_VERIFIER_SCRIPT = r"""
+import importlib
+import json
+import pathlib
+import sys
+
+
+def reject_constant(value):
+    raise ValueError(f"non-standard JSON constant: {value}")
+
+
+operation, scripts_root, identity_path, payload = sys.argv[1:]
+scripts = pathlib.Path(scripts_root).resolve(strict=True)
+sys.path.insert(0, str(scripts))
+identity_module = importlib.import_module("retrospective_v2.identity")
+identity = identity_module.load_identity_key(pathlib.Path(identity_path))
+if operation == "load-identity":
+    result = {
+        "operation": operation,
+        "schema": "coordinator_verifier_result_v1",
+        "secret_hex": bytes(identity.secret).hex(),
+    }
+elif operation == "verify-coverage":
+    authority_module = importlib.import_module("retrospective_v2.authority")
+    receipt = json.loads(payload, parse_constant=reject_constant)
+    verified = authority_module.verify_shadow_coverage_receipt(identity, receipt)
+    result = {
+        "operation": operation,
+        "schema": "coordinator_verifier_result_v1",
+        "verified": verified,
+    }
+else:
+    raise ValueError("unsupported coordinator verifier operation")
+print(json.dumps(result, allow_nan=False, separators=(",", ":"), sort_keys=True))
+"""
 CoverageVerifier = Callable[
-    [pathlib.Path, pathlib.Path, Mapping[str, Any]], dict[str, Any]
+    [pathlib.Path, pathlib.Path, Mapping[str, Any], pathlib.Path], dict[str, Any]
 ]
-CoordinatorIdentityLoader = Callable[[pathlib.Path, pathlib.Path], bytes]
+CoordinatorIdentityLoader = Callable[[pathlib.Path, pathlib.Path, pathlib.Path], bytes]
+
+
+def _run_coordinator_verifier(
+    *,
+    operation: str,
+    coordinator_path: pathlib.Path,
+    coordinator_identity_path: pathlib.Path,
+    invocation_dir: pathlib.Path,
+    receipt: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    if sys.platform != "darwin" or not SANDBOX_EXEC_PATH.is_file():
+        raise ShadowPolicyError(
+            "the supported macOS coordinator verifier sandbox is required"
+        )
+    payload = ""
+    if receipt is not None:
+        try:
+            payload = json.dumps(
+                dict(receipt),
+                allow_nan=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            )
+        except (TypeError, ValueError) as exc:
+            raise ShadowPolicyError(
+                "coordinator verifier payload is not closed JSON"
+            ) from exc
+    if len(payload.encode("utf-8")) > MAX_COORDINATOR_VERIFIER_PAYLOAD_BYTES:
+        raise ShadowPolicyError("coordinator verifier payload is too large")
+    python_path = pathlib.Path(sys.executable).resolve(strict=True)
+    command = (
+        str(SANDBOX_EXEC_PATH),
+        "-p",
+        _sandbox_profile(invocation_dir, coordinator_path),
+        str(python_path),
+        "-I",
+        "-c",
+        _COORDINATOR_VERIFIER_SCRIPT,
+        operation,
+        str(coordinator_path.parent.resolve(strict=True)),
+        str(coordinator_identity_path),
+        payload,
+    )
+    completed = _run_supervised_process(
+        command,
+        cwd=invocation_dir,
+        environment=_sandbox_environment(invocation_dir),
+        capture_output=True,
+        timeout_seconds=COORDINATOR_STATUS_TIMEOUT_SECONDS,
+    )
+    if (
+        completed.returncode != 0
+        or completed.stdout is None
+        or completed.stderr is None
+        or completed.stderr != ""
+        or len(completed.stdout.splitlines()) != 1
+    ):
+        raise ShadowPolicyError("coordinator verifier subprocess failed")
+    try:
+        result = json.loads(
+            completed.stdout,
+            object_pairs_hook=_reject_duplicate_json_keys,
+            parse_constant=_reject_json_constant,
+        )
+    except (TypeError, ValueError) as exc:
+        raise ShadowPolicyError("coordinator verifier returned invalid JSON") from exc
+    if not isinstance(result, dict):
+        raise ShadowPolicyError("coordinator verifier returned invalid data")
+    return result
 
 
 def _load_coordinator_identity_key(
     coordinator_path: pathlib.Path,
     coordinator_identity_path: pathlib.Path,
+    invocation_dir: pathlib.Path,
 ) -> bytes:
-    scripts_root = coordinator_path.parent.resolve(strict=True)
-    package_root = scripts_root / "retrospective_v2"
-    if not package_root.is_dir():
-        raise ShadowPolicyError("coordinator identity package is unavailable")
-    for name, loaded in tuple(sys.modules.items()):
-        if name != "retrospective_v2" and not name.startswith("retrospective_v2."):
-            continue
-        loaded_path = getattr(loaded, "__file__", None)
-        if loaded_path is None or not _path_is_relative_to(
-            pathlib.Path(loaded_path).resolve(strict=False),
-            package_root,
-        ):
-            raise ShadowPolicyError(
-                "a different coordinator identity package is already loaded"
-            )
-    sys.path.insert(0, str(scripts_root))
-    try:
-        identity_module = importlib.import_module("retrospective_v2.identity")
-        identity = identity_module.load_identity_key(coordinator_identity_path)
-        secret = bytes(identity.secret)
-    except (ImportError, OSError, RuntimeError, TypeError, ValueError) as exc:
-        raise ShadowPolicyError("coordinator identity authentication failed") from exc
-    finally:
-        if sys.path[:1] == [str(scripts_root)]:
-            sys.path.pop(0)
-    if len(secret) != 32:
+    result = _run_coordinator_verifier(
+        operation="load-identity",
+        coordinator_path=coordinator_path,
+        coordinator_identity_path=coordinator_identity_path,
+        invocation_dir=invocation_dir,
+    )
+    if set(result) != {"operation", "schema", "secret_hex"} or (
+        result.get("operation") != "load-identity"
+        or result.get("schema") != COORDINATOR_VERIFIER_SCHEMA
+        or not isinstance(result.get("secret_hex"), str)
+        or re.fullmatch(r"[0-9a-f]{64}", result["secret_hex"]) is None
+    ):
         raise ShadowPolicyError("coordinator identity key has an invalid length")
-    return secret
+    return bytes.fromhex(result["secret_hex"])
 
 
 def _verify_coordinator_coverage_receipt(
     coordinator_path: pathlib.Path,
     coordinator_identity_path: pathlib.Path,
     receipt: Mapping[str, Any],
+    invocation_dir: pathlib.Path,
 ) -> dict[str, Any]:
-    scripts_root = coordinator_path.parent.resolve(strict=True)
-    package_root = scripts_root / "retrospective_v2"
-    if not package_root.is_dir():
-        raise ShadowPolicyError(
-            "coordinator package is unavailable for coverage authentication"
-        )
-    for name, loaded in tuple(sys.modules.items()):
-        if name != "retrospective_v2" and not name.startswith("retrospective_v2."):
-            continue
-        loaded_path = getattr(loaded, "__file__", None)
-        if loaded_path is None or not _path_is_relative_to(
-            pathlib.Path(loaded_path).resolve(strict=False),
-            package_root,
-        ):
-            raise ShadowPolicyError(
-                "a different coordinator verifier package is already loaded"
-            )
-    sys.path.insert(0, str(scripts_root))
-    try:
-        identity_module = importlib.import_module("retrospective_v2.identity")
-        authority_module = importlib.import_module("retrospective_v2.authority")
-        identity = identity_module.load_identity_key(coordinator_identity_path)
-        verified = authority_module.verify_shadow_coverage_receipt(identity, receipt)
-    except (ImportError, OSError, RuntimeError, TypeError, ValueError) as exc:
-        raise ShadowPolicyError(
-            "coordinator coverage receipt authentication failed"
-        ) from exc
-    finally:
-        if sys.path[:1] == [str(scripts_root)]:
-            sys.path.pop(0)
-    if not isinstance(verified, dict):
+    result = _run_coordinator_verifier(
+        operation="verify-coverage",
+        coordinator_path=coordinator_path,
+        coordinator_identity_path=coordinator_identity_path,
+        invocation_dir=invocation_dir,
+        receipt=receipt,
+    )
+    if (
+        set(result) != {"operation", "schema", "verified"}
+        or result.get("operation") != "verify-coverage"
+        or result.get("schema") != COORDINATOR_VERIFIER_SCHEMA
+        or not isinstance(result.get("verified"), dict)
+    ):
         raise ShadowPolicyError("coordinator coverage verifier returned invalid data")
-    return verified
+    return result["verified"]
 
 
 def _status_for_run(
@@ -1778,8 +2215,14 @@ def _status_for_run(
         "--run-dir",
         str(run_dir),
     )
-    _parse_coordinator_command(arguments, host=None, invocation_dir=invocation_dir)
-    return _status_result(status_query(coordinator_path, arguments, invocation_dir))
+    return _status_result(
+        _guarded_status_query(
+            coordinator_path=coordinator_path,
+            arguments=arguments,
+            invocation_dir=invocation_dir,
+            status_query=status_query,
+        )
+    )
 
 
 def _verified_coverage(
@@ -1787,6 +2230,7 @@ def _verified_coverage(
     *,
     coordinator_path: pathlib.Path,
     coordinator_identity_path: pathlib.Path,
+    invocation_dir: pathlib.Path,
     coverage_verifier: CoverageVerifier,
 ) -> dict[str, Any]:
     publication = status.get("publication")
@@ -1806,13 +2250,20 @@ def _verified_coverage(
         coordinator_path,
         coordinator_identity_path,
         raw_receipt,
+        invocation_dir,
     )
     if verified != dict(raw_receipt):
         raise ShadowPolicyError("coverage verifier changed the coordinator receipt")
+    status_window = status.get("window")
     if (
         verified.get("schema") != COORDINATOR_COVERAGE_SCHEMA
         or verified.get("run_ref") != status.get("run_ref")
         or verified.get("identity_key_id") != status.get("identity_key_id")
+        or verified.get("mode") != status.get("mode")
+        or not isinstance(status_window, Mapping)
+        or set(status_window) != {"end", "start"}
+        or verified.get("window_start") != status_window.get("start")
+        or verified.get("window_end") != status_window.get("end")
         or not isinstance(verified.get("checkpoint_revision"), int)
         or isinstance(verified.get("checkpoint_revision"), bool)
         or verified["checkpoint_revision"] < 1
@@ -1836,6 +2287,427 @@ def _status_source_cell(
     if not isinstance(host_coverage, dict) or not isinstance(cell, dict):
         raise ShadowPolicyError("shadow status lacks the held-out source cell")
     return host_coverage, cell
+
+
+def _verified_holdout_receipt(
+    *,
+    module: Any,
+    receipt: Mapping[str, Any],
+    holdout_identity_path: pathlib.Path,
+    now_utc: dt.datetime | None,
+) -> tuple[dict[str, Any], bytes]:
+    closed_receipt = dict(receipt)
+    identity_key = module._read_session_shards_shadow_identity_key(
+        holdout_identity_path
+    )
+    receipt_bindings = (
+        closed_receipt.get("host"),
+        closed_receipt.get("window_start"),
+        closed_receipt.get("window_end"),
+        closed_receipt.get("source_kind"),
+        closed_receipt.get("source_lease_ref"),
+    )
+    if not all(isinstance(value, str) for value in receipt_bindings):
+        raise ShadowPolicyError("holdout receipt binding fields must be strings")
+    module._verify_session_shards_holdout_receipt(
+        closed_receipt,
+        identity_key=identity_key,
+        expected_host=receipt_bindings[0],
+        expected_window_start=receipt_bindings[1],
+        expected_window_end=receipt_bindings[2],
+        expected_source_kind=receipt_bindings[3],
+        expected_source_lease_ref=receipt_bindings[4],
+        now_utc=now_utc,
+    )
+    if closed_receipt["host"] not in CANONICAL_HOSTS - {"local"}:
+        raise ShadowPolicyError(
+            "authenticated holdout does not name a canonical remote host"
+        )
+    return closed_receipt, identity_key
+
+
+def _validate_daily_partial_successor(
+    *,
+    module: Any,
+    receipt: Mapping[str, Any],
+    status: Mapping[str, Any],
+    coverage_receipt: Mapping[str, Any],
+    expected_run_ref: str,
+    window_start: str,
+    window_end: str,
+) -> None:
+    host = receipt.get("host")
+    source_kind = receipt.get("source_kind")
+    source_lease_ref = receipt.get("source_lease_ref")
+    holdout_ref = receipt.get("holdout_ref")
+    if not all(
+        isinstance(value, str)
+        for value in (host, source_kind, source_lease_ref, holdout_ref)
+    ):
+        raise ShadowPolicyError("authenticated holdout lacks Daily pair bindings")
+    host_coverage, source_cell = _status_source_cell(
+        status,
+        host=host,
+        source_kind=source_kind,
+    )
+    host_ref = host_coverage.get("host_ref")
+    coverage = status.get("coverage")
+    hosts = coverage.get("hosts") if isinstance(coverage, Mapping) else None
+    host_refs = (
+        {
+            name: value.get("host_ref")
+            for name, value in hosts.items()
+            if isinstance(name, str) and isinstance(value, Mapping)
+        }
+        if isinstance(hosts, Mapping)
+        else {}
+    )
+    expected_gap = {
+        "host": host,
+        "host_ref": host_ref,
+        "lease_ref": source_lease_ref,
+        "reason": module.SESSION_SHARDS_HOLDOUT_REASON,
+        "receipt_ref": holdout_ref,
+        "source_kind": source_kind,
+    }
+    gaps = status.get("gaps")
+    lineage = status.get("lineage")
+    configuration_root = coverage_receipt.get("configuration_root")
+    if (
+        receipt.get("reason") != module.SESSION_SHARDS_HOLDOUT_REASON
+        or receipt.get("window_start") != window_start
+        or receipt.get("window_end") != window_end
+        or status.get("run_ref") != expected_run_ref
+        or status.get("stage") != "export"
+        or status.get("mode") != "daily"
+        or status.get("window") != {"start": window_start, "end": window_end}
+        or not isinstance(coverage, Mapping)
+        or coverage.get("status") != "partial"
+        or not isinstance(hosts, Mapping)
+        or set(hosts) != CANONICAL_HOSTS
+        or set(host_refs) != CANONICAL_HOSTS
+        or len(set(host_refs.values())) != len(CANONICAL_HOSTS)
+        or any(
+            not isinstance(value, str) or HOST_REF_RE.fullmatch(value) is None
+            for value in host_refs.values()
+        )
+        or host_coverage.get("status") != "gap"
+        or set(source_cell) != _SOURCE_STATUS_CELL_FIELDS
+        or source_cell.get("lease_ref") != source_lease_ref
+        or source_cell.get("snapshot_ref") is not None
+        or source_cell.get("status") != "gap"
+        or source_cell.get("transport_receipt_ref") is not None
+        or any(
+            not isinstance(hosts.get(name), Mapping)
+            or hosts[name].get("status") not in {"complete", "no_activity"}
+            for name in CANONICAL_HOSTS - {host}
+        )
+        or not isinstance(gaps, list)
+        or gaps != [expected_gap]
+        or status.get("active_source_leases") != []
+        or not isinstance(lineage, Mapping)
+        or lineage.get("backfill_of") is not None
+        or coverage_receipt.get("partial") is not True
+        or coverage_receipt.get("backfill_of") is not None
+        or coverage_receipt.get("controlled_gap_receipt_ref") != holdout_ref
+        or coverage_receipt.get("configured_host_refs") != sorted(host_refs.values())
+        or coverage_receipt.get("covered_host_refs")
+        != sorted(value for name, value in host_refs.items() if name != host)
+        or coverage_receipt.get("gap_host_refs") != [host_ref]
+        or not isinstance(configuration_root, str)
+        or CONFIGURATION_ROOT_RE.fullmatch(configuration_root) is None
+    ):
+        raise ShadowPolicyError(
+            "Daily backfill requires the authenticated terminal partial predecessor"
+        )
+
+
+def _daily_pair_start_arguments(
+    manifest: Mapping[str, Any],
+    *,
+    invocation_dir: pathlib.Path,
+    receipt_path: pathlib.Path | None = None,
+) -> tuple[str, ...]:
+    backfill = receipt_path is not None
+    arguments = [
+        "start",
+        "--identity-path",
+        str(manifest["coordinator_identity_path"]),
+        "--require-existing-identity",
+        "--history-repo",
+        str(invocation_dir / "simulation-history"),
+        "--history-target-ref",
+        SHADOW_HISTORY_TARGET_REF,
+        "--run-config",
+        str(manifest["run_config"]),
+        "--run-dir",
+        str(manifest["backfill_run_dir"] if backfill else manifest["partial_run_dir"]),
+        "--mode",
+        "daily",
+        "--start",
+        str(manifest["window_start"]),
+        "--end",
+        str(manifest["window_end"]),
+    ]
+    if backfill:
+        arguments.extend(
+            (
+                "--host",
+                str(manifest["holdout_host"]),
+                "--backfill-of",
+                str(manifest["partial_run_ref"]),
+                "--controlled-gap-receipt",
+                str(receipt_path),
+            )
+        )
+    else:
+        for host in CANONICAL_HOST_ORDER:
+            arguments.extend(("--host", host))
+        arguments.append("--allow-partial")
+    arguments.append("--shadow")
+    return tuple(arguments)
+
+
+def start_daily_shadow_pair(
+    *,
+    invocation_dir: pathlib.Path,
+    holdout_host: str,
+    holdout_identity_path: pathlib.Path,
+    coordinator_identity_path: pathlib.Path,
+    run_config: pathlib.Path,
+    partial_run_dir: pathlib.Path,
+    backfill_run_dir: pathlib.Path,
+    window_start: str,
+    window_end: str,
+    shadow_root: pathlib.Path = SHADOW_ROOT,
+    coordinator_path: pathlib.Path = COORDINATOR_PATH,
+    transport_module: Any | None = None,
+    executor: Executor = _sandboxed_executor,
+    now_utc: dt.datetime | None = None,
+) -> subprocess.CompletedProcess[str]:
+    invocation_dir, shadow_root = _prepare_invocation_directory(
+        invocation_dir,
+        shadow_root=shadow_root,
+    )
+    if holdout_host not in CANONICAL_HOSTS - {"local"}:
+        raise ShadowPolicyError(
+            "Daily pair holdout must name one canonical remote host"
+        )
+    _validate_latest_closed_daily_window(
+        window_start,
+        window_end,
+        now_utc=now_utc,
+    )
+    for option, path in (
+        ("--holdout-identity-path", holdout_identity_path),
+        ("--coordinator-identity-path", coordinator_identity_path),
+        ("--run-config", run_config),
+        ("--partial-run-dir", partial_run_dir),
+        ("--backfill-run-dir", backfill_run_dir),
+    ):
+        _validate_path_argument(option, str(path), invocation_dir=invocation_dir)
+    if partial_run_dir == backfill_run_dir:
+        raise ShadowPolicyError(
+            "Daily partial and backfill run directories must differ"
+        )
+    for run_dir in (partial_run_dir, backfill_run_dir):
+        if run_dir.exists() or run_dir.is_symlink():
+            raise ShadowPolicyError("Daily pair run directories must be unused")
+    _read_private_json(coordinator_identity_path, root=invocation_dir)
+    _read_private_json(run_config, root=invocation_dir)
+    module = transport_module or _load_transport_module()
+    holdout_identity_key = module._read_session_shards_shadow_identity_key(
+        holdout_identity_path.resolve(strict=True)
+    )
+    holdout_identity_key_id = module._session_shards_holdout_identity_key_id(
+        holdout_identity_key
+    )
+    declared_coordinator_path = coordinator_path
+    coordinator_path = _validate_coordinator_path(declared_coordinator_path)
+    simulation_history = invocation_dir / "simulation-history"
+    _ensure_owner_only_directory(simulation_history)
+    if any(simulation_history.iterdir()):
+        raise ShadowPolicyError("shadow simulation history must remain empty")
+
+    manifest_path = invocation_dir / DAILY_PAIR_FILENAME
+    manifest = _validate_daily_pair_manifest(
+        {
+            "automation_id": AUTOMATION_ID,
+            "backfill_run_dir": str(backfill_run_dir),
+            "controlled_gap_receipt_ref": None,
+            "coordinator_identity_path": str(coordinator_identity_path),
+            "coordinator_path": str(declared_coordinator_path),
+            "holdout_host": holdout_host,
+            "holdout_identity_key_id": holdout_identity_key_id,
+            "holdout_mechanism": DAILY_PAIR_HOLDOUT_MECHANISM,
+            "partial_run_dir": str(partial_run_dir),
+            "partial_run_ref": None,
+            "production_source_suppressed": False,
+            "run_config": str(run_config),
+            "schema": DAILY_PAIR_SCHEMA,
+            "shadow": True,
+            "state": "partial_starting",
+            "window_end": window_end,
+            "window_start": window_start,
+        },
+        invocation_dir=invocation_dir,
+    )
+
+    with daily_pair_mutex(shadow_root):
+        _write_private_json(manifest_path, manifest, root=invocation_dir)
+        result = run_guarded_coordinator(
+            _daily_pair_start_arguments(manifest, invocation_dir=invocation_dir),
+            invocation_dir=invocation_dir,
+            shadow_root=shadow_root,
+            coordinator_path=coordinator_path,
+            executor=executor,
+        )
+        if result.returncode == 0:
+            _validate_owner_only_directory(partial_run_dir)
+            started = {**manifest, "state": "partial_started"}
+            _validate_daily_pair_manifest(started, invocation_dir=invocation_dir)
+            _write_private_json(
+                manifest_path,
+                started,
+                root=invocation_dir,
+                expected_current=manifest,
+            )
+        return result
+
+
+def start_daily_shadow_pair_successor(
+    *,
+    invocation_dir: pathlib.Path,
+    receipt_path: pathlib.Path,
+    holdout_identity_path: pathlib.Path,
+    coordinator_identity_path: pathlib.Path,
+    partial_run_ref: str,
+    shadow_root: pathlib.Path = SHADOW_ROOT,
+    coordinator_path: pathlib.Path = COORDINATOR_PATH,
+    transport_module: Any | None = None,
+    executor: Executor = _sandboxed_executor,
+    status_query: StatusQuery = _sandboxed_status_query,
+    coverage_verifier: CoverageVerifier = _verify_coordinator_coverage_receipt,
+    now_utc: dt.datetime | None = None,
+) -> subprocess.CompletedProcess[str]:
+    invocation_dir, shadow_root = _prepare_invocation_directory(
+        invocation_dir,
+        shadow_root=shadow_root,
+    )
+    if RUN_REF_RE.fullmatch(partial_run_ref) is None:
+        raise ShadowPolicyError("Daily pair successor requires an exact v2 run ref")
+    for option, path in (
+        ("--receipt", receipt_path),
+        ("--holdout-identity-path", holdout_identity_path),
+        ("--coordinator-identity-path", coordinator_identity_path),
+    ):
+        _validate_path_argument(option, str(path), invocation_dir=invocation_dir)
+    manifest_path = invocation_dir / DAILY_PAIR_FILENAME
+    manifest = _validate_daily_pair_manifest(
+        _read_private_json(manifest_path, root=invocation_dir),
+        invocation_dir=invocation_dir,
+    )
+    if manifest["state"] != "partial_started":
+        raise ShadowPolicyError("Daily pair successor requires one started partial")
+    if manifest["coordinator_identity_path"] != str(coordinator_identity_path):
+        raise ShadowPolicyError("Daily pair coordinator identity changed")
+    declared_coordinator_path = coordinator_path
+    if manifest["coordinator_path"] != str(declared_coordinator_path):
+        raise ShadowPolicyError("Daily pair coordinator path changed")
+    coordinator_path = _validate_coordinator_path(declared_coordinator_path)
+    _read_private_json(coordinator_identity_path, root=invocation_dir)
+    _read_private_json(pathlib.Path(manifest["run_config"]), root=invocation_dir)
+    receipt = _read_private_json(receipt_path, root=invocation_dir)
+    module = transport_module or _load_transport_module()
+    receipt, _identity_key = _verified_holdout_receipt(
+        module=module,
+        receipt=receipt,
+        holdout_identity_path=holdout_identity_path.resolve(strict=True),
+        now_utc=now_utc,
+    )
+    if receipt["identity_key_id"] != manifest["holdout_identity_key_id"]:
+        raise ShadowPolicyError("Daily pair holdout identity changed")
+    if (
+        receipt["host"] != manifest["holdout_host"]
+        or receipt["window_start"] != manifest["window_start"]
+        or receipt["window_end"] != manifest["window_end"]
+    ):
+        raise ShadowPolicyError("Daily pair receipt does not match its planned holdout")
+
+    partial_run_dir = pathlib.Path(manifest["partial_run_dir"]).resolve(strict=True)
+    backfill_run_dir = pathlib.Path(manifest["backfill_run_dir"])
+    _validate_owner_only_directory(partial_run_dir)
+    if backfill_run_dir.exists() or backfill_run_dir.is_symlink():
+        raise ShadowPolicyError("Daily backfill run directory must be unused")
+
+    with (
+        daily_pair_mutex(shadow_root),
+        host_mutex(shadow_root, str(manifest["holdout_host"])),
+    ):
+        current = _validate_daily_pair_manifest(
+            _read_private_json(manifest_path, root=invocation_dir),
+            invocation_dir=invocation_dir,
+        )
+        if current != manifest:
+            raise ShadowPolicyError("Daily pair state changed before its successor")
+        partial_status = _status_for_run(
+            coordinator_path=coordinator_path,
+            coordinator_identity_path=coordinator_identity_path,
+            run_dir=partial_run_dir,
+            invocation_dir=invocation_dir,
+            status_query=status_query,
+        )
+        partial_coverage = _verified_coverage(
+            partial_status,
+            coordinator_path=coordinator_path,
+            coordinator_identity_path=coordinator_identity_path,
+            invocation_dir=invocation_dir,
+            coverage_verifier=coverage_verifier,
+        )
+        _validate_daily_partial_successor(
+            module=module,
+            receipt=receipt,
+            status=partial_status,
+            coverage_receipt=partial_coverage,
+            expected_run_ref=partial_run_ref,
+            window_start=str(manifest["window_start"]),
+            window_end=str(manifest["window_end"]),
+        )
+        starting = {
+            **manifest,
+            "controlled_gap_receipt_ref": receipt["holdout_ref"],
+            "partial_run_ref": partial_run_ref,
+            "state": "backfill_starting",
+        }
+        _validate_daily_pair_manifest(starting, invocation_dir=invocation_dir)
+        _write_private_json(
+            manifest_path,
+            starting,
+            root=invocation_dir,
+            expected_current=manifest,
+        )
+        result = run_guarded_coordinator(
+            _daily_pair_start_arguments(
+                starting,
+                invocation_dir=invocation_dir,
+                receipt_path=receipt_path,
+            ),
+            invocation_dir=invocation_dir,
+            shadow_root=shadow_root,
+            coordinator_path=coordinator_path,
+            executor=executor,
+        )
+        if result.returncode == 0:
+            _validate_owner_only_directory(backfill_run_dir)
+            started = {**starting, "state": "backfill_started"}
+            _validate_daily_pair_manifest(started, invocation_dir=invocation_dir)
+            _write_private_json(
+                manifest_path,
+                started,
+                root=invocation_dir,
+                expected_current=starting,
+            )
+        return result
 
 
 def _authenticated_backfill_result_from_status(
@@ -1869,7 +2741,8 @@ def _authenticated_backfill_result_from_status(
     backfill_lease_ref = backfill_cell.get("lease_ref")
     snapshot_ref = backfill_cell.get("snapshot_ref")
     source_receipt_ref = backfill_cell.get("transport_receipt_ref")
-    source_outcome = backfill_host.get("status")
+    cell_status = backfill_cell.get("status")
+    source_outcome = "no_activity" if cell_status == "verified_absent" else cell_status
 
     partial_run_ref = partial_status.get("run_ref")
     backfill_run_ref = backfill_status.get("run_ref")
@@ -1879,6 +2752,7 @@ def _authenticated_backfill_result_from_status(
     backfill_window = backfill_status.get("window")
     partial_hosts = partial_status.get("coverage", {}).get("hosts")
     backfill_hosts = backfill_status.get("coverage", {}).get("hosts")
+    backfill_cells = backfill_host.get("cells")
     partial_host_refs = (
         {
             name: value.get("host_ref")
@@ -1917,6 +2791,7 @@ def _authenticated_backfill_result_from_status(
         or partial_window != {"start": window_start, "end": window_end}
         or backfill_window != partial_window
         or partial_host.get("status") != "gap"
+        or set(partial_cell) != _SOURCE_STATUS_CELL_FIELDS
         or partial_cell.get("status") != "gap"
         or partial_cell.get("lease_ref") != partial_lease_ref
         or not isinstance(partial_hosts, Mapping)
@@ -1938,9 +2813,12 @@ def _authenticated_backfill_result_from_status(
         )
         or not isinstance(backfill_hosts, Mapping)
         or set(backfill_hosts) != {host}
+        or not isinstance(backfill_cells, Mapping)
+        or set(backfill_cells) != {source_kind}
+        or set(backfill_cell) != _SOURCE_STATUS_CELL_FIELDS
+        or cell_status not in {"complete", "no_activity", "verified_absent"}
         or source_outcome not in {"complete", "no_activity"}
-        or backfill_cell.get("status")
-        not in {"complete", "no_activity", "verified_absent"}
+        or backfill_host.get("status") != source_outcome
         or not isinstance(lineage, Mapping)
         or lineage.get("backfill_of") != partial_run_ref
         or partial_coverage.get("partial") is not True
@@ -1973,8 +2851,15 @@ def _authenticated_backfill_result_from_status(
         or SOURCE_SNAPSHOT_REF_RE.fullmatch(snapshot_ref) is None
         or not isinstance(source_receipt_ref, str)
         or SOURCE_RECEIPT_REF_RE.fullmatch(source_receipt_ref) is None
-        or snapshot_ref not in backfill_coverage.get("source_snapshot_refs", [])
-        or source_receipt_ref not in backfill_coverage.get("source_receipt_refs", [])
+        or backfill_coverage.get("source_snapshot_refs") != [snapshot_ref]
+        or backfill_coverage.get("source_receipt_refs") != [source_receipt_ref]
+        or backfill_coverage.get("source_units")
+        != {
+            "consumed_candidate": 1,
+            "expected": 1,
+            "explicit_gap": 0,
+            "structurally_excluded": 0,
+        }
         or not isinstance(backfill_coverage.get("source_evidence_commitment"), str)
         or SOURCE_EVIDENCE_RE.fullmatch(backfill_coverage["source_evidence_commitment"])
         is None
@@ -1995,7 +2880,7 @@ def _authenticated_backfill_result_from_status(
             and item.get("host_ref") == host_ref
             and item.get("source_kind") == source_kind
             and item.get("snapshot_ref") == snapshot_ref
-            and item.get("status") == backfill_cell.get("status")
+            and item.get("status") == cell_status
             and isinstance(item.get("record_count"), int)
             and not isinstance(item.get("record_count"), bool)
             and item.get("record_count") >= 0
@@ -2003,10 +2888,19 @@ def _authenticated_backfill_result_from_status(
         if isinstance(manifests, list)
         else []
     )
-    if len(matching_manifests) != 1:
+    if (
+        not isinstance(manifests, list)
+        or len(manifests) != 1
+        or len(matching_manifests) != 1
+    ):
         raise ShadowPolicyError(
             "backfill has no unique accepted session-shards source manifest"
         )
+    if (
+        source_outcome == "no_activity"
+        and matching_manifests[0].get("record_count") != 0
+    ):
+        raise ShadowPolicyError("no-activity backfill manifest must have zero records")
 
     return module._session_shards_backfill_result(
         holdout_identity_key=holdout_identity_key,
@@ -2077,37 +2971,18 @@ def record_backfill_replacement(
     receipt = _read_private_json(receipt_path, root=invocation_dir)
     ledger_path = shadow_root / "campaign-ledger.sqlite3"
     module = transport_module or _load_transport_module()
-    holdout_identity_key = module._read_session_shards_shadow_identity_key(
-        holdout_identity_path
+    receipt, holdout_identity_key = _verified_holdout_receipt(
+        module=module,
+        receipt=receipt,
+        holdout_identity_path=holdout_identity_path,
+        now_utc=now_utc,
     )
     coordinator_identity_key = coordinator_identity_loader(
         coordinator_path,
         coordinator_identity_path,
+        invocation_dir,
     )
-    receipt_bindings = (
-        receipt.get("host"),
-        receipt.get("window_start"),
-        receipt.get("window_end"),
-        receipt.get("source_kind"),
-        receipt.get("source_lease_ref"),
-    )
-    if not all(isinstance(value, str) for value in receipt_bindings):
-        raise ShadowPolicyError("holdout receipt binding fields must be strings")
-    module._verify_session_shards_holdout_receipt(
-        receipt,
-        identity_key=holdout_identity_key,
-        expected_host=receipt_bindings[0],
-        expected_window_start=receipt_bindings[1],
-        expected_window_end=receipt_bindings[2],
-        expected_source_kind=receipt_bindings[3],
-        expected_source_lease_ref=receipt_bindings[4],
-        now_utc=now_utc,
-    )
-    host = str(receipt_bindings[0])
-    if host not in CANONICAL_HOSTS - {"local"}:
-        raise ShadowPolicyError(
-            "authenticated holdout does not name a canonical remote host"
-        )
+    host = str(receipt["host"])
     with host_mutex(shadow_root, host):
         partial_status = _status_for_run(
             coordinator_path=coordinator_path,
@@ -2127,12 +3002,14 @@ def record_backfill_replacement(
             partial_status,
             coordinator_path=coordinator_path,
             coordinator_identity_path=coordinator_identity_path,
+            invocation_dir=invocation_dir,
             coverage_verifier=coverage_verifier,
         )
         backfill_coverage = _verified_coverage(
             backfill_status,
             coordinator_path=coordinator_path,
             coordinator_identity_path=coordinator_identity_path,
+            invocation_dir=invocation_dir,
             coverage_verifier=coverage_verifier,
         )
         backfill_result = _authenticated_backfill_result_from_status(
@@ -2161,6 +3038,8 @@ def record_backfill_replacement(
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Fail-closed runner for Session Retrospective v2 shadow automation.",
+        epilog=f"Installed Session Retrospective v2 CLI: {COORDINATOR_PATH}",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
         allow_abbrev=False,
     )
     subparsers = parser.add_subparsers(dest="runner_action", required=True)
@@ -2171,6 +3050,38 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--invocation-dir", type=pathlib.Path, required=True)
     run.add_argument("--host", choices=sorted(CANONICAL_HOSTS))
     run.add_argument("coordinator_arguments", nargs=argparse.REMAINDER)
+
+    pair = subparsers.add_parser(
+        "start-daily-pair",
+        help="Start a shadow Daily partial with every canonical source enabled.",
+        allow_abbrev=False,
+    )
+    pair.add_argument("--invocation-dir", type=pathlib.Path, required=True)
+    pair.add_argument(
+        "--holdout-host",
+        choices=sorted(CANONICAL_HOSTS - {"local"}),
+        required=True,
+    )
+    pair.add_argument("--holdout-identity-path", type=pathlib.Path, required=True)
+    pair.add_argument("--coordinator-identity-path", type=pathlib.Path, required=True)
+    pair.add_argument("--run-config", type=pathlib.Path, required=True)
+    pair.add_argument("--partial-run-dir", type=pathlib.Path, required=True)
+    pair.add_argument("--backfill-run-dir", type=pathlib.Path, required=True)
+    pair.add_argument("--start", required=True)
+    pair.add_argument("--end", required=True)
+
+    successor = subparsers.add_parser(
+        "start-daily-pair-successor",
+        help="Verify the terminal partial and start its exact shadow backfill.",
+        allow_abbrev=False,
+    )
+    successor.add_argument("--invocation-dir", type=pathlib.Path, required=True)
+    successor.add_argument("--receipt", type=pathlib.Path, required=True)
+    successor.add_argument("--holdout-identity-path", type=pathlib.Path, required=True)
+    successor.add_argument(
+        "--coordinator-identity-path", type=pathlib.Path, required=True
+    )
+    successor.add_argument("--partial-run-ref", required=True)
 
     replace = subparsers.add_parser(
         "record-backfill",
@@ -2199,6 +3110,28 @@ def main() -> int:
                 coordinator_arguments,
                 invocation_dir=args.invocation_dir,
                 host=args.host,
+            )
+            return int(result.returncode)
+        if args.runner_action == "start-daily-pair":
+            result = start_daily_shadow_pair(
+                invocation_dir=args.invocation_dir,
+                holdout_host=args.holdout_host,
+                holdout_identity_path=args.holdout_identity_path,
+                coordinator_identity_path=args.coordinator_identity_path,
+                run_config=args.run_config,
+                partial_run_dir=args.partial_run_dir,
+                backfill_run_dir=args.backfill_run_dir,
+                window_start=args.start,
+                window_end=args.end,
+            )
+            return int(result.returncode)
+        if args.runner_action == "start-daily-pair-successor":
+            result = start_daily_shadow_pair_successor(
+                invocation_dir=args.invocation_dir,
+                receipt_path=args.receipt,
+                holdout_identity_path=args.holdout_identity_path,
+                coordinator_identity_path=args.coordinator_identity_path,
+                partial_run_ref=args.partial_run_ref,
             )
             return int(result.returncode)
         holdout_ref = record_backfill_replacement(

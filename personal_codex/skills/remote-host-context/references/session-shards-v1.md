@@ -124,7 +124,10 @@ Every source byte and record belongs to exactly one descriptor. A normal ready
 descriptor contains one or more valid whole records and stays within
 `shard_bytes`. One valid record larger than `shard_bytes` owns a single ready
 descriptor marked for base64 fragment transport. Invalid JSON and records that
-cross a processing ceiling become explicit content-free gap descriptors.
+cross a processing ceiling become explicit content-free gap descriptors. Each
+content-free gap owns exactly one record. An `invalid_json` gap must stay within
+the authenticated processing budget, and every gap must stay within the hard
+record-scan ceiling.
 
 At a page boundary the producer stops after the last emitted descriptor. It
 does not read, parse, or validate the next descriptor to decide whether another
@@ -186,10 +189,11 @@ HMAC-SHA-256 over the canonical receipt body and a protocol-domain separator.
 The source lease ref is a one-time challenge, not reusable metadata. The
 consumer validates the closed schema, receipt ref, key id, HMAC, and every
 expected binding before acceptance. Acceptance uses an owner-only SQLite
-ledger with `BEGIN IMMEDIATE`: insertion of the consumed `holdout_ref` and its
-real backfill replacement are one transaction. Primary-key and unique
-constraints reject concurrent or later replay even when every other field
-still matches; a replacement uniqueness failure rolls back the consumption
+ledger with `BEGIN IMMEDIATE`: insertion of the consumed `holdout_ref`, its
+status-bound source transport receipt and backfill source lease, and its real
+backfill replacement are one transaction. Primary-key and unique constraints
+reject concurrent, cross-holdout, or later replay even when every other field
+still matches; a replacement uniqueness failure rolls back every consumption
 insert too. A valid tag for another host, window, source kind, or source lease
 is also rejected.
 
@@ -214,9 +218,19 @@ prompt text, enforces these boundaries before execution:
   different hosts.
 
 The runner's `record-backfill` action holds the same host mutex while calling
-the persistent holdout ledger transaction. If the runner, write sandbox, lock,
-or transaction is unavailable, the scenario is blocked; direct coordinator
-execution is not a fallback.
+the persistent holdout ledger transaction. Coordinator identity loading and
+coverage-receipt authentication occur only in a bounded `python -I` worker under
+the same macOS write/network sandbox; the parent accepts one closed structured
+result and never imports the coordinator verifier package. The persisted source
+outcome is derived from the exact backfill cell, must agree with the host
+aggregate, and a no-activity or verified-absent cell requires a zero-record
+manifest. Each authenticated coverage receipt must match its status mode and
+window. The backfill status must contain exactly the held-out source cell under
+its closed field schema, one matching manifest, one snapshot ref, one transport
+receipt ref, and single-source unit accounting; extra source evidence blocks
+replacement. If the
+runner, verifier sandbox, lock, or transaction is unavailable, the scenario is
+blocked; direct coordinator execution is not a fallback.
 
 ## Secure Open And Fixed Bounds
 
@@ -228,11 +242,12 @@ from blocking before type validation. If the required traversal primitives are
 missing, the command fails closed. A name-based check followed by an ordinary
 path reopen is not sufficient.
 
-Records are scanned incrementally in chunks no larger than 64 KiB. A record
-stays in memory only through 64 KiB, then rolls to an owner-only spool. Valid
-large records are emitted in 256 KiB base64 fragments. The fixed in-memory
-envelope is 4 MiB even when the configured processing budget or exact range is
-larger.
+Records use source-offset two-pass streaming without a temporary file. The first
+pass scans, validates, and hashes chunks no larger than 64 KiB; the second pass
+re-reads the exact validated source range and emits valid large records in 256
+KiB base64 fragments. The generated remote program never opens a writable file
+or spools record content on the remote host. The fixed in-memory envelope is 4
+MiB even when the configured processing budget or exact range is larger.
 
 The record scanner checks the independent hard byte ceiling before every read
 and caps each `readline` request to the remaining allowance. A first record
@@ -437,13 +452,23 @@ non-Daily window, or using an unsafe identity terminates without a receipt.
 ## Remote Completion
 
 Descriptor and record execution use the existing fixed SSH argv and a
-self-contained stdlib Python program. The remote helper starts no SSH process,
-shell pipeline, agent, or child process. Holdout receipt creation is local and
-must not probe DNS, start SSH, or inspect a Codex root.
+self-contained stdlib Python program in isolated mode with bytecode writes
+disabled by `python3 -I -B -`. Remote cwd modules, `PYTHONPATH`, user site
+packages, and `.pth` files cannot participate. The remote helper starts no SSH
+process, shell pipeline, agent, or child process.
+Holdout receipt creation is local and must not probe DNS, start SSH, or inspect
+a Codex root.
 
-The local side uses `Popen` and reads one bounded line at a time. Internal begin
-and end markers are not exposed as JSON frames. Data frames may stream after
-validation, but `stream_end` is withheld until all of these hold:
+The local side uses `Popen` and reads bounded 64 KiB raw chunks into a bounded
+line assembler. A 60-second output-idle watchdog resets after every non-empty
+raw chunk, including while a large frame is still arriving, so a progressing
+fragment stream may exceed 60 seconds without permitting a stalled SSH channel.
+When the shadow runner supplies an authenticated owner-only progress sidecar
+below the invocation root, the local receiver appends one content-free byte per
+raw chunk. It rejects missing-root, escaping, symlinked, non-regular,
+multi-link, wrong-owner, or non-0600 sidecars.
+Internal begin and end markers are not exposed as JSON frames. Data frames may
+stream after validation, but `stream_end` is withheld until all of these hold:
 
 1. Exactly one begin marker was received.
 2. Exactly one request-bound terminal frame was received.
@@ -461,13 +486,20 @@ Before capture, it verifies the lease's `sha256:<digest>` transport program
 commitment against the installed helper and executes an owner-only run-local
 snapshot of exactly those verified bytes, so path replacement cannot change the
 program after validation.
+The authenticated command must use the runner's Python executable in isolated
+mode as `<python> -I <helper> ...`; a missing or displaced `-I` blocks capture so
+the writable invocation directory cannot supply imports outside the committed
+transport program.
 Capture stdout is written to a fresh owner-only temporary file inside the
 invocation directory, published atomically to the authenticated stream path,
 and removed after acceptance. The capture sandbox permits the exact installed
 transport helper to read Codex history and use SSH, but denies writes outside
-the invocation directory. The runner enforces a 90-second wall-clock limit and
-a lease-derived output limit capped at 512 MiB while capture is running. A
-capture failure, timeout, output-limit breach, retained descendant, command
+the invocation directory. The runner enforces a 90-second output-idle limit that
+resets whenever the capture file grows or the bounded progress sidecar records a
+raw chunk, a lease-derived total wall-clock limit between 2 and 15 minutes, and
+a lease-derived output limit capped at 512 MiB. The sidecar contains no evidence,
+is capped at 1 MiB, and is removed after each capture. A capture failure, idle or
+wall-clock timeout, output/progress-limit breach, retained descendant, command
 mismatch, or atomic-publication failure blocks acceptance.
 Coordinator status and action subprocesses run in supervised process groups
 with 30-second and 300-second limits respectively. Timeout, oversized status
@@ -499,18 +531,39 @@ blocks the invocation without retaining the host mutex indefinitely.
 - **Holdout identity unavailable:** block the controlled scenario. Do not
   downgrade the receipt to an unauthenticated gap or transport error.
 
-For a later Daily backfill, the coordinator must start a distinct backfill run
-with the partial run's exact run ref as its backfill lineage. Its source
-contract must select only the held-out host, preserve the same window and
-source kind, and carry the authenticated `holdout_ref` as the terminal receipt
-being replaced. The accepted real `session-shards` transport must match all of
-those bindings. The authenticated partial coverage receipt and its sole gap
-must both name that exact `holdout_ref`; all other canonical hosts must be
-covered, and a second gap is fatal. The coordinator atomically marks the
-holdout replaced only after complete or genuine no-activity accounting for that
-real source; another holdout cannot satisfy backfill. Reuse across another partial run,
-host, window, source kind, identity/configuration root, or an already replaced
-receipt is rejected.
+The shadow runner's `start-daily-pair` action is the only supported way to
+start the qualification partial. It passes all canonical hosts and persists an
+owner-only closed state with `production_source_suppressed: false`. The caller
+must create the run-local holdout identity first and pass it through
+`--holdout-identity-path`; the runner records that identity's key ID before it
+starts the partial. The controlled gap may arise only from the authenticated
+status-issued holdout flow above, never from omitting, disabling, or
+intercepting a production source. The runner does not read, register, or update
+a live automation.
+
+For the Daily backfill, `start-daily-pair-successor` must verify the terminal
+partial status and authenticated coverage receipt before starting a distinct
+direct-successor run with the partial run's exact run ref as its backfill
+lineage. It also requires the exact planned host and window, the originally
+persisted holdout identity key ID, all other canonical hosts covered, one
+matching gap, and no active leases. The identity key ID is part of the
+authenticated `holdout_ref` binding, so a newly created identity cannot reissue
+an equivalent receipt. Its source contract must select only the held-out host,
+preserve the same window and source kind, and carry the authenticated `holdout_ref`
+as the terminal receipt being replaced. The accepted real
+`session-shards` transport must match all of those bindings. The authenticated
+partial coverage receipt and its sole gap must both name that exact
+`holdout_ref`; all other canonical hosts must be covered, and a second gap is
+fatal. The coordinator atomically marks the holdout replaced only after
+complete or genuine no-activity accounting for that real source; another
+holdout cannot satisfy backfill. Reuse across another partial run, host, window,
+source kind, identity/configuration root, source transport receipt, backfill
+source lease, or an already replaced receipt is
+rejected. The source transport receipt and backfill source lease are consumed
+exactly once in the same ledger transaction as the holdout replacement. The
+authenticated coverage receipts must match their status modes and windows, and
+the backfill may carry no cells, manifests, snapshot refs, transport receipt
+refs, or source units beyond that exact held-out source.
 
 Descriptor output is transient catalog material. Record and fragment frames are
 raw source evidence and may flow only to the bounded supervisor intake. Never

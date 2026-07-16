@@ -17,12 +17,16 @@ superseded_by:
 - Added the closed `session-shards-v1` descriptor and record transport for local and SSH-backed Codex rollout sources.
 - Added authenticated controlled-holdout and real-backfill replacement handling with a persistent atomic ledger.
 - Added a fail-closed macOS shadow runner and a reference-only v2 acceptance-campaign automation.
+- Updated the reference-only Daily and Weekly release templates for exact first registration or verified in-place update cutover.
+- Added a shadow-only Daily partial/direct-successor backfill launcher that never suppresses a production source.
 
 ## Current State
 
 - Transport pagination is bound to source tokens, resume cursors, exact byte and record coordinates, and terminal conservation proofs.
-- Raw record handling has fixed spool, scan, JSON-depth, fragment, frame, timeout, and range limits.
+- Raw record handling has fixed spool, scan, JSON-depth, fragment, frame, idle-progress, total-timeout, and range limits.
 - The shadow runner constrains coordinator commands, paths, writes, network access, and per-host concurrency before execution.
+- The runner exposes `/Users/hoteng/.codex/skills/codex-session-retrospective/scripts/session_retrospective_v2.py`, rechecks its inert history directory after coordinator actions, and persists Daily pair transitions plus the original holdout identity key ID atomically.
+- Release templates do not assert that a live automation exists, and this change performs no live automation registration or update.
 - Existing remote-host helper commands retain their prior interfaces and defaults.
 
 ## Next Steps
@@ -35,6 +39,9 @@ superseded_by:
 - `personal_codex/skills/remote-host-context/scripts/session_retrospective_v2_shadow_runner.py`
 - `personal_codex/skills/remote-host-context/references/session-shards-v1.md`
 - `personal_codex/automations/session-retrospective-v2-shadow/automation.toml`
+- `personal_codex/automations/daily-session-retrospective/automation.toml`
+- `personal_codex/automations/weekly-session-retrospective/automation.toml`
 - `tests/test_remote_session_shards.py`
 - `tests/test_session_retrospective_v2_shadow_automation.py`
-- Full test suite: 555 tests passed with 3 platform-dependent skips.
+- Focused transport/shadow suite: 96 tests passed in 7.167 seconds with 1 platform-dependent skip.
+- Full test suite: 568 tests passed in 78.292 seconds with 3 platform-dependent skips.

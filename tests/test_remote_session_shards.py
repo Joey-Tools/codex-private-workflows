@@ -15,6 +15,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import tracemalloc
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
@@ -153,6 +154,7 @@ def authenticated_backfill_result(
     now_utc: dt.datetime,
     backfill_run_ref: str | None = None,
     source_outcome: str = "complete",
+    source_transport_receipt_ref: str | None = None,
 ) -> dict[str, object]:
     partial_run_ref = protocol_ref("run_ref_v2:", f"{label}:partial")
     return MODULE._session_shards_backfill_result(
@@ -178,8 +180,11 @@ def authenticated_backfill_result(
         ),
         source_outcome=source_outcome,
         source_snapshot_ref=protocol_ref("source_snapshot_v2:", f"{label}:snapshot"),
-        source_transport_receipt_ref=protocol_ref(
-            "source_transport_receipt_v2:", f"{label}:transport-receipt"
+        source_transport_receipt_ref=(
+            source_transport_receipt_ref
+            or protocol_ref(
+                "source_transport_receipt_v2:", f"{label}:transport-receipt"
+            )
         ),
         evidence_digest=protocol_ref("shadow_source_evidence_v2:", f"{label}:evidence"),
         terminal_completion_ref=protocol_ref(
@@ -347,9 +352,11 @@ def empty_descriptor_frames(
 
 
 class FakePopen:
-    def __init__(self, output: str, returncode: int) -> None:
-        self.stdin = io.StringIO()
-        self.stdout = io.StringIO(output)
+    def __init__(self, output: str | bytes, returncode: int) -> None:
+        self.stdin = io.BytesIO()
+        self.stdout = io.BytesIO(
+            output.encode("utf-8") if isinstance(output, str) else output
+        )
         self._returncode = returncode
         self._waited = False
 
@@ -363,6 +370,25 @@ class FakePopen:
 
     def kill(self) -> None:
         self._waited = True
+
+
+class DelayedChunkReader(io.BytesIO):
+    def __init__(
+        self,
+        output: str,
+        delay_seconds: float,
+        chunk_bytes: int,
+    ) -> None:
+        super().__init__(output.encode("utf-8"))
+        self.delay_seconds = delay_seconds
+        self.chunk_bytes = chunk_bytes
+
+    def read1(self, size: int = -1) -> bytes:
+        if self.tell() >= len(self.getbuffer()):
+            return b""
+        time.sleep(self.delay_seconds)
+        limit = self.chunk_bytes if size < 0 else min(size, self.chunk_bytes)
+        return super().read(limit)
 
 
 class SessionShardsLocalTests(unittest.TestCase):
@@ -528,11 +554,11 @@ class SessionShardsLocalTests(unittest.TestCase):
             [(0, 1), (1, 2), (2, 3)],
         )
 
-    def test_max_shards_boundary_does_not_read_or_spool_huge_next_record(self) -> None:
+    def test_max_shards_boundary_does_not_read_huge_next_record(self) -> None:
         first = b'{"n":1}\n'
         second = (
             b'{"text":"'
-            + b"x" * (2 * MODULE.SESSION_SHARDS_RECORD_SPOOL_MEMORY_BYTES)
+            + b"x" * (2 * MODULE.SESSION_SHARDS_RECORD_SCAN_CHUNK_BYTES)
             + b'"}\n'
         )
         bytes_read = 0
@@ -579,7 +605,7 @@ class SessionShardsLocalTests(unittest.TestCase):
                 mock.patch.object(
                     MODULE.tempfile,
                     "SpooledTemporaryFile",
-                    wraps=MODULE.tempfile.SpooledTemporaryFile,
+                    side_effect=AssertionError("session-shards must not spool"),
                 ) as spool,
             ):
                 rc, frames, error = run_local(
@@ -596,7 +622,7 @@ class SessionShardsLocalTests(unittest.TestCase):
         self.assertEqual(terminal["reason"], "max_shards")
         self.assertEqual(terminal["next_byte_start"], len(first))
         self.assertEqual(bytes_read, len(first))
-        self.assertEqual(spool.call_count, 1)
+        spool.assert_not_called()
 
     def test_high_page_resume_cursor_does_not_rescan_the_prefix(self) -> None:
         lines = [f'{{"n":"{index:04d}"}}\n'.encode() for index in range(1_100)]
@@ -876,16 +902,23 @@ class SessionShardsLocalTests(unittest.TestCase):
         ):
             adversarial.accept(unmarked)
 
-    def test_large_record_uses_owner_only_spool_with_bounded_peak_memory(self) -> None:
+    def test_large_record_uses_source_offsets_with_bounded_peak_memory(self) -> None:
         data = b'{"text":"' + b"x" * (1024 * 1024) + b'"}\n'
         budget = MODULE.MIN_SESSION_RECORD_PROCESSING_BUDGET_BYTES
         with tempfile.TemporaryDirectory() as raw:
             codex_root = Path(raw) / ".codex"
             rollout = write_rollout(codex_root, data)
-            with MODULE._open_session_shard_source(
-                codex_root,
-                MODULE.pathlib.PurePosixPath(rollout),
-            ) as handle:
+            with (
+                MODULE._open_session_shard_source(
+                    codex_root,
+                    MODULE.pathlib.PurePosixPath(rollout),
+                ) as handle,
+                mock.patch.object(
+                    MODULE.tempfile,
+                    "SpooledTemporaryFile",
+                    side_effect=AssertionError("session-shards must not spool"),
+                ) as spool,
+            ):
                 records = iter(
                     MODULE._iter_session_shard_records(
                         handle,
@@ -901,17 +934,28 @@ class SessionShardsLocalTests(unittest.TestCase):
                     _, peak_bytes = tracemalloc.get_traced_memory()
                 finally:
                     tracemalloc.stop()
-                storage = record.record_storage
-                self.assertIsNotNone(storage)
-                assert storage is not None
-                self.assertTrue(storage._rolled)
-                spool_mode = stat.S_IMODE(os.fstat(storage.fileno()).st_mode)
-                self.assertEqual(spool_mode & 0o077, 0)
+                self.assertIs(record.source_handle, handle)
                 self.assertLess(peak_bytes, budget)
                 self.assertEqual(
                     record.record_commitment,
                     MODULE._session_shards_content_commitment(data),
                 )
+                frames = list(
+                    MODULE._iter_session_record_transport_frames(
+                        record,
+                        shard_bytes=MODULE.MAX_SESSION_SHARD_BYTES,
+                        source_token=MODULE.SESSION_SHARDS_SOURCE_TOKEN_PREFIX
+                        + "a" * 64,
+                        request_binding=MODULE.SESSION_SHARDS_REQUEST_BINDING_PREFIX
+                        + "b" * 64,
+                    )
+                )
+                transported = b"".join(
+                    base64.b64decode(frame["fragment_b64"], validate=True)
+                    for frame in frames
+                )
+                self.assertEqual(data, transported)
+                spool.assert_not_called()
                 records.close()
 
     def test_first_record_without_newline_stops_at_hard_scan_ceiling(self) -> None:
@@ -1468,6 +1512,18 @@ class SessionShardsHoldoutReceiptTests(unittest.TestCase):
             source_kind="codex_session_history",
             source_lease_ref="source-lease:daily-partial:hoteng-srv-01:1",
         )
+        replacement_receipt = MODULE._session_shards_holdout_receipt(
+            identity_key=b"r" * MODULE.SESSION_SHARDS_HOLDOUT_IDENTITY_KEY_BYTES,
+            host="hoteng-srv-01",
+            window_start="2026-07-13T00:00:00Z",
+            window_end="2026-07-14T00:00:00Z",
+            source_kind="codex_session_history",
+            source_lease_ref="source-lease:daily-partial:hoteng-srv-01:1",
+        )
+        self.assertNotEqual(
+            receipt["identity_key_id"], replacement_receipt["identity_key_id"]
+        )
+        self.assertNotEqual(receipt["holdout_ref"], replacement_receipt["holdout_ref"])
         expected = {
             "expected_host": "hoteng-srv-01",
             "expected_window_start": "2026-07-13T00:00:00Z",
@@ -1613,6 +1669,7 @@ class SessionShardsHoldoutReceiptTests(unittest.TestCase):
                 label: str,
                 *,
                 backfill_run_ref: str | None = None,
+                source_transport_receipt_ref: str | None = None,
             ) -> str:
                 result = authenticated_backfill_result(
                     holdout_identity_key=holdout_identity_key,
@@ -1620,6 +1677,7 @@ class SessionShardsHoldoutReceiptTests(unittest.TestCase):
                     receipt=receipt,
                     label=label,
                     backfill_run_ref=backfill_run_ref,
+                    source_transport_receipt_ref=source_transport_receipt_ref,
                     now_utc=now_utc,
                 )
                 return MODULE._consume_session_shards_holdout_for_backfill(
@@ -1643,6 +1701,18 @@ class SessionShardsHoldoutReceiptTests(unittest.TestCase):
                     "second-conflict",
                     backfill_run_ref=shared_backfill_run_ref,
                 )
+            first_transport_receipt_ref = protocol_ref(
+                "source_transport_receipt_v2:", "first:transport-receipt"
+            )
+            with self.assertRaisesRegex(
+                ValueError,
+                "source transport receipt replay rejected",
+            ):
+                consume(
+                    second_receipt,
+                    "second-transport-replay",
+                    source_transport_receipt_ref=first_transport_receipt_ref,
+                )
             second_ref = consume(second_receipt, "second")
 
             connection = sqlite3.connect(ledger_path)
@@ -1653,6 +1723,9 @@ class SessionShardsHoldoutReceiptTests(unittest.TestCase):
                 replacement_count = connection.execute(
                     "SELECT COUNT(*) FROM backfill_replacements"
                 ).fetchone()
+                transport_consumption_count = connection.execute(
+                    "SELECT COUNT(*) FROM source_transport_consumptions"
+                ).fetchone()
             finally:
                 connection.close()
 
@@ -1660,6 +1733,7 @@ class SessionShardsHoldoutReceiptTests(unittest.TestCase):
             self.assertEqual(str(second_receipt["holdout_ref"]), second_ref)
             self.assertEqual((2,), consumption_count)
             self.assertEqual((2,), replacement_count)
+            self.assertEqual((2,), transport_consumption_count)
             self.assertEqual(0o600, stat.S_IMODE(ledger_path.stat().st_mode))
 
     def test_concurrent_holdout_replay_accepts_exactly_once(self) -> None:
@@ -1919,6 +1993,137 @@ class SessionShardsHoldoutReceiptTests(unittest.TestCase):
 
 
 class SessionShardsRemoteTests(unittest.TestCase):
+    def test_remote_receiver_idle_timeout_resets_on_output_progress(self) -> None:
+        request = remote_request(
+            "sessions/2026/07/14/rollout-a.jsonl",
+            max_shards=2,
+        )
+        output_lines = remote_output(empty_descriptor_frames(request)).splitlines()
+        output_lines[1] += " " * 4096
+        output = "\n".join(output_lines) + "\n"
+
+        progressing = FakePopen(output, 0)
+        progressing.stdout = DelayedChunkReader(output, 0.005, 512)
+        started = time.monotonic()
+        with tempfile.TemporaryDirectory(prefix="session-shards-progress.") as raw:
+            progress_root = Path(raw)
+            progress_root.chmod(0o700)
+            progress_path = progress_root / "capture.progress"
+            progress_path.touch(mode=0o600)
+            progress_path.chmod(0o600)
+            with (
+                mock.patch.dict(
+                    os.environ,
+                    {
+                        "CODEX_SESSION_SHARDS_SHADOW_ROOT": str(progress_root),
+                        MODULE.SESSION_SHARDS_CAPTURE_PROGRESS_PATH_ENV: str(
+                            progress_path
+                        ),
+                    },
+                ),
+                mock.patch.object(
+                    MODULE.subprocess,
+                    "Popen",
+                    return_value=progressing,
+                ) as popen,
+                mock.patch.object(
+                    MODULE,
+                    "REMOTE_SESSION_SHARDS_IDLE_TIMEOUT_SECONDS",
+                    0.02,
+                ),
+            ):
+                frames = list(
+                    MODULE._iter_remote_session_shard_frames(
+                        "miku-bot-dev",
+                        request,
+                    )
+                )
+            self.assertGreater(progress_path.stat().st_size, 1)
+        self.assertGreater(time.monotonic() - started, 0.02)
+        self.assertEqual("stream_end", frames[-1]["kind"])
+        self.assertEqual(
+            ["python3", "-I", "-B", "-"],
+            popen.call_args.args[0][-4:],
+        )
+
+        stalled = FakePopen(output, 0)
+        stalled.stdout = DelayedChunkReader(output, 0.05, len(output))
+        with (
+            mock.patch.object(MODULE.subprocess, "Popen", return_value=stalled),
+            mock.patch.object(
+                MODULE,
+                "REMOTE_SESSION_SHARDS_IDLE_TIMEOUT_SECONDS",
+                0.02,
+            ),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "idle timed out"):
+                list(
+                    MODULE._iter_remote_session_shard_frames(
+                        "miku-bot-dev",
+                        request,
+                    )
+                )
+
+    def test_remote_receiver_rejects_unbounded_gap_descriptors(self) -> None:
+        data = b"not-json\n"
+        with tempfile.TemporaryDirectory() as raw:
+            codex_root = Path(raw) / ".codex"
+            rollout = write_rollout(codex_root, data)
+            rc, frames, error = run_local(codex_root, command_args(rollout))
+
+        self.assertEqual((rc, error), (0, ""))
+        stream_meta = {
+            key: value
+            for key, value in frame_of_kind(frames, "stream_meta").items()
+            if key not in {"host", "rollout"}
+        }
+        gap = {
+            key: value
+            for key, value in frame_of_kind(frames, "shard").items()
+            if key not in {"host", "rollout"}
+        }
+        request = remote_request(rollout)
+
+        record_count_gap = dict(gap)
+        record_count_gap["record_count"] = 2
+        record_count_gap["record_end"] = int(record_count_gap["record_start"]) + 2
+        validator = MODULE._RemoteSessionShardsValidator(request=request)
+        validator.accept(dict(stream_meta))
+        with self.assertRaisesRegex(RuntimeError, "gap descriptor range"):
+            validator.accept(record_count_gap)
+
+        invalid_over_budget = MODULE._RemoteSessionShardsValidator(request=request)
+        invalid_over_budget.accept(dict(stream_meta))
+        assert invalid_over_budget.stream_meta is not None
+        invalid_over_budget.stream_meta["record_processing_budget_bytes"] = (
+            len(data) - 1
+        )
+        with self.assertRaisesRegex(RuntimeError, "exceeds its byte ceiling"):
+            invalid_over_budget.accept(dict(gap))
+
+        processing_over_scan = MODULE._RemoteSessionShardsValidator(request=request)
+        processing_over_scan.accept(dict(stream_meta))
+        assert processing_over_scan.stream_meta is not None
+        processing_over_scan.stream_meta["record_processing_budget_bytes"] = 1
+        processing_over_scan.stream_meta["hard_record_scan_ceiling_bytes"] = (
+            len(data) - 1
+        )
+        processing_gap = dict(gap)
+        processing_gap["gap_reason"] = "record_processing_budget_exceeded"
+        processing_gap.update(
+            {
+                "hard_record_processing_ceiling_bytes": stream_meta[
+                    "hard_record_processing_ceiling_bytes"
+                ],
+                "processing_ceiling_kind": "record_bytes",
+                "processing_ceiling_limit": 1,
+                "processing_ceiling_observed": len(data),
+                "record_processing_budget_bytes": 1,
+            }
+        )
+        with self.assertRaisesRegex(RuntimeError, "exceeds its byte ceiling"):
+            processing_over_scan.accept(processing_gap)
+
     def test_remote_program_compiles_and_has_no_child_transport(self) -> None:
         script = MODULE._remote_session_shards_script(
             {
@@ -1936,6 +2141,8 @@ class SessionShardsRemoteTests(unittest.TestCase):
         compile(script, "<session-shards>", "exec")
         self.assertNotIn("subprocess", script)
         self.assertNotIn("ssh", script)
+        self.assertNotIn("SpooledTemporaryFile", script)
+        self.assertNotIn("import tempfile", script)
 
     def test_remote_parser_rejects_deep_frames_before_json_loads(self) -> None:
         request = remote_request(
@@ -2971,6 +3178,132 @@ class SessionShardsRemoteTests(unittest.TestCase):
                             )
                         )
 
+    def test_remote_receiver_rejects_boolean_terminal_integers(self) -> None:
+        first = b'{"n":1}\n'
+        data = first + b'{"n":2}\n'
+        with tempfile.TemporaryDirectory() as raw:
+            codex_root = Path(raw) / ".codex"
+            rollout = write_rollout(codex_root, data)
+            rc_descriptors, descriptors, descriptor_error = run_local(
+                codex_root,
+                command_args(
+                    rollout,
+                    shard_bytes=len(first),
+                    max_shards=1,
+                ),
+            )
+            token = str(frame_of_kind(descriptors, "stream_meta")["source_token"])
+            rc_records, records, record_error = run_local(
+                codex_root,
+                command_args(
+                    rollout,
+                    emit="records",
+                    byte_end=len(first),
+                    shard_bytes=len(first),
+                    max_shards=1,
+                    source_token=token,
+                ),
+            )
+
+        self.assertEqual((rc_descriptors, descriptor_error), (0, ""))
+        self.assertEqual((rc_records, record_error), (0, ""))
+        descriptor_request = remote_request(
+            rollout,
+            shard_bytes=len(first),
+            max_shards=1,
+        )
+        record_request = remote_request(
+            rollout,
+            emit="records",
+            byte_end=len(first),
+            shard_bytes=len(first),
+            max_shards=1,
+            source_token=token,
+        )
+        descriptor_terminal_index = next(
+            index
+            for index, frame in enumerate(descriptors)
+            if frame.get("kind") == "stream_end"
+        )
+        record_terminal_index = next(
+            index
+            for index, frame in enumerate(records)
+            if frame.get("kind") == "stream_end"
+        )
+        cases = (
+            (
+                "descriptor emitted count",
+                descriptors,
+                descriptor_request,
+                descriptor_terminal_index,
+                None,
+                "emitted_shards",
+            ),
+            (
+                "descriptor accounting count",
+                descriptors,
+                descriptor_request,
+                descriptor_terminal_index,
+                None,
+                "accounted_record_count",
+            ),
+            (
+                "descriptor continuation",
+                descriptors,
+                descriptor_request,
+                descriptor_terminal_index,
+                None,
+                "next_record_start",
+            ),
+            (
+                "record emitted count",
+                records,
+                record_request,
+                record_terminal_index,
+                None,
+                "emitted_records",
+            ),
+            (
+                "proof record count",
+                records,
+                record_request,
+                record_terminal_index,
+                "conservation_proof",
+                "record_count",
+            ),
+            (
+                "proof accounting count",
+                records,
+                record_request,
+                record_terminal_index,
+                "conservation_proof",
+                "accounted_record_count",
+            ),
+        )
+        for label, frames, request, index, nested_key, field in cases:
+            with self.subTest(field=label):
+                mutated = [dict(frame) for frame in frames]
+                target = mutated[index]
+                if nested_key is not None:
+                    nested = dict(target[nested_key])
+                    target[nested_key] = nested
+                    target = nested
+                self.assertEqual(1, target[field])
+                target[field] = True
+                fake = FakePopen(remote_output(mutated), 0)
+                with mock.patch.object(
+                    MODULE.subprocess,
+                    "Popen",
+                    return_value=fake,
+                ):
+                    with self.assertRaisesRegex(RuntimeError, f"invalid {field}"):
+                        list(
+                            MODULE._iter_remote_session_shard_frames(
+                                "miku-bot-dev",
+                                request,
+                            )
+                        )
+
     def test_remote_receiver_checks_every_data_and_terminal_binding(self) -> None:
         data = b'{"n":1}\n'
         with tempfile.TemporaryDirectory() as raw:
@@ -3193,6 +3526,27 @@ class SessionShardsRemoteTests(unittest.TestCase):
 
 
 class SessionShardsCompatibilityTests(unittest.TestCase):
+    def test_isolated_review_contract_is_filtered_as_wrapper_noise(self) -> None:
+        wrapper = (
+            "Persistent isolated code-review contract:\n"
+            "Check sandbox, credentials, privacy, and verification."
+        )
+
+        self.assertIn(
+            "Persistent isolated code-review contract:",
+            MODULE.WRAPPER_PREFIXES,
+        )
+        self.assertEqual("", MODULE._meaningful_prompt_text(wrapper))
+        self.assertIsNone(
+            MODULE._build_summary_record(
+                kind="user_message",
+                text=wrapper,
+                line_no=1,
+                timestamp="2026-07-16T00:00:00Z",
+                max_text_chars=1200,
+            )
+        )
+
     def test_existing_v1_command_defaults_and_remote_program_stay_available(
         self,
     ) -> None:
@@ -3373,6 +3727,9 @@ class SessionShardsCompatibilityTests(unittest.TestCase):
             "source lease ref is a one-time challenge",
             "carry the authenticated `holdout_ref`",
             "holdout cannot satisfy backfill",
+            "`start-daily-pair-successor`",
+            "direct-successor run",
+            "production_source_suppressed: false",
         ):
             self.assertIn(phrase, reference)
 
@@ -3380,6 +3737,8 @@ class SessionShardsCompatibilityTests(unittest.TestCase):
             "Only an explicitly requested shadow Daily partial/backfill qualification",
             "never as `no_activity`",
             "replace the authenticated `holdout_ref`",
+            "exact installed v2 coordinator path",
+            "start-daily-pair-successor",
         ):
             self.assertIn(phrase, skill)
 
