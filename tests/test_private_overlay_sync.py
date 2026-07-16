@@ -111,7 +111,11 @@ class PrivateOverlaySyncTests(unittest.TestCase):
             mock.Mock(owner="private", target=Path("skills/private"))
         ]
 
-        def safe_extract(_archive_path: Path, destination: Path) -> Path:
+        def verify_and_extract(
+            _archive_path: Path,
+            _checksum_path: Path,
+            destination: Path,
+        ) -> tuple[Path, object]:
             destinations.append(destination)
             self.assertNotEqual(destination, existing_extract)
             self.assertFalse(destination.exists())
@@ -130,9 +134,9 @@ class PrivateOverlaySyncTests(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
-            return release_root
+            return release_root, object()
 
-        sync_module.safe_extract_archive.side_effect = safe_extract
+        sync_module.verify_and_extract_archive.side_effect = verify_and_extract
         with mock.patch.object(
             RELEASE_MODULE,
             "_load_sync_module",
@@ -145,18 +149,22 @@ class PrivateOverlaySyncTests(unittest.TestCase):
         self.assertNotEqual(destinations[0], destinations[1])
         self.assertTrue(all(not destination.exists() for destination in destinations))
         self.assertEqual(sentinel.read_text(encoding="utf-8"), "keep\n")
-        sync_module.verify_checksum.assert_has_calls(
+        sync_module.verify_and_extract_archive.assert_has_calls(
             [
                 mock.call(
                     dist / f"personal-codex-{sha}.tar.gz",
                     dist / f"personal-codex-{sha}.sha256",
+                    destinations[0],
                 ),
                 mock.call(
                     dist / f"personal-codex-{sha}.tar.gz",
                     dist / f"personal-codex-{sha}.sha256",
+                    destinations[1],
                 ),
             ]
         )
+        sync_module.verify_checksum.assert_not_called()
+        sync_module.safe_extract_archive.assert_not_called()
 
     def test_verify_package_cleanup_error_does_not_mask_primary_error(
         self,
@@ -166,8 +174,8 @@ class PrivateOverlaySyncTests(unittest.TestCase):
         dist.mkdir()
         workspace = self.root / "verification-workspace"
         sync_module = mock.Mock()
-        sync_module.safe_extract_archive.side_effect = RELEASE_MODULE.ReleaseError(
-            "primary verification failure"
+        sync_module.verify_and_extract_archive.side_effect = (
+            RELEASE_MODULE.ReleaseError("primary verification failure")
         )
         stderr = io.StringIO()
 
@@ -207,8 +215,8 @@ class PrivateOverlaySyncTests(unittest.TestCase):
         dist.mkdir()
         workspace = self.root / "verification-workspace"
         sync_module = mock.Mock()
-        sync_module.safe_extract_archive.side_effect = RELEASE_MODULE.ReleaseError(
-            "primary verification failure"
+        sync_module.verify_and_extract_archive.side_effect = (
+            RELEASE_MODULE.ReleaseError("primary verification failure")
         )
         stderr = io.StringIO()
         real_close = RELEASE_MODULE.os.close

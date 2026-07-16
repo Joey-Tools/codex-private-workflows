@@ -92,16 +92,18 @@ superseded_by:
 - Combined manifest validation rejects portable-key strict ancestor conflicts between one owner's active target and another owner's historical `removed.target`, while continuing to allow exact cross-owner migrations, same-owner hierarchy migrations, removed-vs-removed history, and replacement-target-only hierarchy.
 - Planned installs, public upgrades, and public rollbacks honor every retained overlay's optional `base_release.sha` before reconciliation or release staging. Pinned overlays must match the selected public SHA, paired installs remain supported, and unpinned overlays retain their existing follow-selected-base behavior.
 - Runtime and validation helpers retain Python 3.9 compatibility, with a dedicated CI lane covering the previously incompatible pending-state and release-history paths.
+- Manifest and durable synchronizer state versions require exact JSON integers, so booleans and numerically equal floats cannot select a schema version.
+- Private package verification now checks the checksum and extracts from one immutable archive snapshot, closing the verification-to-extraction path replacement window.
 
 ## Next Steps
 - Publish the private overlay release after the matching public reconciler is available and verify scheduled local consumption.
 - Add a combined public/private manifest capacity gate when the private release job has both exact manifests; the installer already performs this aggregate preflight and fails safely, while repository CI currently proves capacity one owner at a time.
 
 ## Evidence
-- `/usr/bin/python3 -m unittest discover -s tests` — 1005 tests completed successfully, with 2 skipped, using Python 3.9.6 and test-only Git configuration that disables commit signing to avoid a host keybox dependency, after integrating the latest `origin/master`.
-- Reconciliation safety module — 257 tests passed.
-- Package builder safety module — 55 tests passed.
-- Manifest change validation module — 75 tests passed.
+- `/usr/bin/python3 -m unittest discover -s tests` — 1009 tests completed successfully, with 2 skipped, using Python 3.9.6 and test-only Git configuration that disables commit signing to avoid a host keybox dependency, after integrating the latest `origin/master`.
+- Reconciliation safety module — 259 tests passed as part of the repository suite.
+- Package builder safety module — 56 tests passed as part of the repository suite.
+- Manifest change validation module — 76 tests passed as part of the repository suite.
 - Release baseline validation module — 24 tests passed.
 - Dedicated Python 3.9 compatibility selection — 8 tests passed.
 - Canonical review workflow module — 299 tests passed, with 2 skipped.

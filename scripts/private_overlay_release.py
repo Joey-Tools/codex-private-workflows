@@ -525,7 +525,6 @@ def verify_package(repo_root: Path, sha: str, dist: Path) -> None:
     module = _load_sync_module(repo_root)
     archive_path = dist / f"personal-codex-{sha}.tar.gz"
     checksum_path = dist / f"personal-codex-{sha}.sha256"
-    module.verify_checksum(archive_path, checksum_path)
     workspace = Path(tempfile.mkdtemp(prefix="codex-private-overlay-verify."))
     created_metadata = os.lstat(workspace)
     try:
@@ -545,8 +544,9 @@ def verify_package(repo_root: Path, sha: str, dist: Path) -> None:
             pass
         raise
     try:
-        release_root = module.safe_extract_archive(
+        release_root, _release_expectation = module.verify_and_extract_archive(
             archive_path,
+            checksum_path,
             workspace / "extract",
         )
         entries = module.validate_release_tree(release_root)
