@@ -32,7 +32,7 @@ superseded_by:
 
 ## Delivery State
 
-- Public source commit `2939bff1220826e35eee8f05e66885e3fadd929b` contains the complete synthetic-token facility, printable legacy correction, exhaustive pinned-master audit, required Claude runtime hardening, the explicit-override fail-closed follow-up, the audited JWT legacy migration, and the merged per-model-attempt Claude OAuth freshness fix.
+- Public source commit `4da59bf424f941f61bf36fd1f9871ad09dff8d3a` contains the complete synthetic-token facility, printable legacy correction, exhaustive pinned-master audit, required Claude runtime hardening, the explicit-override fail-closed follow-up, the audited JWT legacy migration, the merged per-model-attempt Claude OAuth freshness fix, and the reviewed Node extra-CA support.
 - The private release is generated from that complete public skill plus the fixed trusted catalog replacement; public and private catalogs are not unioned.
 - Default-branch release packaging installs the generated review skill and thin fixture skill, never the private override source directory.
 
@@ -41,7 +41,7 @@ superseded_by:
 - Digest-bound recovery verified all 26 historical IDs against their pinned master Git objects. Admission retained the one hygiene value and 16 portable values totaling 37 source occurrences; nine portable IDs with no exact eligible scanner capture were excluded from the runtime catalog.
 - The refreshed public parser accepted the migrated catalog as schema version 1 with pool `joey-private-v1`, 10 authoring values, 3 legacy envelopes, and 18 legacy values representing 39 source occurrences.
 - All three pinned-master audits passed against the hygiene tip and portable runtime tip; emitted evidence contained IDs, rules, digests, lengths, and counts without raw or Base64 values.
-- The real private source sync from public commit `2939bff1220826e35eee8f05e66885e3fadd929b` completed, and `cmp` proved the generated catalog is byte-equal to the trusted override source.
+- The real private source sync from public commit `4da59bf424f941f61bf36fd1f9871ad09dff8d3a` completed after private sync commit `e484d46df985f4a58209f82d5d14f2d77a729e50` was merged into the feature branch. It produced no tracked source drift, and `cmp` proved the generated catalog is byte-equal to the trusted override source.
 - `/usr/bin/env GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=commit.gpgsign GIT_CONFIG_VALUE_0=false python3 -m unittest discover -s tests -v` passed before review (`488` tests, `2` skipped). The override only neutralized Joey's global signing configuration for four ephemeral merge fixtures.
 - The independent review gate identified an ancestor-directory TOCTOU gap in the first overlay implementation. Directory-fd traversal now protects both source reads and target writes; deterministic source-swap, target-swap, and missing-dirfd tests pass.
 - The next independent pass identified an unbounded target read-back loop. Verification now reads at most `len(data) + 1` bytes and rejects excess content; its deterministic append simulation passes. The complete private suite then passed again (`492` tests, `2` skipped).
