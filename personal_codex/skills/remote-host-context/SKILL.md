@@ -1,6 +1,6 @@
 ---
 name: remote-host-context
-description: Collect read-only task evidence across Joey's local machine, BL-mac-mini-m4-hoteng, miku-bot-dev, hoteng-srv-01, and codex-hoteng-srv-01. Use when Apple Notes work reports, session/history scans, repo-state recovery, or similar workflow summaries might miss work done on remote hosts.
+description: Collect read-only task evidence across Joey's local machine, BL-mac-mini-m4-hoteng, miku-bot-dev, hoteng-srv-01, and codex-hoteng-srv-01. Use when Apple Notes work reports, session/history scans, repo-state recovery, cross-host Codex task/thread URL recovery, or similar workflow summaries might miss work done on remote hosts.
 ---
 
 # Remote Host Context
@@ -34,6 +34,7 @@ It standardizes a small read-only SSH preflight across Joey's default remote hos
 
 2. Use the helper for bounded remote Codex reads once the preflight is clear.
 - Prefer `python3 /Users/hoteng/.codex/skills/remote-host-context/scripts/remote_codex_probe.py preflight ...` for recurring host checks.
+- When Joey supplies a `codex://threads/<id>` URL and thread tools are available, use `read_thread` only as a bounded locator or last-turn skim: read one exact thread per call with `turnLimit: 1`, `includeOutputs: false`, and `maxOutputCharsPerItem` at most 400. Emit only selected thread metadata plus at most 12 short user or agent message snippets. Do not batch multiple thread reads, stringify the raw result, retain reasoning or tool-output items, or fetch a full result and compact it afterward. Follow [Codex Thread Locator Skim](references/hosts.md#codex-thread-locator-skim) for date-bound exact-session lookup, rollout or chunk fallback, and preservation of later substantive human follow-ups.
 - The helper takes a repeatable `--host` option for `preflight` and `session-meta`; do not pass positional host names or a plural `--hosts` flag.
 - For the default evidence scope, use `python3 /Users/hoteng/.codex/skills/remote-host-context/scripts/remote_codex_probe.py preflight --host local --host BL-mac-mini-m4-hoteng --host miku-bot-dev --host hoteng-srv-01 --host codex-hoteng-srv-01`.
 - For required remote evidence workflows, if `remote_codex_probe.py preflight`, `session-meta`, `rollout-summary`, `chunked-rollout-summary`, `fetch-rollout`, or `fetch-rollout-chunk` fails with a local sandbox/network error such as `Operation not permitted`, a DNS/network gate, or a connection blocked before SSH authentication, immediately rerun the same helper command with `sandbox_permissions=require_escalated`.

@@ -25,6 +25,9 @@ assert SPEC.loader is not None
 sys.modules[SPEC.name] = MODULE
 SPEC.loader.exec_module(MODULE)
 SKILL_PATH = REPO_ROOT / "personal_codex/skills/remote-host-context/SKILL.md"
+HOSTS_REFERENCE_PATH = (
+    REPO_ROOT / "personal_codex/skills/remote-host-context/references/hosts.md"
+)
 
 
 def write_rollout(codex_root: Path, lines: list[str]) -> str:
@@ -47,6 +50,40 @@ class RemoteHostContextDocumentationTests(unittest.TestCase):
         )
         self.assertIn("do not pass positional host names", skill)
         self.assertIn("plural `--hosts` flag", skill)
+
+    def test_skill_bounds_codex_thread_locator_reads(self) -> None:
+        skill = SKILL_PATH.read_text(encoding="utf-8")
+        reference = HOSTS_REFERENCE_PATH.read_text(encoding="utf-8")
+
+        self.assertIn("cross-host Codex task/thread URL recovery", skill)
+        self.assertIn("one exact thread per call", skill)
+        self.assertIn("`turnLimit: 1`", skill)
+        self.assertIn("`includeOutputs: false`", skill)
+        self.assertIn("`maxOutputCharsPerItem` at most 400", skill)
+        self.assertIn("Do not batch multiple thread reads", skill)
+        self.assertIn(
+            "[Codex Thread Locator Skim]"
+            "(references/hosts.md#codex-thread-locator-skim)",
+            skill,
+        )
+        self.assertIn("Do not batch several thread reads", reference)
+        self.assertIn("at most 12 user or agent message snippets", reference)
+        self.assertIn("rendered on one line per snippet", reference)
+        self.assertIn("stringify or serialize the raw result", reference)
+        self.assertIn("created/updated timestamps", reference)
+        self.assertIn(
+            "created timestamp as the primary `YYYY/MM/DD` date for `session-meta`",
+            reference,
+        )
+        self.assertIn(
+            "distinct updated date and UTC/host-local calendar dates", reference
+        )
+        self.assertIn("filter the bounded results by the exact session id", reference)
+        self.assertIn("an output cap on the parent tool call does not bound", reference)
+        self.assertIn("`chunked-rollout-summary`", reference)
+        self.assertIn(
+            "retain later substantive human follow-ups typed by the user", reference
+        )
 
     def test_bl_mac_mini_uses_hoteng_macos_home(self) -> None:
         host = MODULE.HOSTS["BL-mac-mini-m4-hoteng"]

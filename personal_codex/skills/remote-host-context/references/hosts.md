@@ -77,6 +77,20 @@ Then narrow to date-bounded session trees or rollout files before opening repo-s
 Keep recurring approvals anchored to this short preflight shape.
 If deeper remote reads start repeating across sessions, add a helper under `~/.codex/skills/remote-host-context/` instead of preserving host- or query-specific shell literals in `default.rules`.
 
+## Codex Thread Locator Skim
+
+When Joey supplies a `codex://threads/<id>` URL, use a callable thread reader only to locate the task or inspect its latest compact state. Read one exact thread per call with:
+
+```text
+turnLimit: 1
+includeOutputs: false
+maxOutputCharsPerItem: 400
+```
+
+Project only thread id, host id, title, status, cwd, created/updated timestamps, and at most 12 user or agent message snippets of at most 400 characters each, rendered on one line per snippet. Exclude reasoning, tool calls, tool outputs, file-change payloads, and other retained artifacts. Do not batch several thread reads or stringify or serialize the raw result: an output cap on the parent tool call does not bound the thread payload. If one compact turn is insufficient, use the created timestamp as the primary `YYYY/MM/DD` date for `session-meta`, because the canonical rollout remains under its creation date when a thread continues across days. Query only the distinct updated date and UTC/host-local calendar dates when they differ, then filter the bounded results by the exact session id. After locating the canonical rollout, use `rollout-summary` or `chunked-rollout-summary` rather than widening `read_thread`.
+
+Treat the bounded latest turn as a locator, not as permission to discard task history. If the thread started with an automation, skill, or instruction wrapper, retain later substantive human follow-ups typed by the user and delegate replay-prefix and wrapper filtering to `codex-session-mining`.
+
 Current dedicated helper path for those repeated remote Codex reads:
 
 ```bash
