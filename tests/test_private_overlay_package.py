@@ -691,6 +691,29 @@ class PrivateAutomationPromptTests(unittest.TestCase):
         self.assertIn("structured parser or narrowly bounded extraction", prompt)
         self.assertIn("latest completed-run End timestamp", prompt)
 
+    def test_daily_skill_friction_scans_active_and_archived_rollouts(self) -> None:
+        prompt = automation_prompt("daily-skill-friction")
+
+        self.assertIn("both `~/.codex/sessions` and `~/.codex/archived_sessions`", prompt)
+        self.assertIn("dated `YYYY/MM/DD/rollout-*.jsonl` directories", prompt)
+        self.assertIn("flat `archived_sessions/rollout-*.jsonl` layouts", prompt)
+        self.assertIn(
+            "rollout lifecycle identity and normalized content fingerprint",
+            prompt,
+        )
+        self.assertIn(
+            "In the final report, state the active, archived, and union candidate, "
+            "parsed, and accepted counts, plus the cross-root duplicate groups, "
+            "duplicate rollouts collapsed, and replayed-prefix record counts produced "
+            "by the session corpus helper.",
+            prompt,
+        )
+        self.assertIn(
+            "do not discard later human follow-up turns in the same thread solely "
+            "because the rollout began with the automation wrapper",
+            prompt,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
