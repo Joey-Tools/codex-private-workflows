@@ -14,8 +14,8 @@ superseded_by:
 
 ## Summary
 
-- Expanded the private authoring catalog from eleven to 52 exact values so every supported role has ten active IDs, while retaining the existing lifecycle fixtures.
-- Advanced the pool version from `joey-private-v2` to `joey-private-v3`, as required whenever trusted authoring values change.
+- Expanded the private authoring catalog from ten to 52 exact values so every supported role has ten active IDs, including the third refresh-token ID, while retaining the existing lifecycle fixtures.
+- Advanced the pool version from `joey-private-v1` to `joey-private-v3` across the complete change; `joey-private-v2` was the intermediate refresh-capacity state.
 
 ## Current State
 
