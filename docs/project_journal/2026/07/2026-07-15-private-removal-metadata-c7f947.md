@@ -79,6 +79,7 @@ superseded_by:
 - Published Release validation rejects any matching personal-Codex archive or checksum whose GitHub asset state is not `uploaded`, including duplicate and other-SHA assets, so validation and runtime selection cannot disagree on a partially uploaded Release.
 - Runtime Release selection applies the same uploaded-only rule to every matching personal-Codex archive or checksum before choosing the exact pair, so pending, missing-state, duplicate, and other-SHA matching assets fail closed during installation as well as history validation.
 - Private Release publication validates the exact tag, target SHA, Release identity, and all distinct positive matching asset IDs before mutation. Any incomplete matching set is replaced as a full archive/checksum pair; publication then re-fetches the same Release and requires the exact uploaded pair before clearing its draft state or accepting an already-published repair.
+- Private Release selection enumerates every same-SHA personal candidate before deciding: prereleases never satisfy cooldown or completion, drafts never satisfy the read-only completion probe, a unique incomplete published candidate is repaired even when another complete Release exists, and ambiguous incomplete or draft sets fail closed. Tags accept the same 7–40-character SHA suffix as the runtime; complete drafts follow GET → PATCH → GET and must retain the exact identity, publication flags, and uploaded asset pair after publishing.
 - Reconciliation plans bind the nearest existing ancestor plus the exact parent and leaf inode/target; missing parents are published exclusively and reused only through transaction-owned identities.
 - Install, uninstall, and `current` mutations fail closed on same-target inode or parent replacement, while failed destructive transactions restore the original quarantined inode without overwriting concurrent content.
 - Manifest-change validation applies the same 4 MiB raw and formatted payload limits to current and historical manifests, resolving exact Git commits and blobs before bounded reads.
@@ -129,14 +130,14 @@ superseded_by:
 - Private shared reconciliation and manifest-validation modules — 379 tests passed in 153.687 seconds after synchronization.
 - Changed shared Python files — `ruff check`, Python compilation, and `git diff --check` passed.
 - Focused read-only security review of the byte-identical optional-claim diff — no findings.
-- Repository suite — 1170 tests completed successfully using Python 3.13.0 after merging the latest `origin/master`; the run used host GPG access for tests that create signed merge commits.
+- Repository suite — 1182 tests completed successfully using Python 3.13.0 after merging the latest `origin/master`; the run used host GPG access for tests that create signed merge commits.
 - Reconciliation safety module — 299 tests passed, including locked recovery of a pending transaction that appears after first-bootstrap preflight.
 - Package builder safety module — 70 tests passed as part of the repository suite.
 - Private package module — 45 tests passed.
-- Private overlay sync module — 133 tests passed.
+- Private overlay sync module — 152 tests passed, including mixed complete/incomplete candidates, prerelease exclusion, read-only completion checks, 7–40-character tag suffixes, and post-publish identity drift.
 - Workspace-capability and strict JSON regression selection — focused runtime, private-verification, managed-state, WAL-pointer, and GitHub pagination tests passed, including checksum/archive binding plus dist/ancestor replacement coverage.
 - Manifest change validation module — 81 tests passed as part of the repository suite.
-- Shared Release baseline validation module — 49 tests passed, including HEAD-bound incomplete-Release repair eligibility and strict uploaded-asset state checks.
+- Shared Release baseline validation module — 50 tests passed, including HEAD-bound incomplete-Release repair eligibility and rejection of extra uploaded other-SHA assets.
 - Authenticated historical Release validation — every published archive/checksum pair matched its corresponding Git manifest, with baseline `d9bef542591944597c5846fe2074bfa2714d688e`.
 - Python 3.9 Release-history and manifest-serialization selection — 48 tests passed.
 - Canonical review workflow suite — 708 tests passed, with 10 skipped.
