@@ -21,7 +21,7 @@ import stat
 import sys
 import time
 from collections.abc import Iterable
-from typing import Any
+from typing import Any, BinaryIO
 
 DATE_FORMAT = "%Y/%m/%d"
 MAX_SESSION_META_LIMIT = 500
@@ -716,16 +716,17 @@ def _assert_rollout_path_identity(
 
 
 class _HashingReader:
-    def __init__(self, handle: Any) -> None:
+    def __init__(self, handle: BinaryIO) -> None:
         self.handle = handle
         self.hasher = hashlib.sha256()
         self.bytes_read = 0
 
-    def read(self, size: int = -1) -> Any:
+    def read(self, size: int = -1) -> bytes:
         data = self.handle.read(size)
-        raw_bytes = data.encode("utf-8", "surrogatepass") if isinstance(data, str) else bytes(data)
-        self.hasher.update(raw_bytes)
-        self.bytes_read += len(raw_bytes)
+        if not isinstance(data, bytes):
+            raise TypeError("rollout hashing reader requires binary input")
+        self.hasher.update(data)
+        self.bytes_read += len(data)
         return data
 
     def hexdigest(self) -> str:
@@ -1414,9 +1415,10 @@ class HashingReader:
 
     def read(self, size=-1):
         data = self.handle.read(size)
-        raw_bytes = data.encode("utf-8", "surrogatepass") if isinstance(data, str) else bytes(data)
-        self.hasher.update(raw_bytes)
-        self.bytes_read += len(raw_bytes)
+        if not isinstance(data, bytes):
+            raise TypeError("rollout hashing reader requires binary input")
+        self.hasher.update(data)
+        self.bytes_read += len(data)
         return data
 
     def hexdigest(self):
@@ -2400,8 +2402,10 @@ def _scan_session_meta_records(
 ) -> SessionMetaScan:
     try:
         resolved_root = _resolve_safe_codex_root(codex_root)
-    except OSError:
+    except FileNotFoundError:
         return SessionMetaScan(rows=[], truncated=False)
+    except OSError as exc:
+        raise SessionMetaRolloutError("session directory unreadable") from exc
     rows: list[dict[str, str]] = []
     seen_rollout_paths: set[str] = set()
 
