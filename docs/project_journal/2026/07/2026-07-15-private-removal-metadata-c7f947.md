@@ -19,7 +19,7 @@ superseded_by:
 - `submodule-linked-worktrees` is recorded as a legacy private removal with its public replacement target.
 - Public sync scripts and manifest-diff validation are mirrored through the scheduled source-sync rules.
 - Private CI validates removal history against the unique complete Release that is a Git descendant of every other complete Release candidate; release SHAs come from the unique uploaded archive/checksum pair, are batch-bound through local tags, and do not depend on a potentially movable `target_commitish` branch. Explicit target SHAs must still match, publish timestamps do not define version order, and incomparable histories fail closed.
-- Release-manifest validation unions the normalized `removed_links` history from every unique complete Release before checking the baseline transition. Historical entries must remain exact across releases and the current manifest, while a later commit may precisely restore a non-legacy tombstone that an intervening release dropped; historical replacement-retirement obligations remain enforced.
+- Release-manifest validation unions the normalized `removed_links` history from every unique complete Release before checking the baseline transition. Historical entries must remain exact across releases and the current manifest, while a later commit may precisely restore a non-legacy tombstone that an intervening release dropped; historical replacement-retirement obligations remain enforced. Every historical Release is also treated as a possible direct upgrade origin: an active link that is absent or changed in the current manifest requires at least one exact matching removal ID that origin has not seen, preserving repeated removal episodes while allowing explicit legacy repair of an older published omission.
 - Portable target identities, create-before-remove reconciliation, and descriptor-bound transactional rollback are mirrored from the public runner.
 - Cross-version target checks and replacement-retirement cycle validation are mirrored from the public runner.
 - Install and rollback activation plus overlay uninstall now use a durable exact-inode write-ahead log: a fixed regular-file pointer at the stable sync-home root binds one fsynced quarantine batch containing staged link inodes, preimages, and exact managed-state before/after evidence.
@@ -112,11 +112,11 @@ superseded_by:
 - Add a combined public/private manifest capacity gate when the private release job has both exact manifests; the installer already performs this aggregate preflight and fails safely, while repository CI currently proves capacity one owner at a time.
 
 ## Evidence
-- Repository suite — 1055 tests completed successfully, with 2 skipped, using Python 3.13.0 and test-only Git configuration that disables commit signing to avoid a host keybox dependency, after integrating the latest `origin/master`.
+- Repository suite — 1060 tests completed successfully, with 2 skipped, using Python 3.13.0 and test-only Git configuration that disables commit signing to avoid a host keybox dependency, after integrating the latest `origin/master`.
 - Reconciliation safety module — 275 tests passed as part of the repository suite.
 - Package builder safety module — 59 tests passed as part of the repository suite.
 - Manifest change validation module — 79 tests passed as part of the repository suite.
-- Release baseline validation module — 24 tests passed.
+- Release baseline validation module — 29 tests passed.
 - Dedicated Python 3.9 compatibility selection — 8 tests passed.
 - Canonical review workflow suite — 707 tests passed, with 10 skipped.
 - Waited-delivery review contract — 40 tests passed.
