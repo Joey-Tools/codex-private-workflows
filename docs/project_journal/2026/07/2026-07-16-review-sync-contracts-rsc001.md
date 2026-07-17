@@ -33,6 +33,11 @@ superseded_by:
   minimum payload indent, while an implicit scalar still infers its indent from
   the first non-empty line. The aggregate job requires one structural `steps`
   block header while retaining ordinary quoted/spaced/commented spellings.
+- Literal `run` body collection follows the same explicit minimum instead of
+  locking its boundary to a more-indented first command. A later payload line
+  cannot hide a `GITHUB_ENV` update that installs `BASH_ENV` and redefines
+  `test` for a subsequent dependency-check step; folded `run` scalars remain
+  rejected.
 
 ## Next Steps
 
@@ -54,6 +59,10 @@ superseded_by:
   `steps`, alias, and block-scalar-payload fixtures; project-journal validation
   and diff checks also passed. The explicit-indentation payload regression also
   passed focused contract tests, Ruff, and an Actionlint-valid de-indent fixture.
+- The explicit-indentation `run` regression passed both focused and complete
+  contract files (`17` tests each), Ruff, Python compilation, Actionlint 1.7.12
+  coverage for both chomping/indicator orders and quoted/sequence `run` keys,
+  project-journal validation, normalized copy comparison, and diff checks.
 - `scripts/sync_private_overlay_sources.py`
 - `personal_codex/private-sync-manifest.json`
 - `.github/workflows/ci.yml`
