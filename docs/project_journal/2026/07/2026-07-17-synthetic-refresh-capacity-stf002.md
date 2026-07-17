@@ -32,7 +32,7 @@ superseded_by:
 - The catalog CLI validates schema version 1 with pool `joey-private-v3` and reports 52 authoring entries: 50 active values with ten for each supported role, plus one expired and one consumed fixture.
 - The focused private catalog and overlay contract suite passed 3 tests.
 - The generated helper synthetic-token module passed 84 tests with 1 skip.
-- The complete private repository suite passed 592 tests with 2 skips.
+- The complete private repository suite passed 595 tests with 2 skips after synchronizing the current `master` baseline.
 - The review skill passed the OpenAI quick validator through an isolated PyYAML environment, both catalog copies compare byte-for-byte equal, and `git diff --check` passed.
 - Source context: `codex://threads/019f17fc-5756-7fb2-8d9f-34c0330bd59b` on `BL-mac-mini-m4-hoteng`.
 
