@@ -497,6 +497,8 @@ CANONICAL_REVIEW_REQUIRED_FILES = tuple(
         "tests/test_cli.py",
         "tests/test_common.py",
         "tests/test_contracts.py",
+        "tests/fixtures/ci/canonical.yml",
+        "tests/fixtures/ci/private.yml",
         "tests/test_providers.py",
         "tests/test_state.py",
         "tests/test_synthetic_tokens.py",
