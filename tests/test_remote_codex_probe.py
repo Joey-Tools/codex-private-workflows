@@ -1454,6 +1454,98 @@ class RemoteCodexProbeChunkTests(unittest.TestCase):
 
         self.assertTrue(swapped)
 
+    def test_session_meta_ancestor_disappearance_after_stat_fails_closed(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            codex_root = Path(temp_dir) / ".codex"
+            write_rollout(
+                codex_root,
+                ['{"type":"session_meta","payload":{"id":"trusted"}}'],
+            )
+            sessions = codex_root / "sessions"
+            moved_sessions = codex_root / "sessions-vanished"
+            real_open = MODULE.os.open
+            vanished = False
+
+            def vanish_sessions_before_open(
+                path: object,
+                flags: int,
+                mode: int = 0o777,
+                *,
+                dir_fd: int | None = None,
+            ) -> int:
+                nonlocal vanished
+                if path == "sessions" and dir_fd is not None and not vanished:
+                    os.replace(sessions, moved_sessions)
+                    vanished = True
+                return real_open(path, flags, mode, dir_fd=dir_fd)
+
+            with (
+                mock.patch.object(
+                    MODULE.os,
+                    "open",
+                    side_effect=vanish_sessions_before_open,
+                ),
+                self.assertRaises(MODULE.SessionMetaRolloutError) as raised,
+            ):
+                MODULE._scan_session_meta_records(
+                    codex_root=codex_root,
+                    dates=[MODULE.dt.date(2026, 5, 26)],
+                    limit=10,
+                    host="local",
+                )
+
+            self.assertTrue(vanished)
+            self.assertEqual(raised.exception.error, "session directory unreadable")
+            self.assertIsNone(raised.exception.rollout)
+            os.replace(moved_sessions, sessions)
+
+            script = MODULE._remote_python_script(
+                {
+                    "mode": "session-meta",
+                    "dates": ["2026/05/26"],
+                    "limit": 10,
+                    "codex_root": str(codex_root),
+                    "session_meta_scan_bytes": MODULE.MAX_SESSION_META_SCAN_BYTES,
+                }
+            )
+            marker = (
+                "                next_fd = os.open(part, directory_open_flags(), "
+                "dir_fd=directory_fd)\n"
+            )
+            injection = (
+                "                if part == 'sessions' and not globals().get('_ancestor_vanished', False):\n"
+                "                    globals()['_ancestor_vanished'] = True\n"
+                f"                    os.replace({str(sessions)!r}, {str(moved_sessions)!r})\n"
+                + marker
+            )
+            self.assertEqual(script.count(marker), 1)
+            script = script.replace(marker, injection)
+            embedded = subprocess.run(
+                [sys.executable, "-"],
+                input=script,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+        self.assertEqual(embedded.returncode, 0, embedded.stderr)
+        embedded_records = [
+            json.loads(line)
+            for line in MODULE._extract_framed_lines(
+                embedded.stdout,
+                begin_marker=MODULE.REMOTE_SESSION_META_BEGIN,
+                end_marker=MODULE.REMOTE_SESSION_META_END,
+                host="embedded",
+                command="session-meta",
+            )
+        ]
+        self.assertEqual(
+            embedded_records,
+            [{"kind": "error", "error": "session directory unreadable"}],
+        )
+
     def test_regular_file_open_flags_fail_closed_without_nonblock(self) -> None:
         with (
             mock.patch.object(MODULE.os, "O_NONBLOCK", None),
@@ -1668,8 +1760,8 @@ class RemoteCodexProbeChunkTests(unittest.TestCase):
                 }
             )
             marker = (
-                "            next_fd = os.open(part, directory_open_flags(), "
-                "dir_fd=directory_fd)\n"
+                "            except FileNotFoundError as error:\n"
+                "                raise ValueError(\"path ancestor changed during open\") from error\n"
             )
             injection = marker + (
                 "            if part == 'sessions' and not globals().get('_ancestor_swapped', False):\n"
@@ -2055,6 +2147,77 @@ class RemoteCodexProbeChunkTests(unittest.TestCase):
                     ],
                 )
                 self.assertNotIn("x" * 1024, result.stdout)
+
+    def test_session_meta_limit_precedes_next_row_output_validation(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            codex_root = Path(temp_dir) / ".codex"
+            rollout_dir = codex_root / "sessions/2026/05/26"
+            valid_rollout = rollout_dir / "rollout-2026-05-26T11-00-00-valid.jsonl"
+            oversized_rollout = (
+                rollout_dir / "rollout-2026-05-26T10-00-00-oversized.jsonl"
+            )
+            write_session_meta_rollout(valid_rollout, "within-limit", "/repo", "ok")
+            write_session_meta_rollout(
+                oversized_rollout,
+                "beyond-limit",
+                "x" * (MODULE.MAX_REMOTE_SESSION_META_SERIALIZED_ROW_BYTES + 1024),
+                "must not be validated",
+            )
+
+            local_scan = MODULE._scan_session_meta_records(
+                codex_root=codex_root,
+                dates=[MODULE.dt.date(2026, 5, 26)],
+                limit=1,
+                host="local",
+            )
+            script = MODULE._remote_python_script(
+                {
+                    "mode": "session-meta",
+                    "dates": ["2026/05/26"],
+                    "limit": 1,
+                    "codex_root": str(codex_root),
+                    "session_meta_scan_bytes": MODULE.MAX_SESSION_META_SCAN_BYTES,
+                }
+            )
+            embedded = subprocess.run(
+                [sys.executable, "-"],
+                input=script,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+        self.assertEqual(
+            [row["session_id"] for row in local_scan.rows],
+            ["within-limit"],
+        )
+        self.assertTrue(local_scan.truncated)
+        self.assertEqual(embedded.returncode, 0, embedded.stderr)
+        embedded_records = [
+            json.loads(line)
+            for line in MODULE._extract_framed_lines(
+                embedded.stdout,
+                begin_marker=MODULE.REMOTE_SESSION_META_BEGIN,
+                end_marker=MODULE.REMOTE_SESSION_META_END,
+                host="embedded",
+                command="session-meta",
+            )
+        ]
+        self.assertEqual(len(embedded_records), 2)
+        self.assertEqual(embedded_records[0]["session_id"], "within-limit")
+        self.assertEqual(
+            embedded_records[1],
+            {
+                "kind": "truncation",
+                "reason": MODULE.SESSION_META_LIMIT_TRUNCATED_REASON,
+                "date": "2026/05/26",
+                "limit": 1,
+            },
+        )
+        self.assertNotIn(
+            MODULE.SESSION_META_OUTPUT_ROW_TOO_LARGE_ERROR, embedded.stdout
+        )
+        self.assertNotIn("beyond-limit", embedded.stdout)
 
     def test_remote_python_script_compiles_for_chunk_commands(self) -> None:
         identity = MODULE.RolloutIdentity(120, 1, 2, 3, 4)

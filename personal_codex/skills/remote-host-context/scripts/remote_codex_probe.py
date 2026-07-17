@@ -488,11 +488,14 @@ def _open_pinned_directory_from_fd(
                 raise ValueError("path uses a symlink ancestor")
             if not stat.S_ISDIR(observed.st_mode):
                 raise ValueError("path ancestor is not a directory")
-            next_fd = os.open(
-                part,
-                _directory_open_flags(),
-                dir_fd=directory_fd,
-            )
+            try:
+                next_fd = os.open(
+                    part,
+                    _directory_open_flags(),
+                    dir_fd=directory_fd,
+                )
+            except FileNotFoundError as error:
+                raise ValueError("path ancestor changed during open") from error
             try:
                 opened = os.fstat(next_fd)
                 if not stat.S_ISDIR(opened.st_mode):
@@ -1480,7 +1483,10 @@ def open_pinned_directory_from_fd(root_fd, rel):
                 raise ValueError("path uses a symlink ancestor")
             if not stat.S_ISDIR(observed.st_mode):
                 raise ValueError("path ancestor is not a directory")
-            next_fd = os.open(part, directory_open_flags(), dir_fd=directory_fd)
+            try:
+                next_fd = os.open(part, directory_open_flags(), dir_fd=directory_fd)
+            except FileNotFoundError as error:
+                raise ValueError("path ancestor changed during open") from error
             try:
                 opened = os.fstat(next_fd)
                 if not stat.S_ISDIR(opened.st_mode):
@@ -3047,6 +3053,8 @@ def _scan_session_meta_records(
                             rollout=rollout_relative_path.as_posix(),
                         )
                     continue
+                if limit and len(rows) >= limit:
+                    return SessionMetaScan(rows=rows, truncated=True)
                 output_row = _validated_session_meta_output_row(
                     date=date_value.strftime(DATE_FORMAT),
                     session_id=session_id,
@@ -3054,8 +3062,6 @@ def _scan_session_meta_records(
                     rollout=rollout_relative_path.as_posix(),
                 )
                 rows.append({"host": host, **output_row})
-                if limit and len(rows) > limit:
-                    return SessionMetaScan(rows=rows[:limit], truncated=True)
         finally:
             os.close(directory_fd)
         return None
