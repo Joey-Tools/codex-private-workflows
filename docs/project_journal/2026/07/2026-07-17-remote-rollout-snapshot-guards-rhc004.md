@@ -4,7 +4,7 @@ title: Remote Rollout Snapshot Guards
 status: completed
 created: 2026-07-17
 updated: 2026-07-17
-branch: codex/daily-skill-friction-20260716-codex-private-workflows-remote-rollout-snapshot-safety
+branch: codex/daily-skill-friction-20260717-codex-private-workflows-integrate-workflow-hygiene-snapshot-safety
 pr:
 supersedes: []
 superseded_by:
@@ -19,6 +19,7 @@ superseded_by:
 - Derived `rollout-summary` source size from its scan descriptor and required descriptor and path identity to remain stable before any success output.
 - Matched keywords against the full normalized signal before display truncation while retaining only a transient boolean and bounded signal-only text.
 - Bounded remote full-fetch parent capture to the maximum base64 payload plus fixed framing overhead.
+- Synchronized the public bounded recent-turn heap recipe and snapshot-safe retrospective helper into the private overlay.
 
 ## Current State
 
@@ -36,8 +37,13 @@ superseded_by:
 
 - Focused remote probe suite: 34 tests passed, including seven new local and embedded truncation, snapshot, bounded-capture, and keyword cases.
 - Private integration coverage: 2 focused compatibility tests and the full 588-test suite passed (`skipped=2`).
-- Python byte compilation, Ruff lint, isolated skill quick validation, project journal validation, and `git diff --check` passed.
+- Python byte compilation, focused Ruff lint for the synchronized helper, isolated skill quick validation, project journal validation, and `git diff --check` passed.
+- The touched retrospective test file retains one pre-existing `F541` finding from `master`; both touched Python files also retain their public/master Ruff-format baseline.
 - `personal_codex/skills/remote-host-context/scripts/remote_codex_probe.py`
 - `personal_codex/skills/remote-host-context/SKILL.md`
 - `tests/test_remote_codex_probe.py`
+- `personal_codex/skills/codex-session-mining/references/workflow.md`
+- `personal_codex/skills/codex-session-retrospective/SKILL.md`
+- `personal_codex/skills/codex-session-retrospective/scripts/remote_codex_probe.py`
+- `tests/test_session_retrospective.py`
 - Public source: `Joey-Tools/codex-workflow-hygiene#46`, merge `31f252e2356a1401559dc2a1c65a4569073a19d8`.
