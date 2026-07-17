@@ -88,7 +88,9 @@ superseded_by:
 - Runtime, builder, and manifest-change validation now share owner, override, reserved-target, source-kind, `base_release`, removed-link field, and retirement-graph semantics, including exact `OWNER/REPOSITORY` validation and fail-closed unknown-field rejection for base releases; current validation revalidates the manifest plus every observed source/ancestor as one live worktree snapshot, while the baseline remains commit-bound.
 - Public package obligations are rejected before publication when a replacement is neither active nor retired; private cross-owner obligations remain deferred to the combined public/private release-set check.
 - GitHub release-history validation bounds each response, the page count, the total release count, and batch Git input/output; it normalizes malformed or over-deep JSON without traceback leakage and resolves commit-graph order with a fixed number of Git processes. Every authenticated complete Release manifest is deduplicated and batch-loaded to prove skip-upgrade target hierarchy and WAL capacity, while all declared historical removal targets remain subject to the same checks for legacy and not-yet-released state.
+- Every published personal-Codex Release must retain one complete uploaded archive/checksum pair with valid exact asset IDs and advertised sizes. All known release counts and compressed byte totals are preflighted before download; each distinct pair is checksum-bound to an immutable snapshot, scanned twice without extraction, and required to contain the unique exact package-root manifest. The archive manifest must match its Git commit with type-sensitive JSON equality, while a hard 2 GiB cross-release expanded-read budget is enforced inside both scan passes.
 - GitHub CLI JSON parsing normalizes oversized integers and recursion failures for both single and concatenated-page responses, so malformed remote data cannot escape the synchronizer error boundary with a traceback.
+- Current, historical, runtime, and GitHub JSON parsing rejects non-standard `NaN` and infinity constants, and generated Release manifests refuse non-finite programmatic values.
 - Status reconciliation reads ledger-recorded links through descriptor-bound snapshots, rejects managed-link parent replacement instead of following a redirected path, and normalizes descriptor open/read races to sync-domain errors.
 - Read-only status validation records each full-tree manifest result or validation failure only for one status invocation, so public and overlay status scan every installed Release at most once per command without sharing cache with install, rollback, uninstall, or recovery.
 - First-bootstrap ownership reconstruction uses a separate cache scoped to one refresh operation, so each current or historical Release is fully hashed once while install, uninstall, rollback, and binding freshness checks continue to revalidate independently.
@@ -115,12 +117,13 @@ superseded_by:
 - Add a combined public/private manifest capacity gate when the private release job has both exact manifests; the installer already performs this aggregate preflight and fails safely, while repository CI currently proves capacity one owner at a time.
 
 ## Evidence
-- Repository suite — 1080 tests completed successfully, with 2 skipped, using Python 3.13.0 and test-only Git configuration that disables commit signing to avoid a host keybox dependency, after integrating the latest `origin/master`.
+- Repository suite — 1095 tests completed successfully, with 2 skipped, using Python 3.13.0 and test-only Git configuration that disables commit signing to avoid a host keybox dependency, after integrating the latest `origin/master`.
 - Reconciliation safety module — 282 tests passed as part of the repository suite.
 - Package builder safety module — 68 tests passed as part of the repository suite.
-- Manifest change validation module — 79 tests passed as part of the repository suite.
-- Release baseline validation module — 29 tests passed.
-- Dedicated Python 3.9 compatibility selection — 8 tests passed.
+- Manifest change validation module — 81 tests passed as part of the repository suite.
+- Release baseline validation module — 42 tests passed.
+- Authenticated historical Release validation — all 95 published archive/checksum pairs matched their corresponding Git manifests, with baseline `e7b5076298570eab39058ba652671b34d0acbb33`.
+- Python 3.9 Release-history and manifest-serialization selection — 48 tests passed.
 - Canonical review workflow suite — 708 tests passed, with 10 skipped.
 - Waited-delivery review contract — 40 tests passed.
 - Changed-file `ruff`, `actionlint`, manifest change validation, project journal validation, Python compilation, and `git diff --check` passed. Repository-wide `ruff` remains at six unrelated pre-existing findings.
