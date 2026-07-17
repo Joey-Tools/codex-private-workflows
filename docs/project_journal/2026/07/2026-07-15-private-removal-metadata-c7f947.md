@@ -129,7 +129,7 @@ superseded_by:
 - Private shared reconciliation and manifest-validation modules — 379 tests passed in 153.687 seconds after synchronization.
 - Changed shared Python files — `ruff check`, Python compilation, and `git diff --check` passed.
 - Focused read-only security review of the byte-identical optional-claim diff — no findings.
-- Repository suite — 1135 tests completed successfully, with 2 skipped, using Python 3.13.0; the run used host GPG access for tests that create signed merge commits.
+- Repository suite — 1170 tests completed successfully using Python 3.13.0 after merging the latest `origin/master`; the run used host GPG access for tests that create signed merge commits.
 - Reconciliation safety module — 299 tests passed, including locked recovery of a pending transaction that appears after first-bootstrap preflight.
 - Package builder safety module — 70 tests passed as part of the repository suite.
 - Private package module — 45 tests passed.
@@ -137,7 +137,7 @@ superseded_by:
 - Workspace-capability and strict JSON regression selection — focused runtime, private-verification, managed-state, WAL-pointer, and GitHub pagination tests passed, including checksum/archive binding plus dist/ancestor replacement coverage.
 - Manifest change validation module — 81 tests passed as part of the repository suite.
 - Shared Release baseline validation module — 49 tests passed, including HEAD-bound incomplete-Release repair eligibility and strict uploaded-asset state checks.
-- Authenticated historical Release validation — all 95 published archive/checksum pairs matched their corresponding Git manifests, with baseline `e7b5076298570eab39058ba652671b34d0acbb33`.
+- Authenticated historical Release validation — every published archive/checksum pair matched its corresponding Git manifest, with baseline `d9bef542591944597c5846fe2074bfa2714d688e`.
 - Python 3.9 Release-history and manifest-serialization selection — 48 tests passed.
 - Canonical review workflow suite — 708 tests passed, with 10 skipped.
 - Waited-delivery review contract — 40 tests passed.
