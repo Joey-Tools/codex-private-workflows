@@ -42,6 +42,11 @@ MAX_FETCH_RANGE_PLAN_ENTRIES = max(
 MAX_SOURCE_IDENTITY_TOKEN_CHARS = 256
 MAX_REMOTE_METADATA_STDOUT_BYTES = 64 * 1024
 MAX_REMOTE_STDERR_BYTES = 64 * 1024
+REMOTE_FETCH_ROLLOUT_FRAME_OVERHEAD_BYTES = 64 * 1024
+MAX_REMOTE_FETCH_ROLLOUT_STDOUT_BYTES = (
+    4 * ((MAX_FETCH_ROLLOUT_BYTES + 2) // 3)
+    + REMOTE_FETCH_ROLLOUT_FRAME_OVERHEAD_BYTES
+)
 REMOTE_CHUNKED_SUMMARY_FRAME_OVERHEAD_BYTES = 64 * 1024
 MAX_ROLLOUT_SUMMARY_LIMIT = 200
 MAX_ROLLOUT_SUMMARY_SCAN_BYTES = 2 * 1024 * 1024
@@ -100,6 +105,9 @@ SUMMARY_SIGNAL_MARKERS = ("error:", "approval", "could not run", "you missed", "
 REMOTE_SESSION_META_BEGIN = "__REMOTE_CODEX_PROBE_SESSION_META_BEGIN__"
 REMOTE_SESSION_META_END = "__REMOTE_CODEX_PROBE_SESSION_META_END__"
 SESSION_META_LIMIT_TRUNCATED_REASON = "session_meta_limit_truncated"
+SESSION_META_SCAN_TRUNCATED_ERROR = (
+    "session-meta scan truncated before metadata was found"
+)
 REMOTE_FETCH_ROLLOUT_BEGIN = "__REMOTE_CODEX_PROBE_FETCH_ROLLOUT_BEGIN__"
 REMOTE_FETCH_ROLLOUT_END = "__REMOTE_CODEX_PROBE_FETCH_ROLLOUT_END__"
 REMOTE_FETCH_ROLLOUT_CHUNK_BEGIN = "__REMOTE_CODEX_PROBE_FETCH_ROLLOUT_CHUNK_BEGIN__"
@@ -608,15 +616,27 @@ def _read_local_rollout_bytes(
     flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
     fd = os.open(str(target), flags)
     try:
-        stat_result = os.fstat(fd)
-        if not stat.S_ISREG(stat_result.st_mode):
-            raise ValueError("rollout path is not a regular file")
-        size = stat_result.st_size
-        if max_bytes and size > max_bytes:
-            raise ValueError(f"rollout too large: {size} bytes > {max_bytes}")
+        identity = _rollout_identity_from_stat(os.fstat(fd))
+        _assert_rollout_path_identity(target, identity, phase="before read")
+        if max_bytes and identity.size > max_bytes:
+            raise ValueError(
+                f"rollout too large: {identity.size} bytes > {max_bytes}"
+            )
         with os.fdopen(fd, "rb") as handle:
             fd = -1
-            return handle.read()
+            data = handle.read(identity.size + 1)
+            _assert_rollout_identity(
+                _rollout_identity_from_stat(os.fstat(handle.fileno())),
+                identity,
+                phase="after read",
+            )
+            _assert_rollout_path_identity(target, identity, phase="after read")
+            if len(data) != identity.size:
+                raise ValueError(
+                    "rollout read did not match snapshot size: "
+                    f"{len(data)} bytes != {identity.size}"
+                )
+            return data
     finally:
         if fd != -1:
             os.close(fd)
@@ -1200,6 +1220,7 @@ SUMMARY_TAIL_RECORDS = int(CONFIG.get("summary_tail_records", 0))
 SUMMARY_MAX_TEXT_CHARS = int(CONFIG.get("summary_max_text_chars", 0))
 SUMMARY_MAX_TEXT_CHARS_LIMIT = {MAX_ROLLOUT_SUMMARY_TEXT_CHARS}
 SUMMARY_KEYWORDS = [str(value) for value in CONFIG.get("summary_keywords", [])]
+SUMMARY_SEARCH_KEYWORDS = [value.casefold() for value in SUMMARY_KEYWORDS if value]
 CHUNK_BYTES = int(CONFIG.get("chunk_bytes", 0))
 FETCH_CHUNK_BYTE_START = int(CONFIG.get("byte_start", 0))
 FETCH_CHUNK_BYTE_END = int(CONFIG.get("byte_end", 0))
@@ -1217,6 +1238,7 @@ SUMMARY_SIGNAL_MARKERS = {SUMMARY_SIGNAL_MARKERS!r}
 SESSION_META_BEGIN = {REMOTE_SESSION_META_BEGIN!r}
 SESSION_META_END = {REMOTE_SESSION_META_END!r}
 SESSION_META_LIMIT_TRUNCATED_REASON = {SESSION_META_LIMIT_TRUNCATED_REASON!r}
+SESSION_META_SCAN_TRUNCATED_ERROR = {SESSION_META_SCAN_TRUNCATED_ERROR!r}
 FETCH_ROLLOUT_BEGIN = {REMOTE_FETCH_ROLLOUT_BEGIN!r}
 FETCH_ROLLOUT_END = {REMOTE_FETCH_ROLLOUT_END!r}
 FETCH_ROLLOUT_CHUNK_BEGIN = {REMOTE_FETCH_ROLLOUT_CHUNK_BEGIN!r}
@@ -1404,15 +1426,22 @@ def read_rollout_bytes(target, max_bytes):
     flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
     fd = os.open(str(target), flags)
     try:
-        stat_result = os.fstat(fd)
-        if not stat.S_ISREG(stat_result.st_mode):
-            raise ValueError("rollout path is not a regular file")
-        size = stat_result.st_size
-        if max_bytes and size > max_bytes:
-            raise ValueError("rollout too large: " + str(size) + " bytes > " + str(max_bytes))
+        identity = rollout_identity_from_stat(os.fstat(fd))
+        assert_rollout_path_identity(target, identity, "before read")
+        if max_bytes and identity["size"] > max_bytes:
+            raise ValueError("rollout too large: " + str(identity["size"]) + " bytes > " + str(max_bytes))
         with os.fdopen(fd, "rb") as handle:
             fd = -1
-            return size, handle.read()
+            data = handle.read(identity["size"] + 1)
+            assert_rollout_identity(
+                rollout_identity_from_stat(os.fstat(handle.fileno())),
+                identity,
+                "after read",
+            )
+            assert_rollout_path_identity(target, identity, "after read")
+            if len(data) != identity["size"]:
+                raise ValueError("rollout read did not match snapshot size")
+            return identity["size"], data
     finally:
         if fd != -1:
             os.close(fd)
@@ -1773,9 +1802,11 @@ def summary_record(kind, text, *, line_no, timestamp, session_id=""):
     record = {{"kind": kind, "line": line_no, "text": value, "timestamp": timestamp or ""}}
     if session_id:
         record["session_id"] = str(session_id)
-    match_text = normalize_text(signal_text, SUMMARY_MAX_TEXT_CHARS)
-    if match_text and match_text != value:
-        record["_match_text"] = match_text
+    if SUMMARY_SEARCH_KEYWORDS:
+        match_text = normalize_text(signal_text, 0).casefold()
+        record["_keyword_matched"] = any(
+            keyword in match_text for keyword in SUMMARY_SEARCH_KEYWORDS
+        )
     return record
 
 
@@ -1836,7 +1867,7 @@ def bounded_text_lines(handle, max_scan_bytes):
 
 
 def summarize_records(lines, line_offset=0):
-    keywords = [value.casefold() for value in SUMMARY_KEYWORDS if value]
+    keywords = SUMMARY_SEARCH_KEYWORDS
     matched = []
     matched_seen = set()
     signal_records = []
@@ -1906,8 +1937,7 @@ def summarize_records(lines, line_offset=0):
                 signal_records.append(record)
                 signal_seen.add(key)
 
-        text_value = str(record.get("_match_text") or record.get("text", ""))
-        if keywords and any(keyword in text_value.casefold() for keyword in keywords):
+        if keywords and record.get("_keyword_matched") is True:
             key = (str(record.get("kind", "")), int(record.get("line", 0)))
             if key not in matched_seen and (not SUMMARY_LIMIT or len(matched) < SUMMARY_LIMIT):
                 matched.append(record)
@@ -1925,7 +1955,7 @@ def summarize_records(lines, line_offset=0):
         if key in emitted:
             return
         payload = dict(record)
-        payload.pop("_match_text", None)
+        payload.pop("_keyword_matched", None)
         output.append(payload)
         emitted.add(key)
 
@@ -2188,6 +2218,11 @@ def summarize_rollout():
     rel = pathlib.PurePosixPath(str(CONFIG["rollout"]))
     normalized = rel.as_posix()
     print(ROLLOUT_SUMMARY_BEGIN)
+
+    def summary_error(message):
+        print(json.dumps({{"ok": False, "error": str(message)}}, separators=(",", ":"), sort_keys=True))
+        print(ROLLOUT_SUMMARY_END)
+
     if SUMMARY_MAX_TEXT_CHARS < 40 or SUMMARY_MAX_TEXT_CHARS > SUMMARY_MAX_TEXT_CHARS_LIMIT:
         print(json.dumps({{"ok": False, "error": "summary max text chars out of range"}}, separators=(",", ":"), sort_keys=True))
         print(ROLLOUT_SUMMARY_END)
@@ -2210,7 +2245,7 @@ def summarize_rollout():
         print(ROLLOUT_SUMMARY_END)
         return
 
-    keywords = [value.casefold() for value in SUMMARY_KEYWORDS if value]
+    keywords = SUMMARY_SEARCH_KEYWORDS
     matched = []
     matched_seen = set()
     signal_records = []
@@ -2222,13 +2257,18 @@ def summarize_rollout():
     last_task_complete_record = None
 
     try:
-        target_size = target.stat().st_size
         handle = open_rollout_text(target)
     except OSError:
-        print(json.dumps({{"ok": False, "error": "rollout unreadable"}}, separators=(",", ":"), sort_keys=True))
-        print(ROLLOUT_SUMMARY_END)
+        summary_error("rollout unreadable")
         return
     with handle:
+        try:
+            source_identity = rollout_identity_from_stat(os.fstat(handle.fileno()))
+        except (OSError, ValueError) as error:
+            summary_error(
+                "rollout unreadable" if isinstance(error, OSError) else str(error)
+            )
+            return
         for line_no, line in enumerate(bounded_text_lines(handle, SUMMARY_SCAN_BYTES), 1):
             try:
                 obj = json.loads(line)
@@ -2288,8 +2328,7 @@ def summarize_rollout():
                     signal_records.append(record)
                     signal_seen.add(key)
 
-            text_value = str(record.get("_match_text") or record.get("text", ""))
-            if keywords and any(keyword in text_value.casefold() for keyword in keywords):
+            if keywords and record.get("_keyword_matched") is True:
                 key = (str(record.get("kind", "")), int(record.get("line", 0)))
                 if key not in matched_seen and (not SUMMARY_LIMIT or len(matched) < SUMMARY_LIMIT):
                     matched.append(record)
@@ -2297,17 +2336,34 @@ def summarize_rollout():
             if SUMMARY_TAIL_RECORDS:
                 tail.append(record)
 
+        try:
+            assert_rollout_identity(
+                rollout_identity_from_stat(os.fstat(handle.fileno())),
+                source_identity,
+                "after summary scan",
+            )
+            assert_rollout_path_identity(
+                target,
+                source_identity,
+                "after summary scan",
+            )
+        except (OSError, ValueError) as error:
+            summary_error(
+                "rollout unreadable" if isinstance(error, OSError) else str(error)
+            )
+            return
+
     print(json.dumps({{"ok": True}}, separators=(",", ":"), sort_keys=True))
     print(json.dumps(
         {{
             "kind": "scan_meta",
             "line": 0,
             "scan_bytes": SUMMARY_SCAN_BYTES,
-            "scan_truncated": bool(SUMMARY_SCAN_BYTES and target_size > SUMMARY_SCAN_BYTES),
-            "source_bytes": target_size,
-            "text": "scan_truncated=" + str(bool(SUMMARY_SCAN_BYTES and target_size > SUMMARY_SCAN_BYTES)).lower()
+            "scan_truncated": bool(SUMMARY_SCAN_BYTES and source_identity["size"] > SUMMARY_SCAN_BYTES),
+            "source_bytes": source_identity["size"],
+            "text": "scan_truncated=" + str(bool(SUMMARY_SCAN_BYTES and source_identity["size"] > SUMMARY_SCAN_BYTES)).lower()
                 + " scan_bytes=" + str(SUMMARY_SCAN_BYTES)
-                + " source_bytes=" + str(target_size),
+                + " source_bytes=" + str(source_identity["size"]),
             "timestamp": "",
         }},
         separators=(",", ":"),
@@ -2322,7 +2378,7 @@ def summarize_rollout():
         if key in emitted:
             return
         payload = dict(record)
-        payload.pop("_match_text", None)
+        payload.pop("_keyword_matched", None)
         print(json.dumps(payload, separators=(",", ":"), sort_keys=True))
         emitted.add(key)
 
@@ -2418,6 +2474,14 @@ def iter_session_meta():
                     session_id = str(payload.get("id", ""))
                     cwd = str(payload.get("cwd", ""))
                     break
+                has_unread_bytes = (
+                    rollout_identity_from_stat(os.fstat(handle.fileno()))["size"]
+                    > handle.tell()
+                )
+            if not session_id and SESSION_META_SCAN_BYTES and has_unread_bytes:
+                print(json.dumps({{"kind": "error", "error": SESSION_META_SCAN_TRUNCATED_ERROR, "rollout": rel.as_posix()}}, separators=(",", ":"), sort_keys=True))
+                print(SESSION_META_END)
+                return
             if session_id:
                 count += 1
                 if LIMIT and count > LIMIT:
@@ -2643,7 +2707,16 @@ def _scan_session_meta_records(
                     session_id = str(payload.get("id", ""))
                     cwd = str(payload.get("cwd", ""))
                     break
+                has_unread_bytes = (
+                    _rollout_identity_from_stat(os.fstat(handle.fileno())).size
+                    > handle.tell()
+                )
             if not session_id:
+                if MAX_SESSION_META_SCAN_BYTES and has_unread_bytes:
+                    raise SessionMetaRolloutError(
+                        SESSION_META_SCAN_TRUNCATED_ERROR,
+                        rollout=rollout_relative_path.as_posix(),
+                    )
                 continue
             rows.append(
                 {
@@ -3129,7 +3202,11 @@ def cmd_fetch_rollout(args: argparse.Namespace) -> int:
                 "max_fetch_rollout_bytes": MAX_FETCH_ROLLOUT_BYTES,
             }
             try:
-                result = _run_remote_python(alias, payload)
+                result = _run_remote_python_bounded(
+                    alias,
+                    payload,
+                    max_stdout_bytes=MAX_REMOTE_FETCH_ROLLOUT_STDOUT_BYTES,
+                )
             except RuntimeError as error:
                 print(f"host={alias}", file=sys.stderr)
                 print(f"rollout={rollout_relative_path.as_posix()}", file=sys.stderr)
@@ -3518,6 +3595,7 @@ def _build_summary_record(
     line_no: int,
     timestamp: str,
     max_text_chars: int,
+    search_keywords: Iterable[str] | None = None,
     session_id: str = "",
 ) -> dict[str, Any] | None:
     signal_text = text
@@ -3536,9 +3614,21 @@ def _build_summary_record(
     }
     if session_id:
         record["session_id"] = session_id
-    match_text = _normalize_summary_text(signal_text, max_text_chars=max_text_chars)
-    if match_text and match_text != normalized:
-        record["_match_text"] = match_text
+    if search_keywords is None:
+        match_text = _normalize_summary_text(
+            signal_text,
+            max_text_chars=max_text_chars,
+        )
+        if match_text and match_text != normalized:
+            record["_match_text"] = match_text
+    elif search_keywords:
+        match_text = _normalize_summary_text(
+            signal_text,
+            max_text_chars=0,
+        ).casefold()
+        record["_keyword_matched"] = any(
+            keyword in match_text for keyword in search_keywords
+        )
     return record
 
 
@@ -3628,6 +3718,7 @@ def _summarize_rollout_records(
                 line_no=line_no,
                 timestamp=timestamp,
                 max_text_chars=max_text_chars,
+                search_keywords=search_keywords,
                 session_id=str(payload.get("id", "")),
             )
             continue
@@ -3644,6 +3735,7 @@ def _summarize_rollout_records(
                         line_no=line_no,
                         timestamp=timestamp,
                         max_text_chars=max_text_chars,
+                        search_keywords=search_keywords,
                     )
                     if kind == "assistant_message":
                         last_assistant_record = record
@@ -3658,6 +3750,7 @@ def _summarize_rollout_records(
                         line_no=line_no,
                         timestamp=timestamp,
                         max_text_chars=max_text_chars,
+                        search_keywords=search_keywords,
                     )
         elif record_type == "event_msg":
             payload = obj.get("payload", {})
@@ -3671,6 +3764,7 @@ def _summarize_rollout_records(
                         line_no=line_no,
                         timestamp=timestamp,
                         max_text_chars=max_text_chars,
+                        search_keywords=search_keywords,
                     )
                     last_task_complete_record = record
             elif payload_type == "user_message":
@@ -3682,6 +3776,7 @@ def _summarize_rollout_records(
                         line_no=line_no,
                         timestamp=timestamp,
                         max_text_chars=max_text_chars,
+                        search_keywords=search_keywords,
                     )
                     if record is not None:
                         last_user_record = record
@@ -3696,8 +3791,7 @@ def _summarize_rollout_records(
                 signal_seen.add(key)
 
         if search_keywords:
-            text_value = str(record.get("_match_text") or record.get("text", "")).casefold()
-            if any(keyword in text_value for keyword in search_keywords):
+            if record.get("_keyword_matched") is True:
                 key = (str(record.get("kind", "")), int(record.get("line", 0)))
                 if key not in matched_seen and (limit <= 0 or len(matched) < limit):
                     matched.append(record)
@@ -3717,7 +3811,7 @@ def _summarize_rollout_records(
             return
         emitted.add(key)
         safe_record = dict(record)
-        safe_record.pop("_match_text", None)
+        safe_record.pop("_keyword_matched", None)
         result.append(safe_record)
 
     append(session_meta_record)
@@ -4003,8 +4097,11 @@ def cmd_rollout_summary(args: argparse.Namespace) -> int:
     try:
         if HOSTS[alias]["kind"] == "local":
             codex_root = _local_codex_root()
-            source_bytes = _safe_rollout_path(codex_root, rollout_relative_path).stat().st_size
+            target = _safe_rollout_path(codex_root, rollout_relative_path)
             with _open_local_rollout_text(codex_root, rollout_relative_path) as handle:
+                source_identity = _rollout_identity_from_stat(
+                    os.fstat(handle.fileno())
+                )
                 records = _summarize_rollout_records(
                     lines=_bounded_text_lines(handle, MAX_ROLLOUT_SUMMARY_SCAN_BYTES),
                     keywords=args.keyword,
@@ -4012,10 +4109,20 @@ def cmd_rollout_summary(args: argparse.Namespace) -> int:
                     tail_records=args.tail_records,
                     max_text_chars=args.max_text_chars,
                 )
+                _assert_rollout_identity(
+                    _rollout_identity_from_stat(os.fstat(handle.fileno())),
+                    source_identity,
+                    phase="after summary scan",
+                )
+                _assert_rollout_path_identity(
+                    target,
+                    source_identity,
+                    phase="after summary scan",
+                )
             records.insert(
                 0,
                 _rollout_summary_scan_meta(
-                    source_bytes=source_bytes,
+                    source_bytes=source_identity.size,
                     scan_bytes=MAX_ROLLOUT_SUMMARY_SCAN_BYTES,
                 ),
             )
