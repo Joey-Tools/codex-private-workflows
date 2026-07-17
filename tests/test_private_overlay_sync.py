@@ -5778,6 +5778,36 @@ class PrivateOverlaySyncTests(unittest.TestCase):
         self.assertEqual(checked_out_repos, sync_rule_repos)
         self.assertEqual(checked_out_paths, sync_rule_repos)
 
+    def test_release_workflows_use_vm_backed_runners(self) -> None:
+        workflows = {
+            "scheduled sync-release": (
+                REPO_ROOT / ".github" / "workflows" / "scheduled-sync-release.yml",
+                "sync-release",
+            ),
+            "release build": (
+                REPO_ROOT / ".github" / "workflows" / "release.yml",
+                "release",
+            ),
+            "release publish": (
+                REPO_ROOT / ".github" / "workflows" / "release.yml",
+                "publish",
+            ),
+        }
+
+        for label, (path, job_name) in workflows.items():
+            with self.subTest(job=label):
+                workflow = path.read_text(encoding="utf-8")
+                job = re.search(
+                    rf"(?ms)^  {re.escape(job_name)}:\n(?P<body>.*?)(?=^  [-a-zA-Z0-9_]+:\n|\Z)",
+                    workflow,
+                )
+                self.assertIsNotNone(job)
+                runners = re.findall(
+                    r"(?m)^    runs-on: *([^\n]+?) *$",
+                    job.group("body"),
+                )
+                self.assertEqual(runners, ["ubuntu-latest"])
+
     def test_ci_validates_review_helper_on_minimum_python_across_platforms(
         self,
     ) -> None:

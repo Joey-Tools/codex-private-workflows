@@ -79,7 +79,7 @@ superseded_by:
 - Manifest-change validation applies the same 4 MiB raw and formatted payload limits to current and historical manifests, resolving exact Git commits and blobs before bounded reads.
 - Scheduled release repair is skipped whenever source synchronization changes the checkout, and the workflow revalidates `HEAD` plus the complete worktree immediately before packaging.
 - Scheduled sync redirects Python bytecode caches to the runner's temporary directory, so validation cannot pollute the release checkout, fail the full-worktree gate, or enter generated sync commits.
-- Private release validation and publication use the VM-backed `ubuntu-latest` runner; the lightweight `ubuntu-slim` container exposes mount/device boundaries that correctly trigger the installer's fail-closed quarantine cleanup and is not suitable for this full CI/CD build.
+- Private release validation, publication, and scheduled incomplete-release repair use the VM-backed `ubuntu-latest` runner; the lightweight `ubuntu-slim` container exposes mount/device boundaries that correctly trigger the installer's fail-closed quarantine cleanup and is not suitable for these full CI/CD builds.
 - Linux and macOS CI both exercise the platform-specific no-replace reconciliation path.
 - Strict builders and manifest validators disable Git replacement objects for every commit, tree, blob, ancestry, and diff read, so package and baseline identities cannot be redirected through `refs/replace`.
 - Release-manifest serialization rejects oversized string tokens before encoder materialization and streams formatted JSON into a bounded buffer; deep or oversized programmatic payloads fail with domain errors.
@@ -118,10 +118,11 @@ superseded_by:
 - Add a combined public/private manifest capacity gate when the private release job has both exact manifests; the installer already performs this aggregate preflight and fails safely, while repository CI currently proves capacity one owner at a time.
 
 ## Evidence
-- Repository suite — 1098 tests completed successfully, with 2 skipped, using Python 3.13.0 and test-only Git configuration that disables commit signing to avoid a host keybox dependency, after integrating the latest `origin/master`.
+- Repository suite — 1099 tests completed successfully, with 2 skipped, using Python 3.13.0 and test-only Git configuration that disables commit signing to avoid a host keybox dependency, after integrating the latest `origin/master`.
 - Reconciliation safety module — 282 tests passed as part of the repository suite.
 - Package builder safety module — 70 tests passed as part of the repository suite.
 - Private package module — 42 tests passed as part of the repository suite.
+- Private overlay sync module — 133 tests passed.
 - Manifest change validation module — 81 tests passed as part of the repository suite.
 - Release baseline validation module — 42 tests passed.
 - Authenticated historical Release validation — all 95 published archive/checksum pairs matched their corresponding Git manifests, with baseline `e7b5076298570eab39058ba652671b34d0acbb33`.
