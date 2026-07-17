@@ -27,6 +27,12 @@ superseded_by:
 - The synchronized aggregate-status contract accepts only an ordinary block
   mapping with one inline `working-directory` scalar under workflow/job
   `defaults.run`. Custom shells and unstructured YAML nodes fail closed.
+- `needs` block sequences support bare-dash ordinary job-ID scalars without
+  accepting partial results. Block-scalar payloads are excluded from physical
+  mapping-key checks by treating an explicit indentation indicator as the
+  minimum payload indent, while an implicit scalar still infers its indent from
+  the first non-empty line. The aggregate job requires one structural `steps`
+  block header while retaining ordinary quoted/spaced/commented spellings.
 
 ## Next Steps
 
@@ -43,6 +49,11 @@ superseded_by:
   (`17` tests each), Ruff, Python compilation, Actionlint checks for four valid
   flow-mapping variants and six valid alias/anchor/tag/block-scalar variants,
   project-journal validation, and diff checks.
+- The sequence/structure regression update passed both contract files (`17`
+  tests each), Ruff, Python compilation, and five Actionlint-valid needs,
+  `steps`, alias, and block-scalar-payload fixtures; project-journal validation
+  and diff checks also passed. The explicit-indentation payload regression also
+  passed focused contract tests, Ruff, and an Actionlint-valid de-indent fixture.
 - `scripts/sync_private_overlay_sources.py`
 - `personal_codex/private-sync-manifest.json`
 - `.github/workflows/ci.yml`
