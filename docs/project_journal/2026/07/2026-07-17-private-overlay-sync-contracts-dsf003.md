@@ -21,6 +21,7 @@ superseded_by:
 
 - Retrospective summary records no longer retain `_match_text`; the distinct private remote-host probe keeps its existing pre-signal behavior.
 - Truncated session metadata scans raise `SessionMetaRolloutError` with rollout evidence instead of returning an empty result.
+- Oversized binary JSONL records drain through the newline delimiter, so a bare carriage return cannot expose the remaining bytes as a new record.
 - The next private overlay release will also consume the merged public `wait_agent` timeout guidance from `codex-toolbox`.
 
 ## Next Steps
@@ -31,6 +32,7 @@ superseded_by:
 
 - https://github.com/Joey-Tools/codex-private-workflows/actions/runs/29550022797
 - https://github.com/Joey-Tools/codex-workflow-hygiene/pull/46
+- https://github.com/Joey-Tools/codex-workflow-hygiene/pull/47
 - https://github.com/Joey-Tools/codex-toolbox/pull/16
 - https://github.com/Joey-Tools/codex-review-workflows/pull/57
 - `tests/test_session_retrospective.py`
