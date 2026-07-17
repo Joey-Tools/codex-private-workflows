@@ -1472,14 +1472,16 @@ class SessionRetrospectiveTests(unittest.TestCase):
             )
 
             with mock.patch.object(REMOTE_PROBE, "MAX_SESSION_META_SCAN_BYTES", len(first) - 1):
-                rows = REMOTE_PROBE._iter_session_meta_records(
-                    codex_root=root,
-                    dates=[dt.date(2026, 5, 1)],
-                    limit=10,
-                    host="local",
-                )
-
-        self.assertEqual(rows, [])
+                with self.assertRaisesRegex(
+                    REMOTE_PROBE.SessionMetaRolloutError,
+                    "session metadata scan truncated",
+                ):
+                    REMOTE_PROBE._iter_session_meta_records(
+                        codex_root=root,
+                        dates=[dt.date(2026, 5, 1)],
+                        limit=10,
+                        host="local",
+                    )
 
     def test_explicit_sources_still_require_default_host_coverage(self) -> None:
         sources = MODULE.parse_sources(["local=/tmp/local", "miku-bot-dev=/tmp/miku"])
@@ -9835,11 +9837,15 @@ class SessionRetrospectiveTests(unittest.TestCase):
                     timestamp="2026-05-22T10:01:00Z",
                     max_text_chars=1200,
                     session_id="s1",
+                    search_keywords=["actionable findings"],
                 )
 
                 self.assertIsNotNone(record)
                 assert record is not None
-                self.assertEqual(record["_match_text"], prompt)
+                self.assertEqual(record["text"], "user message present")
+                self.assertTrue(record["_keyword_matched"])
+                self.assertNotIn("_match_text", record)
+                self.assertNotIn(prompt, json.dumps(record))
 
     def test_remote_probe_ignores_automation_prompt_before_signaling(self) -> None:
         for probe in (REMOTE_PROBE, REMOTE_HOST_CONTEXT_PROBE):
