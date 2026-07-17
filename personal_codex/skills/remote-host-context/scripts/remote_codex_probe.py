@@ -49,12 +49,30 @@ MAX_REMOTE_FETCH_ROLLOUT_CHUNK_STDOUT_BYTES = (
     4 * ((MAX_FETCH_ROLLOUT_CHUNK_BYTES + 2) // 3)
     + REMOTE_FETCH_ROLLOUT_FRAME_OVERHEAD_BYTES
 )
+MAX_REMOTE_SESSION_META_SERIALIZED_ROW_BYTES = 64 * 1024
+REMOTE_SESSION_META_FRAME_OVERHEAD_BYTES = 64 * 1024
+MAX_REMOTE_SESSION_META_STDOUT_BYTES = (
+    (MAX_SESSION_META_LIMIT + 1) * MAX_REMOTE_SESSION_META_SERIALIZED_ROW_BYTES
+    + REMOTE_SESSION_META_FRAME_OVERHEAD_BYTES
+)
 REMOTE_CHUNKED_SUMMARY_FRAME_OVERHEAD_BYTES = 64 * 1024
 MAX_ROLLOUT_SUMMARY_LIMIT = 200
 MAX_ROLLOUT_SUMMARY_SCAN_BYTES = 2 * 1024 * 1024
 MAX_ROLLOUT_SUMMARY_LINE_BYTES = 1024 * 1024
 MAX_ROLLOUT_SUMMARY_TAIL_RECORDS = 50
 MAX_ROLLOUT_SUMMARY_TEXT_CHARS = 1200
+# JSON may encode one non-BMP character as two six-byte surrogate escapes. The
+# record-count term covers both bounded selection lists plus fixed final rows.
+MAX_REMOTE_ROLLOUT_SUMMARY_SERIALIZED_BYTES = (
+    12 * MAX_ROLLOUT_SUMMARY_SCAN_BYTES
+    + (2 * MAX_ROLLOUT_SUMMARY_LIMIT + 4)
+    * (12 * MAX_ROLLOUT_SUMMARY_TEXT_CHARS + 1024)
+)
+REMOTE_ROLLOUT_SUMMARY_FRAME_OVERHEAD_BYTES = 64 * 1024
+MAX_REMOTE_ROLLOUT_SUMMARY_STDOUT_BYTES = (
+    MAX_REMOTE_ROLLOUT_SUMMARY_SERIALIZED_BYTES
+    + REMOTE_ROLLOUT_SUMMARY_FRAME_OVERHEAD_BYTES
+)
 MAX_SESSION_META_SCAN_BYTES = 256 * 1024
 REMOTE_PREFLIGHT_TIMEOUT_SECONDS = 15
 REMOTE_COMMAND_TIMEOUT_SECONDS = 60
@@ -133,6 +151,8 @@ SESSION_META_LIMIT_TRUNCATED_REASON = "session_meta_limit_truncated"
 SESSION_META_SCAN_TRUNCATED_ERROR = (
     "session-meta scan truncated before metadata was found"
 )
+SESSION_META_OUTPUT_ROW_TOO_LARGE_ERROR = "session-meta output row too large"
+ROLLOUT_SUMMARY_OUTPUT_TOO_LARGE_ERROR = "rollout summary output too large"
 REMOTE_FETCH_ROLLOUT_BEGIN = "__REMOTE_CODEX_PROBE_FETCH_ROLLOUT_BEGIN__"
 REMOTE_FETCH_ROLLOUT_END = "__REMOTE_CODEX_PROBE_FETCH_ROLLOUT_END__"
 REMOTE_FETCH_ROLLOUT_CHUNK_BEGIN = "__REMOTE_CODEX_PROBE_FETCH_ROLLOUT_CHUNK_BEGIN__"
@@ -431,13 +451,19 @@ def _open_pinned_codex_root(codex_root: pathlib.Path) -> int:
     root_entry = expanded_root.lstat()
     if stat.S_ISLNK(root_entry.st_mode):
         raise ValueError("Codex root is a symlink")
-    resolved_root = expanded_root.resolve(strict=True)
-    observed = os.stat(resolved_root, follow_symlinks=False)
+    try:
+        resolved_root = expanded_root.resolve(strict=True)
+        observed = os.stat(resolved_root, follow_symlinks=False)
+    except (FileNotFoundError, RuntimeError) as error:
+        raise ValueError("Codex root changed after initial inspection") from error
     if not stat.S_ISDIR(observed.st_mode):
         raise ValueError("Codex root is not a directory")
     if (observed.st_dev, observed.st_ino) != (root_entry.st_dev, root_entry.st_ino):
         raise ValueError("Codex root changed during resolution")
-    fd = os.open(str(resolved_root), _directory_open_flags())
+    try:
+        fd = os.open(str(resolved_root), _directory_open_flags())
+    except FileNotFoundError as error:
+        raise ValueError("Codex root changed after initial inspection") from error
     try:
         opened = os.fstat(fd)
         if not stat.S_ISDIR(opened.st_mode):
@@ -1331,12 +1357,16 @@ AUTHORIZED_SOURCE_BYTES_RAW = CONFIG.get("authorized_source_bytes")
 AUTHORIZED_SOURCE_BYTES = None if AUTHORIZED_SOURCE_BYTES_RAW is None else int(AUTHORIZED_SOURCE_BYTES_RAW)
 OUTPUT_HOST = str(CONFIG.get("output_host", ""))
 SESSION_META_SCAN_BYTES = int(CONFIG.get("session_meta_scan_bytes", 0))
+SESSION_META_SERIALIZED_ROW_BYTES = {MAX_REMOTE_SESSION_META_SERIALIZED_ROW_BYTES}
+SESSION_META_OUTPUT_ROW_TOO_LARGE_ERROR = {SESSION_META_OUTPUT_ROW_TOO_LARGE_ERROR!r}
 SUMMARY_LIMIT = int(CONFIG.get("summary_limit", 0))
 SUMMARY_SCAN_BYTES = int(CONFIG.get("summary_scan_bytes", 0))
 SUMMARY_LINE_BYTES = int(CONFIG.get("summary_line_bytes", 0)) or {MAX_ROLLOUT_SUMMARY_LINE_BYTES}
 SUMMARY_TAIL_RECORDS = int(CONFIG.get("summary_tail_records", 0))
 SUMMARY_MAX_TEXT_CHARS = int(CONFIG.get("summary_max_text_chars", 0))
 SUMMARY_MAX_TEXT_CHARS_LIMIT = {MAX_ROLLOUT_SUMMARY_TEXT_CHARS}
+ROLLOUT_SUMMARY_SERIALIZED_BYTES = {MAX_REMOTE_ROLLOUT_SUMMARY_SERIALIZED_BYTES}
+ROLLOUT_SUMMARY_OUTPUT_TOO_LARGE_ERROR = {ROLLOUT_SUMMARY_OUTPUT_TOO_LARGE_ERROR!r}
 SUMMARY_KEYWORDS = [str(value) for value in CONFIG.get("summary_keywords", [])]
 SUMMARY_SEARCH_KEYWORDS = [value.casefold() for value in SUMMARY_KEYWORDS if value]
 CHUNK_BYTES = int(CONFIG.get("chunk_bytes", 0))
@@ -1416,13 +1446,19 @@ def open_pinned_codex_root():
     root_entry = ROOT.lstat()
     if stat.S_ISLNK(root_entry.st_mode):
         raise ValueError("Codex root is a symlink")
-    resolved_root = ROOT.resolve(strict=True)
-    observed = os.stat(resolved_root, follow_symlinks=False)
+    try:
+        resolved_root = ROOT.resolve(strict=True)
+        observed = os.stat(resolved_root, follow_symlinks=False)
+    except (FileNotFoundError, RuntimeError) as error:
+        raise ValueError("Codex root changed after initial inspection") from error
     if not stat.S_ISDIR(observed.st_mode):
         raise ValueError("Codex root is not a directory")
     if (observed.st_dev, observed.st_ino) != (root_entry.st_dev, root_entry.st_ino):
         raise ValueError("Codex root changed during resolution")
-    fd = os.open(str(resolved_root), directory_open_flags())
+    try:
+        fd = os.open(str(resolved_root), directory_open_flags())
+    except FileNotFoundError as error:
+        raise ValueError("Codex root changed after initial inspection") from error
     try:
         opened = os.fstat(fd)
         if not stat.S_ISDIR(opened.st_mode):
@@ -2033,7 +2069,7 @@ def read_bounded_session_meta(handle, max_scan_bytes):
         remaining = max_scan_bytes - scanned
         if remaining <= 0:
             return "", "", rollout_identity_from_stat(os.fstat(handle.fileno()))["size"] > handle.tell()
-        raw_line = handle.readline(remaining + 1)
+        raw_line = handle.readline(remaining)
         if not raw_line:
             return "", "", False
         raw_bytes = raw_line.encode("utf-8", "surrogatepass") if isinstance(raw_line, str) else bytes(raw_line)
@@ -2572,8 +2608,24 @@ def summarize_rollout():
             )
             return
 
-    print(json.dumps({{"ok": True}}, separators=(",", ":"), sort_keys=True))
-    print(json.dumps(
+    serialized_lines = []
+    serialized_bytes = 0
+    output_too_large = False
+
+    def append_serialized(item):
+        nonlocal serialized_bytes, output_too_large
+        if output_too_large:
+            return
+        line = json.dumps(item, separators=(",", ":"), sort_keys=True)
+        line_bytes = len(line.encode("utf-8")) + 1
+        if serialized_bytes + line_bytes > ROLLOUT_SUMMARY_SERIALIZED_BYTES:
+            output_too_large = True
+            return
+        serialized_lines.append(line)
+        serialized_bytes += line_bytes
+
+    append_serialized({{"ok": True}})
+    append_serialized(
         {{
             "kind": "scan_meta",
             "line": 0,
@@ -2584,10 +2636,8 @@ def summarize_rollout():
                 + " scan_bytes=" + str(SUMMARY_SCAN_BYTES)
                 + " source_bytes=" + str(source_identity["size"]),
             "timestamp": "",
-        }},
-        separators=(",", ":"),
-        sort_keys=True,
-    ))
+        }}
+    )
     emitted = set()
 
     def emit(record):
@@ -2598,7 +2648,7 @@ def summarize_rollout():
             return
         payload = dict(record)
         payload.pop("_keyword_matched", None)
-        print(json.dumps(payload, separators=(",", ":"), sort_keys=True))
+        append_serialized(payload)
         emitted.add(key)
 
     emit(session_meta_record)
@@ -2613,6 +2663,11 @@ def summarize_rollout():
     emit(last_assistant_record)
     if last_assistant_record is None:
         emit(last_task_complete_record)
+    if output_too_large:
+        summary_error(ROLLOUT_SUMMARY_OUTPUT_TOO_LARGE_ERROR)
+        return
+    for line in serialized_lines:
+        print(line)
     print(ROLLOUT_SUMMARY_END)
 
 
@@ -2623,6 +2678,15 @@ def iter_session_meta():
         print(json.dumps({{"kind": "error", "error": "session directory unreadable"}}, separators=(",", ":"), sort_keys=True))
         print(SESSION_META_END)
         raise SystemExit(0)
+
+    def emit_session_meta_item(item):
+        serialized = json.dumps(item, separators=(",", ":"), sort_keys=True)
+        if len(serialized.encode("utf-8")) > SESSION_META_SERIALIZED_ROW_BYTES:
+            print(json.dumps({{"kind": "error", "error": SESSION_META_OUTPUT_ROW_TOO_LARGE_ERROR}}, separators=(",", ":"), sort_keys=True))
+            print(SESSION_META_END)
+            return False
+        print(serialized)
+        return True
 
     try:
         root_fd = open_pinned_codex_root()
@@ -2643,8 +2707,6 @@ def iter_session_meta():
                     ),
                     reverse=True,
                 )
-        except FileNotFoundError:
-            return []
         except OSError:
             session_directory_unreadable()
 
@@ -2674,11 +2736,16 @@ def iter_session_meta():
                 except FileNotFoundError:
                     continue
                 except (OSError, ValueError):
-                    print(json.dumps({{"kind": "error", "error": "rollout unreadable", "rollout": rel.as_posix()}}, separators=(",", ":"), sort_keys=True))
-                    print(SESSION_META_END)
+                    if emit_session_meta_item({{"kind": "error", "error": "rollout unreadable", "rollout": rel.as_posix()}}):
+                        print(SESSION_META_END)
                     return True
-                handle = PinnedRolloutHandle(file_fd, os.dup(directory_fd), name)
                 try:
+                    try:
+                        parent_fd = os.dup(directory_fd)
+                    except OSError:
+                        os.close(file_fd)
+                        raise
+                    handle = PinnedRolloutHandle(file_fd, parent_fd, name)
                     with handle:
                         identity = rollout_identity_from_stat(os.fstat(handle.fileno()))
                         session_id, cwd, scan_truncated = read_bounded_session_meta(
@@ -2687,21 +2754,22 @@ def iter_session_meta():
                         )
                         handle.assert_identity(identity, "after session-meta scan")
                 except (OSError, ValueError):
-                    print(json.dumps({{"kind": "error", "error": "rollout unreadable", "rollout": rel.as_posix()}}, separators=(",", ":"), sort_keys=True))
-                    print(SESSION_META_END)
+                    if emit_session_meta_item({{"kind": "error", "error": "rollout unreadable", "rollout": rel.as_posix()}}):
+                        print(SESSION_META_END)
                     return True
                 if not session_id:
                     if scan_truncated:
-                        print(json.dumps({{"kind": "error", "error": SESSION_META_SCAN_TRUNCATED_ERROR, "rollout": rel.as_posix()}}, separators=(",", ":"), sort_keys=True))
-                        print(SESSION_META_END)
+                        if emit_session_meta_item({{"kind": "error", "error": SESSION_META_SCAN_TRUNCATED_ERROR, "rollout": rel.as_posix()}}):
+                            print(SESSION_META_END)
                         return True
                     continue
                 count += 1
                 if LIMIT and count > LIMIT:
-                    print(json.dumps({{"kind": "truncation", "reason": SESSION_META_LIMIT_TRUNCATED_REASON, "date": date_text, "limit": LIMIT}}, separators=(",", ":"), sort_keys=True))
-                    print(SESSION_META_END)
+                    if emit_session_meta_item({{"kind": "truncation", "reason": SESSION_META_LIMIT_TRUNCATED_REASON, "date": date_text, "limit": LIMIT}}):
+                        print(SESSION_META_END)
                     return True
-                print(json.dumps({{"date": date_text, "session_id": session_id, "cwd": cwd, "rollout": rel.as_posix()}}, separators=(",", ":"), sort_keys=True))
+                if not emit_session_meta_item({{"date": date_text, "session_id": session_id, "cwd": cwd, "rollout": rel.as_posix()}}):
+                    return True
         finally:
             os.close(directory_fd)
         return False
@@ -2835,16 +2903,6 @@ def _remote_python_argv(alias: str) -> list[str]:
     ]
 
 
-def _run_remote_python(
-    alias: str, payload: dict[str, object]
-) -> subprocess.CompletedProcess[str]:
-    return _run_subprocess_text(
-        _remote_python_argv(alias),
-        input_text=_remote_python_script(payload),
-        timeout_seconds=REMOTE_COMMAND_TIMEOUT_SECONDS,
-    )
-
-
 def _run_remote_python_bounded(
     alias: str,
     payload: dict[str, object],
@@ -2887,8 +2945,6 @@ def _scan_session_meta_records(
                     ),
                     reverse=True,
                 )
-        except FileNotFoundError:
-            return []
         except OSError as exc:
             raise SessionMetaRolloutError("session directory unreadable") from exc
 
@@ -2928,8 +2984,13 @@ def _scan_session_meta_records(
                         "rollout unreadable",
                         rollout=rollout_relative_path.as_posix(),
                     ) from exc
-                handle = _PinnedRolloutHandle(file_fd, os.dup(directory_fd), name)
                 try:
+                    try:
+                        parent_fd = os.dup(directory_fd)
+                    except OSError:
+                        os.close(file_fd)
+                        raise
+                    handle = _PinnedRolloutHandle(file_fd, parent_fd, name)
                     with handle:
                         identity = _rollout_identity_from_stat(
                             os.fstat(handle.fileno())
@@ -3392,7 +3453,11 @@ def cmd_session_meta(args: argparse.Namespace) -> int:
                 "session_meta_scan_bytes": MAX_SESSION_META_SCAN_BYTES,
             }
             try:
-                result = _run_remote_python(alias, payload)
+                result = _run_remote_python_bounded(
+                    alias,
+                    payload,
+                    max_stdout_bytes=MAX_REMOTE_SESSION_META_STDOUT_BYTES,
+                )
             except RuntimeError as error:
                 print(f"host={alias}", file=sys.stderr)
                 print(f"error={error}", file=sys.stderr)
@@ -3953,7 +4018,7 @@ def _read_bounded_session_meta(
                 _rollout_identity_from_stat(os.fstat(handle.fileno())).size
                 > handle.tell(),
             )
-        raw_line = handle.readline(remaining + 1)
+        raw_line = handle.readline(remaining)
         if not raw_line:
             return "", "", False
         raw_bytes = (
@@ -4473,7 +4538,11 @@ def cmd_rollout_summary(args: argparse.Namespace) -> int:
                 "summary_max_text_chars": args.max_text_chars,
             }
             try:
-                result = _run_remote_python(alias, payload)
+                result = _run_remote_python_bounded(
+                    alias,
+                    payload,
+                    max_stdout_bytes=MAX_REMOTE_ROLLOUT_SUMMARY_STDOUT_BYTES,
+                )
             except RuntimeError as error:
                 print(f"host={alias}", file=sys.stderr)
                 print(f"rollout={rollout_relative_path.as_posix()}", file=sys.stderr)

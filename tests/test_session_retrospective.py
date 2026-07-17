@@ -60,6 +60,12 @@ VALID_SESSION_ID = f"{MODULE.SESSION_REF_PREFIX}:{'c' * 20}"
 VALID_SOURCE_HASH = f"{MODULE.SOURCE_HASH_PREFIX}:{'d' * 20}"
 
 
+def session_meta_runner_name(probe: object) -> str:
+    if probe is REMOTE_HOST_CONTEXT_PROBE:
+        return "_run_remote_python_bounded"
+    return "_run_remote_python"
+
+
 def write_jsonl(path: Path, rows: list[dict]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("\n".join(json.dumps(row) for row in rows) + "\n", encoding="utf-8")
@@ -699,7 +705,7 @@ class SessionRetrospectiveTests(unittest.TestCase):
 
                 with mock.patch.object(
                     probe,
-                    "_run_remote_python",
+                    session_meta_runner_name(probe),
                     return_value=subprocess.CompletedProcess(
                         args=["ssh"],
                         returncode=0,
@@ -726,7 +732,7 @@ class SessionRetrospectiveTests(unittest.TestCase):
 
                 with mock.patch.object(
                     probe,
-                    "_run_remote_python",
+                    session_meta_runner_name(probe),
                     return_value=subprocess.CompletedProcess(
                         args=["ssh"],
                         returncode=1,
@@ -1002,7 +1008,7 @@ class SessionRetrospectiveTests(unittest.TestCase):
 
                 with mock.patch.object(
                     probe,
-                    "_run_remote_python",
+                    session_meta_runner_name(probe),
                     return_value=subprocess.CompletedProcess(args=["ssh"], returncode=0, stdout=remote_output, stderr=""),
                 ), mock.patch.object(sys, "stderr", stderr), mock.patch.object(sys, "stdout", stdout):
                     result = probe.cmd_session_meta(
@@ -1044,7 +1050,7 @@ class SessionRetrospectiveTests(unittest.TestCase):
 
                     with mock.patch.object(probe, "_local_codex_root", return_value=root), mock.patch.object(
                         probe,
-                        "_run_remote_python",
+                        session_meta_runner_name(probe),
                         return_value=subprocess.CompletedProcess(args=["ssh"], returncode=0, stdout=remote_output, stderr=""),
                     ), mock.patch.object(sys, "stderr", stderr), mock.patch.object(sys, "stdout", stdout):
                         result = probe.cmd_session_meta(
