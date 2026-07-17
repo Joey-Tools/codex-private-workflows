@@ -726,10 +726,10 @@ class PrivateOverlayPackageTests(unittest.TestCase):
         retained_archive = self.root / "verified.tar.gz"
         real_extract = MODULE._safe_extract_archive_snapshot
 
-        def replace_archive_path(snapshot, extract_root):
+        def replace_archive_path(snapshot, extract_root, destination_anchor):
             archive_path.rename(retained_archive)
             malicious_archive.rename(archive_path)
-            return real_extract(snapshot, extract_root)
+            return real_extract(snapshot, extract_root, destination_anchor)
 
         with (
             mock.patch.object(MODULE, "find_latest_release", return_value={}),
@@ -1145,6 +1145,27 @@ class PrivateOverlayPackageTests(unittest.TestCase):
 
         self.assertTrue(destination.is_symlink())
         self.assertEqual(list(outside.iterdir()), [])
+
+    def test_safe_extract_rejects_symlink_destination_ancestor(self) -> None:
+        archive_path = self.build_private_package()
+        outside = self.root / "ancestor-outside"
+        nested_outside = outside / "nested"
+        nested_outside.mkdir(parents=True)
+        sentinel = outside / "sentinel.txt"
+        sentinel.write_text("keep\n", encoding="utf-8")
+        linked_ancestor = self.root / "linked-ancestor"
+        linked_ancestor.symlink_to(outside, target_is_directory=True)
+        destination = linked_ancestor / "nested" / "extract"
+
+        with self.assertRaisesRegex(
+            MODULE.SyncError,
+            "unsafe archive destination parent",
+        ):
+            MODULE.safe_extract_archive(archive_path, destination)
+
+        self.assertEqual(sentinel.read_text(encoding="utf-8"), "keep\n")
+        self.assertEqual(list(nested_outside.iterdir()), [])
+        self.assertFalse(destination.exists())
 
     def test_safe_extract_destination_swap_does_not_write_redirected_tree(self) -> None:
         archive_path = self.build_private_package()
