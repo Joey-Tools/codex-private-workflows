@@ -14,8 +14,8 @@ superseded_by:
 
 ## Summary
 
-- Integrated concurrent private sync work from PRs #102, #103, #105, and #106 before finalizing this branch.
-- Kept only the remaining raw-byte hashing guardrail, its regressions, and stronger structured rollout error evidence in PR #104.
+- Integrated concurrent private sync work from PRs #102, #103, #105, #106, #107, and #108 before finalizing this branch.
+- PR #108 already carries the production raw-byte and unreadable-root guardrails, so PR #104 now keeps only the private regression coverage and stronger structured rollout error evidence that are not on `master`.
 
 ## Current State
 
@@ -36,6 +36,8 @@ superseded_by:
 - https://github.com/Joey-Tools/codex-private-workflows/pull/103
 - https://github.com/Joey-Tools/codex-private-workflows/pull/105
 - https://github.com/Joey-Tools/codex-private-workflows/pull/106
+- https://github.com/Joey-Tools/codex-private-workflows/pull/107
+- https://github.com/Joey-Tools/codex-private-workflows/pull/108
 - https://github.com/Joey-Tools/codex-private-workflows/actions/runs/29550022797
 - https://github.com/Joey-Tools/codex-workflow-hygiene/pull/46
 - https://github.com/Joey-Tools/codex-workflow-hygiene/pull/47
