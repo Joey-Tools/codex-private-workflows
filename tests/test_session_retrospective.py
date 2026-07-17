@@ -9926,30 +9926,24 @@ class SessionRetrospectiveTests(unittest.TestCase):
     def test_remote_probes_handle_normal_review_prompt_without_signaling(self) -> None:
         prompt = "Review the code changes against the base branch and report only actionable findings."
 
-        retrospective_record = REMOTE_PROBE._build_summary_record(
-            kind="user_message",
-            text=prompt,
-            line_no=1,
-            timestamp="2026-05-22T10:01:00Z",
-            max_text_chars=1200,
-            session_id="s1",
-        )
-        remote_host_record = REMOTE_HOST_CONTEXT_PROBE._build_summary_record(
-            kind="user_message",
-            text=prompt,
-            line_no=1,
-            timestamp="2026-05-22T10:01:00Z",
-            max_text_chars=1200,
-            session_id="s1",
-        )
+        for probe in (REMOTE_PROBE, REMOTE_HOST_CONTEXT_PROBE):
+            with self.subTest(probe=probe.__name__):
+                record = probe._build_summary_record(
+                    kind="user_message",
+                    text=prompt,
+                    line_no=1,
+                    timestamp="2026-05-22T10:01:00Z",
+                    max_text_chars=1200,
+                    session_id="s1",
+                    search_keywords=["actionable findings"],
+                )
 
-        self.assertIsNotNone(retrospective_record)
-        self.assertIsNotNone(remote_host_record)
-        assert retrospective_record is not None
-        assert remote_host_record is not None
-        self.assertNotIn("_match_text", retrospective_record)
-        self.assertNotIn("_keyword_matched", retrospective_record)
-        self.assertEqual(remote_host_record["_match_text"], prompt)
+                self.assertIsNotNone(record)
+                assert record is not None
+                self.assertEqual(record["text"], "user message present")
+                self.assertTrue(record["_keyword_matched"])
+                self.assertNotIn("_match_text", record)
+                self.assertNotIn(prompt, json.dumps(record))
 
     def test_remote_probe_ignores_automation_prompt_before_signaling(self) -> None:
         for probe in (REMOTE_PROBE, REMOTE_HOST_CONTEXT_PROBE):

@@ -14,16 +14,16 @@ superseded_by:
 
 ## Summary
 
-- Synchronized pending canonical retrospective snapshot-safety and review-wait continuity changes into the private overlay.
-- Aligned two private-only retrospective tests with the canonical fail-closed and hidden-signal contracts.
+- Integrated concurrent private sync work from PRs #102, #103, #105, and #106 before finalizing this branch.
+- Kept only the remaining raw-byte hashing guardrail, its regressions, and stronger structured rollout error evidence in PR #104.
 
 ## Current State
 
-- Retrospective summary records no longer retain `_match_text`; the distinct private remote-host probe keeps its existing pre-signal behavior.
+- Retrospective summary records no longer retain raw hidden-signal text.
 - Truncated session metadata scans raise `SessionMetaRolloutError` with rollout evidence instead of returning an empty result.
 - Oversized binary JSONL records drain through the newline delimiter, so a bare carriage return cannot expose the remaining bytes as a new record.
 - Rollout hashing readers require binary input, and raw-byte SHA-256 proofs are covered for CRLF plus invalid UTF-8 locally and in the embedded remote probe.
-- The next private overlay release will also consume the merged public `wait_agent` timeout guidance from `codex-toolbox`.
+- Private `master` already contains the merged `wait_agent` timeout guidance through PR #106.
 
 ## Next Steps
 
@@ -32,6 +32,10 @@ superseded_by:
 ## Evidence
 
 - https://github.com/Joey-Tools/codex-private-workflows/pull/104
+- https://github.com/Joey-Tools/codex-private-workflows/pull/102
+- https://github.com/Joey-Tools/codex-private-workflows/pull/103
+- https://github.com/Joey-Tools/codex-private-workflows/pull/105
+- https://github.com/Joey-Tools/codex-private-workflows/pull/106
 - https://github.com/Joey-Tools/codex-private-workflows/actions/runs/29550022797
 - https://github.com/Joey-Tools/codex-workflow-hygiene/pull/46
 - https://github.com/Joey-Tools/codex-workflow-hygiene/pull/47
