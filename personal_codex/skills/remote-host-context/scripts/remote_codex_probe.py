@@ -2064,18 +2064,27 @@ def summary_record_has_signal(record):
 def read_bounded_session_meta(handle, max_scan_bytes):
     if max_scan_bytes < 1:
         raise ValueError("session-meta scan bytes must be positive")
+    file_descriptor = handle.fileno()
+    start_offset = os.lseek(file_descriptor, 0, os.SEEK_CUR)
+    chunks = []
     scanned = 0
-    while True:
+    while scanned < max_scan_bytes:
         remaining = max_scan_bytes - scanned
-        if remaining <= 0:
-            return "", "", rollout_identity_from_stat(os.fstat(handle.fileno()))["size"] > handle.tell()
-        raw_line = handle.readline(remaining)
-        if not raw_line:
-            return "", "", False
-        raw_bytes = raw_line.encode("utf-8", "surrogatepass") if isinstance(raw_line, str) else bytes(raw_line)
-        if len(raw_bytes) > remaining or not raw_bytes.endswith(b"\\n"):
+        chunk = os.read(file_descriptor, remaining)
+        if not chunk:
+            break
+        chunks.append(chunk)
+        scanned += len(chunk)
+    prefix = b"".join(chunks)
+    source_size = rollout_identity_from_stat(os.fstat(file_descriptor))["size"]
+    cursor = 0
+    while cursor < len(prefix):
+        line_end = prefix.find(b"\\n", cursor)
+        if line_end < 0:
             return "", "", True
-        scanned += len(raw_bytes)
+        line_end += 1
+        raw_bytes = prefix[cursor:line_end]
+        cursor = line_end
         try:
             obj = json.loads(raw_bytes.decode("utf-8", "replace"))
         except json.JSONDecodeError:
@@ -2085,8 +2094,9 @@ def read_bounded_session_meta(handle, max_scan_bytes):
         payload = obj.get("payload", {{}})
         session_id = str(payload.get("id", ""))
         cwd = str(payload.get("cwd", ""))
-        has_unread_bytes = rollout_identity_from_stat(os.fstat(handle.fileno()))["size"] > handle.tell()
+        has_unread_bytes = source_size > start_offset + cursor
         return session_id, cwd, bool(not session_id and has_unread_bytes)
+    return "", "", source_size > start_offset + len(prefix)
 
 
 def bounded_text_lines(handle, max_scan_bytes):
@@ -2918,6 +2928,28 @@ def _run_remote_python_bounded(
     )
 
 
+def _validated_session_meta_output_row(
+    *,
+    date: str,
+    session_id: str,
+    cwd: str,
+    rollout: str,
+) -> dict[str, str]:
+    row = {
+        "date": date,
+        "session_id": session_id,
+        "cwd": cwd,
+        "rollout": rollout,
+    }
+    serialized = json.dumps(row, separators=(",", ":"), sort_keys=True)
+    if (
+        len(serialized.encode("utf-8"))
+        > MAX_REMOTE_SESSION_META_SERIALIZED_ROW_BYTES
+    ):
+        raise SessionMetaRolloutError(SESSION_META_OUTPUT_ROW_TOO_LARGE_ERROR)
+    return row
+
+
 def _scan_session_meta_records(
     *,
     codex_root: pathlib.Path,
@@ -3015,15 +3047,13 @@ def _scan_session_meta_records(
                             rollout=rollout_relative_path.as_posix(),
                         )
                     continue
-                rows.append(
-                    {
-                        "host": host,
-                        "date": date_value.strftime(DATE_FORMAT),
-                        "session_id": session_id,
-                        "cwd": cwd,
-                        "rollout": rollout_relative_path.as_posix(),
-                    }
+                output_row = _validated_session_meta_output_row(
+                    date=date_value.strftime(DATE_FORMAT),
+                    session_id=session_id,
+                    cwd=cwd,
+                    rollout=rollout_relative_path.as_posix(),
                 )
+                rows.append({"host": host, **output_row})
                 if limit and len(rows) > limit:
                     return SessionMetaScan(rows=rows[:limit], truncated=True)
         finally:
@@ -4008,27 +4038,27 @@ def _read_bounded_session_meta(
 ) -> tuple[str, str, bool]:
     if max_scan_bytes < 1:
         raise ValueError("session-meta scan bytes must be positive")
+    file_descriptor = handle.fileno()
+    start_offset = os.lseek(file_descriptor, 0, os.SEEK_CUR)
+    chunks: list[bytes] = []
     scanned = 0
-    while True:
+    while scanned < max_scan_bytes:
         remaining = max_scan_bytes - scanned
-        if remaining <= 0:
-            return (
-                "",
-                "",
-                _rollout_identity_from_stat(os.fstat(handle.fileno())).size
-                > handle.tell(),
-            )
-        raw_line = handle.readline(remaining)
-        if not raw_line:
-            return "", "", False
-        raw_bytes = (
-            raw_line.encode("utf-8", "surrogatepass")
-            if isinstance(raw_line, str)
-            else bytes(raw_line)
-        )
-        if len(raw_bytes) > remaining or not raw_bytes.endswith(b"\n"):
+        chunk = os.read(file_descriptor, remaining)
+        if not chunk:
+            break
+        chunks.append(chunk)
+        scanned += len(chunk)
+    prefix = b"".join(chunks)
+    source_size = _rollout_identity_from_stat(os.fstat(file_descriptor)).size
+    cursor = 0
+    while cursor < len(prefix):
+        line_end = prefix.find(b"\n", cursor)
+        if line_end < 0:
             return "", "", True
-        scanned += len(raw_bytes)
+        line_end += 1
+        raw_bytes = prefix[cursor:line_end]
+        cursor = line_end
         try:
             obj = json.loads(raw_bytes.decode("utf-8", "replace"))
         except json.JSONDecodeError:
@@ -4038,10 +4068,9 @@ def _read_bounded_session_meta(
         payload = obj.get("payload", {})
         session_id = str(payload.get("id", ""))
         cwd = str(payload.get("cwd", ""))
-        has_unread_bytes = (
-            _rollout_identity_from_stat(os.fstat(handle.fileno())).size > handle.tell()
-        )
+        has_unread_bytes = source_size > start_offset + cursor
         return session_id, cwd, bool(not session_id and has_unread_bytes)
+    return "", "", source_size > start_offset + len(prefix)
 
 
 def _bounded_text_lines(handle: Any, max_scan_bytes: int) -> Iterable[str]:

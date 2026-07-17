@@ -16,7 +16,7 @@ superseded_by:
 
 - Pinned the resolved Codex root and every rollout ancestor with descriptor-relative, no-follow opens before reading the final regular file.
 - Kept the rollout parent descriptor through each read so descriptor and current-entry identity checks cannot be redirected by mutable ancestor paths.
-- Made `session-meta` accept only complete LF-terminated JSONL records inside its exact byte cap, reject bare CR termination, and propagate post-open directory-enumeration failures through path-neutral errors while preserving optional directories that are absent before a descriptor is opened.
+- Made `session-meta` read through raw descriptor calls without buffered prefetch, accept only complete LF-terminated JSONL records inside its exact byte cap, reject bare CR termination, and propagate post-open directory-enumeration failures through path-neutral errors while preserving optional directories that are absent before a descriptor is opened.
 - Opened final rollout entries with `O_NONBLOCK` before the regular-file `fstat` check so a stat-to-open FIFO replacement cannot hang the probe.
 - Rejected absolute rollout paths in both local and embedded descriptor traversal, and kept expected embedded safety rejections and post-preflight disappearance inside closed, structured frames.
 - Bounded remote `fetch-rollout-chunk` stdout capture to the exact base64-frame budget derived from the 2 MiB chunk ceiling, and added producer-backed parent caps for remote `session-meta` and `rollout-summary`.
@@ -26,9 +26,10 @@ superseded_by:
 - `rollout-stat`, `rollout-summary`, `chunked-rollout-summary`, `fetch-rollout`, `fetch-rollout-chunk`, and `session-meta` share the pinned input traversal in both local and embedded-remote implementations.
 - Root disappearance, replacement, or a symlink loop after the initial existence check fails closed across resolution, pre-stat, and open; ancestor replacement between pre-stat and open also fails closed, while replacement after a parent is opened remains confined to the pinned descriptor tree.
 - A session metadata cap that ends at a valid JSON `}` but excludes trailing bytes or the record newline is reported as truncated rather than parsed as a complete record.
+- Local and embedded scans count actual raw descriptor reads against the cap; buffered file-object prefetch cannot consume hidden bytes beyond it.
 - CRLF records remain valid because they end in LF; bare CR records fail as truncated coverage rather than being parsed as JSON whitespace.
 - Missing Codex roots and optional session/archive directories remain empty evidence only when they are absent before their descriptor is opened. Post-open enumeration failures, permission, I/O, and rollout failures remain path-neutral and fail closed.
-- Remote `session-meta` rejects a serialized row above 64 KiB and caps complete stdout at 32,899,072 bytes; `rollout-summary` enforces its serialized-output budget and caps complete stdout at 31,462,656 bytes. Capture breaches return before any partial frame is parsed.
+- Local and remote `session-meta` reject the same serialized row above 64 KiB, and the remote parent caps complete stdout at 32,899,072 bytes; `rollout-summary` enforces its serialized-output budget and caps complete stdout at 31,462,656 bytes. Capture breaches return before any partial frame is parsed.
 
 ## Next Steps
 
@@ -36,7 +37,7 @@ superseded_by:
 
 ## Evidence
 
-- Final parent-cap, producer-budget, root-race, descriptor-cleanup, directory-enumeration, and exact-read regressions: 10 tests passed.
+- Final raw-read, local/remote row-boundary, root-race, descriptor-cleanup, directory-enumeration, and parent/producer-cap regressions: 9 tests passed.
 - Complete remote probe regression module: 66 tests passed.
 - Direct cross-probe compatibility branches: 4 tests passed; the broader bounded-fetch compatibility group passed 8 tests.
 - Complete repository regression suite: 621 tests passed, 1 skipped.

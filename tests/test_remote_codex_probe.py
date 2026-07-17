@@ -822,31 +822,34 @@ class RemoteCodexProbeChunkTests(unittest.TestCase):
         self.assertEqual(scan.rows[0]["session_id"], "complete-at-cap")
         self.assertEqual(scan.rows[0]["rollout"], rollout)
 
-    def test_session_meta_readline_never_exceeds_remaining_cap_local_and_embedded(
+    def test_session_meta_raw_reads_never_exceed_scan_cap_local_and_embedded(
         self,
     ) -> None:
         lines = [
             '{"type":"other","payload":{}}',
-            '{"type":"session_meta","payload":{"id":"bounded-readline","cwd":"/repo"}}',
+            '{"type":"session_meta","payload":{"id":"bounded-raw-read","cwd":"/repo"}}',
+            json.dumps(
+                {"type": "response_item", "payload": "x" * 16_384},
+                separators=(",", ":"),
+            ),
         ]
         with tempfile.TemporaryDirectory() as temp_dir:
             codex_root = Path(temp_dir) / ".codex"
             rollout = write_rollout(codex_root, lines)
-            scan_bytes = (codex_root / rollout).stat().st_size
+            scan_bytes = sum(len(line.encode("utf-8")) + 1 for line in lines[:2])
+            self.assertLess(scan_bytes, io.DEFAULT_BUFFER_SIZE)
+            self.assertGreater((codex_root / rollout).stat().st_size, io.DEFAULT_BUFFER_SIZE)
             local_reads: list[tuple[int, int]] = []
+            real_os_read = MODULE.os.read
 
-            def guarded_local_readline(
-                handle: MODULE._PinnedRolloutHandle,
-                size: int = -1,
-            ) -> bytes:
-                expected_remaining = scan_bytes - sum(
-                    returned for _requested, returned in local_reads
-                )
-                if size != expected_remaining:
+            def guarded_local_os_read(file_descriptor: int, size: int) -> bytes:
+                consumed = sum(returned for _requested, returned in local_reads)
+                remaining = scan_bytes - consumed
+                if size < 0 or size > remaining:
                     raise AssertionError(
-                        f"readline requested {size}, expected {expected_remaining}"
+                        f"os.read requested {size}, remaining cap is {remaining}"
                     )
-                data = handle._handle.readline(size)
+                data = real_os_read(file_descriptor, size)
                 local_reads.append((size, len(data)))
                 return data
 
@@ -857,10 +860,9 @@ class RemoteCodexProbeChunkTests(unittest.TestCase):
                     scan_bytes,
                 ),
                 mock.patch.object(
-                    MODULE._PinnedRolloutHandle,
-                    "readline",
-                    guarded_local_readline,
-                    create=True,
+                    MODULE.os,
+                    "read",
+                    guarded_local_os_read,
                 ),
             ):
                 scan = MODULE._scan_session_meta_records(
@@ -870,9 +872,13 @@ class RemoteCodexProbeChunkTests(unittest.TestCase):
                     host="local",
                 )
 
-            self.assertEqual(scan.rows[0]["session_id"], "bounded-readline")
+            self.assertEqual(scan.rows[0]["session_id"], "bounded-raw-read")
             self.assertEqual(sum(returned for _size, returned in local_reads), scan_bytes)
-            self.assertTrue(all(size <= scan_bytes for size, _returned in local_reads))
+            self.assertTrue(local_reads)
+            self.assertLessEqual(
+                sum(requested for requested, _returned in local_reads),
+                scan_bytes,
+            )
 
             script = MODULE._remote_python_script(
                 {
@@ -883,22 +889,25 @@ class RemoteCodexProbeChunkTests(unittest.TestCase):
                     "session_meta_scan_bytes": scan_bytes,
                 }
             )
+            audit_path = Path(temp_dir) / "embedded-os-read-bytes.txt"
             marker = 'if CONFIG["mode"] == "session-meta":\n'
             injection = (
-                "_embedded_read_bytes = 0\n"
-                "def guarded_embedded_readline(self, size=-1):\n"
-                "    global _embedded_read_bytes\n"
-                "    expected_remaining = SESSION_META_SCAN_BYTES - _embedded_read_bytes\n"
-                "    if size != expected_remaining:\n"
-                "        raise AssertionError('embedded readline exceeded remaining cap')\n"
-                "    data = self.handle.readline(size)\n"
-                "    _embedded_read_bytes += len(data)\n"
+                "_real_os_read = os.read\n"
+                "_embedded_os_read_bytes = 0\n"
+                "def guarded_embedded_os_read(file_descriptor, size):\n"
+                "    global _embedded_os_read_bytes\n"
+                "    remaining = SESSION_META_SCAN_BYTES - _embedded_os_read_bytes\n"
+                "    if size < 0 or size > remaining:\n"
+                "        raise AssertionError('embedded os.read exceeded session-meta cap')\n"
+                "    data = _real_os_read(file_descriptor, size)\n"
+                "    _embedded_os_read_bytes += len(data)\n"
+                f"    pathlib.Path({str(audit_path)!r}).write_text(str(_embedded_os_read_bytes), encoding='utf-8')\n"
                 "    return data\n"
-                "PinnedRolloutHandle.readline = guarded_embedded_readline\n\n"
+                "os.read = guarded_embedded_os_read\n\n"
             )
             self.assertEqual(script.count(marker), 1)
-            self.assertIn("raw_line = handle.readline(remaining)", script)
-            self.assertNotIn("raw_line = handle.readline(remaining + 1)", script)
+            self.assertIn("chunk = os.read(file_descriptor, remaining)", script)
+            self.assertNotIn("raw_line = handle.readline(remaining)", script)
             script = script.replace(marker, injection + marker)
             result = subprocess.run(
                 [sys.executable, "-"],
@@ -907,9 +916,11 @@ class RemoteCodexProbeChunkTests(unittest.TestCase):
                 text=True,
                 check=False,
             )
+            embedded_read_bytes = int(audit_path.read_text(encoding="utf-8"))
 
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stderr, "")
+        self.assertEqual(embedded_read_bytes, scan_bytes)
         payload_lines = MODULE._extract_framed_lines(
             result.stdout,
             begin_marker=MODULE.REMOTE_SESSION_META_BEGIN,
@@ -919,7 +930,7 @@ class RemoteCodexProbeChunkTests(unittest.TestCase):
         )
         self.assertEqual(
             [json.loads(line)["session_id"] for line in payload_lines],
-            ["bounded-readline"],
+            ["bounded-raw-read"],
         )
 
     def test_session_meta_rejects_bare_carriage_return_locally_and_embedded(
@@ -1927,16 +1938,43 @@ class RemoteCodexProbeChunkTests(unittest.TestCase):
         )
         self.assertEqual(embedded_records[0]["rollout"], rollout)
 
-    def test_embedded_session_meta_bounds_each_serialized_row(self) -> None:
-        for cwd_size, expected in (
-            (60_000, "success"),
-            (70_000, "session-meta output row too large"),
-        ):
+    def test_session_meta_bounds_serialized_rows_local_and_embedded(self) -> None:
+        row_limit = MODULE.MAX_REMOTE_SESSION_META_SERIALIZED_ROW_BYTES
+        for serialized_bytes in (row_limit, row_limit + 1):
             with (
-                self.subTest(cwd_size=cwd_size),
+                self.subTest(serialized_bytes=serialized_bytes),
                 tempfile.TemporaryDirectory() as temp_dir,
             ):
                 codex_root = Path(temp_dir) / ".codex"
+                rollout = (
+                    "sessions/2026/05/26/"
+                    "rollout-2026-05-26T10-00-00-example.jsonl"
+                )
+                base_row = {
+                    "date": "2026/05/26",
+                    "session_id": "bounded-row",
+                    "cwd": "",
+                    "rollout": rollout,
+                }
+                base_bytes = len(
+                    json.dumps(
+                        base_row,
+                        separators=(",", ":"),
+                        sort_keys=True,
+                    ).encode("utf-8")
+                )
+                cwd_size = serialized_bytes - base_bytes
+                expected_row = {**base_row, "cwd": "x" * cwd_size}
+                self.assertEqual(
+                    len(
+                        json.dumps(
+                            expected_row,
+                            separators=(",", ":"),
+                            sort_keys=True,
+                        ).encode("utf-8")
+                    ),
+                    serialized_bytes,
+                )
                 rollout = write_rollout(
                     codex_root,
                     [
@@ -1952,6 +1990,28 @@ class RemoteCodexProbeChunkTests(unittest.TestCase):
                         )
                     ],
                 )
+                if serialized_bytes == row_limit:
+                    local_scan = MODULE._scan_session_meta_records(
+                        codex_root=codex_root,
+                        dates=[MODULE.dt.date(2026, 5, 26)],
+                        limit=10,
+                        host="local",
+                    )
+                else:
+                    with self.assertRaises(
+                        MODULE.SessionMetaRolloutError
+                    ) as raised:
+                        MODULE._scan_session_meta_records(
+                            codex_root=codex_root,
+                            dates=[MODULE.dt.date(2026, 5, 26)],
+                            limit=10,
+                            host="local",
+                        )
+                    self.assertEqual(
+                        raised.exception.error,
+                        MODULE.SESSION_META_OUTPUT_ROW_TOO_LARGE_ERROR,
+                    )
+                    self.assertIsNone(raised.exception.rollout)
                 script = MODULE._remote_python_script(
                     {
                         "mode": "session-meta",
@@ -1978,14 +2038,21 @@ class RemoteCodexProbeChunkTests(unittest.TestCase):
                 command="session-meta",
             )
             records = [json.loads(line) for line in payload_lines]
-            if expected == "success":
-                self.assertEqual(len(records), 1)
-                self.assertEqual(records[0]["cwd"], "x" * cwd_size)
-                self.assertEqual(records[0]["rollout"], rollout)
+            if serialized_bytes == row_limit:
+                self.assertEqual(
+                    {key: local_scan.rows[0][key] for key in expected_row},
+                    expected_row,
+                )
+                self.assertEqual(records, [expected_row])
             else:
                 self.assertEqual(
                     records,
-                    [{"kind": "error", "error": expected}],
+                    [
+                        {
+                            "kind": "error",
+                            "error": MODULE.SESSION_META_OUTPUT_ROW_TOO_LARGE_ERROR,
+                        }
+                    ],
                 )
                 self.assertNotIn("x" * 1024, result.stdout)
 
