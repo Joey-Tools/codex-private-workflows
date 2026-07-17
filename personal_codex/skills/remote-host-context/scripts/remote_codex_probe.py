@@ -578,8 +578,22 @@ def _open_pinned_regular_file_from_fd(
         fd = os.open(name, _regular_file_open_flags(), dir_fd=parent_fd)
     except FileNotFoundError as error:
         raise ValueError("rollout changed during open") from error
+    except OSError as error:
+        if error.errno == errno.ELOOP:
+            raise ValueError("rollout path is a symlink") from error
+        raise
     try:
         opened = _rollout_identity_from_stat(os.fstat(fd))
+        if expected_identity is None and allow_append:
+            current, snapshot_identity, prefix_proof, verified_snapshot = (
+                _capture_initial_append_only_rollout_checkpoint(
+                    fd,
+                    parent_fd,
+                    name,
+                    phase="during open",
+                )
+            )
+            return fd, current, snapshot_identity, prefix_proof, verified_snapshot
         if expected_identity is None:
             _assert_rollout_identity(opened, observed, phase="during open")
         elif allow_append:
@@ -979,6 +993,49 @@ def _read_rollout_prefix_proof(
     return (
         RolloutPrefixProof(length=length, sha256=digest.hexdigest()),
         bytes(snapshot),
+    )
+
+
+def _capture_initial_append_only_rollout_checkpoint(
+    fd: int,
+    parent_fd: int,
+    name: str,
+    *,
+    phase: str,
+) -> tuple[RolloutIdentity, RolloutIdentity, RolloutPrefixProof, bytes]:
+    descriptor_identity = _rollout_identity_from_stat(os.fstat(fd))
+    try:
+        current = _rollout_identity_from_stat(
+            os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+        )
+    except (FileNotFoundError, ValueError) as error:
+        raise ValueError(f"rollout identity changed {phase}") from error
+    _assert_append_only_rollout_identity(current, descriptor_identity, phase=phase)
+    prefix_proof, _snapshot = _read_rollout_prefix_proof(
+        fd,
+        min(descriptor_identity.size, MAX_SESSION_META_SCAN_BYTES),
+        phase=phase,
+    )
+    descriptor_after = _rollout_identity_from_stat(os.fstat(fd))
+    _assert_append_only_rollout_identity(descriptor_after, current, phase=phase)
+    try:
+        current_after = _rollout_identity_from_stat(
+            os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+        )
+    except (FileNotFoundError, ValueError) as error:
+        raise ValueError(f"rollout identity changed {phase}") from error
+    _assert_append_only_rollout_identity(
+        current_after,
+        descriptor_after,
+        phase=phase,
+    )
+    return _assert_append_only_rollout_checkpoint(
+        fd,
+        parent_fd,
+        name,
+        current_after,
+        prefix_proof,
+        phase=phase,
     )
 
 
@@ -1944,8 +2001,22 @@ def open_pinned_regular_file_from_fd(
         fd = os.open(name, regular_file_open_flags(), dir_fd=parent_fd)
     except FileNotFoundError as error:
         raise ValueError("rollout changed during open") from error
+    except OSError as error:
+        if error.errno == errno.ELOOP:
+            raise ValueError("rollout path is a symlink") from error
+        raise
     try:
         opened = rollout_identity_from_stat(os.fstat(fd))
+        if expected_identity is None and allow_append:
+            current, snapshot_identity, prefix_proof, verified_snapshot = (
+                capture_initial_append_only_rollout_checkpoint(
+                    fd,
+                    parent_fd,
+                    name,
+                    "during open",
+                )
+            )
+            return fd, current, snapshot_identity, prefix_proof, verified_snapshot
         if expected_identity is None:
             assert_rollout_identity(opened, observed, "during open")
         elif allow_append:
@@ -2274,6 +2345,44 @@ def read_rollout_prefix_proof(
     return (
         {{"length": length, "sha256": digest.hexdigest()}},
         bytes(snapshot),
+    )
+
+
+def capture_initial_append_only_rollout_checkpoint(
+    fd,
+    parent_fd,
+    name,
+    phase,
+):
+    descriptor_identity = rollout_identity_from_stat(os.fstat(fd))
+    try:
+        current = rollout_identity_from_stat(
+            os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+        )
+    except (FileNotFoundError, ValueError) as error:
+        raise ValueError("rollout identity changed " + phase) from error
+    assert_append_only_rollout_identity(current, descriptor_identity, phase)
+    prefix_proof, _snapshot = read_rollout_prefix_proof(
+        fd,
+        min(descriptor_identity["size"], SESSION_META_PREFIX_PROOF_BYTES),
+        phase=phase,
+    )
+    descriptor_after = rollout_identity_from_stat(os.fstat(fd))
+    assert_append_only_rollout_identity(descriptor_after, current, phase)
+    try:
+        current_after = rollout_identity_from_stat(
+            os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+        )
+    except (FileNotFoundError, ValueError) as error:
+        raise ValueError("rollout identity changed " + phase) from error
+    assert_append_only_rollout_identity(current_after, descriptor_after, phase)
+    return assert_append_only_rollout_checkpoint(
+        fd,
+        parent_fd,
+        name,
+        current_after,
+        prefix_proof,
+        phase,
     )
 
 
@@ -3468,26 +3577,12 @@ def iter_session_meta():
     prefix_proof_candidate_limit = LIMIT + 1
     prefix_proof_candidate_captures = 0
 
-    def prepare_candidate_for_consumption(parent_fd, rel, identity):
+    def consume_active_candidate_budget():
         nonlocal prefix_proof_candidate_captures
-        if not session_meta_allows_append(rel):
-            return identity
         if prefix_proof_candidate_captures >= prefix_proof_candidate_limit:
-            return None
+            return False
         prefix_proof_candidate_captures += 1
-        try:
-            prefix_proof = capture_rollout_prefix_proof_from_parent_fd(
-                parent_fd,
-                rel.name,
-                identity["snapshot"],
-            )
-        except ValueError as error:
-            session_rollout_error(rel, str(error))
-        except OSError:
-            session_rollout_error(rel, "rollout unreadable")
-        consumed_identity = dict(identity)
-        consumed_identity["prefix_proof"] = prefix_proof
-        return consumed_identity
+        return True
 
     def sorted_rollout_candidates(
         directory_fd,
@@ -3501,25 +3596,15 @@ def iter_session_meta():
                 for entry in entries:
                     if not RAW_ROLLOUT_BASENAME_RE.fullmatch(entry.name):
                         continue
-                    rel = rel_dir / entry.name
                     if flat_archive and not flat_archived_rollout_matches_date(
                         pathlib.PurePosixPath(entry.name),
                         date_text,
                     ):
                         continue
-                    try:
-                        identity = capture_rollout_candidate_identity_from_parent_fd(
-                            directory_fd,
-                            entry.name,
-                        )
-                    except ValueError as error:
-                        session_rollout_error(rel, str(error))
-                    except OSError:
-                        session_rollout_error(rel, "rollout unreadable")
-                    candidates.append((entry.name, identity))
+                    candidates.append(entry.name)
         except OSError:
             session_directory_unreadable()
-        candidates.sort(key=lambda candidate: candidate[0], reverse=True)
+        candidates.sort(reverse=True)
         return candidates
 
     count = 0
@@ -3540,35 +3625,26 @@ def iter_session_meta():
                 date_text,
                 flat_archive,
             )
-            for name, expected_identity in candidates:
+            for name in candidates:
                 rel = rel_dir / name
                 rel_key = session_meta_rollout_dedupe_key(rel)
                 if rel_key in seen_rollout_paths:
                     continue
                 seen_rollout_paths.add(rel_key)
-                consumed_identity = prepare_candidate_for_consumption(
-                    directory_fd,
-                    rel,
-                    expected_identity,
-                )
-                if consumed_identity is None:
+                allow_append = session_meta_allows_append(rel)
+                if allow_append and not consume_active_candidate_budget():
                     if emit_session_meta_item({{"kind": "truncation", "reason": SESSION_META_LIMIT_TRUNCATED_REASON, "date": date_text, "limit": LIMIT}}):
                         print(SESSION_META_END)
                     return True
-                allow_append = session_meta_allows_append(rel)
                 try:
                     handle = open_rollout_text(
                         rel,
-                        expected_identity=consumed_identity,
                         parent_fd=directory_fd,
                         allow_append=allow_append,
                     )
                     with handle:
                         if allow_append:
-                            high_water_identity = handle.assert_append_only_identity(
-                                handle.open_identity,
-                                "before session-meta scan",
-                            )
+                            high_water_identity = handle.open_identity
                             snapshot_identity = handle.verified_snapshot_identity
                             verified_snapshot = handle.verified_snapshot
                             if snapshot_identity is None or verified_snapshot is None:
@@ -3591,7 +3667,7 @@ def iter_session_meta():
                                 SESSION_META_SCAN_BYTES,
                             )
                             handle.assert_identity(
-                                consumed_identity["snapshot"],
+                                handle.open_identity,
                                 "after session-meta scan",
                             )
                 except OSError:
@@ -3799,34 +3875,12 @@ def _scan_session_meta_records(
     prefix_proof_candidate_limit = limit + 1
     prefix_proof_candidate_captures = 0
 
-    def prepare_candidate_for_consumption(
-        parent_fd: int,
-        relative_path: pathlib.PurePosixPath,
-        identity: RolloutCandidateIdentity,
-    ) -> RolloutCandidateIdentity | None:
+    def consume_active_candidate_budget() -> bool:
         nonlocal prefix_proof_candidate_captures
-        if not _session_meta_allows_append(relative_path):
-            return identity
         if prefix_proof_candidate_captures >= prefix_proof_candidate_limit:
-            return None
+            return False
         prefix_proof_candidate_captures += 1
-        try:
-            prefix_proof = _capture_rollout_prefix_proof_from_parent_fd(
-                parent_fd,
-                relative_path.name,
-                identity.snapshot,
-            )
-        except ValueError as exc:
-            raise SessionMetaRolloutError(
-                str(exc),
-                rollout=relative_path.as_posix(),
-            ) from exc
-        except OSError as exc:
-            raise SessionMetaRolloutError(
-                "rollout unreadable",
-                rollout=relative_path.as_posix(),
-            ) from exc
-        return dataclasses.replace(identity, prefix_proof=prefix_proof)
+        return True
 
     def sorted_rollout_candidates(
         directory_fd: int,
@@ -3834,40 +3888,22 @@ def _scan_session_meta_records(
         *,
         date_value: dt.date,
         flat_archive: bool,
-    ) -> list[tuple[str, RolloutCandidateIdentity]]:
+    ) -> list[str]:
         try:
-            candidates: list[tuple[str, RolloutCandidateIdentity]] = []
+            candidates: list[str] = []
             with os.scandir(directory_fd) as entries:
                 for entry in entries:
                     if not RAW_ROLLOUT_BASENAME_RE.fullmatch(entry.name):
                         continue
-                    relative_path = relative_dir / entry.name
                     if flat_archive and not _flat_archived_rollout_matches_date(
                         pathlib.PurePosixPath(entry.name),
                         date_value,
                     ):
                         continue
-                    try:
-                        identity = (
-                            _capture_rollout_candidate_identity_from_parent_fd(
-                                directory_fd,
-                                entry.name,
-                            )
-                        )
-                    except ValueError as exc:
-                        raise SessionMetaRolloutError(
-                            str(exc),
-                            rollout=relative_path.as_posix(),
-                        ) from exc
-                    except OSError as exc:
-                        raise SessionMetaRolloutError(
-                            "rollout unreadable",
-                            rollout=relative_path.as_posix(),
-                        ) from exc
-                    candidates.append((entry.name, identity))
+                    candidates.append(entry.name)
         except OSError as exc:
             raise SessionMetaRolloutError("session directory unreadable") from exc
-        candidates.sort(key=lambda candidate: candidate[0], reverse=True)
+        candidates.sort(reverse=True)
         return candidates
 
     def scan_directory(
@@ -3889,7 +3925,7 @@ def _scan_session_meta_records(
                 date_value=date_value,
                 flat_archive=flat_archive,
             )
-            for name, expected_identity in candidates:
+            for name in candidates:
                 rollout_relative_path = relative_dir / name
                 rollout_relative_key = _session_meta_rollout_dedupe_key(
                     rollout_relative_path
@@ -3897,27 +3933,18 @@ def _scan_session_meta_records(
                 if rollout_relative_key in seen_rollout_paths:
                     continue
                 seen_rollout_paths.add(rollout_relative_key)
-                consumed_identity = prepare_candidate_for_consumption(
-                    directory_fd,
-                    rollout_relative_path,
-                    expected_identity,
-                )
-                if consumed_identity is None:
-                    return SessionMetaScan(rows=rows, truncated=True)
                 allow_append = _session_meta_allows_append(rollout_relative_path)
+                if allow_append and not consume_active_candidate_budget():
+                    return SessionMetaScan(rows=rows, truncated=True)
                 try:
                     handle = _open_pinned_rollout_text_from_parent_fd(
                         directory_fd,
                         name,
-                        expected_identity=consumed_identity,
                         allow_append=allow_append,
                     )
                     with handle:
                         if allow_append:
-                            high_water_identity = handle.assert_append_only_identity(
-                                handle.open_identity,
-                                phase="before session-meta scan",
-                            )
+                            high_water_identity = handle.open_identity
                             snapshot_identity = handle.verified_snapshot_identity
                             verified_snapshot = handle.verified_snapshot
                             if snapshot_identity is None or verified_snapshot is None:
@@ -3942,7 +3969,7 @@ def _scan_session_meta_records(
                                 )
                             )
                             handle.assert_identity(
-                                consumed_identity.snapshot,
+                                handle.open_identity,
                                 phase="after session-meta scan",
                             )
                 except OSError as exc:
