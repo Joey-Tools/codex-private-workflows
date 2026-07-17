@@ -117,8 +117,11 @@ class RemoteHostContextDocumentationTests(unittest.TestCase):
         self.assertIn("If only an activity or updated date is known", skill)
         self.assertIn("derive the creation date", skill)
         self.assertIn("never substitute activity-date directories", skill)
-        self.assertIn("accepts only complete newline-terminated JSONL records", skill)
+        self.assertIn("accepts only complete LF-terminated JSONL records", skill)
+        self.assertIn("a bare CR is incomplete", skill)
         self.assertIn("descriptor-relative directory enumeration is unreadable", skill)
+        self.assertIn("`O_NOFOLLOW` and `O_NONBLOCK`", skill)
+        self.assertIn("stat-to-open FIFO replacement", skill)
         self.assertIn("cap cuts through a record", skill)
         self.assertIn("locator and triage output only", skill)
         self.assertIn(
@@ -579,6 +582,149 @@ class RemoteCodexProbeChunkTests(unittest.TestCase):
         self.assertEqual(scan.rows[0]["session_id"], "complete-at-cap")
         self.assertEqual(scan.rows[0]["rollout"], rollout)
 
+    def test_session_meta_rejects_bare_carriage_return_locally_and_embedded(
+        self,
+    ) -> None:
+        session_meta = json.dumps(
+            {
+                "type": "session_meta",
+                "payload": {"id": "bare-cr-must-not-escape", "cwd": "/repo"},
+            },
+            separators=(",", ":"),
+        ).encode("utf-8")
+        bare_cr_record = session_meta + b"\r"
+        rollout = "sessions/2026/05/26/rollout-2026-05-26T10-00-00-bare-cr.jsonl"
+        with tempfile.TemporaryDirectory() as temp_dir:
+            codex_root = Path(temp_dir) / ".codex"
+            rollout_path = codex_root / rollout
+            rollout_path.parent.mkdir(parents=True)
+            rollout_path.write_bytes(bare_cr_record)
+            output = io.StringIO()
+            error_output = io.StringIO()
+            with (
+                mock.patch.object(MODULE, "_local_codex_root", return_value=codex_root),
+                mock.patch.object(
+                    MODULE,
+                    "MAX_SESSION_META_SCAN_BYTES",
+                    len(bare_cr_record),
+                ),
+                redirect_stdout(output),
+                redirect_stderr(error_output),
+            ):
+                rc = MODULE.cmd_session_meta(
+                    argparse.Namespace(
+                        host=["local"],
+                        date=["2026/05/26"],
+                        from_date=None,
+                        to_date=None,
+                        limit=10,
+                    )
+                )
+
+            script = MODULE._remote_python_script(
+                {
+                    "mode": "session-meta",
+                    "dates": ["2026/05/26"],
+                    "limit": 10,
+                    "codex_root": str(codex_root),
+                    "session_meta_scan_bytes": len(bare_cr_record),
+                }
+            )
+            embedded = subprocess.run(
+                [sys.executable, "-"],
+                input=script,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+        self.assertEqual(rc, 1)
+        self.assertEqual(output.getvalue(), "")
+        self.assertIn(MODULE.SESSION_META_SCAN_TRUNCATED_ERROR, error_output.getvalue())
+        self.assertNotIn("bare-cr-must-not-escape", output.getvalue())
+        self.assertEqual(embedded.returncode, 0, embedded.stderr)
+        embedded_items = [
+            json.loads(line)
+            for line in MODULE._extract_framed_lines(
+                embedded.stdout,
+                begin_marker=MODULE.REMOTE_SESSION_META_BEGIN,
+                end_marker=MODULE.REMOTE_SESSION_META_END,
+                host="embedded",
+                command="session-meta",
+            )
+        ]
+        self.assertEqual(
+            embedded_items,
+            [
+                {
+                    "kind": "error",
+                    "error": MODULE.SESSION_META_SCAN_TRUNCATED_ERROR,
+                    "rollout": rollout,
+                }
+            ],
+        )
+        self.assertNotIn("bare-cr-must-not-escape", embedded.stdout)
+
+    def test_session_meta_accepts_crlf_locally_and_embedded(self) -> None:
+        session_meta = json.dumps(
+            {
+                "type": "session_meta",
+                "payload": {"id": "crlf-session", "cwd": "/repo"},
+            },
+            separators=(",", ":"),
+        ).encode("utf-8")
+        crlf_record = session_meta + b"\r\n"
+        rollout = "sessions/2026/05/26/rollout-2026-05-26T10-00-00-crlf.jsonl"
+        with tempfile.TemporaryDirectory() as temp_dir:
+            codex_root = Path(temp_dir) / ".codex"
+            rollout_path = codex_root / rollout
+            rollout_path.parent.mkdir(parents=True)
+            rollout_path.write_bytes(crlf_record)
+            with mock.patch.object(
+                MODULE,
+                "MAX_SESSION_META_SCAN_BYTES",
+                len(crlf_record),
+            ):
+                scan = MODULE._scan_session_meta_records(
+                    codex_root=codex_root,
+                    dates=[MODULE.dt.date(2026, 5, 26)],
+                    limit=10,
+                    host="local",
+                )
+
+            script = MODULE._remote_python_script(
+                {
+                    "mode": "session-meta",
+                    "dates": ["2026/05/26"],
+                    "limit": 10,
+                    "codex_root": str(codex_root),
+                    "session_meta_scan_bytes": len(crlf_record),
+                }
+            )
+            embedded = subprocess.run(
+                [sys.executable, "-"],
+                input=script,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+        self.assertEqual(scan.rows[0]["session_id"], "crlf-session")
+        self.assertEqual(scan.rows[0]["rollout"], rollout)
+        self.assertEqual(embedded.returncode, 0, embedded.stderr)
+        embedded_items = [
+            json.loads(line)
+            for line in MODULE._extract_framed_lines(
+                embedded.stdout,
+                begin_marker=MODULE.REMOTE_SESSION_META_BEGIN,
+                end_marker=MODULE.REMOTE_SESSION_META_END,
+                host="embedded",
+                command="session-meta",
+            )
+        ]
+        self.assertEqual(embedded_items[0]["session_id"], "crlf-session")
+        self.assertEqual(embedded_items[0]["rollout"], rollout)
+
     def test_session_meta_rejects_current_entry_replacement_after_read(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             codex_root = Path(temp_dir) / ".codex"
@@ -956,6 +1102,127 @@ class RemoteCodexProbeChunkTests(unittest.TestCase):
                 )
 
         self.assertTrue(swapped)
+
+    def test_regular_file_open_flags_fail_closed_without_nonblock(self) -> None:
+        with (
+            mock.patch.object(MODULE.os, "O_NONBLOCK", None),
+            self.assertRaisesRegex(OSError, "secure rollout reads require O_NONBLOCK"),
+        ):
+            MODULE._regular_file_open_flags()
+
+    @unittest.skipUnless(
+        hasattr(os, "mkfifo") and hasattr(os, "O_NONBLOCK"),
+        "FIFO nonblocking opens require POSIX mkfifo and O_NONBLOCK",
+    )
+    def test_rollout_fifo_swap_before_open_fails_without_blocking(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            codex_root = Path(temp_dir) / ".codex"
+            rollout = write_rollout(
+                codex_root,
+                ['{"type":"session_meta","payload":{"id":"trusted"}}'],
+            )
+            rollout_relative = MODULE._resolve_rollout_relative_path(rollout)
+            rollout_path = codex_root / rollout
+            moved_rollout = rollout_path.with_suffix(".pinned")
+            real_open = MODULE.os.open
+            opened_flags: list[int] = []
+            swapped = False
+
+            def swap_rollout_for_fifo_before_open(
+                path: object,
+                flags: int,
+                mode: int = 0o777,
+                *,
+                dir_fd: int | None = None,
+            ) -> int:
+                nonlocal swapped
+                if path == rollout_path.name and dir_fd is not None and not swapped:
+                    os.replace(rollout_path, moved_rollout)
+                    os.mkfifo(rollout_path, 0o600)
+                    opened_flags.append(flags)
+                    swapped = True
+                    if not flags & os.O_NONBLOCK:
+                        raise AssertionError("final rollout open omitted O_NONBLOCK")
+                return real_open(path, flags, mode, dir_fd=dir_fd)
+
+            with (
+                mock.patch.object(
+                    MODULE.os,
+                    "open",
+                    side_effect=swap_rollout_for_fifo_before_open,
+                ),
+                self.assertRaisesRegex(
+                    ValueError, "rollout path is not a regular file"
+                ),
+            ):
+                MODULE._read_local_rollout_bytes(
+                    codex_root,
+                    rollout_relative,
+                    max_bytes=MODULE.MAX_FETCH_ROLLOUT_BYTES,
+                )
+
+        self.assertTrue(swapped)
+        self.assertEqual(len(opened_flags), 1)
+        self.assertTrue(opened_flags[0] & os.O_NONBLOCK)
+
+    @unittest.skipUnless(
+        hasattr(os, "mkfifo") and hasattr(os, "O_NONBLOCK"),
+        "FIFO nonblocking opens require POSIX mkfifo and O_NONBLOCK",
+    )
+    def test_embedded_fetch_fifo_swap_before_open_fails_without_blocking(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            codex_root = Path(temp_dir) / ".codex"
+            rollout = write_rollout(
+                codex_root,
+                ['{"type":"session_meta","payload":{"id":"trusted"}}'],
+            )
+            rollout_path = codex_root / rollout
+            moved_rollout = rollout_path.with_suffix(".pinned")
+            script = MODULE._remote_python_script(
+                {
+                    "mode": "fetch-rollout",
+                    "rollout": rollout,
+                    "codex_root": str(codex_root),
+                    "max_fetch_rollout_bytes": MODULE.MAX_FETCH_ROLLOUT_BYTES,
+                }
+            )
+            marker = (
+                "    fd = os.open(name, regular_file_open_flags(), dir_fd=parent_fd)\n"
+            )
+            injection = (
+                f"    if name == {rollout_path.name!r} and not globals().get('_fifo_swapped', False):\n"
+                "        globals()['_fifo_swapped'] = True\n"
+                f"        os.replace({str(rollout_path)!r}, {str(moved_rollout)!r})\n"
+                f"        os.mkfifo({str(rollout_path)!r}, 0o600)\n" + marker
+            )
+            self.assertEqual(script.count(marker), 1)
+            self.assertIn('getattr(os, "O_NONBLOCK", None)', script)
+            self.assertIn("| nonblocking_flag", script)
+            script = script.replace(marker, injection)
+            result = subprocess.run(
+                [sys.executable, "-"],
+                input=script,
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=3,
+            )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        payload_lines = MODULE._extract_framed_lines(
+            result.stdout,
+            begin_marker=MODULE.REMOTE_FETCH_ROLLOUT_BEGIN,
+            end_marker=MODULE.REMOTE_FETCH_ROLLOUT_END,
+            host="embedded",
+            command="fetch-rollout",
+        )
+        self.assertEqual(
+            [json.loads(line) for line in payload_lines],
+            [{"ok": False, "error": "rollout path is not a regular file"}],
+        )
+        self.assertNotIn("trusted", result.stdout)
 
     def test_pinned_root_tolerates_canonical_ancestor_symlink(self) -> None:
         with tempfile.TemporaryDirectory(dir="/tmp") as temp_dir:

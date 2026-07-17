@@ -409,7 +409,10 @@ def _directory_open_flags() -> int:
 
 def _regular_file_open_flags() -> int:
     _directory_open_flags()
-    return os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+    nonblocking_flag = getattr(os, "O_NONBLOCK", None)
+    if nonblocking_flag is None:
+        raise OSError("secure rollout reads require O_NONBLOCK")
+    return os.O_RDONLY | os.O_NOFOLLOW | nonblocking_flag | getattr(os, "O_CLOEXEC", 0)
 
 
 def _validate_relative_path_parts(
@@ -1387,7 +1390,15 @@ def directory_open_flags():
 
 def regular_file_open_flags():
     directory_open_flags()
-    return os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+    nonblocking_flag = getattr(os, "O_NONBLOCK", None)
+    if nonblocking_flag is None:
+        raise OSError("secure rollout reads require O_NONBLOCK")
+    return (
+        os.O_RDONLY
+        | os.O_NOFOLLOW
+        | nonblocking_flag
+        | getattr(os, "O_CLOEXEC", 0)
+    )
 
 
 def validate_relative_path_parts(rel):
@@ -2022,7 +2033,7 @@ def read_bounded_session_meta(handle, max_scan_bytes):
         if not raw_line:
             return "", "", False
         raw_bytes = raw_line.encode("utf-8", "surrogatepass") if isinstance(raw_line, str) else bytes(raw_line)
-        if len(raw_bytes) > remaining or not (raw_bytes.endswith(b"\\n") or raw_bytes.endswith(b"\\r")):
+        if len(raw_bytes) > remaining or not raw_bytes.endswith(b"\\n"):
             return "", "", True
         scanned += len(raw_bytes)
         try:
@@ -3939,9 +3950,7 @@ def _read_bounded_session_meta(
             if isinstance(raw_line, str)
             else bytes(raw_line)
         )
-        if len(raw_bytes) > remaining or not (
-            raw_bytes.endswith(b"\n") or raw_bytes.endswith(b"\r")
-        ):
+        if len(raw_bytes) > remaining or not raw_bytes.endswith(b"\n"):
             return "", "", True
         scanned += len(raw_bytes)
         try:
