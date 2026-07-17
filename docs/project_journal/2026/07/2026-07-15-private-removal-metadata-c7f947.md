@@ -118,6 +118,6 @@ superseded_by:
 - Manifest change validation module — 79 tests passed as part of the repository suite.
 - Release baseline validation module — 29 tests passed.
 - Dedicated Python 3.9 compatibility selection — 8 tests passed.
-- Canonical review workflow suite — 707 tests passed, with 10 skipped.
+- Canonical review workflow suite — 708 tests passed, with 10 skipped.
 - Waited-delivery review contract — 40 tests passed.
 - Changed-file `ruff`, `actionlint`, manifest change validation, project journal validation, Python compilation, and `git diff --check` passed. Repository-wide `ruff` remains at six unrelated pre-existing findings.
