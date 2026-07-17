@@ -460,13 +460,20 @@ class SessionRetrospectiveTests(unittest.TestCase):
                     link_root = Path(raw) / ".codex"
                     link_root.symlink_to(real_root, target_is_directory=True)
 
-                    with self.assertRaisesRegex(ValueError, "Codex root is a symlink"):
+                    with self.assertRaises(ValueError) as caught:
                         probe._iter_session_meta_records(
                             codex_root=link_root,
                             dates=[dt.date(2026, 5, 1)],
                             limit=10,
                             host="local",
                         )
+                    if probe is REMOTE_HOST_CONTEXT_PROBE:
+                        self.assertIsInstance(caught.exception, probe.SessionMetaRolloutError)
+                        self.assertEqual(caught.exception.error, "session directory unreadable")
+                        self.assertIsNone(caught.exception.rollout)
+                        self.assertNotIn(str(real_root), str(caught.exception))
+                    else:
+                        self.assertRegex(str(caught.exception), "Codex root is a symlink")
 
     def test_remote_probe_summary_rejects_symlink_rollout(self) -> None:
         for probe in (REMOTE_PROBE, REMOTE_HOST_CONTEXT_PROBE):
@@ -555,13 +562,23 @@ class SessionRetrospectiveTests(unittest.TestCase):
                     rollout.parent.mkdir(parents=True)
                     rollout.symlink_to(outside)
 
-                    with self.assertRaisesRegex(ValueError, "symlink"):
+                    with self.assertRaises(ValueError) as caught:
                         probe._iter_session_meta_records(
                             codex_root=root,
                             dates=[dt.date(2026, 5, 1)],
                             limit=10,
                             host="local",
                         )
+                    if probe is REMOTE_HOST_CONTEXT_PROBE:
+                        self.assertIsInstance(caught.exception, probe.SessionMetaRolloutError)
+                        self.assertEqual(caught.exception.error, "rollout unreadable")
+                        self.assertEqual(
+                            caught.exception.rollout,
+                            "sessions/2026/05/01/rollout-2026-05-01T10-00-00-link.jsonl",
+                        )
+                        self.assertNotIn(str(outside), str(caught.exception))
+                    else:
+                        self.assertRegex(str(caught.exception), "symlink")
 
     def test_remote_probe_session_meta_missing_codex_root_returns_empty(self) -> None:
         for probe in (REMOTE_PROBE, REMOTE_HOST_CONTEXT_PROBE):
@@ -595,9 +612,23 @@ class SessionRetrospectiveTests(unittest.TestCase):
                     stderr = io.StringIO()
                     stdout = io.StringIO()
 
-                    with mock.patch.object(probe, "_local_codex_root", return_value=root), mock.patch.object(
-                        probe, "_open_local_rollout_text", side_effect=PermissionError("blocked path")
-                    ), mock.patch.object(sys, "stderr", stderr), mock.patch.object(sys, "stdout", stdout):
+                    if probe is REMOTE_HOST_CONTEXT_PROBE:
+                        real_os_open = probe.os.open
+
+                        def open_or_raise(path, *args, **kwargs):
+                            if path == rollout.name and kwargs.get("dir_fd") is not None:
+                                raise PermissionError("blocked descriptor rollout")
+                            return real_os_open(path, *args, **kwargs)
+
+                        unreadable_rollout = mock.patch.object(probe.os, "open", open_or_raise)
+                    else:
+                        unreadable_rollout = mock.patch.object(
+                            probe, "_open_local_rollout_text", side_effect=PermissionError("blocked path")
+                        )
+
+                    with mock.patch.object(
+                        probe, "_local_codex_root", return_value=root
+                    ), unreadable_rollout, mock.patch.object(sys, "stderr", stderr), mock.patch.object(sys, "stdout", stdout):
                         result = probe.cmd_session_meta(
                             types.SimpleNamespace(host=["local"], date=["2026/05/01"], from_date=None, to_date=None, limit=10)
                         )
@@ -624,11 +655,23 @@ class SessionRetrospectiveTests(unittest.TestCase):
                             raise PermissionError("blocked /home/hoteng/.codex/sessions/2026/05/01")
                         return real_glob(self, pattern)
 
+                    if probe is REMOTE_HOST_CONTEXT_PROBE:
+                        real_scandir = probe.os.scandir
+
+                        def scandir_or_raise(path):
+                            if isinstance(path, int):
+                                raise PermissionError("blocked descriptor directory")
+                            return real_scandir(path)
+
+                        unreadable_directory = mock.patch.object(probe.os, "scandir", scandir_or_raise)
+                    else:
+                        unreadable_directory = mock.patch.object(Path, "glob", glob_or_raise)
+
                     stderr = io.StringIO()
                     stdout = io.StringIO()
-                    with mock.patch.object(probe, "_local_codex_root", return_value=root), mock.patch.object(
-                        Path, "glob", glob_or_raise
-                    ), mock.patch.object(sys, "stderr", stderr), mock.patch.object(sys, "stdout", stdout):
+                    with mock.patch.object(
+                        probe, "_local_codex_root", return_value=root
+                    ), unreadable_directory, mock.patch.object(sys, "stderr", stderr), mock.patch.object(sys, "stdout", stdout):
                         result = probe.cmd_session_meta(
                             types.SimpleNamespace(host=["local"], date=["2026/05/01"], from_date=None, to_date=None, limit=10)
                         )
@@ -721,13 +764,20 @@ class SessionRetrospectiveTests(unittest.TestCase):
                     link_dir.parent.mkdir(parents=True)
                     link_dir.symlink_to(target_dir, target_is_directory=True)
 
-                    with self.assertRaisesRegex(ValueError, "symlink"):
+                    with self.assertRaises(ValueError) as caught:
                         probe._iter_session_meta_records(
                             codex_root=root,
                             dates=[dt.date(2026, 5, 1)],
                             limit=10,
                             host="local",
                         )
+                    if probe is REMOTE_HOST_CONTEXT_PROBE:
+                        self.assertIsInstance(caught.exception, probe.SessionMetaRolloutError)
+                        self.assertEqual(caught.exception.error, "session directory unreadable")
+                        self.assertIsNone(caught.exception.rollout)
+                        self.assertNotIn(str(target_dir), str(caught.exception))
+                    else:
+                        self.assertRegex(str(caught.exception), "symlink")
 
     def test_remote_probe_supports_dated_archived_rollout_paths(self) -> None:
         path = REMOTE_PROBE._resolve_rollout_relative_path(
@@ -10383,8 +10433,14 @@ class SessionRetrospectiveTests(unittest.TestCase):
                 self.assertIn("internal|corp|local|lan|example|invalid|test", script)
                 self.assertIn("meaningful_user_message_text", script)
                 self.assertIn("Persistent internal Codex readonly review contract", script)
-                self.assertIn("ROOT.lstat()", script)
-                self.assertIn("Codex root is a symlink", script)
+                if probe is REMOTE_HOST_CONTEXT_PROBE:
+                    self.assertIn("resolved_root = ROOT.resolve(strict=True)", script)
+                    self.assertIn("os.stat(part, dir_fd=directory_fd, follow_symlinks=False)", script)
+                    self.assertIn("os.open(part, directory_open_flags(), dir_fd=directory_fd)", script)
+                    self.assertIn("dir_fd=self.parent_fd", script)
+                else:
+                    self.assertIn("ROOT.lstat()", script)
+                    self.assertIn("Codex root is a symlink", script)
                 self.assertIn('os.fdopen(fd, "rb")', script)
                 self.assertIn("raw_bytes.splitlines(keepends=True)", script)
                 self.assertIn("if max_scan_bytes and scanned >= max_scan_bytes:\n            if dropping_oversized_line:", script)
@@ -10428,8 +10484,23 @@ class SessionRetrospectiveTests(unittest.TestCase):
                         check=False,
                     )
 
-                self.assertNotEqual(result.returncode, 0)
-                self.assertIn("Codex root is a symlink", result.stderr)
+                if probe is REMOTE_HOST_CONTEXT_PROBE:
+                    self.assertEqual(result.returncode, 0)
+                    self.assertEqual(result.stderr, "")
+                    payload_lines = probe._extract_framed_lines(
+                        result.stdout,
+                        begin_marker=probe.REMOTE_SESSION_META_BEGIN,
+                        end_marker=probe.REMOTE_SESSION_META_END,
+                        host="embedded",
+                        command="session-meta",
+                    )
+                    self.assertEqual(
+                        [json.loads(line) for line in payload_lines],
+                        [{"kind": "error", "error": "session directory unreadable"}],
+                    )
+                else:
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn("Codex root is a symlink", result.stderr)
                 self.assertNotIn("hidden-session", result.stdout)
 
     def test_remote_probe_generated_session_meta_marks_limit_truncation(self) -> None:
