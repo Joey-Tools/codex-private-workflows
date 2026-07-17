@@ -3,7 +3,7 @@ id: 20260715-stf001
 title: Synthetic Token Fixtures Private Overlay
 status: completed
 created: 2026-07-15
-updated: 2026-07-16
+updated: 2026-07-17
 branch: codex/synthetic-token-v1-private
 pr: https://github.com/Joey-Tools/codex-private-workflows/pull/88
 supersedes: []
@@ -21,7 +21,7 @@ superseded_by:
 ## Current State
 
 - The review sync rule first copies the complete public skill and then replaces only `scripts/review_runtime/synthetic-token-catalog.json` with a helper-relative private catalog.
-- The private authoring pool contains ten `joey-private-v1` exact values. The legacy catalog contains two envelopes: one GitHub-token value for `codex-workflow-hygiene`, plus 16 exact scanner-capturable generic-assignment values representing 37 source occurrences in the verified `portable-codex-runtime` master history.
+- The private authoring pool now contains 52 `joey-private-v3` exact values: ten active IDs for each supported role, plus the existing expired access-token and consumed refresh-token fixtures. The legacy catalog remains unchanged with two envelopes: one GitHub-token value for `codex-workflow-hygiene`, plus 16 exact scanner-capturable generic-assignment values representing 37 source occurrences in the verified `portable-codex-runtime` master history. See `2026-07-17-synthetic-refresh-capacity-stf002.md` for the capacity update.
 - Trusted legacy entries store canonical Base64 as a reversible raw-equivalent together with counts, rules, and pinned master provenance. Metadata, logs, and evidence expose only IDs, digests, lengths, and counts.
 - Four exact substring relationships required by the admitted portable history are confined to the same selected envelope. Raw and unembedded occurrence counts must both remain monotonic; cross-envelope and authoring overlaps remain invalid.
 - The secure review rule is a one-rule trust barrier: every plain sync and retired-target cleanup finishes first, then the repository root is pinned once and the private catalog is read through descriptor-relative no-follow traversal.
