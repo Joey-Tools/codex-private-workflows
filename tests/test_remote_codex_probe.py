@@ -829,7 +829,7 @@ class RemoteCodexProbeChunkTests(unittest.TestCase):
             '{"type":"other","payload":{}}',
             '{"type":"session_meta","payload":{"id":"bounded-raw-read","cwd":"/repo"}}',
             json.dumps(
-                {"type": "response_item", "payload": "x" * 16_384},
+                {"type": "response_item", "payload": "x" * io.DEFAULT_BUFFER_SIZE},
                 separators=(",", ":"),
             ),
         ]
