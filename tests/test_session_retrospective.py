@@ -60,6 +60,32 @@ VALID_SESSION_ID = f"{MODULE.SESSION_REF_PREFIX}:{'c' * 20}"
 VALID_SOURCE_HASH = f"{MODULE.SOURCE_HASH_PREFIX}:{'d' * 20}"
 
 
+def function_references_name(function: object, name: str) -> bool:
+    pending = [function.__code__]
+    while pending:
+        code = pending.pop()
+        if name in code.co_names:
+            return True
+        pending.extend(item for item in code.co_consts if isinstance(item, types.CodeType))
+    return False
+
+
+def session_meta_runner_name(probe: object) -> str:
+    for function_name in ("cmd_session_meta", "_scan_host_session_meta"):
+        function = getattr(probe, function_name, None)
+        if function is not None and function_references_name(function, "_run_remote_python_bounded"):
+            return "_run_remote_python_bounded"
+    return "_run_remote_python"
+
+
+def session_meta_uses_scandir(probe: object) -> bool:
+    for function_name in ("_scan_session_meta_records", "_iter_session_meta_records"):
+        function = getattr(probe, function_name, None)
+        if function is not None and function_references_name(function, "scandir"):
+            return True
+    return False
+
+
 def write_jsonl(path: Path, rows: list[dict]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("\n".join(json.dumps(row) for row in rows) + "\n", encoding="utf-8")
@@ -460,13 +486,20 @@ class SessionRetrospectiveTests(unittest.TestCase):
                     link_root = Path(raw) / ".codex"
                     link_root.symlink_to(real_root, target_is_directory=True)
 
-                    with self.assertRaisesRegex(ValueError, "Codex root is a symlink"):
+                    with self.assertRaises(ValueError) as caught:
                         probe._iter_session_meta_records(
                             codex_root=link_root,
                             dates=[dt.date(2026, 5, 1)],
                             limit=10,
                             host="local",
                         )
+                    if probe is REMOTE_HOST_CONTEXT_PROBE:
+                        self.assertIsInstance(caught.exception, probe.SessionMetaRolloutError)
+                        self.assertEqual(caught.exception.error, "session directory unreadable")
+                        self.assertIsNone(caught.exception.rollout)
+                        self.assertNotIn(str(real_root), str(caught.exception))
+                    else:
+                        self.assertRegex(str(caught.exception), "Codex root is a symlink")
 
     def test_remote_probe_summary_rejects_symlink_rollout(self) -> None:
         for probe in (REMOTE_PROBE, REMOTE_HOST_CONTEXT_PROBE):
@@ -555,13 +588,23 @@ class SessionRetrospectiveTests(unittest.TestCase):
                     rollout.parent.mkdir(parents=True)
                     rollout.symlink_to(outside)
 
-                    with self.assertRaisesRegex(ValueError, "symlink"):
+                    with self.assertRaises(ValueError) as caught:
                         probe._iter_session_meta_records(
                             codex_root=root,
                             dates=[dt.date(2026, 5, 1)],
                             limit=10,
                             host="local",
                         )
+                    if probe is REMOTE_HOST_CONTEXT_PROBE:
+                        self.assertIsInstance(caught.exception, probe.SessionMetaRolloutError)
+                        self.assertEqual(caught.exception.error, "rollout unreadable")
+                        self.assertEqual(
+                            caught.exception.rollout,
+                            "sessions/2026/05/01/rollout-2026-05-01T10-00-00-link.jsonl",
+                        )
+                        self.assertNotIn(str(outside), str(caught.exception))
+                    else:
+                        self.assertRegex(str(caught.exception), "symlink")
 
     def test_remote_probe_session_meta_missing_codex_root_returns_empty(self) -> None:
         for probe in (REMOTE_PROBE, REMOTE_HOST_CONTEXT_PROBE):
@@ -595,9 +638,23 @@ class SessionRetrospectiveTests(unittest.TestCase):
                     stderr = io.StringIO()
                     stdout = io.StringIO()
 
-                    with mock.patch.object(probe, "_local_codex_root", return_value=root), mock.patch.object(
-                        probe, "_open_local_rollout_text", side_effect=PermissionError("blocked path")
-                    ), mock.patch.object(sys, "stderr", stderr), mock.patch.object(sys, "stdout", stdout):
+                    if probe is REMOTE_HOST_CONTEXT_PROBE:
+                        real_os_open = probe.os.open
+
+                        def open_or_raise(path, *args, **kwargs):
+                            if path == rollout.name and kwargs.get("dir_fd") is not None:
+                                raise PermissionError("blocked descriptor rollout")
+                            return real_os_open(path, *args, **kwargs)
+
+                        unreadable_rollout = mock.patch.object(probe.os, "open", open_or_raise)
+                    else:
+                        unreadable_rollout = mock.patch.object(
+                            probe, "_open_local_rollout_text", side_effect=PermissionError("blocked path")
+                        )
+
+                    with mock.patch.object(
+                        probe, "_local_codex_root", return_value=root
+                    ), unreadable_rollout, mock.patch.object(sys, "stderr", stderr), mock.patch.object(sys, "stdout", stdout):
                         result = probe.cmd_session_meta(
                             types.SimpleNamespace(host=["local"], date=["2026/05/01"], from_date=None, to_date=None, limit=10)
                         )
@@ -616,19 +673,27 @@ class SessionRetrospectiveTests(unittest.TestCase):
                     root = Path(raw) / ".codex"
                     date_dir = root / "sessions" / "2026" / "05" / "01"
                     date_dir.mkdir(parents=True)
-                    resolved_date_dir = date_dir.resolve()
-                    real_glob = Path.glob
+                    if session_meta_uses_scandir(probe):
+                        def scandir_or_raise(_path):
+                            raise PermissionError("blocked descriptor directory")
 
-                    def glob_or_raise(self: Path, pattern: str):
-                        if self == resolved_date_dir:
-                            raise PermissionError("blocked /home/hoteng/.codex/sessions/2026/05/01")
-                        return real_glob(self, pattern)
+                        unreadable_directory = mock.patch.object(probe.os, "scandir", scandir_or_raise)
+                    else:
+                        resolved_date_dir = date_dir.resolve()
+                        real_glob = Path.glob
+
+                        def glob_or_raise(self: Path, pattern: str):
+                            if self == resolved_date_dir:
+                                raise PermissionError("blocked /home/hoteng/.codex/sessions/2026/05/01")
+                            return real_glob(self, pattern)
+
+                        unreadable_directory = mock.patch.object(Path, "glob", glob_or_raise)
 
                     stderr = io.StringIO()
                     stdout = io.StringIO()
-                    with mock.patch.object(probe, "_local_codex_root", return_value=root), mock.patch.object(
-                        Path, "glob", glob_or_raise
-                    ), mock.patch.object(sys, "stderr", stderr), mock.patch.object(sys, "stdout", stdout):
+                    with mock.patch.object(
+                        probe, "_local_codex_root", return_value=root
+                    ), unreadable_directory, mock.patch.object(sys, "stderr", stderr), mock.patch.object(sys, "stdout", stdout):
                         result = probe.cmd_session_meta(
                             types.SimpleNamespace(host=["local"], date=["2026/05/01"], from_date=None, to_date=None, limit=10)
                         )
@@ -656,7 +721,7 @@ class SessionRetrospectiveTests(unittest.TestCase):
 
                 with mock.patch.object(
                     probe,
-                    "_run_remote_python",
+                    session_meta_runner_name(probe),
                     return_value=subprocess.CompletedProcess(
                         args=["ssh"],
                         returncode=0,
@@ -683,7 +748,7 @@ class SessionRetrospectiveTests(unittest.TestCase):
 
                 with mock.patch.object(
                     probe,
-                    "_run_remote_python",
+                    session_meta_runner_name(probe),
                     return_value=subprocess.CompletedProcess(
                         args=["ssh"],
                         returncode=1,
@@ -721,13 +786,20 @@ class SessionRetrospectiveTests(unittest.TestCase):
                     link_dir.parent.mkdir(parents=True)
                     link_dir.symlink_to(target_dir, target_is_directory=True)
 
-                    with self.assertRaisesRegex(ValueError, "symlink"):
+                    with self.assertRaises(ValueError) as caught:
                         probe._iter_session_meta_records(
                             codex_root=root,
                             dates=[dt.date(2026, 5, 1)],
                             limit=10,
                             host="local",
                         )
+                    if probe is REMOTE_HOST_CONTEXT_PROBE:
+                        self.assertIsInstance(caught.exception, probe.SessionMetaRolloutError)
+                        self.assertEqual(caught.exception.error, "session directory unreadable")
+                        self.assertIsNone(caught.exception.rollout)
+                        self.assertNotIn(str(target_dir), str(caught.exception))
+                    else:
+                        self.assertRegex(str(caught.exception), "symlink")
 
     def test_remote_probe_supports_dated_archived_rollout_paths(self) -> None:
         path = REMOTE_PROBE._resolve_rollout_relative_path(
@@ -952,7 +1024,7 @@ class SessionRetrospectiveTests(unittest.TestCase):
 
                 with mock.patch.object(
                     probe,
-                    "_run_remote_python",
+                    session_meta_runner_name(probe),
                     return_value=subprocess.CompletedProcess(args=["ssh"], returncode=0, stdout=remote_output, stderr=""),
                 ), mock.patch.object(sys, "stderr", stderr), mock.patch.object(sys, "stdout", stdout):
                     result = probe.cmd_session_meta(
@@ -994,7 +1066,7 @@ class SessionRetrospectiveTests(unittest.TestCase):
 
                     with mock.patch.object(probe, "_local_codex_root", return_value=root), mock.patch.object(
                         probe,
-                        "_run_remote_python",
+                        session_meta_runner_name(probe),
                         return_value=subprocess.CompletedProcess(args=["ssh"], returncode=0, stdout=remote_output, stderr=""),
                     ), mock.patch.object(sys, "stderr", stderr), mock.patch.object(sys, "stdout", stdout):
                         result = probe.cmd_session_meta(
@@ -1221,6 +1293,99 @@ class SessionRetrospectiveTests(unittest.TestCase):
 
             self.assertNotEqual(result, 0)
             self.assertFalse((outside / "rollout.jsonl").exists())
+
+    def test_remote_probe_hashing_reader_rejects_lossy_text_stream(self) -> None:
+        raw_bytes = b"a\r\nb\r\n\xff"
+        with io.TextIOWrapper(
+            io.BytesIO(raw_bytes),
+            encoding="utf-8",
+            errors="replace",
+            newline=None,
+        ) as handle:
+            reader = REMOTE_PROBE._HashingReader(handle)
+            with self.assertRaisesRegex(TypeError, "requires binary input"):
+                reader.read()
+
+    def test_remote_probe_local_rollout_summary_hashes_exact_raw_bytes(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw) / ".codex"
+            rollout_ref = "sessions/2026/05/01/rollout-2026-05-01T10-00-00-raw-bytes.jsonl"
+            rollout = root / rollout_ref
+            first_line = json.dumps(
+                message("user", "Review the deployment.", "2026-05-01T10:00:00Z")
+            ).encode("utf-8")
+            first_line = first_line.replace(b"deployment", b"deploy\xffment")
+            payload = first_line + b"\r\n" + json.dumps(
+                message("assistant", "Acknowledged.", "2026-05-01T10:01:00Z")
+            ).encode("utf-8") + b"\r\n"
+            rollout.parent.mkdir(parents=True, exist_ok=True)
+            rollout.write_bytes(payload)
+            stdout = io.StringIO()
+
+            with mock.patch.object(REMOTE_PROBE, "_local_codex_root", return_value=root), mock.patch.object(
+                sys, "stdout", stdout
+            ):
+                result = REMOTE_PROBE.cmd_rollout_summary(
+                    types.SimpleNamespace(
+                        host="local",
+                        rollout=rollout_ref,
+                        keyword=[],
+                        limit=10,
+                        tail_records=0,
+                        max_text_chars=80,
+                    )
+                )
+
+        self.assertEqual(result, 0)
+        self.assertEqual(payload.count(b"\r\n"), 2)
+        self.assertIn(b"\xff", payload)
+        rows = [json.loads(line) for line in stdout.getvalue().splitlines() if line.startswith("{")]
+        scan_meta = next(row for row in rows if row.get("kind") == "scan_meta")
+        self.assertFalse(scan_meta["scan_truncated"])
+        self.assertEqual(scan_meta["source_bytes"], len(payload))
+        self.assertEqual(scan_meta["source_sha256"], hashlib.sha256(payload).hexdigest())
+
+    def test_remote_probe_embedded_rollout_summary_hashes_exact_raw_bytes(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw) / ".codex"
+            rollout_ref = "sessions/2026/05/01/rollout-2026-05-01T10-00-00-raw-bytes.jsonl"
+            rollout = root / rollout_ref
+            first_line = json.dumps(
+                message("user", "Review the deployment.", "2026-05-01T10:00:00Z")
+            ).encode("utf-8")
+            first_line = first_line.replace(b"deployment", b"deploy\xffment")
+            payload = first_line + b"\r\n" + json.dumps(
+                message("assistant", "Acknowledged.", "2026-05-01T10:01:00Z")
+            ).encode("utf-8") + b"\r\n"
+            rollout.parent.mkdir(parents=True, exist_ok=True)
+            rollout.write_bytes(payload)
+            script = REMOTE_PROBE._remote_python_script(
+                {
+                    "mode": "rollout-summary",
+                    "codex_root": str(root),
+                    "rollout": rollout_ref,
+                    "summary_limit": 10,
+                    "summary_scan_bytes": 4096,
+                    "summary_tail_records": 0,
+                    "summary_max_text_chars": 80,
+                    "summary_keywords": [],
+                }
+            )
+
+            result = subprocess.run(
+                [sys.executable, "-"],
+                input=script,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        rows = [json.loads(line) for line in result.stdout.splitlines() if line.startswith("{")]
+        scan_meta = next(row for row in rows if row.get("kind") == "scan_meta")
+        self.assertFalse(scan_meta["scan_truncated"])
+        self.assertEqual(scan_meta["source_bytes"], len(payload))
+        self.assertEqual(scan_meta["source_sha256"], hashlib.sha256(payload).hexdigest())
 
     def test_remote_probe_rollout_summary_preserves_bounded_user_signal(self) -> None:
         records = REMOTE_PROBE._summarize_rollout_records(
@@ -1452,7 +1617,7 @@ class SessionRetrospectiveTests(unittest.TestCase):
 
         self.assertEqual(turns[0].session_id, MODULE.opaque_session_id(raw_session))
 
-    def test_remote_probe_session_meta_uses_bounded_input_scan(self) -> None:
+    def test_remote_probe_session_meta_truncation_fails_closed(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw) / ".codex"
             rollout = root / "sessions" / "2026" / "05" / "01" / "rollout-2026-05-01T10-00-00-large.jsonl"
@@ -1475,13 +1640,18 @@ class SessionRetrospectiveTests(unittest.TestCase):
                 with self.assertRaisesRegex(
                     REMOTE_PROBE.SessionMetaRolloutError,
                     "session metadata scan truncated",
-                ):
+                ) as raised:
                     REMOTE_PROBE._iter_session_meta_records(
                         codex_root=root,
                         dates=[dt.date(2026, 5, 1)],
                         limit=10,
                         host="local",
                     )
+
+        self.assertEqual(
+            raised.exception.rollout,
+            "sessions/2026/05/01/rollout-2026-05-01T10-00-00-large.jsonl",
+        )
 
     def test_explicit_sources_still_require_default_host_coverage(self) -> None:
         sources = MODULE.parse_sources(["local=/tmp/local", "miku-bot-dev=/tmp/miku"])
@@ -9825,7 +9995,7 @@ class SessionRetrospectiveTests(unittest.TestCase):
 
                 self.assertIsNone(record)
 
-    def test_remote_probe_keeps_normal_review_prompt_before_signaling(self) -> None:
+    def test_remote_probes_handle_normal_review_prompt_without_signaling(self) -> None:
         prompt = "Review the code changes against the base branch and report only actionable findings."
 
         for probe in (REMOTE_PROBE, REMOTE_HOST_CONTEXT_PROBE):
@@ -10383,8 +10553,14 @@ class SessionRetrospectiveTests(unittest.TestCase):
                 self.assertIn("internal|corp|local|lan|example|invalid|test", script)
                 self.assertIn("meaningful_user_message_text", script)
                 self.assertIn("Persistent internal Codex readonly review contract", script)
-                self.assertIn("ROOT.lstat()", script)
-                self.assertIn("Codex root is a symlink", script)
+                if probe is REMOTE_HOST_CONTEXT_PROBE:
+                    self.assertIn("resolved_root = ROOT.resolve(strict=True)", script)
+                    self.assertIn("os.stat(part, dir_fd=directory_fd, follow_symlinks=False)", script)
+                    self.assertIn("os.open(part, directory_open_flags(), dir_fd=directory_fd)", script)
+                    self.assertIn("dir_fd=self.parent_fd", script)
+                else:
+                    self.assertIn("ROOT.lstat()", script)
+                    self.assertIn("Codex root is a symlink", script)
                 self.assertIn('os.fdopen(fd, "rb")', script)
                 self.assertIn("raw_bytes.splitlines(keepends=True)", script)
                 self.assertIn("if max_scan_bytes and scanned >= max_scan_bytes:\n            if dropping_oversized_line:", script)
@@ -10428,8 +10604,23 @@ class SessionRetrospectiveTests(unittest.TestCase):
                         check=False,
                     )
 
-                self.assertNotEqual(result.returncode, 0)
-                self.assertIn("Codex root is a symlink", result.stderr)
+                if probe is REMOTE_HOST_CONTEXT_PROBE:
+                    self.assertEqual(result.returncode, 0)
+                    self.assertEqual(result.stderr, "")
+                    payload_lines = probe._extract_framed_lines(
+                        result.stdout,
+                        begin_marker=probe.REMOTE_SESSION_META_BEGIN,
+                        end_marker=probe.REMOTE_SESSION_META_END,
+                        host="embedded",
+                        command="session-meta",
+                    )
+                    self.assertEqual(
+                        [json.loads(line) for line in payload_lines],
+                        [{"kind": "error", "error": "session directory unreadable"}],
+                    )
+                else:
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn("Codex root is a symlink", result.stderr)
                 self.assertNotIn("hidden-session", result.stdout)
 
     def test_remote_probe_generated_session_meta_marks_limit_truncation(self) -> None:

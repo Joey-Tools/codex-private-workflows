@@ -117,8 +117,12 @@ class RemoteHostContextDocumentationTests(unittest.TestCase):
         self.assertIn("If only an activity or updated date is known", skill)
         self.assertIn("derive the creation date", skill)
         self.assertIn("never substitute activity-date directories", skill)
-        self.assertIn("fails closed when its bounded prefix ends", skill)
-        self.assertIn("still has unread bytes", skill)
+        self.assertIn("accepts only complete LF-terminated JSONL records", skill)
+        self.assertIn("a bare CR is incomplete", skill)
+        self.assertIn("descriptor-relative directory enumeration is unreadable", skill)
+        self.assertIn("`O_NOFOLLOW` and `O_NONBLOCK`", skill)
+        self.assertIn("stat-to-open FIFO replacement", skill)
+        self.assertIn("cap cuts through a record", skill)
         self.assertIn("locator and triage output only", skill)
         self.assertIn(
             "cannot prove that every later substantive human follow-up", skill
@@ -296,7 +300,7 @@ class RemoteCodexProbeChunkTests(unittest.TestCase):
                 with (
                     mock.patch.object(
                         MODULE,
-                        "_resolve_safe_codex_root",
+                        "_open_pinned_codex_root",
                         side_effect=root_error,
                     ),
                     self.assertRaises(MODULE.SessionMetaRolloutError) as raised,
@@ -312,6 +316,144 @@ class RemoteCodexProbeChunkTests(unittest.TestCase):
                 self.assertIsNone(raised.exception.rollout)
                 self.assertNotIn(secret_root, str(raised.exception))
 
+    def test_session_meta_root_post_lstat_failures_fail_closed_local_and_embedded(
+        self,
+    ) -> None:
+        secret_path = "/sensitive/root-race"
+        windows = ("resolve", "stat", "open", "resolve-runtime")
+        for window in windows:
+            with (
+                self.subTest(scope="local", window=window),
+                tempfile.TemporaryDirectory() as temp_dir,
+            ):
+                codex_root = Path(temp_dir) / ".codex"
+                codex_root.mkdir()
+                resolved_root = codex_root.resolve()
+                real_resolve = MODULE.pathlib.Path.resolve
+                real_stat = MODULE.os.stat
+                real_open = MODULE.os.open
+
+                def resolve_failure(path: Path, *args, **kwargs):
+                    if path == codex_root:
+                        if window == "resolve-runtime":
+                            raise RuntimeError(f"symlink loop at {secret_path}")
+                        raise FileNotFoundError(secret_path)
+                    return real_resolve(path, *args, **kwargs)
+
+                def stat_failure(path, *args, **kwargs):
+                    if (
+                        str(path) == str(resolved_root)
+                        and kwargs.get("follow_symlinks") is False
+                        and kwargs.get("dir_fd") is None
+                    ):
+                        raise FileNotFoundError(secret_path)
+                    return real_stat(path, *args, **kwargs)
+
+                def open_failure(path, *args, **kwargs):
+                    if (
+                        str(path) == str(resolved_root)
+                        and kwargs.get("dir_fd") is None
+                    ):
+                        raise FileNotFoundError(secret_path)
+                    return real_open(path, *args, **kwargs)
+
+                if window in ("resolve", "resolve-runtime"):
+                    patcher = mock.patch.object(
+                        MODULE.pathlib.Path,
+                        "resolve",
+                        resolve_failure,
+                    )
+                elif window == "stat":
+                    patcher = mock.patch.object(MODULE.os, "stat", stat_failure)
+                else:
+                    patcher = mock.patch.object(MODULE.os, "open", open_failure)
+
+                with (
+                    patcher,
+                    self.assertRaises(MODULE.SessionMetaRolloutError) as raised,
+                ):
+                    MODULE._scan_session_meta_records(
+                        codex_root=codex_root,
+                        dates=[MODULE.dt.date(2026, 5, 26)],
+                        limit=10,
+                        host="local",
+                    )
+
+                self.assertEqual(raised.exception.error, "session directory unreadable")
+                self.assertIsNone(raised.exception.rollout)
+                self.assertNotIn(secret_path, str(raised.exception))
+
+            with (
+                self.subTest(scope="embedded", window=window),
+                tempfile.TemporaryDirectory() as temp_dir,
+            ):
+                codex_root = Path(temp_dir) / ".codex"
+                codex_root.mkdir()
+                script = MODULE._remote_python_script(
+                    {
+                        "mode": "session-meta",
+                        "dates": [],
+                        "limit": 10,
+                        "codex_root": str(codex_root),
+                        "session_meta_scan_bytes": MODULE.MAX_SESSION_META_SCAN_BYTES,
+                    }
+                )
+                marker = 'if CONFIG["mode"] == "session-meta":\n'
+                if window in ("resolve", "resolve-runtime"):
+                    error_type = "RuntimeError" if window == "resolve-runtime" else "FileNotFoundError"
+                    injection = (
+                        "_real_resolve = pathlib.Path.resolve\n"
+                        "def injected_root_resolve(path, *args, **kwargs):\n"
+                        "    if path == ROOT:\n"
+                        f"        raise {error_type}({secret_path!r})\n"
+                        "    return _real_resolve(path, *args, **kwargs)\n"
+                        "pathlib.Path.resolve = injected_root_resolve\n\n"
+                    )
+                elif window == "stat":
+                    injection = (
+                        "_resolved_root_text = str(ROOT.resolve(strict=True))\n"
+                        "_real_stat = os.stat\n"
+                        "def injected_root_stat(path, *args, **kwargs):\n"
+                        "    if str(path) == _resolved_root_text and kwargs.get('follow_symlinks') is False and kwargs.get('dir_fd') is None:\n"
+                        f"        raise FileNotFoundError({secret_path!r})\n"
+                        "    return _real_stat(path, *args, **kwargs)\n"
+                        "os.stat = injected_root_stat\n\n"
+                    )
+                else:
+                    injection = (
+                        "_resolved_root_text = str(ROOT.resolve(strict=True))\n"
+                        "_real_open = os.open\n"
+                        "def injected_root_open(path, *args, **kwargs):\n"
+                        "    if str(path) == _resolved_root_text and kwargs.get('dir_fd') is None:\n"
+                        f"        raise FileNotFoundError({secret_path!r})\n"
+                        "    return _real_open(path, *args, **kwargs)\n"
+                        "os.open = injected_root_open\n\n"
+                    )
+                self.assertEqual(script.count(marker), 1)
+                script = script.replace(marker, injection + marker)
+                result = subprocess.run(
+                    [sys.executable, "-"],
+                    input=script,
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stderr, "")
+            payload_lines = MODULE._extract_framed_lines(
+                result.stdout,
+                begin_marker=MODULE.REMOTE_SESSION_META_BEGIN,
+                end_marker=MODULE.REMOTE_SESSION_META_END,
+                host="embedded",
+                command="session-meta",
+            )
+            self.assertEqual(
+                [json.loads(line) for line in payload_lines],
+                [{"kind": "error", "error": "session directory unreadable"}],
+            )
+            self.assertNotIn(secret_path, result.stdout)
+
     def test_session_meta_root_permission_error_uses_cli_error_channel(self) -> None:
         secret_root = "/sensitive/codex/root"
         output = io.StringIO()
@@ -319,7 +461,7 @@ class RemoteCodexProbeChunkTests(unittest.TestCase):
         with (
             mock.patch.object(
                 MODULE,
-                "_resolve_safe_codex_root",
+                "_open_pinned_codex_root",
                 side_effect=PermissionError(13, "Permission denied", secret_root),
             ),
             redirect_stdout(output),
@@ -342,6 +484,636 @@ class RemoteCodexProbeChunkTests(unittest.TestCase):
             "host=local\nerror=session directory unreadable\n",
         )
         self.assertNotIn(secret_root, error_output.getvalue())
+
+    def test_session_meta_scandir_errors_fail_closed_without_path_leak(self) -> None:
+        secret_path = "/sensitive/session/directory"
+        for scan_error in (
+            PermissionError(13, "Permission denied", secret_path),
+            OSError(5, "Input/output error", secret_path),
+        ):
+            with (
+                self.subTest(error_type=type(scan_error).__name__),
+                tempfile.TemporaryDirectory() as temp_dir,
+            ):
+                codex_root = Path(temp_dir) / ".codex"
+                write_rollout(
+                    codex_root,
+                    ['{"type":"session_meta","payload":{"id":"trusted"}}'],
+                )
+                with (
+                    mock.patch.object(MODULE.os, "scandir", side_effect=scan_error),
+                    self.assertRaises(MODULE.SessionMetaRolloutError) as raised,
+                ):
+                    MODULE._scan_session_meta_records(
+                        codex_root=codex_root,
+                        dates=[MODULE.dt.date(2026, 5, 26)],
+                        limit=10,
+                        host="local",
+                    )
+
+                self.assertEqual(raised.exception.error, "session directory unreadable")
+                self.assertIsNone(raised.exception.rollout)
+                self.assertNotIn(secret_path, str(raised.exception))
+
+    def test_session_meta_scandir_missing_after_open_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            codex_root = Path(temp_dir) / ".codex"
+            write_rollout(
+                codex_root,
+                ['{"type":"session_meta","payload":{"id":"vanished"}}'],
+            )
+            with (
+                mock.patch.object(
+                    MODULE.os,
+                    "scandir",
+                    side_effect=FileNotFoundError("directory vanished"),
+                ),
+                self.assertRaises(MODULE.SessionMetaRolloutError) as raised,
+            ):
+                MODULE._scan_session_meta_records(
+                    codex_root=codex_root,
+                    dates=[MODULE.dt.date(2026, 5, 26)],
+                    limit=10,
+                    host="local",
+                )
+
+        self.assertEqual(raised.exception.error, "session directory unreadable")
+        self.assertIsNone(raised.exception.rollout)
+        self.assertNotIn("directory vanished", str(raised.exception))
+
+    def test_embedded_session_meta_scandir_error_uses_path_neutral_frame(self) -> None:
+        secret_path = "/sensitive/session/directory"
+        with tempfile.TemporaryDirectory() as temp_dir:
+            codex_root = Path(temp_dir) / ".codex"
+            write_rollout(
+                codex_root,
+                ['{"type":"session_meta","payload":{"id":"trusted"}}'],
+            )
+            script = MODULE._remote_python_script(
+                {
+                    "mode": "session-meta",
+                    "dates": ["2026/05/26"],
+                    "limit": 10,
+                    "codex_root": str(codex_root),
+                    "session_meta_scan_bytes": MODULE.MAX_SESSION_META_SCAN_BYTES,
+                }
+            )
+            marker = 'if CONFIG["mode"] == "session-meta":\n'
+            injection = (
+                "def injected_scandir_failure(*args, **kwargs):\n"
+                f"    raise OSError(5, 'Input/output error', {secret_path!r})\n\n"
+                "os.scandir = injected_scandir_failure\n\n"
+            )
+            self.assertEqual(script.count(marker), 1)
+            script = script.replace(marker, injection + marker)
+            result = subprocess.run(
+                [sys.executable, "-"],
+                input=script,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        payload_lines = MODULE._extract_framed_lines(
+            result.stdout,
+            begin_marker=MODULE.REMOTE_SESSION_META_BEGIN,
+            end_marker=MODULE.REMOTE_SESSION_META_END,
+            host="embedded",
+            command="session-meta",
+        )
+        self.assertEqual(
+            [json.loads(line) for line in payload_lines],
+            [{"kind": "error", "error": "session directory unreadable"}],
+        )
+        self.assertNotIn(secret_path, result.stdout)
+        self.assertNotIn(secret_path, result.stderr)
+
+    def test_embedded_session_meta_scandir_missing_after_open_fails_closed(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            codex_root = Path(temp_dir) / ".codex"
+            write_rollout(
+                codex_root,
+                ['{"type":"session_meta","payload":{"id":"vanished"}}'],
+            )
+            script = MODULE._remote_python_script(
+                {
+                    "mode": "session-meta",
+                    "dates": ["2026/05/26"],
+                    "limit": 10,
+                    "codex_root": str(codex_root),
+                    "session_meta_scan_bytes": MODULE.MAX_SESSION_META_SCAN_BYTES,
+                }
+            )
+            marker = 'if CONFIG["mode"] == "session-meta":\n'
+            injection = (
+                "def injected_scandir_missing(*args, **kwargs):\n"
+                "    raise FileNotFoundError('directory vanished')\n\n"
+                "os.scandir = injected_scandir_missing\n\n"
+            )
+            self.assertEqual(script.count(marker), 1)
+            script = script.replace(marker, injection + marker)
+            result = subprocess.run(
+                [sys.executable, "-"],
+                input=script,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        payload_lines = MODULE._extract_framed_lines(
+            result.stdout,
+            begin_marker=MODULE.REMOTE_SESSION_META_BEGIN,
+            end_marker=MODULE.REMOTE_SESSION_META_END,
+            host="embedded",
+            command="session-meta",
+        )
+        self.assertEqual(
+            [json.loads(line) for line in payload_lines],
+            [{"kind": "error", "error": "session directory unreadable"}],
+        )
+        self.assertNotIn("directory vanished", result.stdout)
+        self.assertNotIn("directory vanished", result.stderr)
+
+    def test_session_meta_parent_dup_failure_closes_rollout_and_stays_framed(
+        self,
+    ) -> None:
+        secret_error = "/sensitive/dup-failure"
+        with tempfile.TemporaryDirectory() as temp_dir:
+            codex_root = Path(temp_dir) / ".codex"
+            rollout = write_rollout(
+                codex_root,
+                ['{"type":"session_meta","payload":{"id":"trusted"}}'],
+            )
+            rollout_name = Path(rollout).name
+            real_open = MODULE.os.open
+            real_dup = MODULE.os.dup
+            dup_calls = 0
+            rollout_fds: list[int] = []
+
+            def tracking_open(path, *args, **kwargs):
+                fd = real_open(path, *args, **kwargs)
+                if path == rollout_name and kwargs.get("dir_fd") is not None:
+                    rollout_fds.append(fd)
+                return fd
+
+            def fail_parent_dup(fd: int) -> int:
+                nonlocal dup_calls
+                dup_calls += 1
+                if dup_calls == 2:
+                    raise OSError(24, "Too many open files", secret_error)
+                return real_dup(fd)
+
+            with (
+                mock.patch.object(MODULE.os, "open", tracking_open),
+                mock.patch.object(MODULE.os, "dup", fail_parent_dup),
+                self.assertRaises(MODULE.SessionMetaRolloutError) as raised,
+            ):
+                MODULE._scan_session_meta_records(
+                    codex_root=codex_root,
+                    dates=[MODULE.dt.date(2026, 5, 26)],
+                    limit=10,
+                    host="local",
+                )
+
+            self.assertEqual(raised.exception.error, "rollout unreadable")
+            self.assertEqual(raised.exception.rollout, rollout)
+            self.assertNotIn(secret_error, str(raised.exception))
+            self.assertEqual(len(rollout_fds), 1)
+            with self.assertRaises(OSError):
+                os.fstat(rollout_fds[0])
+
+            script = MODULE._remote_python_script(
+                {
+                    "mode": "session-meta",
+                    "dates": ["2026/05/26"],
+                    "limit": 10,
+                    "codex_root": str(codex_root),
+                    "session_meta_scan_bytes": MODULE.MAX_SESSION_META_SCAN_BYTES,
+                }
+            )
+            marker = 'if CONFIG["mode"] == "session-meta":\n'
+            injection = (
+                "_real_dup = os.dup\n"
+                "_dup_calls = 0\n"
+                "def injected_parent_dup(fd):\n"
+                "    global _dup_calls\n"
+                "    _dup_calls += 1\n"
+                "    if _dup_calls == 2:\n"
+                f"        raise OSError(24, 'Too many open files', {secret_error!r})\n"
+                "    return _real_dup(fd)\n"
+                "os.dup = injected_parent_dup\n\n"
+            )
+            self.assertEqual(script.count(marker), 1)
+            script = script.replace(marker, injection + marker)
+            result = subprocess.run(
+                [sys.executable, "-"],
+                input=script,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stderr, "")
+        payload_lines = MODULE._extract_framed_lines(
+            result.stdout,
+            begin_marker=MODULE.REMOTE_SESSION_META_BEGIN,
+            end_marker=MODULE.REMOTE_SESSION_META_END,
+            host="embedded",
+            command="session-meta",
+        )
+        self.assertEqual(
+            [json.loads(line) for line in payload_lines],
+            [{"kind": "error", "error": "rollout unreadable", "rollout": rollout}],
+        )
+        self.assertNotIn(secret_error, result.stdout)
+
+    def test_session_meta_cap_never_accepts_unterminated_json_prefix(self) -> None:
+        session_meta = json.dumps(
+            {
+                "type": "session_meta",
+                "payload": {"id": "must-not-escape", "cwd": "/repo"},
+            },
+            separators=(",", ":"),
+        )
+        scan_bytes = len(session_meta.encode("utf-8"))
+        with tempfile.TemporaryDirectory() as temp_dir:
+            codex_root = Path(temp_dir) / ".codex"
+            write_rollout(codex_root, [session_meta + " trailing-junk"])
+            output = io.StringIO()
+            error_output = io.StringIO()
+            with (
+                mock.patch.object(MODULE, "_local_codex_root", return_value=codex_root),
+                mock.patch.object(MODULE, "MAX_SESSION_META_SCAN_BYTES", scan_bytes),
+                redirect_stdout(output),
+                redirect_stderr(error_output),
+            ):
+                rc = MODULE.cmd_session_meta(
+                    argparse.Namespace(
+                        host=["local"],
+                        date=["2026/05/26"],
+                        from_date=None,
+                        to_date=None,
+                        limit=10,
+                    )
+                )
+
+            script = MODULE._remote_python_script(
+                {
+                    "mode": "session-meta",
+                    "dates": ["2026/05/26"],
+                    "limit": 10,
+                    "codex_root": str(codex_root),
+                    "session_meta_scan_bytes": scan_bytes,
+                }
+            )
+            embedded = subprocess.run(
+                [sys.executable, "-"],
+                input=script,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+        self.assertEqual(rc, 1)
+        self.assertEqual(output.getvalue(), "")
+        self.assertIn(MODULE.SESSION_META_SCAN_TRUNCATED_ERROR, error_output.getvalue())
+        self.assertNotIn("must-not-escape", output.getvalue())
+        self.assertEqual(embedded.returncode, 0, embedded.stderr)
+        embedded_items = [
+            json.loads(line)
+            for line in MODULE._extract_framed_lines(
+                embedded.stdout,
+                begin_marker=MODULE.REMOTE_SESSION_META_BEGIN,
+                end_marker=MODULE.REMOTE_SESSION_META_END,
+                host="embedded",
+                command="session-meta",
+            )
+        ]
+        self.assertEqual(
+            embedded_items[0]["error"], MODULE.SESSION_META_SCAN_TRUNCATED_ERROR
+        )
+        self.assertNotIn("must-not-escape", embedded.stdout)
+
+    def test_session_meta_complete_line_and_newline_at_cap_is_accepted(self) -> None:
+        session_meta = json.dumps(
+            {
+                "type": "session_meta",
+                "payload": {"id": "complete-at-cap", "cwd": "/repo"},
+            },
+            separators=(",", ":"),
+        )
+        line = (session_meta + "\n").encode("utf-8")
+        with tempfile.TemporaryDirectory() as temp_dir:
+            codex_root = Path(temp_dir) / ".codex"
+            rollout = write_rollout(codex_root, [session_meta, "trailing"])
+            with mock.patch.object(MODULE, "MAX_SESSION_META_SCAN_BYTES", len(line)):
+                scan = MODULE._scan_session_meta_records(
+                    codex_root=codex_root,
+                    dates=[MODULE.dt.date(2026, 5, 26)],
+                    limit=10,
+                    host="local",
+                )
+
+        self.assertEqual(scan.rows[0]["session_id"], "complete-at-cap")
+        self.assertEqual(scan.rows[0]["rollout"], rollout)
+
+    def test_session_meta_raw_reads_never_exceed_scan_cap_local_and_embedded(
+        self,
+    ) -> None:
+        lines = [
+            '{"type":"other","payload":{}}',
+            '{"type":"session_meta","payload":{"id":"bounded-raw-read","cwd":"/repo"}}',
+            json.dumps(
+                {"type": "response_item", "payload": "x" * io.DEFAULT_BUFFER_SIZE},
+                separators=(",", ":"),
+            ),
+        ]
+        with tempfile.TemporaryDirectory() as temp_dir:
+            codex_root = Path(temp_dir) / ".codex"
+            rollout = write_rollout(codex_root, lines)
+            scan_bytes = sum(len(line.encode("utf-8")) + 1 for line in lines[:2])
+            self.assertLess(scan_bytes, io.DEFAULT_BUFFER_SIZE)
+            self.assertGreater((codex_root / rollout).stat().st_size, io.DEFAULT_BUFFER_SIZE)
+            local_reads: list[tuple[int, int]] = []
+            real_os_read = MODULE.os.read
+
+            def guarded_local_os_read(file_descriptor: int, size: int) -> bytes:
+                consumed = sum(returned for _requested, returned in local_reads)
+                remaining = scan_bytes - consumed
+                if size < 0 or size > remaining:
+                    raise AssertionError(
+                        f"os.read requested {size}, remaining cap is {remaining}"
+                    )
+                data = real_os_read(file_descriptor, size)
+                local_reads.append((size, len(data)))
+                return data
+
+            with (
+                mock.patch.object(
+                    MODULE,
+                    "MAX_SESSION_META_SCAN_BYTES",
+                    scan_bytes,
+                ),
+                mock.patch.object(
+                    MODULE.os,
+                    "read",
+                    guarded_local_os_read,
+                ),
+            ):
+                scan = MODULE._scan_session_meta_records(
+                    codex_root=codex_root,
+                    dates=[MODULE.dt.date(2026, 5, 26)],
+                    limit=10,
+                    host="local",
+                )
+
+            self.assertEqual(scan.rows[0]["session_id"], "bounded-raw-read")
+            self.assertEqual(sum(returned for _size, returned in local_reads), scan_bytes)
+            self.assertTrue(local_reads)
+            self.assertLessEqual(
+                sum(requested for requested, _returned in local_reads),
+                scan_bytes,
+            )
+
+            script = MODULE._remote_python_script(
+                {
+                    "mode": "session-meta",
+                    "dates": ["2026/05/26"],
+                    "limit": 10,
+                    "codex_root": str(codex_root),
+                    "session_meta_scan_bytes": scan_bytes,
+                }
+            )
+            audit_path = Path(temp_dir) / "embedded-os-read-bytes.txt"
+            marker = 'if CONFIG["mode"] == "session-meta":\n'
+            injection = (
+                "_real_os_read = os.read\n"
+                "_embedded_os_read_bytes = 0\n"
+                "def guarded_embedded_os_read(file_descriptor, size):\n"
+                "    global _embedded_os_read_bytes\n"
+                "    remaining = SESSION_META_SCAN_BYTES - _embedded_os_read_bytes\n"
+                "    if size < 0 or size > remaining:\n"
+                "        raise AssertionError('embedded os.read exceeded session-meta cap')\n"
+                "    data = _real_os_read(file_descriptor, size)\n"
+                "    _embedded_os_read_bytes += len(data)\n"
+                f"    pathlib.Path({str(audit_path)!r}).write_text(str(_embedded_os_read_bytes), encoding='utf-8')\n"
+                "    return data\n"
+                "os.read = guarded_embedded_os_read\n\n"
+            )
+            self.assertEqual(script.count(marker), 1)
+            self.assertIn("chunk = os.read(file_descriptor, remaining)", script)
+            self.assertNotIn("raw_line = handle.readline(remaining)", script)
+            script = script.replace(marker, injection + marker)
+            result = subprocess.run(
+                [sys.executable, "-"],
+                input=script,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            embedded_read_bytes = int(audit_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stderr, "")
+        self.assertEqual(embedded_read_bytes, scan_bytes)
+        payload_lines = MODULE._extract_framed_lines(
+            result.stdout,
+            begin_marker=MODULE.REMOTE_SESSION_META_BEGIN,
+            end_marker=MODULE.REMOTE_SESSION_META_END,
+            host="embedded",
+            command="session-meta",
+        )
+        self.assertEqual(
+            [json.loads(line)["session_id"] for line in payload_lines],
+            ["bounded-raw-read"],
+        )
+
+    def test_session_meta_rejects_bare_carriage_return_locally_and_embedded(
+        self,
+    ) -> None:
+        session_meta = json.dumps(
+            {
+                "type": "session_meta",
+                "payload": {"id": "bare-cr-must-not-escape", "cwd": "/repo"},
+            },
+            separators=(",", ":"),
+        ).encode("utf-8")
+        bare_cr_record = session_meta + b"\r"
+        rollout = "sessions/2026/05/26/rollout-2026-05-26T10-00-00-bare-cr.jsonl"
+        with tempfile.TemporaryDirectory() as temp_dir:
+            codex_root = Path(temp_dir) / ".codex"
+            rollout_path = codex_root / rollout
+            rollout_path.parent.mkdir(parents=True)
+            rollout_path.write_bytes(bare_cr_record)
+            output = io.StringIO()
+            error_output = io.StringIO()
+            with (
+                mock.patch.object(MODULE, "_local_codex_root", return_value=codex_root),
+                mock.patch.object(
+                    MODULE,
+                    "MAX_SESSION_META_SCAN_BYTES",
+                    len(bare_cr_record),
+                ),
+                redirect_stdout(output),
+                redirect_stderr(error_output),
+            ):
+                rc = MODULE.cmd_session_meta(
+                    argparse.Namespace(
+                        host=["local"],
+                        date=["2026/05/26"],
+                        from_date=None,
+                        to_date=None,
+                        limit=10,
+                    )
+                )
+
+            script = MODULE._remote_python_script(
+                {
+                    "mode": "session-meta",
+                    "dates": ["2026/05/26"],
+                    "limit": 10,
+                    "codex_root": str(codex_root),
+                    "session_meta_scan_bytes": len(bare_cr_record),
+                }
+            )
+            embedded = subprocess.run(
+                [sys.executable, "-"],
+                input=script,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+        self.assertEqual(rc, 1)
+        self.assertEqual(output.getvalue(), "")
+        self.assertIn(MODULE.SESSION_META_SCAN_TRUNCATED_ERROR, error_output.getvalue())
+        self.assertNotIn("bare-cr-must-not-escape", output.getvalue())
+        self.assertEqual(embedded.returncode, 0, embedded.stderr)
+        embedded_items = [
+            json.loads(line)
+            for line in MODULE._extract_framed_lines(
+                embedded.stdout,
+                begin_marker=MODULE.REMOTE_SESSION_META_BEGIN,
+                end_marker=MODULE.REMOTE_SESSION_META_END,
+                host="embedded",
+                command="session-meta",
+            )
+        ]
+        self.assertEqual(
+            embedded_items,
+            [
+                {
+                    "kind": "error",
+                    "error": MODULE.SESSION_META_SCAN_TRUNCATED_ERROR,
+                    "rollout": rollout,
+                }
+            ],
+        )
+        self.assertNotIn("bare-cr-must-not-escape", embedded.stdout)
+
+    def test_session_meta_accepts_crlf_locally_and_embedded(self) -> None:
+        session_meta = json.dumps(
+            {
+                "type": "session_meta",
+                "payload": {"id": "crlf-session", "cwd": "/repo"},
+            },
+            separators=(",", ":"),
+        ).encode("utf-8")
+        crlf_record = session_meta + b"\r\n"
+        rollout = "sessions/2026/05/26/rollout-2026-05-26T10-00-00-crlf.jsonl"
+        with tempfile.TemporaryDirectory() as temp_dir:
+            codex_root = Path(temp_dir) / ".codex"
+            rollout_path = codex_root / rollout
+            rollout_path.parent.mkdir(parents=True)
+            rollout_path.write_bytes(crlf_record)
+            with mock.patch.object(
+                MODULE,
+                "MAX_SESSION_META_SCAN_BYTES",
+                len(crlf_record),
+            ):
+                scan = MODULE._scan_session_meta_records(
+                    codex_root=codex_root,
+                    dates=[MODULE.dt.date(2026, 5, 26)],
+                    limit=10,
+                    host="local",
+                )
+
+            script = MODULE._remote_python_script(
+                {
+                    "mode": "session-meta",
+                    "dates": ["2026/05/26"],
+                    "limit": 10,
+                    "codex_root": str(codex_root),
+                    "session_meta_scan_bytes": len(crlf_record),
+                }
+            )
+            embedded = subprocess.run(
+                [sys.executable, "-"],
+                input=script,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+        self.assertEqual(scan.rows[0]["session_id"], "crlf-session")
+        self.assertEqual(scan.rows[0]["rollout"], rollout)
+        self.assertEqual(embedded.returncode, 0, embedded.stderr)
+        embedded_items = [
+            json.loads(line)
+            for line in MODULE._extract_framed_lines(
+                embedded.stdout,
+                begin_marker=MODULE.REMOTE_SESSION_META_BEGIN,
+                end_marker=MODULE.REMOTE_SESSION_META_END,
+                host="embedded",
+                command="session-meta",
+            )
+        ]
+        self.assertEqual(embedded_items[0]["session_id"], "crlf-session")
+        self.assertEqual(embedded_items[0]["rollout"], rollout)
+
+    def test_session_meta_rejects_current_entry_replacement_after_read(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            codex_root = Path(temp_dir) / ".codex"
+            rollout = write_rollout(
+                codex_root,
+                ['{"type":"session_meta","payload":{"id":"trusted"}}'],
+            )
+            source_path = codex_root / rollout
+            original_reader = MODULE._read_bounded_session_meta
+
+            def read_then_replace(*args: object, **kwargs: object):
+                result = original_reader(*args, **kwargs)
+                replacement = source_path.with_suffix(".replacement")
+                replacement.write_text(
+                    '{"type":"session_meta","payload":{"id":"external-sentinel"}}\n',
+                    encoding="utf-8",
+                )
+                os.replace(replacement, source_path)
+                return result
+
+            with (
+                mock.patch.object(
+                    MODULE,
+                    "_read_bounded_session_meta",
+                    side_effect=read_then_replace,
+                ),
+                self.assertRaises(MODULE.SessionMetaRolloutError) as raised,
+            ):
+                MODULE._scan_session_meta_records(
+                    codex_root=codex_root,
+                    dates=[MODULE.dt.date(2026, 5, 26)],
+                    limit=10,
+                    host="local",
+                )
+
+        self.assertEqual(raised.exception.error, "rollout unreadable")
+        self.assertEqual(raised.exception.rollout, rollout)
+        self.assertNotIn("external-sentinel", str(raised.exception))
 
     def test_private_output_rejects_parent_symlink_swap_after_resolution(self) -> None:
         with tempfile.TemporaryDirectory(dir="/tmp") as temp_dir:
@@ -402,6 +1174,713 @@ class RemoteCodexProbeChunkTests(unittest.TestCase):
             self.assertEqual(len(replace_dir_fds), 1)
             self.assertIsNotNone(replace_dir_fds[0][0])
             self.assertEqual(replace_dir_fds[0][0], replace_dir_fds[0][1])
+
+    def test_rollout_readers_stay_on_pinned_ancestor_after_swap(self) -> None:
+        operations = (
+            "rollout-stat",
+            "rollout-summary",
+            "chunked-rollout-summary",
+            "fetch-rollout",
+            "fetch-rollout-chunk",
+            "session-meta",
+        )
+        for operation in operations:
+            with (
+                self.subTest(operation=operation),
+                tempfile.TemporaryDirectory() as temp_dir,
+            ):
+                base = Path(temp_dir)
+                codex_root = base / ".codex"
+                external_root = base / "external-codex"
+                trusted_line = json.dumps(
+                    {
+                        "type": "session_meta",
+                        "payload": {"id": "trusted-session", "cwd": "/trusted"},
+                    },
+                    separators=(",", ":"),
+                )
+                sentinel_line = json.dumps(
+                    {
+                        "type": "session_meta",
+                        "payload": {"id": "external-sentinel", "cwd": "/external"},
+                    },
+                    separators=(",", ":"),
+                )
+                rollout = write_rollout(codex_root, [trusted_line])
+                write_rollout(external_root, [sentinel_line])
+                rollout_relative = MODULE._resolve_rollout_relative_path(rollout)
+                trusted_data = (codex_root / rollout).read_bytes()
+                identity = rollout_identity(codex_root, rollout)
+                moved_sessions = codex_root / "sessions-pinned"
+                external_sessions = external_root / "sessions"
+                real_open = MODULE.os.open
+                swapped = False
+
+                def swap_after_sessions_open(
+                    path: object,
+                    flags: int,
+                    mode: int = 0o777,
+                    *,
+                    dir_fd: int | None = None,
+                ) -> int:
+                    nonlocal swapped
+                    fd = real_open(path, flags, mode, dir_fd=dir_fd)
+                    if path == "sessions" and dir_fd is not None and not swapped:
+                        os.replace(codex_root / "sessions", moved_sessions)
+                        (codex_root / "sessions").symlink_to(
+                            external_sessions,
+                            target_is_directory=True,
+                        )
+                        swapped = True
+                    return fd
+
+                with mock.patch.object(
+                    MODULE.os,
+                    "open",
+                    side_effect=swap_after_sessions_open,
+                ):
+                    if operation == "rollout-stat":
+                        result = MODULE._stat_local_rollout_identity(
+                            codex_root,
+                            rollout_relative,
+                        )
+                        self.assertEqual(result, identity)
+                    elif operation == "rollout-summary":
+                        output = io.StringIO()
+                        error_output = io.StringIO()
+                        with (
+                            mock.patch.object(
+                                MODULE,
+                                "_local_codex_root",
+                                return_value=codex_root,
+                            ),
+                            redirect_stdout(output),
+                            redirect_stderr(error_output),
+                        ):
+                            rc = MODULE.cmd_rollout_summary(
+                                argparse.Namespace(
+                                    host="local",
+                                    rollout=rollout,
+                                    keyword=[],
+                                    limit=20,
+                                    tail_records=4,
+                                    max_text_chars=200,
+                                )
+                            )
+                        self.assertEqual(rc, 0, error_output.getvalue())
+                        self.assertIn("trusted-session", output.getvalue())
+                        self.assertNotIn("external-sentinel", output.getvalue())
+                    elif operation == "chunked-rollout-summary":
+                        with mock.patch.object(MODULE, "MIN_ROLLOUT_CHUNK_BYTES", 1):
+                            records = MODULE._chunked_rollout_summary_records(
+                                codex_root=codex_root,
+                                rollout_relative_path=rollout_relative,
+                                chunk_bytes=identity.size,
+                                keywords=[],
+                                limit_per_chunk=20,
+                                tail_records=0,
+                                max_text_chars=200,
+                                host="local",
+                                expected_identity=identity,
+                                authorized_source_bytes=None,
+                            )
+                        encoded = json.dumps(records)
+                        self.assertIn("trusted-session", encoded)
+                        self.assertNotIn("external-sentinel", encoded)
+                    elif operation == "fetch-rollout":
+                        data = MODULE._read_local_rollout_bytes(
+                            codex_root,
+                            rollout_relative,
+                            max_bytes=MODULE.MAX_FETCH_ROLLOUT_BYTES,
+                        )
+                        self.assertEqual(data, trusted_data)
+                    elif operation == "fetch-rollout-chunk":
+                        data = MODULE._read_local_rollout_byte_range(
+                            codex_root,
+                            rollout_relative,
+                            byte_start=0,
+                            byte_end=len(trusted_data),
+                            max_bytes=MODULE.MAX_FETCH_ROLLOUT_CHUNK_BYTES,
+                            expected_identity=identity,
+                        )
+                        self.assertEqual(data, trusted_data)
+                    else:
+                        scan = MODULE._scan_session_meta_records(
+                            codex_root=codex_root,
+                            dates=[MODULE.dt.date(2026, 5, 26)],
+                            limit=10,
+                            host="local",
+                        )
+                        self.assertEqual(scan.rows[0]["session_id"], "trusted-session")
+                        self.assertNotIn("external-sentinel", json.dumps(scan.rows))
+
+                self.assertTrue(swapped)
+
+    def test_rollout_root_swap_between_stat_and_open_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            base = Path(temp_dir)
+            codex_root = base / ".codex"
+            external_root = base / "external-codex"
+            rollout = write_rollout(
+                codex_root,
+                ['{"type":"session_meta","payload":{"id":"trusted"}}'],
+            )
+            write_rollout(
+                external_root,
+                ['{"type":"session_meta","payload":{"id":"external-sentinel"}}'],
+            )
+            rollout_relative = MODULE._resolve_rollout_relative_path(rollout)
+            resolved_root = codex_root.resolve()
+            moved_root = base / ".codex-pinned"
+            real_open = MODULE.os.open
+            swapped = False
+
+            def swap_root_before_open(
+                path: object,
+                flags: int,
+                mode: int = 0o777,
+                *,
+                dir_fd: int | None = None,
+            ) -> int:
+                nonlocal swapped
+                if str(path) == str(resolved_root) and dir_fd is None and not swapped:
+                    os.replace(codex_root, moved_root)
+                    os.replace(external_root, codex_root)
+                    swapped = True
+                return real_open(path, flags, mode, dir_fd=dir_fd)
+
+            with (
+                mock.patch.object(MODULE.os, "open", side_effect=swap_root_before_open),
+                self.assertRaisesRegex(ValueError, "Codex root changed during open"),
+            ):
+                MODULE._read_local_rollout_bytes(
+                    codex_root,
+                    rollout_relative,
+                    max_bytes=MODULE.MAX_FETCH_ROLLOUT_BYTES,
+                )
+
+        self.assertTrue(swapped)
+
+    def test_rollout_root_swap_between_lstat_and_resolve_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            base = Path(temp_dir)
+            codex_root = base / ".codex"
+            external_root = base / "external-codex"
+            rollout = write_rollout(
+                codex_root,
+                ['{"type":"session_meta","payload":{"id":"trusted"}}'],
+            )
+            write_rollout(
+                external_root,
+                ['{"type":"session_meta","payload":{"id":"external-sentinel"}}'],
+            )
+            rollout_relative = MODULE._resolve_rollout_relative_path(rollout)
+            moved_root = base / ".codex-pinned"
+            real_resolve = MODULE.pathlib.Path.resolve
+            swapped = False
+
+            def swap_root_before_resolve(path: Path, *args, **kwargs) -> Path:
+                nonlocal swapped
+                if path == codex_root and not swapped:
+                    os.replace(codex_root, moved_root)
+                    os.replace(external_root, codex_root)
+                    swapped = True
+                return real_resolve(path, *args, **kwargs)
+
+            with (
+                mock.patch.object(
+                    MODULE.pathlib.Path,
+                    "resolve",
+                    swap_root_before_resolve,
+                ),
+                self.assertRaisesRegex(
+                    ValueError,
+                    "Codex root changed during resolution",
+                ),
+            ):
+                MODULE._read_local_rollout_bytes(
+                    codex_root,
+                    rollout_relative,
+                    max_bytes=MODULE.MAX_FETCH_ROLLOUT_BYTES,
+                )
+
+        self.assertTrue(swapped)
+
+    def test_rollout_ancestor_swap_between_stat_and_open_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            base = Path(temp_dir)
+            codex_root = base / ".codex"
+            external_root = base / "external-codex"
+            rollout = write_rollout(
+                codex_root,
+                ['{"type":"session_meta","payload":{"id":"trusted"}}'],
+            )
+            write_rollout(
+                external_root,
+                ['{"type":"session_meta","payload":{"id":"external-sentinel"}}'],
+            )
+            rollout_relative = MODULE._resolve_rollout_relative_path(rollout)
+            moved_sessions = codex_root / "sessions-pinned"
+            real_open = MODULE.os.open
+            swapped = False
+
+            def swap_sessions_before_open(
+                path: object,
+                flags: int,
+                mode: int = 0o777,
+                *,
+                dir_fd: int | None = None,
+            ) -> int:
+                nonlocal swapped
+                if path == "sessions" and dir_fd is not None and not swapped:
+                    os.replace(codex_root / "sessions", moved_sessions)
+                    os.replace(external_root / "sessions", codex_root / "sessions")
+                    swapped = True
+                return real_open(path, flags, mode, dir_fd=dir_fd)
+
+            with (
+                mock.patch.object(
+                    MODULE.os,
+                    "open",
+                    side_effect=swap_sessions_before_open,
+                ),
+                self.assertRaisesRegex(ValueError, "path ancestor changed during open"),
+            ):
+                MODULE._read_local_rollout_bytes(
+                    codex_root,
+                    rollout_relative,
+                    max_bytes=MODULE.MAX_FETCH_ROLLOUT_BYTES,
+                )
+
+        self.assertTrue(swapped)
+
+    def test_session_meta_ancestor_disappearance_after_stat_fails_closed(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            codex_root = Path(temp_dir) / ".codex"
+            write_rollout(
+                codex_root,
+                ['{"type":"session_meta","payload":{"id":"trusted"}}'],
+            )
+            sessions = codex_root / "sessions"
+            moved_sessions = codex_root / "sessions-vanished"
+            real_open = MODULE.os.open
+            vanished = False
+
+            def vanish_sessions_before_open(
+                path: object,
+                flags: int,
+                mode: int = 0o777,
+                *,
+                dir_fd: int | None = None,
+            ) -> int:
+                nonlocal vanished
+                if path == "sessions" and dir_fd is not None and not vanished:
+                    os.replace(sessions, moved_sessions)
+                    vanished = True
+                return real_open(path, flags, mode, dir_fd=dir_fd)
+
+            with (
+                mock.patch.object(
+                    MODULE.os,
+                    "open",
+                    side_effect=vanish_sessions_before_open,
+                ),
+                self.assertRaises(MODULE.SessionMetaRolloutError) as raised,
+            ):
+                MODULE._scan_session_meta_records(
+                    codex_root=codex_root,
+                    dates=[MODULE.dt.date(2026, 5, 26)],
+                    limit=10,
+                    host="local",
+                )
+
+            self.assertTrue(vanished)
+            self.assertEqual(raised.exception.error, "session directory unreadable")
+            self.assertIsNone(raised.exception.rollout)
+            os.replace(moved_sessions, sessions)
+
+            script = MODULE._remote_python_script(
+                {
+                    "mode": "session-meta",
+                    "dates": ["2026/05/26"],
+                    "limit": 10,
+                    "codex_root": str(codex_root),
+                    "session_meta_scan_bytes": MODULE.MAX_SESSION_META_SCAN_BYTES,
+                }
+            )
+            marker = (
+                "                next_fd = os.open(part, directory_open_flags(), "
+                "dir_fd=directory_fd)\n"
+            )
+            injection = (
+                "                if part == 'sessions' and not globals().get('_ancestor_vanished', False):\n"
+                "                    globals()['_ancestor_vanished'] = True\n"
+                f"                    os.replace({str(sessions)!r}, {str(moved_sessions)!r})\n"
+                + marker
+            )
+            self.assertEqual(script.count(marker), 1)
+            script = script.replace(marker, injection)
+            embedded = subprocess.run(
+                [sys.executable, "-"],
+                input=script,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+        self.assertEqual(embedded.returncode, 0, embedded.stderr)
+        embedded_records = [
+            json.loads(line)
+            for line in MODULE._extract_framed_lines(
+                embedded.stdout,
+                begin_marker=MODULE.REMOTE_SESSION_META_BEGIN,
+                end_marker=MODULE.REMOTE_SESSION_META_END,
+                host="embedded",
+                command="session-meta",
+            )
+        ]
+        self.assertEqual(
+            embedded_records,
+            [{"kind": "error", "error": "session directory unreadable"}],
+        )
+
+    def test_regular_file_open_flags_fail_closed_without_nonblock(self) -> None:
+        with (
+            mock.patch.object(MODULE.os, "O_NONBLOCK", None),
+            self.assertRaisesRegex(OSError, "secure rollout reads require O_NONBLOCK"),
+        ):
+            MODULE._regular_file_open_flags()
+
+    def test_relative_path_validator_rejects_absolute_local_and_embedded(
+        self,
+    ) -> None:
+        absolute_path = MODULE.pathlib.PurePosixPath(
+            "/tmp/rollout-absolute-must-not-open.jsonl"
+        )
+        with self.assertRaisesRegex(ValueError, "path must stay under Codex root"):
+            MODULE._validate_relative_path_parts(absolute_path)
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            codex_root = Path(temp_dir) / ".codex"
+            codex_root.mkdir()
+            script = MODULE._remote_python_script(
+                {
+                    "mode": "session-meta",
+                    "dates": [],
+                    "limit": 10,
+                    "codex_root": str(codex_root),
+                    "session_meta_scan_bytes": MODULE.MAX_SESSION_META_SCAN_BYTES,
+                }
+            )
+            marker = 'if CONFIG["mode"] == "session-meta":\n'
+            injection = (
+                "try:\n"
+                f"    validate_relative_path_parts(pathlib.PurePosixPath({absolute_path.as_posix()!r}))\n"
+                "except ValueError as error:\n"
+                "    if str(error) != 'path must stay under Codex root':\n"
+                "        raise\n"
+                "else:\n"
+                "    raise AssertionError('absolute path passed embedded validator')\n\n"
+            )
+            self.assertEqual(script.count(marker), 1)
+            self.assertIn("if rel.is_absolute():", script)
+            script = script.replace(marker, injection + marker)
+            result = subprocess.run(
+                [sys.executable, "-"],
+                input=script,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stderr, "")
+        payload_lines = MODULE._extract_framed_lines(
+            result.stdout,
+            begin_marker=MODULE.REMOTE_SESSION_META_BEGIN,
+            end_marker=MODULE.REMOTE_SESSION_META_END,
+            host="embedded",
+            command="session-meta",
+        )
+        self.assertEqual(payload_lines, [])
+
+    def test_rollout_unlink_between_stat_and_open_fails_closed_local_and_embedded(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            codex_root = Path(temp_dir) / ".codex"
+            rollout = write_rollout(
+                codex_root,
+                ['{"type":"session_meta","payload":{"id":"trusted"}}'],
+            )
+            rollout_relative = MODULE._resolve_rollout_relative_path(rollout)
+            rollout_path = codex_root / rollout
+            real_open = MODULE.os.open
+            unlinked = False
+
+            def unlink_rollout_before_open(
+                path: object,
+                flags: int,
+                mode: int = 0o777,
+                *,
+                dir_fd: int | None = None,
+            ) -> int:
+                nonlocal unlinked
+                if path == rollout_path.name and dir_fd is not None and not unlinked:
+                    rollout_path.unlink()
+                    unlinked = True
+                return real_open(path, flags, mode, dir_fd=dir_fd)
+
+            with (
+                mock.patch.object(
+                    MODULE.os,
+                    "open",
+                    side_effect=unlink_rollout_before_open,
+                ),
+                self.assertRaisesRegex(ValueError, "rollout changed during open"),
+            ):
+                MODULE._read_local_rollout_bytes(
+                    codex_root,
+                    rollout_relative,
+                    max_bytes=MODULE.MAX_FETCH_ROLLOUT_BYTES,
+            )
+
+            self.assertTrue(unlinked)
+            rollout_path.write_text(
+                '{"type":"session_meta","payload":{"id":"trusted"}}\n',
+                encoding="utf-8",
+            )
+            script = MODULE._remote_python_script(
+                {
+                    "mode": "fetch-rollout",
+                    "rollout": rollout,
+                    "codex_root": str(codex_root),
+                    "max_fetch_rollout_bytes": MODULE.MAX_FETCH_ROLLOUT_BYTES,
+                }
+            )
+            marker = (
+                "    try:\n"
+                "        fd = os.open(name, regular_file_open_flags(), dir_fd=parent_fd)\n"
+            )
+            injection = (
+                "    try:\n"
+                f"        if name == {rollout_path.name!r} and not globals().get('_rollout_unlinked', False):\n"
+                "            globals()['_rollout_unlinked'] = True\n"
+                f"            pathlib.Path({str(rollout_path)!r}).unlink()\n"
+                "        fd = os.open(name, regular_file_open_flags(), dir_fd=parent_fd)\n"
+            )
+            self.assertEqual(script.count(marker), 1)
+            script = script.replace(marker, injection)
+            embedded = subprocess.run(
+                [sys.executable, "-"],
+                input=script,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+        self.assertEqual(embedded.returncode, 0, embedded.stderr)
+        payload_lines = MODULE._extract_framed_lines(
+            embedded.stdout,
+            begin_marker=MODULE.REMOTE_FETCH_ROLLOUT_BEGIN,
+            end_marker=MODULE.REMOTE_FETCH_ROLLOUT_END,
+            host="embedded",
+            command="fetch-rollout",
+        )
+        self.assertEqual(
+            [json.loads(line) for line in payload_lines],
+            [{"ok": False, "error": "rollout changed during open"}],
+        )
+        self.assertNotIn(str(rollout_path), embedded.stdout)
+
+    @unittest.skipUnless(
+        hasattr(os, "mkfifo") and hasattr(os, "O_NONBLOCK"),
+        "FIFO nonblocking opens require POSIX mkfifo and O_NONBLOCK",
+    )
+    def test_rollout_fifo_swap_before_open_fails_without_blocking(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            codex_root = Path(temp_dir) / ".codex"
+            rollout = write_rollout(
+                codex_root,
+                ['{"type":"session_meta","payload":{"id":"trusted"}}'],
+            )
+            rollout_relative = MODULE._resolve_rollout_relative_path(rollout)
+            rollout_path = codex_root / rollout
+            moved_rollout = rollout_path.with_suffix(".pinned")
+            real_open = MODULE.os.open
+            opened_flags: list[int] = []
+            swapped = False
+
+            def swap_rollout_for_fifo_before_open(
+                path: object,
+                flags: int,
+                mode: int = 0o777,
+                *,
+                dir_fd: int | None = None,
+            ) -> int:
+                nonlocal swapped
+                if path == rollout_path.name and dir_fd is not None and not swapped:
+                    os.replace(rollout_path, moved_rollout)
+                    os.mkfifo(rollout_path, 0o600)
+                    opened_flags.append(flags)
+                    swapped = True
+                    if not flags & os.O_NONBLOCK:
+                        raise AssertionError("final rollout open omitted O_NONBLOCK")
+                return real_open(path, flags, mode, dir_fd=dir_fd)
+
+            with (
+                mock.patch.object(
+                    MODULE.os,
+                    "open",
+                    side_effect=swap_rollout_for_fifo_before_open,
+                ),
+                self.assertRaisesRegex(
+                    ValueError, "rollout path is not a regular file"
+                ),
+            ):
+                MODULE._read_local_rollout_bytes(
+                    codex_root,
+                    rollout_relative,
+                    max_bytes=MODULE.MAX_FETCH_ROLLOUT_BYTES,
+                )
+
+        self.assertTrue(swapped)
+        self.assertEqual(len(opened_flags), 1)
+        self.assertTrue(opened_flags[0] & os.O_NONBLOCK)
+
+    @unittest.skipUnless(
+        hasattr(os, "mkfifo") and hasattr(os, "O_NONBLOCK"),
+        "FIFO nonblocking opens require POSIX mkfifo and O_NONBLOCK",
+    )
+    def test_embedded_fetch_fifo_swap_before_open_fails_without_blocking(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            codex_root = Path(temp_dir) / ".codex"
+            rollout = write_rollout(
+                codex_root,
+                ['{"type":"session_meta","payload":{"id":"trusted"}}'],
+            )
+            rollout_path = codex_root / rollout
+            moved_rollout = rollout_path.with_suffix(".pinned")
+            script = MODULE._remote_python_script(
+                {
+                    "mode": "fetch-rollout",
+                    "rollout": rollout,
+                    "codex_root": str(codex_root),
+                    "max_fetch_rollout_bytes": MODULE.MAX_FETCH_ROLLOUT_BYTES,
+                }
+            )
+            marker = (
+                "    try:\n"
+                "        fd = os.open(name, regular_file_open_flags(), dir_fd=parent_fd)\n"
+            )
+            injection = (
+                "    try:\n"
+                f"        if name == {rollout_path.name!r} and not globals().get('_fifo_swapped', False):\n"
+                "            globals()['_fifo_swapped'] = True\n"
+                f"            os.replace({str(rollout_path)!r}, {str(moved_rollout)!r})\n"
+                f"            os.mkfifo({str(rollout_path)!r}, 0o600)\n"
+                "        fd = os.open(name, regular_file_open_flags(), dir_fd=parent_fd)\n"
+            )
+            self.assertEqual(script.count(marker), 1)
+            self.assertIn('getattr(os, "O_NONBLOCK", None)', script)
+            self.assertIn("| nonblocking_flag", script)
+            script = script.replace(marker, injection)
+            result = subprocess.run(
+                [sys.executable, "-"],
+                input=script,
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=3,
+            )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        payload_lines = MODULE._extract_framed_lines(
+            result.stdout,
+            begin_marker=MODULE.REMOTE_FETCH_ROLLOUT_BEGIN,
+            end_marker=MODULE.REMOTE_FETCH_ROLLOUT_END,
+            host="embedded",
+            command="fetch-rollout",
+        )
+        self.assertEqual(
+            [json.loads(line) for line in payload_lines],
+            [{"ok": False, "error": "rollout path is not a regular file"}],
+        )
+        self.assertNotIn("trusted", result.stdout)
+
+    def test_pinned_root_tolerates_canonical_ancestor_symlink(self) -> None:
+        with tempfile.TemporaryDirectory(dir="/tmp") as temp_dir:
+            codex_root = Path(temp_dir) / ".codex"
+            rollout = write_rollout(
+                codex_root,
+                ['{"type":"session_meta","payload":{"id":"trusted"}}'],
+            )
+            alias_root = Path("/tmp") / Path(temp_dir).name / ".codex"
+            identity = MODULE._stat_local_rollout_identity(
+                alias_root,
+                MODULE._resolve_rollout_relative_path(rollout),
+            )
+
+        self.assertGreater(identity.size, 0)
+
+    def test_embedded_fetch_stays_on_pinned_ancestor_after_swap(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            base = Path(temp_dir)
+            codex_root = base / ".codex"
+            external_root = base / "external-codex"
+            rollout = write_rollout(
+                codex_root,
+                ['{"type":"session_meta","payload":{"id":"trusted"}}'],
+            )
+            write_rollout(
+                external_root,
+                ['{"type":"session_meta","payload":{"id":"external-sentinel"}}'],
+            )
+            trusted_data = (codex_root / rollout).read_bytes()
+            moved_sessions = codex_root / "sessions-pinned"
+            external_sessions = external_root / "sessions"
+            script = MODULE._remote_python_script(
+                {
+                    "mode": "fetch-rollout",
+                    "rollout": rollout,
+                    "codex_root": str(codex_root),
+                    "max_fetch_rollout_bytes": MODULE.MAX_FETCH_ROLLOUT_BYTES,
+                }
+            )
+            marker = (
+                "            except FileNotFoundError as error:\n"
+                "                raise ValueError(\"path ancestor changed during open\") from error\n"
+            )
+            injection = marker + (
+                "            if part == 'sessions' and not globals().get('_ancestor_swapped', False):\n"
+                "                globals()['_ancestor_swapped'] = True\n"
+                f"                os.replace({str(codex_root / 'sessions')!r}, {str(moved_sessions)!r})\n"
+                f"                os.symlink({str(external_sessions)!r}, {str(codex_root / 'sessions')!r}, target_is_directory=True)\n"
+            )
+            self.assertEqual(script.count(marker), 1)
+            script = script.replace(marker, injection)
+            result = subprocess.run(
+                [sys.executable, "-"],
+                input=script,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        data = MODULE._extract_framed_fetch_rollout_payload(
+            result.stdout,
+            begin_marker=MODULE.REMOTE_FETCH_ROLLOUT_BEGIN,
+            end_marker=MODULE.REMOTE_FETCH_ROLLOUT_END,
+            host="embedded",
+            command="fetch-rollout",
+        )
+        self.assertEqual(data, trusted_data)
+        self.assertNotIn("external-sentinel", data.decode("utf-8"))
 
     def test_session_meta_preserves_distinct_lifecycle_paths_with_same_session_id(
         self,
@@ -643,6 +2122,195 @@ class RemoteCodexProbeChunkTests(unittest.TestCase):
         )
         self.assertEqual(embedded_records[0]["rollout"], rollout)
 
+    def test_session_meta_bounds_serialized_rows_local_and_embedded(self) -> None:
+        row_limit = MODULE.MAX_REMOTE_SESSION_META_SERIALIZED_ROW_BYTES
+        for serialized_bytes in (row_limit, row_limit + 1):
+            with (
+                self.subTest(serialized_bytes=serialized_bytes),
+                tempfile.TemporaryDirectory() as temp_dir,
+            ):
+                codex_root = Path(temp_dir) / ".codex"
+                rollout = (
+                    "sessions/2026/05/26/"
+                    "rollout-2026-05-26T10-00-00-example.jsonl"
+                )
+                base_row = {
+                    "date": "2026/05/26",
+                    "session_id": "bounded-row",
+                    "cwd": "",
+                    "rollout": rollout,
+                }
+                base_bytes = len(
+                    json.dumps(
+                        base_row,
+                        separators=(",", ":"),
+                        sort_keys=True,
+                    ).encode("utf-8")
+                )
+                cwd_size = serialized_bytes - base_bytes
+                expected_row = {**base_row, "cwd": "x" * cwd_size}
+                self.assertEqual(
+                    len(
+                        json.dumps(
+                            expected_row,
+                            separators=(",", ":"),
+                            sort_keys=True,
+                        ).encode("utf-8")
+                    ),
+                    serialized_bytes,
+                )
+                rollout = write_rollout(
+                    codex_root,
+                    [
+                        json.dumps(
+                            {
+                                "type": "session_meta",
+                                "payload": {
+                                    "id": "bounded-row",
+                                    "cwd": "x" * cwd_size,
+                                },
+                            },
+                            separators=(",", ":"),
+                        )
+                    ],
+                )
+                if serialized_bytes == row_limit:
+                    local_scan = MODULE._scan_session_meta_records(
+                        codex_root=codex_root,
+                        dates=[MODULE.dt.date(2026, 5, 26)],
+                        limit=10,
+                        host="local",
+                    )
+                else:
+                    with self.assertRaises(
+                        MODULE.SessionMetaRolloutError
+                    ) as raised:
+                        MODULE._scan_session_meta_records(
+                            codex_root=codex_root,
+                            dates=[MODULE.dt.date(2026, 5, 26)],
+                            limit=10,
+                            host="local",
+                        )
+                    self.assertEqual(
+                        raised.exception.error,
+                        MODULE.SESSION_META_OUTPUT_ROW_TOO_LARGE_ERROR,
+                    )
+                    self.assertIsNone(raised.exception.rollout)
+                script = MODULE._remote_python_script(
+                    {
+                        "mode": "session-meta",
+                        "dates": ["2026/05/26"],
+                        "limit": 10,
+                        "codex_root": str(codex_root),
+                        "session_meta_scan_bytes": MODULE.MAX_SESSION_META_SCAN_BYTES,
+                    }
+                )
+                result = subprocess.run(
+                    [sys.executable, "-"],
+                    input=script,
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            payload_lines = MODULE._extract_framed_lines(
+                result.stdout,
+                begin_marker=MODULE.REMOTE_SESSION_META_BEGIN,
+                end_marker=MODULE.REMOTE_SESSION_META_END,
+                host="embedded",
+                command="session-meta",
+            )
+            records = [json.loads(line) for line in payload_lines]
+            if serialized_bytes == row_limit:
+                self.assertEqual(
+                    {key: local_scan.rows[0][key] for key in expected_row},
+                    expected_row,
+                )
+                self.assertEqual(records, [expected_row])
+            else:
+                self.assertEqual(
+                    records,
+                    [
+                        {
+                            "kind": "error",
+                            "error": MODULE.SESSION_META_OUTPUT_ROW_TOO_LARGE_ERROR,
+                        }
+                    ],
+                )
+                self.assertNotIn("x" * 1024, result.stdout)
+
+    def test_session_meta_limit_precedes_next_row_output_validation(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            codex_root = Path(temp_dir) / ".codex"
+            rollout_dir = codex_root / "sessions/2026/05/26"
+            valid_rollout = rollout_dir / "rollout-2026-05-26T11-00-00-valid.jsonl"
+            oversized_rollout = (
+                rollout_dir / "rollout-2026-05-26T10-00-00-oversized.jsonl"
+            )
+            write_session_meta_rollout(valid_rollout, "within-limit", "/repo", "ok")
+            write_session_meta_rollout(
+                oversized_rollout,
+                "beyond-limit",
+                "x" * (MODULE.MAX_REMOTE_SESSION_META_SERIALIZED_ROW_BYTES + 1024),
+                "must not be validated",
+            )
+
+            local_scan = MODULE._scan_session_meta_records(
+                codex_root=codex_root,
+                dates=[MODULE.dt.date(2026, 5, 26)],
+                limit=1,
+                host="local",
+            )
+            script = MODULE._remote_python_script(
+                {
+                    "mode": "session-meta",
+                    "dates": ["2026/05/26"],
+                    "limit": 1,
+                    "codex_root": str(codex_root),
+                    "session_meta_scan_bytes": MODULE.MAX_SESSION_META_SCAN_BYTES,
+                }
+            )
+            embedded = subprocess.run(
+                [sys.executable, "-"],
+                input=script,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+        self.assertEqual(
+            [row["session_id"] for row in local_scan.rows],
+            ["within-limit"],
+        )
+        self.assertTrue(local_scan.truncated)
+        self.assertEqual(embedded.returncode, 0, embedded.stderr)
+        embedded_records = [
+            json.loads(line)
+            for line in MODULE._extract_framed_lines(
+                embedded.stdout,
+                begin_marker=MODULE.REMOTE_SESSION_META_BEGIN,
+                end_marker=MODULE.REMOTE_SESSION_META_END,
+                host="embedded",
+                command="session-meta",
+            )
+        ]
+        self.assertEqual(len(embedded_records), 2)
+        self.assertEqual(embedded_records[0]["session_id"], "within-limit")
+        self.assertEqual(
+            embedded_records[1],
+            {
+                "kind": "truncation",
+                "reason": MODULE.SESSION_META_LIMIT_TRUNCATED_REASON,
+                "date": "2026/05/26",
+                "limit": 1,
+            },
+        )
+        self.assertNotIn(
+            MODULE.SESSION_META_OUTPUT_ROW_TOO_LARGE_ERROR, embedded.stdout
+        )
+        self.assertNotIn("beyond-limit", embedded.stdout)
+
     def test_remote_python_script_compiles_for_chunk_commands(self) -> None:
         identity = MODULE.RolloutIdentity(120, 1, 2, 3, 4)
         token = MODULE._rollout_identity_token(identity)
@@ -718,7 +2386,7 @@ class RemoteCodexProbeChunkTests(unittest.TestCase):
         self.assertIn("fetch range plan too large", chunked_script)
         self.assertIn('data = handle.read(identity["size"] + 1)', full_fetch_script)
         self.assertIn(
-            'assert_rollout_path_identity(target, identity, "after read")',
+            'handle.assert_identity(identity, "after read")',
             full_fetch_script,
         )
         self.assertIn(
@@ -726,9 +2394,12 @@ class RemoteCodexProbeChunkTests(unittest.TestCase):
             summary_script,
         )
         self.assertIn(
-            'assert_rollout_path_identity(\n                target,\n                source_identity,\n                "after summary scan",',
+            'handle.assert_identity(source_identity, "after summary scan")',
             summary_script,
         )
+        for script in (chunked_script, fetch_script, full_fetch_script, summary_script):
+            self.assertIn("open_pinned_rollout_text", script)
+            self.assertNotIn("assert_rollout_path_identity", script)
         self.assertNotIn("_match_text", summary_script)
 
     def test_remote_chunked_rollout_summary_passes_full_fetch_limit(self) -> None:
@@ -814,6 +2485,63 @@ class RemoteCodexProbeChunkTests(unittest.TestCase):
             run_remote.call_args.kwargs["max_stdout_bytes"],
             MODULE.MAX_CHUNKED_ROLLOUT_SUMMARY_OUTPUT_BYTES
             + MODULE.REMOTE_CHUNKED_SUMMARY_FRAME_OVERHEAD_BYTES,
+        )
+
+    def test_embedded_chunk_summary_missing_at_actual_open_stays_not_found(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            codex_root = Path(temp_dir) / ".codex"
+            rollout = write_rollout(
+                codex_root,
+                ['{"type":"session_meta","payload":{"id":"vanished"}}'],
+            )
+            identity = rollout_identity(codex_root, rollout)
+            script = MODULE._remote_python_script(
+                {
+                    "mode": "chunked-rollout-summary",
+                    "rollout": rollout,
+                    "codex_root": str(codex_root),
+                    "summary_keywords": [],
+                    "summary_limit": 10,
+                    "summary_tail_records": 0,
+                    "summary_max_text_chars": 200,
+                    "chunk_bytes": MODULE.MIN_ROLLOUT_CHUNK_BYTES,
+                    "max_fetch_rollout_bytes": MODULE.MAX_FETCH_ROLLOUT_BYTES,
+                    "max_fetch_rollout_chunk_bytes": MODULE.MAX_FETCH_ROLLOUT_CHUNK_BYTES,
+                    "min_rollout_chunk_bytes": MODULE.MIN_ROLLOUT_CHUNK_BYTES,
+                    "max_rollout_chunk_bytes": MODULE.MAX_ROLLOUT_CHUNK_BYTES,
+                    "max_chunked_summary_output_bytes": MODULE.MAX_CHUNKED_ROLLOUT_SUMMARY_OUTPUT_BYTES,
+                    "max_fetch_range_plan_entries": MODULE.MAX_FETCH_RANGE_PLAN_ENTRIES,
+                    "expected_source_bytes": identity.size,
+                    "expected_source_identity": MODULE._rollout_identity_token(
+                        identity
+                    ),
+                    "authorized_source_bytes": None,
+                    "output_host": "embedded",
+                }
+            )
+            (codex_root / rollout).unlink()
+            result = subprocess.run(
+                [sys.executable, "-"],
+                input=script,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stderr, "")
+        payload_lines = MODULE._extract_framed_lines(
+            result.stdout,
+            begin_marker=MODULE.REMOTE_CHUNKED_ROLLOUT_SUMMARY_BEGIN,
+            end_marker=MODULE.REMOTE_CHUNKED_ROLLOUT_SUMMARY_END,
+            host="embedded",
+            command="chunked-rollout-summary",
+        )
+        self.assertEqual(
+            [json.loads(line) for line in payload_lines],
+            [{"ok": False, "error": "rollout not found"}],
         )
 
     def test_embedded_remote_rejects_fetch_range_plan_before_allocation(self) -> None:
@@ -1433,7 +3161,7 @@ class RemoteCodexProbeChunkTests(unittest.TestCase):
 
     def test_chunk_summary_rejects_tiny_chunks_before_opening_rollout(self) -> None:
         identity = MODULE.RolloutIdentity(100, 1, 2, 3, 4)
-        with mock.patch.object(MODULE, "_safe_rollout_path") as safe_path:
+        with mock.patch.object(MODULE, "_open_pinned_rollout_text") as pinned_open:
             with self.assertRaisesRegex(ValueError, "--chunk-bytes must stay between"):
                 MODULE._chunked_rollout_summary_records(
                     codex_root=Path("/unused"),
@@ -1447,7 +3175,7 @@ class RemoteCodexProbeChunkTests(unittest.TestCase):
                     expected_identity=identity,
                     authorized_source_bytes=None,
                 )
-            safe_path.assert_not_called()
+            pinned_open.assert_not_called()
 
     def test_chunk_summary_output_cap_fails_without_partial_stdout(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -1515,6 +3243,9 @@ class RemoteCodexProbeChunkTests(unittest.TestCase):
                     def fileno(self) -> int:
                         return self.handle.fileno()
 
+                    def close(self) -> None:
+                        self.handle.close()
+
                     def read(self, size: int = -1) -> bytes:
                         nonlocal mutated
                         read_sizes.append(size)
@@ -1569,7 +3300,6 @@ class RemoteCodexProbeChunkTests(unittest.TestCase):
                     "_run_remote_python_bounded",
                     return_value=remote_result,
                 ) as bounded_run,
-                mock.patch.object(MODULE, "_run_remote_python") as unbounded_run,
                 redirect_stdout(io.StringIO()),
             ):
                 rc = MODULE.cmd_fetch_rollout(
@@ -1588,7 +3318,169 @@ class RemoteCodexProbeChunkTests(unittest.TestCase):
             bounded_run.call_args.kwargs["max_stdout_bytes"],
             MODULE.MAX_REMOTE_FETCH_ROLLOUT_STDOUT_BYTES,
         )
-        unbounded_run.assert_not_called()
+
+    def test_remote_session_meta_uses_exact_bounded_parent_capture(self) -> None:
+        remote_result = subprocess.CompletedProcess(
+            args=["ssh"],
+            returncode=0,
+            stdout=(
+                f"{MODULE.REMOTE_SESSION_META_BEGIN}\n"
+                f"{MODULE.REMOTE_SESSION_META_END}\n"
+            ),
+            stderr="",
+        )
+        args = argparse.Namespace(
+            host=["miku-bot-dev"],
+            date=["2026/05/26"],
+            from_date=None,
+            to_date=None,
+            limit=10,
+        )
+        with (
+            mock.patch.object(
+                MODULE,
+                "_run_remote_python_bounded",
+                return_value=remote_result,
+            ) as bounded_run,
+            redirect_stdout(io.StringIO()),
+        ):
+            rc = MODULE.cmd_session_meta(args)
+
+        self.assertEqual(rc, 0)
+        self.assertEqual(MODULE.MAX_REMOTE_SESSION_META_STDOUT_BYTES, 32_899_072)
+        self.assertEqual(
+            bounded_run.call_args.kwargs["max_stdout_bytes"],
+            32_899_072,
+        )
+        self.assertFalse(hasattr(MODULE, "_run_remote_python"))
+
+        with (
+            mock.patch.object(
+                MODULE,
+                "_run_remote_python_bounded",
+                side_effect=RuntimeError("stdout capture limit exceeded"),
+            ),
+            mock.patch.object(MODULE, "_extract_framed_lines") as parser,
+            redirect_stdout(io.StringIO()),
+            redirect_stderr(io.StringIO()),
+        ):
+            rc = MODULE.cmd_session_meta(args)
+
+        self.assertEqual(rc, 1)
+        parser.assert_not_called()
+
+    def test_remote_rollout_summary_uses_exact_bounded_parent_capture(self) -> None:
+        remote_result = subprocess.CompletedProcess(
+            args=["ssh"],
+            returncode=0,
+            stdout="unused framed output",
+            stderr="",
+        )
+        args = argparse.Namespace(
+            host="miku-bot-dev",
+            rollout="sessions/2026/05/26/rollout-a.jsonl",
+            keyword=[],
+            limit=20,
+            tail_records=4,
+            max_text_chars=200,
+        )
+        with (
+            mock.patch.object(
+                MODULE,
+                "_run_remote_python_bounded",
+                return_value=remote_result,
+            ) as bounded_run,
+            mock.patch.object(
+                MODULE,
+                "_extract_framed_rollout_summary_records",
+                return_value=[],
+            ),
+            redirect_stdout(io.StringIO()),
+        ):
+            rc = MODULE.cmd_rollout_summary(args)
+
+        self.assertEqual(rc, 0)
+        self.assertEqual(MODULE.MAX_REMOTE_ROLLOUT_SUMMARY_STDOUT_BYTES, 31_462_656)
+        self.assertEqual(
+            bounded_run.call_args.kwargs["max_stdout_bytes"],
+            31_462_656,
+        )
+
+        with (
+            mock.patch.object(
+                MODULE,
+                "_run_remote_python_bounded",
+                side_effect=RuntimeError("stdout capture limit exceeded"),
+            ),
+            mock.patch.object(
+                MODULE,
+                "_extract_framed_rollout_summary_records",
+            ) as parser,
+            redirect_stdout(io.StringIO()),
+            redirect_stderr(io.StringIO()),
+        ):
+            rc = MODULE.cmd_rollout_summary(args)
+
+        self.assertEqual(rc, 1)
+        parser.assert_not_called()
+
+    def test_remote_chunk_fetch_uses_exact_bounded_parent_capture(self) -> None:
+        identity = MODULE.RolloutIdentity(3, 1, 2, 3, 4)
+        identity_token = MODULE._rollout_identity_token(identity)
+        remote_output = (
+            f"{MODULE.REMOTE_FETCH_ROLLOUT_CHUNK_BEGIN}\n"
+            + json.dumps(
+                {
+                    "bytes": 3,
+                    "ok": True,
+                    "source_bytes": 3,
+                    "source_identity": identity_token,
+                },
+                separators=(",", ":"),
+                sort_keys=True,
+            )
+            + "\nYWJj\n"
+            + f"{MODULE.REMOTE_FETCH_ROLLOUT_CHUNK_END}\n"
+        )
+        remote_result = subprocess.CompletedProcess(
+            args=["ssh"],
+            returncode=0,
+            stdout=remote_output,
+            stderr="",
+        )
+        with tempfile.TemporaryDirectory(dir="/tmp") as temp_dir:
+            output_path = Path(temp_dir) / "chunk.jsonl"
+            with (
+                mock.patch.object(
+                    MODULE,
+                    "_run_remote_python_bounded",
+                    return_value=remote_result,
+                ) as bounded_run,
+                redirect_stdout(io.StringIO()),
+            ):
+                rc = MODULE.cmd_fetch_rollout_chunk(
+                    argparse.Namespace(
+                        host="miku-bot-dev",
+                        rollout="sessions/2026/05/26/rollout-a.jsonl",
+                        byte_start=0,
+                        byte_end=3,
+                        output=str(output_path),
+                        **identity_kwargs(identity),
+                    )
+                )
+
+            self.assertEqual(output_path.read_bytes(), b"abc")
+
+        self.assertEqual(rc, 0)
+        bounded_run.assert_called_once()
+        self.assertEqual(
+            bounded_run.call_args.kwargs["max_stdout_bytes"],
+            2_861_740,
+        )
+        self.assertEqual(
+            MODULE.MAX_REMOTE_FETCH_ROLLOUT_CHUNK_STDOUT_BYTES,
+            2_861_740,
+        )
 
     def test_chunk_fetch_rejects_append_and_replacement_after_preflight(self) -> None:
         for mutation in ("append", "replace"):
@@ -1632,19 +3524,24 @@ class RemoteCodexProbeChunkTests(unittest.TestCase):
             source_path = codex_root / rollout
             source_data = source_path.read_bytes()
             identity = rollout_identity(codex_root, rollout)
-            real_fstat = MODULE.os.fstat
-            calls = 0
+            real_assert_identity = MODULE._PinnedRolloutHandle.assert_identity
 
-            def fstat_then_append(fd: int) -> os.stat_result:
-                nonlocal calls
-                calls += 1
-                result = real_fstat(fd)
-                if calls == 2:
-                    with source_path.open("ab") as handle:
-                        handle.write(b"{}\n")
-                return result
+            def assert_identity_then_append(
+                handle: MODULE._PinnedRolloutHandle,
+                expected: MODULE.RolloutIdentity,
+                *,
+                phase: str,
+            ) -> None:
+                if phase == "after read":
+                    with source_path.open("ab") as append_handle:
+                        append_handle.write(b"{}\n")
+                real_assert_identity(handle, expected, phase=phase)
 
-            with mock.patch.object(MODULE.os, "fstat", side_effect=fstat_then_append):
+            with mock.patch.object(
+                MODULE._PinnedRolloutHandle,
+                "assert_identity",
+                new=assert_identity_then_append,
+            ):
                 with self.assertRaisesRegex(ValueError, "identity changed after read"):
                     MODULE._read_local_rollout_byte_range(
                         codex_root,
@@ -1705,6 +3602,112 @@ class RemoteCodexProbeChunkTests(unittest.TestCase):
         self.assertEqual(rc, 1)
         self.assertEqual(output.getvalue(), "")
         self.assertIn("identity changed after summary scan", error_output.getvalue())
+
+    def test_embedded_rollout_summary_symlink_rejection_stays_framed(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            base = Path(temp_dir)
+            codex_root = base / ".codex"
+            outside = base / "outside-rollout.jsonl"
+            outside.write_text(
+                '{"type":"session_meta","payload":{"id":"must-not-escape"}}\n',
+                encoding="utf-8",
+            )
+            rollout = "sessions/2026/05/26/rollout-2026-05-26T10-00-00-symlink.jsonl"
+            rollout_path = codex_root / rollout
+            rollout_path.parent.mkdir(parents=True)
+            rollout_path.symlink_to(outside)
+            script = MODULE._remote_python_script(
+                {
+                    "mode": "rollout-summary",
+                    "rollout": rollout,
+                    "codex_root": str(codex_root),
+                    "summary_keywords": [],
+                    "summary_limit": 10,
+                    "summary_scan_bytes": MODULE.MAX_ROLLOUT_SUMMARY_SCAN_BYTES,
+                    "summary_line_bytes": MODULE.MAX_ROLLOUT_SUMMARY_LINE_BYTES,
+                    "summary_tail_records": 0,
+                    "summary_max_text_chars": 200,
+                }
+            )
+            result = subprocess.run(
+                [sys.executable, "-"],
+                input=script,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stderr, "")
+        payload_lines = MODULE._extract_framed_lines(
+            result.stdout,
+            begin_marker=MODULE.REMOTE_ROLLOUT_SUMMARY_BEGIN,
+            end_marker=MODULE.REMOTE_ROLLOUT_SUMMARY_END,
+            host="embedded",
+            command="rollout-summary",
+        )
+        self.assertEqual(
+            [json.loads(line) for line in payload_lines],
+            [{"ok": False, "error": "rollout path is a symlink"}],
+        )
+        self.assertNotIn("must-not-escape", result.stdout)
+        self.assertNotIn("Traceback", result.stdout)
+
+    def test_embedded_rollout_summary_budget_error_has_no_partial_records(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            codex_root = Path(temp_dir) / ".codex"
+            rollout = write_rollout(
+                codex_root,
+                ['{"type":"session_meta","payload":{"id":"must-not-leak"}}'],
+            )
+            script = MODULE._remote_python_script(
+                {
+                    "mode": "rollout-summary",
+                    "rollout": rollout,
+                    "codex_root": str(codex_root),
+                    "summary_keywords": [],
+                    "summary_limit": 10,
+                    "summary_scan_bytes": MODULE.MAX_ROLLOUT_SUMMARY_SCAN_BYTES,
+                    "summary_line_bytes": MODULE.MAX_ROLLOUT_SUMMARY_LINE_BYTES,
+                    "summary_tail_records": 0,
+                    "summary_max_text_chars": 200,
+                }
+            )
+            original = (
+                "ROLLOUT_SUMMARY_SERIALIZED_BYTES = "
+                f"{MODULE.MAX_REMOTE_ROLLOUT_SUMMARY_SERIALIZED_BYTES}"
+            )
+            self.assertEqual(script.count(original), 1)
+            script = script.replace(
+                original,
+                "ROLLOUT_SUMMARY_SERIALIZED_BYTES = 1",
+            )
+            result = subprocess.run(
+                [sys.executable, "-"],
+                input=script,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        payload_lines = MODULE._extract_framed_lines(
+            result.stdout,
+            begin_marker=MODULE.REMOTE_ROLLOUT_SUMMARY_BEGIN,
+            end_marker=MODULE.REMOTE_ROLLOUT_SUMMARY_END,
+            host="embedded",
+            command="rollout-summary",
+        )
+        self.assertEqual(
+            [json.loads(line) for line in payload_lines],
+            [{"ok": False, "error": "rollout summary output too large"}],
+        )
+        self.assertNotIn("scan_meta", result.stdout)
+        self.assertNotIn("must-not-leak", result.stdout)
 
     def test_rollout_summary_rejects_path_mutation_before_output(self) -> None:
         for mutation in ("append", "replace"):

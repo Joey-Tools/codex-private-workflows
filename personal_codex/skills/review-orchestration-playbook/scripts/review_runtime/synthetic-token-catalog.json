@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "authoring_pool": {
-    "version": "joey-private-v1",
+    "version": "joey-private-v3",
     "tokens": [
       {
         "id": "access-a",
@@ -16,6 +16,62 @@
         "state": "active",
         "rule": "generic-secret-assignment",
         "value": "codex_synth_v1_access_b"
+      },
+      {
+        "id": "access-c",
+        "role": "access",
+        "state": "active",
+        "rule": "generic-secret-assignment",
+        "value": "JoeyPrivateV3AccessSlotC8R2N6Y4"
+      },
+      {
+        "id": "access-d",
+        "role": "access",
+        "state": "active",
+        "rule": "generic-secret-assignment",
+        "value": "JoeyPrivateV3AccessSlotD9S3P7Z5"
+      },
+      {
+        "id": "access-e",
+        "role": "access",
+        "state": "active",
+        "rule": "generic-secret-assignment",
+        "value": "JoeyPrivateV3AccessSlotE4T8Q2W6"
+      },
+      {
+        "id": "access-f",
+        "role": "access",
+        "state": "active",
+        "rule": "generic-secret-assignment",
+        "value": "JoeyPrivateV3AccessSlotF5U9R3X7"
+      },
+      {
+        "id": "access-g",
+        "role": "access",
+        "state": "active",
+        "rule": "generic-secret-assignment",
+        "value": "JoeyPrivateV3AccessSlotG6V2S4Y8"
+      },
+      {
+        "id": "access-h",
+        "role": "access",
+        "state": "active",
+        "rule": "generic-secret-assignment",
+        "value": "JoeyPrivateV3AccessSlotH7W3T5Z9"
+      },
+      {
+        "id": "access-i",
+        "role": "access",
+        "state": "active",
+        "rule": "generic-secret-assignment",
+        "value": "JoeyPrivateV3AccessSlotI8X4U6Q2"
+      },
+      {
+        "id": "access-j",
+        "role": "access",
+        "state": "active",
+        "rule": "generic-secret-assignment",
+        "value": "JoeyPrivateV3AccessSlotJ9Y5V7R3"
       },
       {
         "id": "access-expired",
@@ -39,6 +95,62 @@
         "value": "codex_synth_v1_refresh_b"
       },
       {
+        "id": "refresh-c",
+        "role": "refresh",
+        "state": "active",
+        "rule": "generic-secret-assignment",
+        "value": "codex_synth_v2_refresh_c"
+      },
+      {
+        "id": "refresh-d",
+        "role": "refresh",
+        "state": "active",
+        "rule": "generic-secret-assignment",
+        "value": "JoeyPrivateV3RefreshSlotD9S3P7Z5"
+      },
+      {
+        "id": "refresh-e",
+        "role": "refresh",
+        "state": "active",
+        "rule": "generic-secret-assignment",
+        "value": "JoeyPrivateV3RefreshSlotE4T8Q2W6"
+      },
+      {
+        "id": "refresh-f",
+        "role": "refresh",
+        "state": "active",
+        "rule": "generic-secret-assignment",
+        "value": "JoeyPrivateV3RefreshSlotF5U9R3X7"
+      },
+      {
+        "id": "refresh-g",
+        "role": "refresh",
+        "state": "active",
+        "rule": "generic-secret-assignment",
+        "value": "JoeyPrivateV3RefreshSlotG6V2S4Y8"
+      },
+      {
+        "id": "refresh-h",
+        "role": "refresh",
+        "state": "active",
+        "rule": "generic-secret-assignment",
+        "value": "JoeyPrivateV3RefreshSlotH7W3T5Z9"
+      },
+      {
+        "id": "refresh-i",
+        "role": "refresh",
+        "state": "active",
+        "rule": "generic-secret-assignment",
+        "value": "JoeyPrivateV3RefreshSlotI8X4U6Q2"
+      },
+      {
+        "id": "refresh-j",
+        "role": "refresh",
+        "state": "active",
+        "rule": "generic-secret-assignment",
+        "value": "JoeyPrivateV3RefreshSlotJ9Y5V7R3"
+      },
+      {
         "id": "refresh-consumed",
         "role": "refresh",
         "state": "consumed",
@@ -60,6 +172,62 @@
         "value": "codex_synth_v1_id_b"
       },
       {
+        "id": "id-c",
+        "role": "id",
+        "state": "active",
+        "rule": "generic-secret-assignment",
+        "value": "JoeyPrivateV3IdSlotC8R2N6Y4"
+      },
+      {
+        "id": "id-d",
+        "role": "id",
+        "state": "active",
+        "rule": "generic-secret-assignment",
+        "value": "JoeyPrivateV3IdSlotD9S3P7Z5"
+      },
+      {
+        "id": "id-e",
+        "role": "id",
+        "state": "active",
+        "rule": "generic-secret-assignment",
+        "value": "JoeyPrivateV3IdSlotE4T8Q2W6"
+      },
+      {
+        "id": "id-f",
+        "role": "id",
+        "state": "active",
+        "rule": "generic-secret-assignment",
+        "value": "JoeyPrivateV3IdSlotF5U9R3X7"
+      },
+      {
+        "id": "id-g",
+        "role": "id",
+        "state": "active",
+        "rule": "generic-secret-assignment",
+        "value": "JoeyPrivateV3IdSlotG6V2S4Y8"
+      },
+      {
+        "id": "id-h",
+        "role": "id",
+        "state": "active",
+        "rule": "generic-secret-assignment",
+        "value": "JoeyPrivateV3IdSlotH7W3T5Z9"
+      },
+      {
+        "id": "id-i",
+        "role": "id",
+        "state": "active",
+        "rule": "generic-secret-assignment",
+        "value": "JoeyPrivateV3IdSlotI8X4U6Q2"
+      },
+      {
+        "id": "id-j",
+        "role": "id",
+        "state": "active",
+        "rule": "generic-secret-assignment",
+        "value": "JoeyPrivateV3IdSlotJ9Y5V7R3"
+      },
+      {
         "id": "api-key-a",
         "role": "api-key",
         "state": "active",
@@ -67,11 +235,137 @@
         "value": "codex_synth_v1_api_key_a"
       },
       {
+        "id": "api-key-b",
+        "role": "api-key",
+        "state": "active",
+        "rule": "generic-secret-assignment",
+        "value": "JoeyPrivateV3ApiKeySlotB7Q9M3X5"
+      },
+      {
+        "id": "api-key-c",
+        "role": "api-key",
+        "state": "active",
+        "rule": "generic-secret-assignment",
+        "value": "JoeyPrivateV3ApiKeySlotC8R2N6Y4"
+      },
+      {
+        "id": "api-key-d",
+        "role": "api-key",
+        "state": "active",
+        "rule": "generic-secret-assignment",
+        "value": "JoeyPrivateV3ApiKeySlotD9S3P7Z5"
+      },
+      {
+        "id": "api-key-e",
+        "role": "api-key",
+        "state": "active",
+        "rule": "generic-secret-assignment",
+        "value": "JoeyPrivateV3ApiKeySlotE4T8Q2W6"
+      },
+      {
+        "id": "api-key-f",
+        "role": "api-key",
+        "state": "active",
+        "rule": "generic-secret-assignment",
+        "value": "JoeyPrivateV3ApiKeySlotF5U9R3X7"
+      },
+      {
+        "id": "api-key-g",
+        "role": "api-key",
+        "state": "active",
+        "rule": "generic-secret-assignment",
+        "value": "JoeyPrivateV3ApiKeySlotG6V2S4Y8"
+      },
+      {
+        "id": "api-key-h",
+        "role": "api-key",
+        "state": "active",
+        "rule": "generic-secret-assignment",
+        "value": "JoeyPrivateV3ApiKeySlotH7W3T5Z9"
+      },
+      {
+        "id": "api-key-i",
+        "role": "api-key",
+        "state": "active",
+        "rule": "generic-secret-assignment",
+        "value": "JoeyPrivateV3ApiKeySlotI8X4U6Q2"
+      },
+      {
+        "id": "api-key-j",
+        "role": "api-key",
+        "state": "active",
+        "rule": "generic-secret-assignment",
+        "value": "JoeyPrivateV3ApiKeySlotJ9Y5V7R3"
+      },
+      {
         "id": "bearer-a",
         "role": "bearer",
         "state": "active",
         "rule": "generic-secret-assignment",
         "value": "codex_synth_v1_bearer_a"
+      },
+      {
+        "id": "bearer-b",
+        "role": "bearer",
+        "state": "active",
+        "rule": "generic-secret-assignment",
+        "value": "JoeyPrivateV3BearerSlotB7Q9M3X5"
+      },
+      {
+        "id": "bearer-c",
+        "role": "bearer",
+        "state": "active",
+        "rule": "generic-secret-assignment",
+        "value": "JoeyPrivateV3BearerSlotC8R2N6Y4"
+      },
+      {
+        "id": "bearer-d",
+        "role": "bearer",
+        "state": "active",
+        "rule": "generic-secret-assignment",
+        "value": "JoeyPrivateV3BearerSlotD9S3P7Z5"
+      },
+      {
+        "id": "bearer-e",
+        "role": "bearer",
+        "state": "active",
+        "rule": "generic-secret-assignment",
+        "value": "JoeyPrivateV3BearerSlotE4T8Q2W6"
+      },
+      {
+        "id": "bearer-f",
+        "role": "bearer",
+        "state": "active",
+        "rule": "generic-secret-assignment",
+        "value": "JoeyPrivateV3BearerSlotF5U9R3X7"
+      },
+      {
+        "id": "bearer-g",
+        "role": "bearer",
+        "state": "active",
+        "rule": "generic-secret-assignment",
+        "value": "JoeyPrivateV3BearerSlotG6V2S4Y8"
+      },
+      {
+        "id": "bearer-h",
+        "role": "bearer",
+        "state": "active",
+        "rule": "generic-secret-assignment",
+        "value": "JoeyPrivateV3BearerSlotH7W3T5Z9"
+      },
+      {
+        "id": "bearer-i",
+        "role": "bearer",
+        "state": "active",
+        "rule": "generic-secret-assignment",
+        "value": "JoeyPrivateV3BearerSlotI8X4U6Q2"
+      },
+      {
+        "id": "bearer-j",
+        "role": "bearer",
+        "state": "active",
+        "rule": "generic-secret-assignment",
+        "value": "JoeyPrivateV3BearerSlotJ9Y5V7R3"
       }
     ]
   },
