@@ -3,7 +3,7 @@ id: 20260716-rsc001
 title: Review Workflow Overlay Sync Contracts
 status: completed
 created: 2026-07-16
-updated: 2026-07-16
+updated: 2026-07-17
 branch: codex/review-sync-contracts
 pr: https://github.com/Joey-Tools/codex-private-workflows/pull/86
 supersedes: []
@@ -24,6 +24,9 @@ superseded_by:
 - Private CI validates the synced review helper on Ubuntu and macOS with Python 3.10 and keeps `test` as the aggregate required context.
 - Linux CI still owns private packaging/sync tests, waited-delivery tests, and the opt-in real isolation integration.
 - The repository README records the helper's minimum Python runtime.
+- The synchronized aggregate-status contract rejects unstructured flow
+  collections under workflow/job `defaults.run`, including quoted-key and
+  multiline custom-shell mappings, while retaining supported block mappings.
 
 ## Next Steps
 
@@ -36,6 +39,10 @@ superseded_by:
 - A temporary post-sync private tree passed all 671 canonical review tests with 9 expected skips.
 - The final worktree passed 672 canonical review tests (9 skipped), 474 private overlay tests (2 skipped), and 40 waited-delivery tests.
 - `actionlint`, Ruff, Python compilation, package build/verification, both skill validators, project-journal validation, and `git diff --check` passed.
+- The flow-collection regression update passed both focused contract files
+  (`17` tests each), Ruff, Python compilation, Actionlint checks for four valid
+  workflow/job flow-mapping variants, project-journal validation, and diff
+  checks.
 - `scripts/sync_private_overlay_sources.py`
 - `personal_codex/private-sync-manifest.json`
 - `.github/workflows/ci.yml`
