@@ -36,16 +36,24 @@ MAX_CHUNKED_ROLLOUT_SUMMARY_OUTPUT_BYTES = 4 * 1024 * 1024
 FETCH_RANGE_PLAN_ENTRY_BUDGET_BYTES = 1024
 MAX_FETCH_RANGE_PLAN_ENTRIES = max(
     1,
-    MAX_CHUNKED_ROLLOUT_SUMMARY_OUTPUT_BYTES
-    // FETCH_RANGE_PLAN_ENTRY_BUDGET_BYTES,
+    MAX_CHUNKED_ROLLOUT_SUMMARY_OUTPUT_BYTES // FETCH_RANGE_PLAN_ENTRY_BUDGET_BYTES,
 )
 MAX_SOURCE_IDENTITY_TOKEN_CHARS = 256
 MAX_REMOTE_METADATA_STDOUT_BYTES = 64 * 1024
 MAX_REMOTE_STDERR_BYTES = 64 * 1024
 REMOTE_FETCH_ROLLOUT_FRAME_OVERHEAD_BYTES = 64 * 1024
 MAX_REMOTE_FETCH_ROLLOUT_STDOUT_BYTES = (
-    4 * ((MAX_FETCH_ROLLOUT_BYTES + 2) // 3)
+    4 * ((MAX_FETCH_ROLLOUT_BYTES + 2) // 3) + REMOTE_FETCH_ROLLOUT_FRAME_OVERHEAD_BYTES
+)
+MAX_REMOTE_FETCH_ROLLOUT_CHUNK_STDOUT_BYTES = (
+    4 * ((MAX_FETCH_ROLLOUT_CHUNK_BYTES + 2) // 3)
     + REMOTE_FETCH_ROLLOUT_FRAME_OVERHEAD_BYTES
+)
+MAX_REMOTE_SESSION_META_SERIALIZED_ROW_BYTES = 64 * 1024
+REMOTE_SESSION_META_FRAME_OVERHEAD_BYTES = 64 * 1024
+MAX_REMOTE_SESSION_META_STDOUT_BYTES = (
+    (MAX_SESSION_META_LIMIT + 1) * MAX_REMOTE_SESSION_META_SERIALIZED_ROW_BYTES
+    + REMOTE_SESSION_META_FRAME_OVERHEAD_BYTES
 )
 REMOTE_CHUNKED_SUMMARY_FRAME_OVERHEAD_BYTES = 64 * 1024
 MAX_ROLLOUT_SUMMARY_LIMIT = 200
@@ -53,6 +61,18 @@ MAX_ROLLOUT_SUMMARY_SCAN_BYTES = 2 * 1024 * 1024
 MAX_ROLLOUT_SUMMARY_LINE_BYTES = 1024 * 1024
 MAX_ROLLOUT_SUMMARY_TAIL_RECORDS = 50
 MAX_ROLLOUT_SUMMARY_TEXT_CHARS = 1200
+# JSON may encode one non-BMP character as two six-byte surrogate escapes. The
+# record-count term covers both bounded selection lists plus fixed final rows.
+MAX_REMOTE_ROLLOUT_SUMMARY_SERIALIZED_BYTES = (
+    12 * MAX_ROLLOUT_SUMMARY_SCAN_BYTES
+    + (2 * MAX_ROLLOUT_SUMMARY_LIMIT + 4)
+    * (12 * MAX_ROLLOUT_SUMMARY_TEXT_CHARS + 1024)
+)
+REMOTE_ROLLOUT_SUMMARY_FRAME_OVERHEAD_BYTES = 64 * 1024
+MAX_REMOTE_ROLLOUT_SUMMARY_STDOUT_BYTES = (
+    MAX_REMOTE_ROLLOUT_SUMMARY_SERIALIZED_BYTES
+    + REMOTE_ROLLOUT_SUMMARY_FRAME_OVERHEAD_BYTES
+)
 MAX_SESSION_META_SCAN_BYTES = 256 * 1024
 REMOTE_PREFLIGHT_TIMEOUT_SECONDS = 15
 REMOTE_COMMAND_TIMEOUT_SECONDS = 60
@@ -62,6 +82,14 @@ ACTIVE_ROLLOUT_RELATIVE_RE = re.compile(
 )
 ARCHIVED_ROLLOUT_RELATIVE_RE = re.compile(
     r"^archived_sessions/(?:\d{4}/\d{2}/\d{2}/)?rollout-[^/]+\.jsonl$"
+)
+RAW_ROLLOUT_BASENAME_RE = re.compile(r"^rollout-(?!summary)[^/]+\.jsonl$")
+SECURE_ROLLOUT_DIR_FD_SUPPORTED = (
+    getattr(os, "O_DIRECTORY", None) is not None
+    and getattr(os, "O_NOFOLLOW", None) is not None
+    and os.open in os.supports_dir_fd
+    and os.stat in os.supports_dir_fd
+    and os.stat in os.supports_follow_symlinks
 )
 PRIVATE_IPV4_SIGNAL_RE = re.compile(
     r"(?<![\d.])(?:10(?:\.\d{1,3}){3}|100\.(?:6[4-9]|[78]\d|9\d|1[01]\d|12[0-7])(?:\.\d{1,3}){2}|127(?:\.\d{1,3}){3}|169\.254(?:\.\d{1,3}){2}|172\.(?:1[6-9]|2\d|3[01])(?:\.\d{1,3}){2}|192\.168(?:\.\d{1,3}){2})(?![\d.])"
@@ -84,7 +112,13 @@ WRAPPER_PREFIXES = (
     "Persistent internal Codex readonly review contract:",
     "Review discipline:",
 )
-WRAPPER_END_MARKERS = ("</INSTRUCTIONS>", "</environment_context>", "</skill>", "</subagent_notification>", "</turn_aborted>")
+WRAPPER_END_MARKERS = (
+    "</INSTRUCTIONS>",
+    "</environment_context>",
+    "</skill>",
+    "</subagent_notification>",
+    "</turn_aborted>",
+)
 AUTOMATION_PROMPT_PATTERN_TEXTS = (
     r"^Run the (?:daily|weekly) Codex session retrospective\b",
     r"^Run a read-only (?:daily|weekly) retrospective over Joey's Codex session activity\b",
@@ -92,7 +126,9 @@ AUTOMATION_PROMPT_PATTERN_TEXTS = (
     r"^Use \$codex-session-retrospective to run\b",
     r"^Use the installed codex-session-retrospective workflow\b",
 )
-AUTOMATION_PROMPT_PATTERNS = tuple(re.compile(pattern, re.I) for pattern in AUTOMATION_PROMPT_PATTERN_TEXTS)
+AUTOMATION_PROMPT_PATTERNS = tuple(
+    re.compile(pattern, re.I) for pattern in AUTOMATION_PROMPT_PATTERN_TEXTS
+)
 AUTOMATION_PROMPT_MARKERS = (
     "Run a read-only daily retrospective over Joey's Codex session activity.",
     "Run a read-only weekly retrospective over Joey's Codex session activity.",
@@ -101,13 +137,22 @@ AUTOMATION_PROMPT_MARKERS = (
     "When reconstructing the real user task from rollouts, ignore injected wrapper content",
     "Write task-local artifacts under .codex-local/session-retrospective/runs/",
 )
-SUMMARY_SIGNAL_MARKERS = ("error:", "approval", "could not run", "you missed", "assumed", "secret")
+SUMMARY_SIGNAL_MARKERS = (
+    "error:",
+    "approval",
+    "could not run",
+    "you missed",
+    "assumed",
+    "secret",
+)
 REMOTE_SESSION_META_BEGIN = "__REMOTE_CODEX_PROBE_SESSION_META_BEGIN__"
 REMOTE_SESSION_META_END = "__REMOTE_CODEX_PROBE_SESSION_META_END__"
 SESSION_META_LIMIT_TRUNCATED_REASON = "session_meta_limit_truncated"
 SESSION_META_SCAN_TRUNCATED_ERROR = (
     "session-meta scan truncated before metadata was found"
 )
+SESSION_META_OUTPUT_ROW_TOO_LARGE_ERROR = "session-meta output row too large"
+ROLLOUT_SUMMARY_OUTPUT_TOO_LARGE_ERROR = "rollout summary output too large"
 REMOTE_FETCH_ROLLOUT_BEGIN = "__REMOTE_CODEX_PROBE_FETCH_ROLLOUT_BEGIN__"
 REMOTE_FETCH_ROLLOUT_END = "__REMOTE_CODEX_PROBE_FETCH_ROLLOUT_END__"
 REMOTE_FETCH_ROLLOUT_CHUNK_BEGIN = "__REMOTE_CODEX_PROBE_FETCH_ROLLOUT_CHUNK_BEGIN__"
@@ -116,8 +161,12 @@ REMOTE_ROLLOUT_STAT_BEGIN = "__REMOTE_CODEX_PROBE_ROLLOUT_STAT_BEGIN__"
 REMOTE_ROLLOUT_STAT_END = "__REMOTE_CODEX_PROBE_ROLLOUT_STAT_END__"
 REMOTE_ROLLOUT_SUMMARY_BEGIN = "__REMOTE_CODEX_PROBE_ROLLOUT_SUMMARY_BEGIN__"
 REMOTE_ROLLOUT_SUMMARY_END = "__REMOTE_CODEX_PROBE_ROLLOUT_SUMMARY_END__"
-REMOTE_CHUNKED_ROLLOUT_SUMMARY_BEGIN = "__REMOTE_CODEX_PROBE_CHUNKED_ROLLOUT_SUMMARY_BEGIN__"
-REMOTE_CHUNKED_ROLLOUT_SUMMARY_END = "__REMOTE_CODEX_PROBE_CHUNKED_ROLLOUT_SUMMARY_END__"
+REMOTE_CHUNKED_ROLLOUT_SUMMARY_BEGIN = (
+    "__REMOTE_CODEX_PROBE_CHUNKED_ROLLOUT_SUMMARY_BEGIN__"
+)
+REMOTE_CHUNKED_ROLLOUT_SUMMARY_END = (
+    "__REMOTE_CODEX_PROBE_CHUNKED_ROLLOUT_SUMMARY_END__"
+)
 
 HOSTS: dict[str, dict[str, str]] = {
     "local": {"kind": "local", "label": "local", "codex_root": "~/.codex"},
@@ -285,7 +334,11 @@ def _local_codex_root() -> pathlib.Path:
 
 
 def _task_output_root(workspace_root: pathlib.Path | None = None) -> pathlib.Path:
-    root = workspace_root.resolve() if workspace_root is not None else pathlib.Path.cwd().resolve()
+    root = (
+        workspace_root.resolve()
+        if workspace_root is not None
+        else pathlib.Path.cwd().resolve()
+    )
     return root / TASK_OUTPUT_RELATIVE_DIR
 
 
@@ -320,7 +373,11 @@ def _resolve_output_path(
     raw_path = pathlib.Path(output).expanduser()
     if any(part == ".." for part in raw_path.parts):
         raise ValueError("output path must not contain ..")
-    workspace = workspace_root.resolve() if workspace_root is not None else pathlib.Path.cwd().resolve()
+    workspace = (
+        workspace_root.resolve()
+        if workspace_root is not None
+        else pathlib.Path.cwd().resolve()
+    )
     task_output_root = _task_output_root(workspace_root)
     tmp_alias_root = pathlib.Path("/tmp")
     tmp_root = pathlib.Path("/tmp").resolve()
@@ -332,7 +389,9 @@ def _resolve_output_path(
     if _path_is_relative_to(raw_path, tmp_alias_root):
         raw_path = tmp_root / raw_path.relative_to(tmp_alias_root)
     for root in (task_output_root, tmp_root):
-        if _path_is_relative_to(raw_path.resolve(strict=False), root.resolve(strict=False)):
+        if _path_is_relative_to(
+            raw_path.resolve(strict=False), root.resolve(strict=False)
+        ):
             return _validate_output_path(raw_path, root)
     raise ValueError(
         f"output path must stay under {task_output_root.resolve(strict=False)} or {tmp_root}"
@@ -360,57 +419,198 @@ def _path_is_relative_to(path: pathlib.Path, root: pathlib.Path) -> bool:
     return True
 
 
-def _resolve_safe_codex_root(codex_root: pathlib.Path) -> pathlib.Path:
-    expanded_root = codex_root.expanduser()
-    root_stat = expanded_root.lstat()
-    if stat.S_ISLNK(root_stat.st_mode):
-        raise ValueError("Codex root is a symlink")
-    if not stat.S_ISDIR(root_stat.st_mode):
-        raise ValueError("Codex root is not a directory")
-    return expanded_root.resolve(strict=True)
+def _directory_open_flags() -> int:
+    if not SECURE_ROLLOUT_DIR_FD_SUPPORTED:
+        raise OSError(
+            "secure rollout reads require O_DIRECTORY, O_NOFOLLOW, and descriptor-relative open/stat"
+        )
+    return os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
 
 
-def _safe_relative_path(
-    codex_root: pathlib.Path,
+def _regular_file_open_flags() -> int:
+    _directory_open_flags()
+    nonblocking_flag = getattr(os, "O_NONBLOCK", None)
+    if nonblocking_flag is None:
+        raise OSError("secure rollout reads require O_NONBLOCK")
+    return os.O_RDONLY | os.O_NOFOLLOW | nonblocking_flag | getattr(os, "O_CLOEXEC", 0)
+
+
+def _validate_relative_path_parts(
     relative_path: pathlib.PurePosixPath,
-    *,
-    expect_directory: bool = False,
-    expect_regular_file: bool = False,
-) -> pathlib.Path:
-    root = _resolve_safe_codex_root(codex_root)
-    target = root
+) -> tuple[str, ...]:
+    if relative_path.is_absolute():
+        raise ValueError("path must stay under Codex root")
     parts = relative_path.parts
-    for index, part in enumerate(parts):
-        if part in ("", ".", ".."):
-            raise ValueError("path must stay under Codex root")
-        target = target / part
-        target_stat = target.lstat()
-        if stat.S_ISLNK(target_stat.st_mode):
-            raise ValueError("path uses a symlink ancestor")
-        is_last = index == len(parts) - 1
-        if not is_last:
-            if not stat.S_ISDIR(target_stat.st_mode):
+    if any(part in ("", ".", "..") for part in parts):
+        raise ValueError("path must stay under Codex root")
+    return parts
+
+
+def _open_pinned_codex_root(codex_root: pathlib.Path) -> int:
+    expanded_root = codex_root.expanduser()
+    root_entry = expanded_root.lstat()
+    if stat.S_ISLNK(root_entry.st_mode):
+        raise ValueError("Codex root is a symlink")
+    try:
+        resolved_root = expanded_root.resolve(strict=True)
+        observed = os.stat(resolved_root, follow_symlinks=False)
+    except (FileNotFoundError, RuntimeError) as error:
+        raise ValueError("Codex root changed after initial inspection") from error
+    if not stat.S_ISDIR(observed.st_mode):
+        raise ValueError("Codex root is not a directory")
+    if (observed.st_dev, observed.st_ino) != (root_entry.st_dev, root_entry.st_ino):
+        raise ValueError("Codex root changed during resolution")
+    try:
+        fd = os.open(str(resolved_root), _directory_open_flags())
+    except FileNotFoundError as error:
+        raise ValueError("Codex root changed after initial inspection") from error
+    try:
+        opened = os.fstat(fd)
+        if not stat.S_ISDIR(opened.st_mode):
+            raise ValueError("Codex root is not a directory")
+        if (opened.st_dev, opened.st_ino) != (observed.st_dev, observed.st_ino):
+            raise ValueError("Codex root changed during open")
+        return fd
+    except Exception:
+        os.close(fd)
+        raise
+
+
+def _open_pinned_directory_from_fd(
+    root_fd: int,
+    relative_path: pathlib.PurePosixPath,
+) -> int:
+    directory_fd = os.dup(root_fd)
+    try:
+        for part in _validate_relative_path_parts(relative_path):
+            observed = os.stat(part, dir_fd=directory_fd, follow_symlinks=False)
+            if stat.S_ISLNK(observed.st_mode):
+                raise ValueError("path uses a symlink ancestor")
+            if not stat.S_ISDIR(observed.st_mode):
                 raise ValueError("path ancestor is not a directory")
-        elif expect_directory and not stat.S_ISDIR(target_stat.st_mode):
-            raise ValueError("path is not a directory")
-        elif expect_regular_file and not stat.S_ISREG(target_stat.st_mode):
+            try:
+                next_fd = os.open(
+                    part,
+                    _directory_open_flags(),
+                    dir_fd=directory_fd,
+                )
+            except FileNotFoundError as error:
+                raise ValueError("path ancestor changed during open") from error
+            try:
+                opened = os.fstat(next_fd)
+                if not stat.S_ISDIR(opened.st_mode):
+                    raise ValueError("path ancestor is not a directory")
+                if (opened.st_dev, opened.st_ino) != (
+                    observed.st_dev,
+                    observed.st_ino,
+                ):
+                    raise ValueError("path ancestor changed during open")
+            except Exception:
+                os.close(next_fd)
+                raise
+            os.close(directory_fd)
+            directory_fd = next_fd
+        return directory_fd
+    except Exception:
+        os.close(directory_fd)
+        raise
+
+
+def _open_pinned_regular_file_from_fd(parent_fd: int, name: str) -> int:
+    if name in ("", ".", "..") or "/" in name:
+        raise ValueError("rollout path has an invalid file name")
+    observed = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+    if stat.S_ISLNK(observed.st_mode):
+        raise ValueError("rollout path is a symlink")
+    if not stat.S_ISREG(observed.st_mode):
+        raise ValueError("rollout path is not a regular file")
+    try:
+        fd = os.open(name, _regular_file_open_flags(), dir_fd=parent_fd)
+    except FileNotFoundError as error:
+        raise ValueError("rollout changed during open") from error
+    try:
+        opened = os.fstat(fd)
+        if not stat.S_ISREG(opened.st_mode):
             raise ValueError("rollout path is not a regular file")
-    target_resolved = target.resolve(strict=True)
-    if not _path_is_relative_to(target_resolved, root):
-        raise ValueError("path escapes Codex root")
-    return target_resolved
+        if (opened.st_dev, opened.st_ino) != (observed.st_dev, observed.st_ino):
+            raise ValueError("rollout changed during open")
+        return fd
+    except Exception:
+        os.close(fd)
+        raise
 
 
-def _safe_rollout_path(
-    codex_root: pathlib.Path, rollout_relative_path: pathlib.PurePosixPath
-) -> pathlib.Path:
-    return _safe_relative_path(codex_root, rollout_relative_path, expect_regular_file=True)
+class _PinnedRolloutHandle:
+    def __init__(self, fd: int, parent_fd: int, name: str) -> None:
+        try:
+            self._handle = os.fdopen(fd, "rb")
+        except Exception:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+            os.close(parent_fd)
+            raise
+        self._parent_fd = parent_fd
+        self._name = name
+
+    def __enter__(self) -> _PinnedRolloutHandle:
+        return self
+
+    def __exit__(self, *args: object) -> None:
+        self.close()
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._handle, name)
+
+    def close(self) -> None:
+        try:
+            self._handle.close()
+        finally:
+            if self._parent_fd != -1:
+                os.close(self._parent_fd)
+                self._parent_fd = -1
+
+    def assert_identity(self, expected: RolloutIdentity, *, phase: str) -> None:
+        _assert_rollout_identity(
+            _rollout_identity_from_stat(os.fstat(self.fileno())),
+            expected,
+            phase=phase,
+        )
+        try:
+            current = _rollout_identity_from_stat(
+                os.stat(
+                    self._name,
+                    dir_fd=self._parent_fd,
+                    follow_symlinks=False,
+                )
+            )
+        except (FileNotFoundError, ValueError) as error:
+            raise ValueError(f"rollout identity changed {phase}") from error
+        _assert_rollout_identity(current, expected, phase=phase)
 
 
-def _safe_directory_path(
-    codex_root: pathlib.Path, relative_path: pathlib.PurePosixPath
-) -> pathlib.Path:
-    return _safe_relative_path(codex_root, relative_path, expect_directory=True)
+def _open_pinned_rollout_text(
+    codex_root: pathlib.Path,
+    rollout_relative_path: pathlib.PurePosixPath,
+) -> _PinnedRolloutHandle:
+    parts = _validate_relative_path_parts(rollout_relative_path)
+    if not parts:
+        raise ValueError("rollout path must name a file")
+    root_fd = _open_pinned_codex_root(codex_root)
+    try:
+        parent_fd = _open_pinned_directory_from_fd(
+            root_fd,
+            pathlib.PurePosixPath(*parts[:-1]),
+        )
+        try:
+            fd = _open_pinned_regular_file_from_fd(parent_fd, parts[-1])
+        except Exception:
+            os.close(parent_fd)
+            raise
+        return _PinnedRolloutHandle(fd, parent_fd, parts[-1])
+    finally:
+        os.close(root_fd)
 
 
 def _rollout_identity_from_stat(stat_result: os.stat_result) -> RolloutIdentity:
@@ -495,23 +695,6 @@ def _assert_rollout_identity(
         raise ValueError(f"rollout identity changed {phase}")
 
 
-def _rollout_path_identity(target: pathlib.Path) -> RolloutIdentity:
-    return _rollout_identity_from_stat(target.lstat())
-
-
-def _assert_rollout_path_identity(
-    target: pathlib.Path,
-    expected: RolloutIdentity,
-    *,
-    phase: str,
-) -> None:
-    try:
-        actual = _rollout_path_identity(target)
-    except (FileNotFoundError, ValueError) as error:
-        raise ValueError(f"rollout identity changed {phase}") from error
-    _assert_rollout_identity(actual, expected, phase=phase)
-
-
 def _validate_source_read_budget(
     identity: RolloutIdentity,
     authorized_source_bytes: int | None,
@@ -574,15 +757,10 @@ def _stat_local_rollout_identity(
     codex_root: pathlib.Path,
     rollout_relative_path: pathlib.PurePosixPath,
 ) -> RolloutIdentity:
-    target = _safe_rollout_path(codex_root, rollout_relative_path)
-    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
-    fd = os.open(str(target), flags)
-    try:
-        identity = _rollout_identity_from_stat(os.fstat(fd))
-        _assert_rollout_path_identity(target, identity, phase="during metadata stat")
+    with _open_pinned_rollout_text(codex_root, rollout_relative_path) as handle:
+        identity = _rollout_identity_from_stat(os.fstat(handle.fileno()))
+        handle.assert_identity(identity, phase="during metadata stat")
         return identity
-    finally:
-        os.close(fd)
 
 
 def _open_local_rollout_text(
@@ -591,19 +769,14 @@ def _open_local_rollout_text(
     *,
     expected_identity: RolloutIdentity | None = None,
 ):
-    target = _safe_rollout_path(codex_root, rollout_relative_path)
-    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
-    fd = os.open(str(target), flags)
+    handle = _open_pinned_rollout_text(codex_root, rollout_relative_path)
     try:
-        identity = _rollout_identity_from_stat(os.fstat(fd))
         if expected_identity is not None:
-            _assert_rollout_identity(identity, expected_identity, phase="before read")
-        handle = os.fdopen(fd, "rb")
-        fd = -1
+            handle.assert_identity(expected_identity, phase="before read")
         return handle
-    finally:
-        if fd != -1:
-            os.close(fd)
+    except Exception:
+        handle.close()
+        raise
 
 
 def _read_local_rollout_bytes(
@@ -612,34 +785,18 @@ def _read_local_rollout_bytes(
     *,
     max_bytes: int,
 ) -> bytes:
-    target = _safe_rollout_path(codex_root, rollout_relative_path)
-    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
-    fd = os.open(str(target), flags)
-    try:
-        identity = _rollout_identity_from_stat(os.fstat(fd))
-        _assert_rollout_path_identity(target, identity, phase="before read")
+    with _open_pinned_rollout_text(codex_root, rollout_relative_path) as handle:
+        identity = _rollout_identity_from_stat(os.fstat(handle.fileno()))
         if max_bytes and identity.size > max_bytes:
+            raise ValueError(f"rollout too large: {identity.size} bytes > {max_bytes}")
+        data = handle.read(identity.size + 1)
+        handle.assert_identity(identity, phase="after read")
+        if len(data) != identity.size:
             raise ValueError(
-                f"rollout too large: {identity.size} bytes > {max_bytes}"
+                "rollout read did not match snapshot size: "
+                f"{len(data)} bytes != {identity.size}"
             )
-        with os.fdopen(fd, "rb") as handle:
-            fd = -1
-            data = handle.read(identity.size + 1)
-            _assert_rollout_identity(
-                _rollout_identity_from_stat(os.fstat(handle.fileno())),
-                identity,
-                phase="after read",
-            )
-            _assert_rollout_path_identity(target, identity, phase="after read")
-            if len(data) != identity.size:
-                raise ValueError(
-                    "rollout read did not match snapshot size: "
-                    f"{len(data)} bytes != {identity.size}"
-                )
-            return data
-    finally:
-        if fd != -1:
-            os.close(fd)
+        return data
 
 
 def _read_local_rollout_byte_range(
@@ -658,36 +815,21 @@ def _read_local_rollout_byte_range(
     length = byte_end - byte_start
     if length > max_bytes:
         raise ValueError(f"chunk too large: {length} bytes > {max_bytes}")
-    target = _safe_rollout_path(codex_root, rollout_relative_path)
-    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
-    fd = os.open(str(target), flags)
-    try:
-        identity = _rollout_identity_from_stat(os.fstat(fd))
-        _assert_rollout_identity(identity, expected_identity, phase="before read")
+    with _open_pinned_rollout_text(codex_root, rollout_relative_path) as handle:
+        identity = _rollout_identity_from_stat(os.fstat(handle.fileno()))
+        handle.assert_identity(expected_identity, phase="before read")
         if byte_end > identity.size:
-            raise ValueError(f"--byte-end exceeds rollout size: {byte_end} > {identity.size}")
-        with os.fdopen(fd, "rb") as handle:
-            fd = -1
-            handle.seek(byte_start)
-            data = handle.read(length)
-            _assert_rollout_identity(
-                _rollout_identity_from_stat(os.fstat(handle.fileno())),
-                expected_identity,
-                phase="after read",
+            raise ValueError(
+                f"--byte-end exceeds rollout size: {byte_end} > {identity.size}"
             )
-            _assert_rollout_path_identity(
-                target,
-                expected_identity,
-                phase="after read",
+        handle.seek(byte_start)
+        data = handle.read(length)
+        handle.assert_identity(expected_identity, phase="after read")
+        if len(data) != length:
+            raise ValueError(
+                f"rollout chunk read was truncated: {len(data)} bytes != {length}"
             )
-            if len(data) != length:
-                raise ValueError(
-                    f"rollout chunk read was truncated: {len(data)} bytes != {length}"
-                )
-            return data
-    finally:
-        if fd != -1:
-            os.close(fd)
+        return data
 
 
 def _open_output_parent(output: pathlib.Path) -> int:
@@ -775,8 +917,8 @@ def _flat_archived_rollout_matches_date(
     return rollout_path.name.startswith(f"rollout-{date_value.strftime('%Y-%m-%d')}")
 
 
-def _is_raw_rollout_file(path: pathlib.Path) -> bool:
-    return path.name.startswith("rollout-") and not path.name.startswith("rollout-summary")
+def _is_raw_rollout_file(path: pathlib.Path | pathlib.PurePosixPath) -> bool:
+    return RAW_ROLLOUT_BASENAME_RE.fullmatch(path.name) is not None
 
 
 def _session_meta_rollout_dedupe_key(relative_path: pathlib.PurePosixPath) -> str:
@@ -813,7 +955,11 @@ class _HashingRolloutReader:
 
     def readline(self, size: int = -1) -> Any:
         data = self.handle.readline(size)
-        raw_bytes = data.encode("utf-8", "surrogatepass") if isinstance(data, str) else bytes(data)
+        raw_bytes = (
+            data.encode("utf-8", "surrogatepass")
+            if isinstance(data, str)
+            else bytes(data)
+        )
         self._hasher.update(raw_bytes)
         self.bytes_read += len(raw_bytes)
         return data
@@ -880,7 +1026,9 @@ def _iter_rollout_chunks(
             if chunk is not None:
                 yield chunk
             return
-        current_read_limit = read_limit if remaining is None else min(read_limit, remaining)
+        current_read_limit = (
+            read_limit if remaining is None else min(read_limit, remaining)
+        )
         raw_line = handle.readline(current_read_limit)
         if not raw_line:
             chunk = flush()
@@ -1009,7 +1157,10 @@ def _parse_kv_lines(text: str) -> dict[str, str]:
 
 
 def _run_subprocess_text(
-    argv: list[str], *, input_text: str | None = None, timeout_seconds: int | None = None
+    argv: list[str],
+    *,
+    input_text: str | None = None,
+    timeout_seconds: int | None = None,
 ) -> subprocess.CompletedProcess[str]:
     try:
         return subprocess.run(
@@ -1025,9 +1176,7 @@ def _run_subprocess_text(
     except subprocess.TimeoutExpired as exc:
         if timeout_seconds is None:
             raise RuntimeError("command timed out") from exc
-        raise RuntimeError(
-            f"command timed out after {timeout_seconds}s"
-        ) from exc
+        raise RuntimeError(f"command timed out after {timeout_seconds}s") from exc
 
 
 def _run_subprocess_text_bounded(
@@ -1081,7 +1230,8 @@ def _run_subprocess_text_bounded(
                 if key.data == "stdin":
                     try:
                         written = os.write(
-                            stream.fileno(), input_bytes[input_offset : input_offset + 65536]
+                            stream.fileno(),
+                            input_bytes[input_offset : input_offset + 65536],
                         )
                     except BrokenPipeError:
                         written = 0
@@ -1102,9 +1252,7 @@ def _run_subprocess_text_bounded(
                     stream.close()
                     continue
                 buffer = stdout if key.data == "stdout" else stderr
-                limit = (
-                    max_stdout_bytes if key.data == "stdout" else max_stderr_bytes
-                )
+                limit = max_stdout_bytes if key.data == "stdout" else max_stderr_bytes
                 if len(buffer) + len(chunk) > limit:
                     raise RuntimeError(
                         f"command {key.data} exceeded {limit}-byte capture limit"
@@ -1177,7 +1325,9 @@ def _remote_preflight_row(alias: str) -> dict[str, str]:
         timeout_seconds=REMOTE_PREFLIGHT_TIMEOUT_SECONDS,
     )
     if result.returncode != 0:
-        message = result.stderr.strip() or result.stdout.strip() or "ssh preflight failed"
+        message = (
+            result.stderr.strip() or result.stdout.strip() or "ssh preflight failed"
+        )
         raise RuntimeError(message)
     row = _parse_kv_lines(result.stdout)
     row["host"] = alias
@@ -1213,12 +1363,16 @@ AUTHORIZED_SOURCE_BYTES_RAW = CONFIG.get("authorized_source_bytes")
 AUTHORIZED_SOURCE_BYTES = None if AUTHORIZED_SOURCE_BYTES_RAW is None else int(AUTHORIZED_SOURCE_BYTES_RAW)
 OUTPUT_HOST = str(CONFIG.get("output_host", ""))
 SESSION_META_SCAN_BYTES = int(CONFIG.get("session_meta_scan_bytes", 0))
+SESSION_META_SERIALIZED_ROW_BYTES = {MAX_REMOTE_SESSION_META_SERIALIZED_ROW_BYTES}
+SESSION_META_OUTPUT_ROW_TOO_LARGE_ERROR = {SESSION_META_OUTPUT_ROW_TOO_LARGE_ERROR!r}
 SUMMARY_LIMIT = int(CONFIG.get("summary_limit", 0))
 SUMMARY_SCAN_BYTES = int(CONFIG.get("summary_scan_bytes", 0))
 SUMMARY_LINE_BYTES = int(CONFIG.get("summary_line_bytes", 0)) or {MAX_ROLLOUT_SUMMARY_LINE_BYTES}
 SUMMARY_TAIL_RECORDS = int(CONFIG.get("summary_tail_records", 0))
 SUMMARY_MAX_TEXT_CHARS = int(CONFIG.get("summary_max_text_chars", 0))
 SUMMARY_MAX_TEXT_CHARS_LIMIT = {MAX_ROLLOUT_SUMMARY_TEXT_CHARS}
+ROLLOUT_SUMMARY_SERIALIZED_BYTES = {MAX_REMOTE_ROLLOUT_SUMMARY_SERIALIZED_BYTES}
+ROLLOUT_SUMMARY_OUTPUT_TOO_LARGE_ERROR = {ROLLOUT_SUMMARY_OUTPUT_TOO_LARGE_ERROR!r}
 SUMMARY_KEYWORDS = [str(value) for value in CONFIG.get("summary_keywords", [])]
 SUMMARY_SEARCH_KEYWORDS = [value.casefold() for value in SUMMARY_KEYWORDS if value]
 CHUNK_BYTES = int(CONFIG.get("chunk_bytes", 0))
@@ -1226,6 +1380,14 @@ FETCH_CHUNK_BYTE_START = int(CONFIG.get("byte_start", 0))
 FETCH_CHUNK_BYTE_END = int(CONFIG.get("byte_end", 0))
 ACTIVE_ROLLOUT_RELATIVE_RE = re.compile({ACTIVE_ROLLOUT_RELATIVE_RE.pattern!r})
 ARCHIVED_ROLLOUT_RELATIVE_RE = re.compile({ARCHIVED_ROLLOUT_RELATIVE_RE.pattern!r})
+RAW_ROLLOUT_BASENAME_RE = re.compile({RAW_ROLLOUT_BASENAME_RE.pattern!r})
+SECURE_ROLLOUT_DIR_FD_SUPPORTED = (
+    getattr(os, "O_DIRECTORY", None) is not None
+    and getattr(os, "O_NOFOLLOW", None) is not None
+    and os.open in os.supports_dir_fd
+    and os.stat in os.supports_dir_fd
+    and os.stat in os.supports_follow_symlinks
+)
 PRIVATE_IPV4_SIGNAL_RE = re.compile({PRIVATE_IPV4_SIGNAL_RE.pattern!r})
 PRIVATE_IPV6_SIGNAL_RE = re.compile({PRIVATE_IPV6_SIGNAL_RE.pattern!r}, re.I)
 INTERNAL_HOSTNAME_SIGNAL_RE = re.compile({INTERNAL_HOSTNAME_SIGNAL_RE.pattern!r}, re.I)
@@ -1251,54 +1413,192 @@ CHUNKED_ROLLOUT_SUMMARY_BEGIN = {REMOTE_CHUNKED_ROLLOUT_SUMMARY_BEGIN!r}
 CHUNKED_ROLLOUT_SUMMARY_END = {REMOTE_CHUNKED_ROLLOUT_SUMMARY_END!r}
 
 
-def path_is_relative_to(path, root):
-    try:
-        path.relative_to(root)
-    except ValueError:
-        return False
-    return True
+def directory_open_flags():
+    if not SECURE_ROLLOUT_DIR_FD_SUPPORTED:
+        raise OSError(
+            "secure rollout reads require O_DIRECTORY, O_NOFOLLOW, and descriptor-relative open/stat"
+        )
+    return (
+        os.O_RDONLY
+        | os.O_DIRECTORY
+        | os.O_NOFOLLOW
+        | getattr(os, "O_CLOEXEC", 0)
+    )
 
 
-def safe_codex_root():
-    root_stat = ROOT.lstat()
-    if stat.S_ISLNK(root_stat.st_mode):
-        raise ValueError("Codex root is a symlink")
-    if not stat.S_ISDIR(root_stat.st_mode):
-        raise ValueError("Codex root is not a directory")
-    return ROOT.resolve(strict=True)
+def regular_file_open_flags():
+    directory_open_flags()
+    nonblocking_flag = getattr(os, "O_NONBLOCK", None)
+    if nonblocking_flag is None:
+        raise OSError("secure rollout reads require O_NONBLOCK")
+    return (
+        os.O_RDONLY
+        | os.O_NOFOLLOW
+        | nonblocking_flag
+        | getattr(os, "O_CLOEXEC", 0)
+    )
 
 
-def safe_relative_path(rel, *, expect_directory=False, expect_regular_file=False):
-    root = safe_codex_root()
-    target = root
+def validate_relative_path_parts(rel):
+    if rel.is_absolute():
+        raise ValueError("path must stay under Codex root")
     parts = rel.parts
-    for index, part in enumerate(parts):
-        if part in ("", ".", ".."):
-            raise ValueError("path must stay under Codex root")
-        target = target / part
-        target_stat = target.lstat()
-        if stat.S_ISLNK(target_stat.st_mode):
-            raise ValueError("path uses a symlink ancestor")
-        is_last = index == len(parts) - 1
-        if not is_last:
-            if not stat.S_ISDIR(target_stat.st_mode):
+    if any(part in ("", ".", "..") for part in parts):
+        raise ValueError("path must stay under Codex root")
+    return parts
+
+
+def open_pinned_codex_root():
+    root_entry = ROOT.lstat()
+    if stat.S_ISLNK(root_entry.st_mode):
+        raise ValueError("Codex root is a symlink")
+    try:
+        resolved_root = ROOT.resolve(strict=True)
+        observed = os.stat(resolved_root, follow_symlinks=False)
+    except (FileNotFoundError, RuntimeError) as error:
+        raise ValueError("Codex root changed after initial inspection") from error
+    if not stat.S_ISDIR(observed.st_mode):
+        raise ValueError("Codex root is not a directory")
+    if (observed.st_dev, observed.st_ino) != (root_entry.st_dev, root_entry.st_ino):
+        raise ValueError("Codex root changed during resolution")
+    try:
+        fd = os.open(str(resolved_root), directory_open_flags())
+    except FileNotFoundError as error:
+        raise ValueError("Codex root changed after initial inspection") from error
+    try:
+        opened = os.fstat(fd)
+        if not stat.S_ISDIR(opened.st_mode):
+            raise ValueError("Codex root is not a directory")
+        if (opened.st_dev, opened.st_ino) != (observed.st_dev, observed.st_ino):
+            raise ValueError("Codex root changed during open")
+        return fd
+    except Exception:
+        os.close(fd)
+        raise
+
+
+def open_pinned_directory_from_fd(root_fd, rel):
+    directory_fd = os.dup(root_fd)
+    try:
+        for part in validate_relative_path_parts(rel):
+            observed = os.stat(part, dir_fd=directory_fd, follow_symlinks=False)
+            if stat.S_ISLNK(observed.st_mode):
+                raise ValueError("path uses a symlink ancestor")
+            if not stat.S_ISDIR(observed.st_mode):
                 raise ValueError("path ancestor is not a directory")
-        elif expect_directory and not stat.S_ISDIR(target_stat.st_mode):
-            raise ValueError("path is not a directory")
-        elif expect_regular_file and not stat.S_ISREG(target_stat.st_mode):
+            try:
+                next_fd = os.open(part, directory_open_flags(), dir_fd=directory_fd)
+            except FileNotFoundError as error:
+                raise ValueError("path ancestor changed during open") from error
+            try:
+                opened = os.fstat(next_fd)
+                if not stat.S_ISDIR(opened.st_mode):
+                    raise ValueError("path ancestor is not a directory")
+                if (opened.st_dev, opened.st_ino) != (observed.st_dev, observed.st_ino):
+                    raise ValueError("path ancestor changed during open")
+            except Exception:
+                os.close(next_fd)
+                raise
+            os.close(directory_fd)
+            directory_fd = next_fd
+        return directory_fd
+    except Exception:
+        os.close(directory_fd)
+        raise
+
+
+def open_pinned_regular_file_from_fd(parent_fd, name):
+    if name in ("", ".", "..") or "/" in name:
+        raise ValueError("rollout path has an invalid file name")
+    observed = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+    if stat.S_ISLNK(observed.st_mode):
+        raise ValueError("rollout path is a symlink")
+    if not stat.S_ISREG(observed.st_mode):
+        raise ValueError("rollout path is not a regular file")
+    try:
+        fd = os.open(name, regular_file_open_flags(), dir_fd=parent_fd)
+    except FileNotFoundError as error:
+        raise ValueError("rollout changed during open") from error
+    try:
+        opened = os.fstat(fd)
+        if not stat.S_ISREG(opened.st_mode):
             raise ValueError("rollout path is not a regular file")
-    target_resolved = target.resolve(strict=True)
-    if not path_is_relative_to(target_resolved, root):
-        raise ValueError("path escapes Codex root")
-    return target_resolved
+        if (opened.st_dev, opened.st_ino) != (observed.st_dev, observed.st_ino):
+            raise ValueError("rollout changed during open")
+        return fd
+    except Exception:
+        os.close(fd)
+        raise
 
 
-def safe_rollout_path(rel):
-    return safe_relative_path(rel, expect_regular_file=True)
+class PinnedRolloutHandle:
+    def __init__(self, fd, parent_fd, name):
+        try:
+            self.handle = os.fdopen(fd, "rb")
+        except Exception:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+            os.close(parent_fd)
+            raise
+        self.parent_fd = parent_fd
+        self.name = name
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        self.close()
+
+    def __getattr__(self, name):
+        return getattr(self.handle, name)
+
+    def close(self):
+        try:
+            self.handle.close()
+        finally:
+            if self.parent_fd != -1:
+                os.close(self.parent_fd)
+                self.parent_fd = -1
+
+    def assert_identity(self, expected, phase):
+        assert_rollout_identity(
+            rollout_identity_from_stat(os.fstat(self.fileno())),
+            expected,
+            phase,
+        )
+        try:
+            current = rollout_identity_from_stat(
+                os.stat(
+                    self.name,
+                    dir_fd=self.parent_fd,
+                    follow_symlinks=False,
+                )
+            )
+        except (FileNotFoundError, ValueError) as error:
+            raise ValueError("rollout identity changed " + phase) from error
+        assert_rollout_identity(current, expected, phase)
 
 
-def safe_directory_path(rel):
-    return safe_relative_path(rel, expect_directory=True)
+def open_pinned_rollout_text(rel):
+    parts = validate_relative_path_parts(rel)
+    if not parts:
+        raise ValueError("rollout path must name a file")
+    root_fd = open_pinned_codex_root()
+    try:
+        parent_fd = open_pinned_directory_from_fd(
+            root_fd,
+            pathlib.PurePosixPath(*parts[:-1]),
+        )
+        try:
+            fd = open_pinned_regular_file_from_fd(parent_fd, parts[-1])
+        except Exception:
+            os.close(parent_fd)
+            raise
+        return PinnedRolloutHandle(fd, parent_fd, parts[-1])
+    finally:
+        os.close(root_fd)
 
 
 def rollout_identity_from_stat(stat_result):
@@ -1349,18 +1649,6 @@ def assert_rollout_identity(actual, expected, phase):
         raise ValueError("rollout identity changed " + phase)
 
 
-def rollout_path_identity(target):
-    return rollout_identity_from_stat(target.lstat())
-
-
-def assert_rollout_path_identity(target, expected, phase):
-    try:
-        actual = rollout_path_identity(target)
-    except (FileNotFoundError, ValueError) as error:
-        raise ValueError("rollout identity changed " + phase) from error
-    assert_rollout_identity(actual, expected, phase)
-
-
 def validate_source_read_budget(identity):
     if AUTHORIZED_SOURCE_BYTES is not None:
         if AUTHORIZED_SOURCE_BYTES < 0:
@@ -1396,58 +1684,38 @@ def rollout_identity_record(identity):
     }}
 
 
-def stat_rollout_identity(target):
-    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
-    fd = os.open(str(target), flags)
-    try:
-        identity = rollout_identity_from_stat(os.fstat(fd))
-        assert_rollout_path_identity(target, identity, "during metadata stat")
+def stat_rollout_identity(rel):
+    with open_pinned_rollout_text(rel) as handle:
+        identity = rollout_identity_from_stat(os.fstat(handle.fileno()))
+        handle.assert_identity(identity, "during metadata stat")
         return identity
-    finally:
-        os.close(fd)
 
 
-def open_rollout_text(target, expected_identity=None):
-    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
-    fd = os.open(str(target), flags)
+def open_rollout_text(rel, expected_identity=None):
+    handle = open_pinned_rollout_text(rel)
     try:
-        identity = rollout_identity_from_stat(os.fstat(fd))
+        identity = rollout_identity_from_stat(os.fstat(handle.fileno()))
         if expected_identity is not None:
-            assert_rollout_identity(identity, expected_identity, "before read")
-        handle = os.fdopen(fd, "rb")
-        fd = -1
+            handle.assert_identity(expected_identity, "before read")
         return handle
-    finally:
-        if fd != -1:
-            os.close(fd)
+    except Exception:
+        handle.close()
+        raise
 
 
-def read_rollout_bytes(target, max_bytes):
-    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
-    fd = os.open(str(target), flags)
-    try:
-        identity = rollout_identity_from_stat(os.fstat(fd))
-        assert_rollout_path_identity(target, identity, "before read")
+def read_rollout_bytes(rel, max_bytes):
+    with open_pinned_rollout_text(rel) as handle:
+        identity = rollout_identity_from_stat(os.fstat(handle.fileno()))
         if max_bytes and identity["size"] > max_bytes:
             raise ValueError("rollout too large: " + str(identity["size"]) + " bytes > " + str(max_bytes))
-        with os.fdopen(fd, "rb") as handle:
-            fd = -1
-            data = handle.read(identity["size"] + 1)
-            assert_rollout_identity(
-                rollout_identity_from_stat(os.fstat(handle.fileno())),
-                identity,
-                "after read",
-            )
-            assert_rollout_path_identity(target, identity, "after read")
-            if len(data) != identity["size"]:
-                raise ValueError("rollout read did not match snapshot size")
-            return identity["size"], data
-    finally:
-        if fd != -1:
-            os.close(fd)
+        data = handle.read(identity["size"] + 1)
+        handle.assert_identity(identity, "after read")
+        if len(data) != identity["size"]:
+            raise ValueError("rollout read did not match snapshot size")
+        return identity["size"], data
 
 
-def read_rollout_byte_range(target, byte_start, byte_end, max_bytes, expected_identity):
+def read_rollout_byte_range(rel, byte_start, byte_end, max_bytes, expected_identity):
     if byte_start < 0:
         raise ValueError("byte start must be non-negative")
     if byte_end <= byte_start:
@@ -1455,29 +1723,17 @@ def read_rollout_byte_range(target, byte_start, byte_end, max_bytes, expected_id
     length = byte_end - byte_start
     if max_bytes and length > max_bytes:
         raise ValueError("chunk too large: " + str(length) + " bytes > " + str(max_bytes))
-    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
-    fd = os.open(str(target), flags)
-    try:
-        identity = rollout_identity_from_stat(os.fstat(fd))
-        assert_rollout_identity(identity, expected_identity, "before read")
+    with open_pinned_rollout_text(rel) as handle:
+        identity = rollout_identity_from_stat(os.fstat(handle.fileno()))
+        handle.assert_identity(expected_identity, "before read")
         if byte_end > identity["size"]:
             raise ValueError("byte end exceeds rollout size: " + str(byte_end) + " > " + str(identity["size"]))
-        with os.fdopen(fd, "rb") as handle:
-            fd = -1
-            handle.seek(byte_start)
-            data = handle.read(length)
-            assert_rollout_identity(
-                rollout_identity_from_stat(os.fstat(handle.fileno())),
-                expected_identity,
-                "after read",
-            )
-            assert_rollout_path_identity(target, expected_identity, "after read")
-            if len(data) != length:
-                raise ValueError("rollout chunk read was truncated")
-            return data
-    finally:
-        if fd != -1:
-            os.close(fd)
+        handle.seek(byte_start)
+        data = handle.read(length)
+        handle.assert_identity(expected_identity, "after read")
+        if len(data) != length:
+            raise ValueError("rollout chunk read was truncated")
+        return data
 
 
 def flat_archived_rollout_matches_date(rollout, date_text):
@@ -1485,7 +1741,7 @@ def flat_archived_rollout_matches_date(rollout, date_text):
 
 
 def is_raw_rollout_file(path):
-    return path.name.startswith("rollout-") and not path.name.startswith("rollout-summary")
+    return RAW_ROLLOUT_BASENAME_RE.fullmatch(path.name) is not None
 
 
 def session_meta_rollout_dedupe_key(rel):
@@ -1817,6 +2073,44 @@ def summary_record_has_signal(record):
     return any(marker in text for marker in SUMMARY_SIGNAL_MARKERS)
 
 
+def read_bounded_session_meta(handle, max_scan_bytes):
+    if max_scan_bytes < 1:
+        raise ValueError("session-meta scan bytes must be positive")
+    file_descriptor = handle.fileno()
+    start_offset = os.lseek(file_descriptor, 0, os.SEEK_CUR)
+    chunks = []
+    scanned = 0
+    while scanned < max_scan_bytes:
+        remaining = max_scan_bytes - scanned
+        chunk = os.read(file_descriptor, remaining)
+        if not chunk:
+            break
+        chunks.append(chunk)
+        scanned += len(chunk)
+    prefix = b"".join(chunks)
+    source_size = rollout_identity_from_stat(os.fstat(file_descriptor))["size"]
+    cursor = 0
+    while cursor < len(prefix):
+        line_end = prefix.find(b"\\n", cursor)
+        if line_end < 0:
+            return "", "", True
+        line_end += 1
+        raw_bytes = prefix[cursor:line_end]
+        cursor = line_end
+        try:
+            obj = json.loads(raw_bytes.decode("utf-8", "replace"))
+        except json.JSONDecodeError:
+            continue
+        if obj.get("type") != "session_meta":
+            continue
+        payload = obj.get("payload", {{}})
+        session_id = str(payload.get("id", ""))
+        cwd = str(payload.get("cwd", ""))
+        has_unread_bytes = source_size > start_offset + cursor
+        return session_id, cwd, bool(not session_id and has_unread_bytes)
+    return "", "", source_size > start_offset + len(prefix)
+
+
 def bounded_text_lines(handle, max_scan_bytes):
     scanned = 0
     buffer = bytearray()
@@ -2084,8 +2378,7 @@ def stat_rollout():
         print(ROLLOUT_STAT_END)
         return
     try:
-        target = safe_rollout_path(rel)
-        identity = stat_rollout_identity(target)
+        identity = stat_rollout_identity(rel)
         if EXPECTED_SOURCE_IDENTITY_TOKEN or EXPECTED_SOURCE_BYTES >= 0:
             if not EXPECTED_SOURCE_IDENTITY_TOKEN or EXPECTED_SOURCE_BYTES < 0:
                 raise ValueError("expected source bytes and identity must be provided together")
@@ -2139,7 +2432,6 @@ def summarize_rollout_chunks():
         return
     try:
         expected_identity = parse_expected_rollout_identity()
-        target = safe_rollout_path(rel)
     except FileNotFoundError:
         print(json.dumps({{"ok": False, "error": "rollout not found"}}, separators=(",", ":"), sort_keys=True))
         print(CHUNKED_ROLLOUT_SUMMARY_END)
@@ -2151,7 +2443,7 @@ def summarize_rollout_chunks():
     try:
         serialized_records = []
         serialized_bytes = 0
-        with open_rollout_text(target, expected_identity) as handle:
+        with open_rollout_text(rel, expected_identity) as handle:
             validate_source_read_budget(expected_identity)
             hashing_reader = HashingRolloutReader(handle)
             chunks = iter_rollout_chunks(
@@ -2178,12 +2470,7 @@ def summarize_rollout_chunks():
                         raise ValueError("chunked summary output too large")
                     serialized_records.append(line)
                     serialized_bytes += line_bytes
-            assert_rollout_identity(
-                rollout_identity_from_stat(os.fstat(handle.fileno())),
-                expected_identity,
-                "after summary scan",
-            )
-            assert_rollout_path_identity(target, expected_identity, "after summary scan")
+            handle.assert_identity(expected_identity, "after summary scan")
             if hashing_reader.bytes_read != expected_identity["size"]:
                 raise ValueError("chunked summary scan did not cover expected source bytes")
             source_sha256 = hashing_reader.hexdigest()
@@ -2193,6 +2480,10 @@ def summarize_rollout_chunks():
         )
         if meta_bytes + serialized_bytes > MAX_CHUNKED_ROLLOUT_SUMMARY_OUTPUT_BYTES:
             raise ValueError("chunked summary output too large")
+    except FileNotFoundError:
+        print(json.dumps({{"ok": False, "error": "rollout not found"}}, separators=(",", ":"), sort_keys=True))
+        print(CHUNKED_ROLLOUT_SUMMARY_END)
+        return
     except OSError:
         print(json.dumps({{"ok": False, "error": "rollout unreadable"}}, separators=(",", ":"), sort_keys=True))
         print(CHUNKED_ROLLOUT_SUMMARY_END)
@@ -2234,17 +2525,6 @@ def summarize_rollout():
         print(json.dumps({{"ok": False, "error": "invalid rollout path"}}, separators=(",", ":"), sort_keys=True))
         print(ROLLOUT_SUMMARY_END)
         return
-    try:
-        target = safe_rollout_path(rel)
-    except FileNotFoundError:
-        print(json.dumps({{"ok": False, "error": "rollout not found"}}, separators=(",", ":"), sort_keys=True))
-        print(ROLLOUT_SUMMARY_END)
-        return
-    except ValueError as error:
-        print(json.dumps({{"ok": False, "error": str(error)}}, separators=(",", ":"), sort_keys=True))
-        print(ROLLOUT_SUMMARY_END)
-        return
-
     keywords = SUMMARY_SEARCH_KEYWORDS
     matched = []
     matched_seen = set()
@@ -2257,9 +2537,15 @@ def summarize_rollout():
     last_task_complete_record = None
 
     try:
-        handle = open_rollout_text(target)
+        handle = open_rollout_text(rel)
+    except FileNotFoundError:
+        summary_error("rollout not found")
+        return
     except OSError:
         summary_error("rollout unreadable")
+        return
+    except ValueError as error:
+        summary_error(str(error))
         return
     with handle:
         try:
@@ -2337,24 +2623,31 @@ def summarize_rollout():
                 tail.append(record)
 
         try:
-            assert_rollout_identity(
-                rollout_identity_from_stat(os.fstat(handle.fileno())),
-                source_identity,
-                "after summary scan",
-            )
-            assert_rollout_path_identity(
-                target,
-                source_identity,
-                "after summary scan",
-            )
+            handle.assert_identity(source_identity, "after summary scan")
         except (OSError, ValueError) as error:
             summary_error(
                 "rollout unreadable" if isinstance(error, OSError) else str(error)
             )
             return
 
-    print(json.dumps({{"ok": True}}, separators=(",", ":"), sort_keys=True))
-    print(json.dumps(
+    serialized_lines = []
+    serialized_bytes = 0
+    output_too_large = False
+
+    def append_serialized(item):
+        nonlocal serialized_bytes, output_too_large
+        if output_too_large:
+            return
+        line = json.dumps(item, separators=(",", ":"), sort_keys=True)
+        line_bytes = len(line.encode("utf-8")) + 1
+        if serialized_bytes + line_bytes > ROLLOUT_SUMMARY_SERIALIZED_BYTES:
+            output_too_large = True
+            return
+        serialized_lines.append(line)
+        serialized_bytes += line_bytes
+
+    append_serialized({{"ok": True}})
+    append_serialized(
         {{
             "kind": "scan_meta",
             "line": 0,
@@ -2365,10 +2658,8 @@ def summarize_rollout():
                 + " scan_bytes=" + str(SUMMARY_SCAN_BYTES)
                 + " source_bytes=" + str(source_identity["size"]),
             "timestamp": "",
-        }},
-        separators=(",", ":"),
-        sort_keys=True,
-    ))
+        }}
+    )
     emitted = set()
 
     def emit(record):
@@ -2379,7 +2670,7 @@ def summarize_rollout():
             return
         payload = dict(record)
         payload.pop("_keyword_matched", None)
-        print(json.dumps(payload, separators=(",", ":"), sort_keys=True))
+        append_serialized(payload)
         emitted.add(key)
 
     emit(session_meta_record)
@@ -2394,16 +2685,15 @@ def summarize_rollout():
     emit(last_assistant_record)
     if last_assistant_record is None:
         emit(last_task_complete_record)
+    if output_too_large:
+        summary_error(ROLLOUT_SUMMARY_OUTPUT_TOO_LARGE_ERROR)
+        return
+    for line in serialized_lines:
+        print(line)
     print(ROLLOUT_SUMMARY_END)
 
 
 def iter_session_meta():
-    try:
-        root = safe_codex_root()
-    except FileNotFoundError:
-        print(SESSION_META_BEGIN)
-        print(SESSION_META_END)
-        return
     print(SESSION_META_BEGIN)
 
     def session_directory_unreadable():
@@ -2411,84 +2701,117 @@ def iter_session_meta():
         print(SESSION_META_END)
         raise SystemExit(0)
 
-    def sorted_rollout_paths(directory):
+    def emit_session_meta_item(item):
+        serialized = json.dumps(item, separators=(",", ":"), sort_keys=True)
+        if len(serialized.encode("utf-8")) > SESSION_META_SERIALIZED_ROW_BYTES:
+            print(json.dumps({{"kind": "error", "error": SESSION_META_OUTPUT_ROW_TOO_LARGE_ERROR}}, separators=(",", ":"), sort_keys=True))
+            print(SESSION_META_END)
+            return False
+        print(serialized)
+        return True
+
+    try:
+        root_fd = open_pinned_codex_root()
+    except FileNotFoundError:
+        print(SESSION_META_END)
+        return
+    except (OSError, ValueError):
+        session_directory_unreadable()
+
+    def sorted_rollout_names(directory_fd):
         try:
-            return sorted(directory.glob("rollout-*.jsonl"), reverse=True)
+            with os.scandir(directory_fd) as entries:
+                return sorted(
+                    (
+                        entry.name
+                        for entry in entries
+                        if RAW_ROLLOUT_BASENAME_RE.fullmatch(entry.name)
+                    ),
+                    reverse=True,
+                )
         except OSError:
             session_directory_unreadable()
 
     count = 0
     seen_rollout_paths = set()
-    for date_text in reversed(DATE_STRINGS):
-        rollout_paths = []
-        for rel_dir in (pathlib.PurePosixPath("sessions") / date_text, pathlib.PurePosixPath("archived_sessions") / date_text):
-            try:
-                date_dir = safe_directory_path(rel_dir)
-            except FileNotFoundError:
-                continue
-            except OSError:
-                session_directory_unreadable()
-            rollout_paths.extend(
-                rollout
-                for rollout in sorted_rollout_paths(date_dir)
-                if is_raw_rollout_file(rollout)
-            )
+
+    def scan_directory(rel_dir, date_text, flat_archive):
+        nonlocal count
         try:
-            flat_archived_dir = safe_directory_path(pathlib.PurePosixPath("archived_sessions"))
-            rollout_paths.extend(
-                rollout
-                for rollout in sorted_rollout_paths(flat_archived_dir)
-                if is_raw_rollout_file(rollout) and flat_archived_rollout_matches_date(rollout, date_text)
-            )
+            directory_fd = open_pinned_directory_from_fd(root_fd, rel_dir)
         except FileNotFoundError:
-            pass
-        except OSError:
+            return False
+        except (OSError, ValueError):
             session_directory_unreadable()
-        for rollout in rollout_paths:
-            rel = pathlib.PurePosixPath(rollout.relative_to(root).as_posix())
-            rel_key = session_meta_rollout_dedupe_key(rel)
-            if rel_key in seen_rollout_paths:
-                continue
-            seen_rollout_paths.add(rel_key)
-            session_id = ""
-            cwd = ""
-            try:
-                target = safe_rollout_path(rel)
-            except FileNotFoundError:
-                continue
-            try:
-                handle = open_rollout_text(target)
-            except OSError:
-                print(json.dumps({{"kind": "error", "error": "rollout unreadable", "rollout": rel.as_posix()}}, separators=(",", ":"), sort_keys=True))
-                print(SESSION_META_END)
-                return
-            with handle:
-                for line in bounded_text_lines(handle, SESSION_META_SCAN_BYTES):
+        try:
+            for name in sorted_rollout_names(directory_fd):
+                name_path = pathlib.PurePosixPath(name)
+                if flat_archive and not flat_archived_rollout_matches_date(name_path, date_text):
+                    continue
+                rel = rel_dir / name
+                rel_key = session_meta_rollout_dedupe_key(rel)
+                if rel_key in seen_rollout_paths:
+                    continue
+                seen_rollout_paths.add(rel_key)
+                try:
+                    file_fd = open_pinned_regular_file_from_fd(directory_fd, name)
+                except FileNotFoundError:
+                    continue
+                except (OSError, ValueError):
+                    if emit_session_meta_item({{"kind": "error", "error": "rollout unreadable", "rollout": rel.as_posix()}}):
+                        print(SESSION_META_END)
+                    return True
+                try:
                     try:
-                        obj = json.loads(line)
-                    except json.JSONDecodeError:
-                        continue
-                    if obj.get("type") != "session_meta":
-                        continue
-                    payload = obj.get("payload", {{}})
-                    session_id = str(payload.get("id", ""))
-                    cwd = str(payload.get("cwd", ""))
-                    break
-                has_unread_bytes = (
-                    rollout_identity_from_stat(os.fstat(handle.fileno()))["size"]
-                    > handle.tell()
-                )
-            if not session_id and SESSION_META_SCAN_BYTES and has_unread_bytes:
-                print(json.dumps({{"kind": "error", "error": SESSION_META_SCAN_TRUNCATED_ERROR, "rollout": rel.as_posix()}}, separators=(",", ":"), sort_keys=True))
-                print(SESSION_META_END)
-                return
-            if session_id:
+                        parent_fd = os.dup(directory_fd)
+                    except OSError:
+                        os.close(file_fd)
+                        raise
+                    handle = PinnedRolloutHandle(file_fd, parent_fd, name)
+                    with handle:
+                        identity = rollout_identity_from_stat(os.fstat(handle.fileno()))
+                        session_id, cwd, scan_truncated = read_bounded_session_meta(
+                            handle,
+                            SESSION_META_SCAN_BYTES,
+                        )
+                        handle.assert_identity(identity, "after session-meta scan")
+                except (OSError, ValueError):
+                    if emit_session_meta_item({{"kind": "error", "error": "rollout unreadable", "rollout": rel.as_posix()}}):
+                        print(SESSION_META_END)
+                    return True
+                if not session_id:
+                    if scan_truncated:
+                        if emit_session_meta_item({{"kind": "error", "error": SESSION_META_SCAN_TRUNCATED_ERROR, "rollout": rel.as_posix()}}):
+                            print(SESSION_META_END)
+                        return True
+                    continue
                 count += 1
                 if LIMIT and count > LIMIT:
-                    print(json.dumps({{"kind": "truncation", "reason": SESSION_META_LIMIT_TRUNCATED_REASON, "date": date_text, "limit": LIMIT}}, separators=(",", ":"), sort_keys=True))
-                    print(SESSION_META_END)
+                    if emit_session_meta_item({{"kind": "truncation", "reason": SESSION_META_LIMIT_TRUNCATED_REASON, "date": date_text, "limit": LIMIT}}):
+                        print(SESSION_META_END)
+                    return True
+                if not emit_session_meta_item({{"date": date_text, "session_id": session_id, "cwd": cwd, "rollout": rel.as_posix()}}):
+                    return True
+        finally:
+            os.close(directory_fd)
+        return False
+
+    try:
+        for date_text in reversed(DATE_STRINGS):
+            for rel_dir in (
+                pathlib.PurePosixPath("sessions") / date_text,
+                pathlib.PurePosixPath("archived_sessions") / date_text,
+            ):
+                if scan_directory(rel_dir, date_text, False):
                     return
-                print(json.dumps({{"date": date_text, "session_id": session_id, "cwd": cwd, "rollout": rollout.relative_to(root).as_posix()}}, separators=(",", ":"), sort_keys=True))
+            if scan_directory(
+                pathlib.PurePosixPath("archived_sessions"),
+                date_text,
+                True,
+            ):
+                return
+    finally:
+        os.close(root_fd)
     print(SESSION_META_END)
 
 
@@ -2504,8 +2827,7 @@ def fetch_rollout():
         print(FETCH_ROLLOUT_END)
         return
     try:
-        target = safe_rollout_path(rel)
-        size, data = read_rollout_bytes(target, MAX_FETCH_ROLLOUT_BYTES)
+        size, data = read_rollout_bytes(rel, MAX_FETCH_ROLLOUT_BYTES)
     except FileNotFoundError:
         print(json.dumps({{"ok": False, "error": "rollout not found"}}, separators=(",", ":"), sort_keys=True))
         print(FETCH_ROLLOUT_END)
@@ -2538,9 +2860,8 @@ def fetch_rollout_chunk():
     try:
         expected_identity = parse_expected_rollout_identity()
         validate_source_read_budget(expected_identity)
-        target = safe_rollout_path(rel)
         data = read_rollout_byte_range(
-            target,
+            rel,
             FETCH_CHUNK_BYTE_START,
             FETCH_CHUNK_BYTE_END,
             MAX_FETCH_ROLLOUT_CHUNK_BYTES,
@@ -2604,14 +2925,6 @@ def _remote_python_argv(alias: str) -> list[str]:
     ]
 
 
-def _run_remote_python(alias: str, payload: dict[str, object]) -> subprocess.CompletedProcess[str]:
-    return _run_subprocess_text(
-        _remote_python_argv(alias),
-        input_text=_remote_python_script(payload),
-        timeout_seconds=REMOTE_COMMAND_TIMEOUT_SECONDS,
-    )
-
-
 def _run_remote_python_bounded(
     alias: str,
     payload: dict[str, object],
@@ -2627,6 +2940,28 @@ def _run_remote_python_bounded(
     )
 
 
+def _validated_session_meta_output_row(
+    *,
+    date: str,
+    session_id: str,
+    cwd: str,
+    rollout: str,
+) -> dict[str, str]:
+    row = {
+        "date": date,
+        "session_id": session_id,
+        "cwd": cwd,
+        "rollout": rollout,
+    }
+    serialized = json.dumps(row, separators=(",", ":"), sort_keys=True)
+    if (
+        len(serialized.encode("utf-8"))
+        > MAX_REMOTE_SESSION_META_SERIALIZED_ROW_BYTES
+    ):
+        raise SessionMetaRolloutError(SESSION_META_OUTPUT_ROW_TOO_LARGE_ERROR)
+    return row
+
+
 def _scan_session_meta_records(
     *,
     codex_root: pathlib.Path,
@@ -2635,102 +2970,131 @@ def _scan_session_meta_records(
     host: str,
 ) -> SessionMetaScan:
     try:
-        resolved_root = _resolve_safe_codex_root(codex_root)
+        root_fd = _open_pinned_codex_root(codex_root)
     except FileNotFoundError:
         return SessionMetaScan(rows=[], truncated=False)
-    except OSError as exc:
+    except (OSError, ValueError) as exc:
         raise SessionMetaRolloutError("session directory unreadable") from exc
     rows: list[dict[str, str]] = []
     seen_rollout_paths: set[str] = set()
 
-    def sorted_rollout_paths(directory: pathlib.Path) -> list[pathlib.Path]:
+    def sorted_rollout_names(directory_fd: int) -> list[str]:
         try:
-            return sorted(directory.glob("rollout-*.jsonl"), reverse=True)
+            with os.scandir(directory_fd) as entries:
+                return sorted(
+                    (
+                        entry.name
+                        for entry in entries
+                        if RAW_ROLLOUT_BASENAME_RE.fullmatch(entry.name)
+                    ),
+                    reverse=True,
+                )
         except OSError as exc:
             raise SessionMetaRolloutError("session directory unreadable") from exc
 
-    for date_value in reversed(dates):
-        date_text = date_value.strftime(DATE_FORMAT)
-        rollout_paths: list[pathlib.Path] = []
-        for relative_dir in (
-            pathlib.PurePosixPath("sessions") / date_text,
-            pathlib.PurePosixPath("archived_sessions") / date_text,
-        ):
-            try:
-                date_dir = _safe_directory_path(resolved_root, relative_dir)
-            except FileNotFoundError:
-                continue
-            except OSError as exc:
-                raise SessionMetaRolloutError("session directory unreadable") from exc
-            rollout_paths.extend(
-                rollout_path
-                for rollout_path in sorted_rollout_paths(date_dir)
-                if _is_raw_rollout_file(rollout_path)
-            )
+    def scan_directory(
+        *,
+        relative_dir: pathlib.PurePosixPath,
+        date_value: dt.date,
+        flat_archive: bool,
+    ) -> SessionMetaScan | None:
         try:
-            flat_archived_dir = _safe_directory_path(resolved_root, pathlib.PurePosixPath("archived_sessions"))
-            rollout_paths.extend(
-                rollout_path
-                for rollout_path in sorted_rollout_paths(flat_archived_dir)
-                if _is_raw_rollout_file(rollout_path) and _flat_archived_rollout_matches_date(rollout_path, date_value)
-            )
+            directory_fd = _open_pinned_directory_from_fd(root_fd, relative_dir)
         except FileNotFoundError:
-            pass
-        except OSError as exc:
+            return None
+        except (OSError, ValueError) as exc:
             raise SessionMetaRolloutError("session directory unreadable") from exc
-        for rollout_path in rollout_paths:
-            rollout_relative_path = pathlib.PurePosixPath(
-                rollout_path.relative_to(resolved_root).as_posix()
-            )
-            rollout_relative_key = _session_meta_rollout_dedupe_key(rollout_relative_path)
-            if rollout_relative_key in seen_rollout_paths:
-                continue
-            seen_rollout_paths.add(rollout_relative_key)
-            session_id = ""
-            cwd = ""
-            try:
-                handle = _open_local_rollout_text(resolved_root, rollout_relative_path)
-            except FileNotFoundError:
-                continue
-            except OSError as exc:
-                raise SessionMetaRolloutError(
-                    "rollout unreadable",
-                    rollout=rollout_relative_path.as_posix(),
-                ) from exc
-            with handle:
-                for line in _bounded_text_lines(handle, MAX_SESSION_META_SCAN_BYTES):
-                    try:
-                        obj = json.loads(line)
-                    except json.JSONDecodeError:
-                        continue
-                    if obj.get("type") != "session_meta":
-                        continue
-                    payload = obj.get("payload", {})
-                    session_id = str(payload.get("id", ""))
-                    cwd = str(payload.get("cwd", ""))
-                    break
-                has_unread_bytes = (
-                    _rollout_identity_from_stat(os.fstat(handle.fileno())).size
-                    > handle.tell()
+        try:
+            for name in sorted_rollout_names(directory_fd):
+                name_path = pathlib.PurePosixPath(name)
+                if flat_archive and not _flat_archived_rollout_matches_date(
+                    name_path,
+                    date_value,
+                ):
+                    continue
+                rollout_relative_path = relative_dir / name
+                rollout_relative_key = _session_meta_rollout_dedupe_key(
+                    rollout_relative_path
                 )
-            if not session_id:
-                if MAX_SESSION_META_SCAN_BYTES and has_unread_bytes:
+                if rollout_relative_key in seen_rollout_paths:
+                    continue
+                seen_rollout_paths.add(rollout_relative_key)
+                try:
+                    file_fd = _open_pinned_regular_file_from_fd(directory_fd, name)
+                except FileNotFoundError:
+                    continue
+                except (OSError, ValueError) as exc:
                     raise SessionMetaRolloutError(
-                        SESSION_META_SCAN_TRUNCATED_ERROR,
+                        "rollout unreadable",
                         rollout=rollout_relative_path.as_posix(),
-                    )
-                continue
-            rows.append(
-                {
-                    "host": host,
-                    "date": date_value.strftime(DATE_FORMAT),
-                    "session_id": session_id,
-                    "cwd": cwd,
-                    "rollout": rollout_path.relative_to(resolved_root).as_posix(),
-                }
+                    ) from exc
+                try:
+                    try:
+                        parent_fd = os.dup(directory_fd)
+                    except OSError:
+                        os.close(file_fd)
+                        raise
+                    handle = _PinnedRolloutHandle(file_fd, parent_fd, name)
+                    with handle:
+                        identity = _rollout_identity_from_stat(
+                            os.fstat(handle.fileno())
+                        )
+                        session_id, cwd, scan_truncated = _read_bounded_session_meta(
+                            handle,
+                            MAX_SESSION_META_SCAN_BYTES,
+                        )
+                        handle.assert_identity(
+                            identity,
+                            phase="after session-meta scan",
+                        )
+                except (OSError, ValueError) as exc:
+                    raise SessionMetaRolloutError(
+                        "rollout unreadable",
+                        rollout=rollout_relative_path.as_posix(),
+                    ) from exc
+                if not session_id:
+                    if scan_truncated:
+                        raise SessionMetaRolloutError(
+                            SESSION_META_SCAN_TRUNCATED_ERROR,
+                            rollout=rollout_relative_path.as_posix(),
+                        )
+                    continue
+                if limit and len(rows) >= limit:
+                    return SessionMetaScan(rows=rows, truncated=True)
+                output_row = _validated_session_meta_output_row(
+                    date=date_value.strftime(DATE_FORMAT),
+                    session_id=session_id,
+                    cwd=cwd,
+                    rollout=rollout_relative_path.as_posix(),
+                )
+                rows.append({"host": host, **output_row})
+        finally:
+            os.close(directory_fd)
+        return None
+
+    try:
+        for date_value in reversed(dates):
+            date_text = date_value.strftime(DATE_FORMAT)
+            for relative_dir in (
+                pathlib.PurePosixPath("sessions") / date_text,
+                pathlib.PurePosixPath("archived_sessions") / date_text,
+            ):
+                truncated = scan_directory(
+                    relative_dir=relative_dir,
+                    date_value=date_value,
+                    flat_archive=False,
+                )
+                if truncated is not None:
+                    return truncated
+            truncated = scan_directory(
+                relative_dir=pathlib.PurePosixPath("archived_sessions"),
+                date_value=date_value,
+                flat_archive=True,
             )
-            if limit and len(rows) > limit:
-                return SessionMetaScan(rows=rows[:limit], truncated=True)
+            if truncated is not None:
+                return truncated
+    finally:
+        os.close(root_fd)
     return SessionMetaScan(rows=rows, truncated=False)
 
 
@@ -2749,7 +3113,9 @@ def _iter_session_meta_records(
     ).rows
 
 
-def _fetch_local_rollout(codex_root: pathlib.Path, rollout_relative_path: pathlib.PurePosixPath) -> bytes:
+def _fetch_local_rollout(
+    codex_root: pathlib.Path, rollout_relative_path: pathlib.PurePosixPath
+) -> bytes:
     return _read_local_rollout_bytes(
         codex_root,
         rollout_relative_path,
@@ -2896,9 +3262,7 @@ def _extract_framed_fetch_rollout_payload(
             f"remote {command} output on host {host} was truncated or mismatched its payload size"
         )
     if len(data) > max_bytes:
-        raise ValueError(
-            f"rollout too large: {len(data)} bytes > {max_bytes}"
-        )
+        raise ValueError(f"rollout too large: {len(data)} bytes > {max_bytes}")
     return data
 
 
@@ -3035,7 +3399,9 @@ def _is_session_meta_truncation_item(item: dict[str, Any]) -> bool:
     )
 
 
-def _session_meta_error_from_item(item: dict[str, Any]) -> SessionMetaRolloutError | None:
+def _session_meta_error_from_item(
+    item: dict[str, Any],
+) -> SessionMetaRolloutError | None:
     if item.get("kind") != "error":
         return None
     error = str(item.get("error", "")).strip() or "remote session-meta failed"
@@ -3129,7 +3495,11 @@ def cmd_session_meta(args: argparse.Namespace) -> int:
                 "session_meta_scan_bytes": MAX_SESSION_META_SCAN_BYTES,
             }
             try:
-                result = _run_remote_python(alias, payload)
+                result = _run_remote_python_bounded(
+                    alias,
+                    payload,
+                    max_stdout_bytes=MAX_REMOTE_SESSION_META_STDOUT_BYTES,
+                )
             except RuntimeError as error:
                 print(f"host={alias}", file=sys.stderr)
                 print(f"error={error}", file=sys.stderr)
@@ -3215,7 +3585,11 @@ def cmd_fetch_rollout(args: argparse.Namespace) -> int:
                 print(f"error={error}", file=sys.stderr)
                 return 1
             if result.returncode != 0:
-                message = result.stderr.strip() or result.stdout.strip() or "remote fetch-rollout failed"
+                message = (
+                    result.stderr.strip()
+                    or result.stdout.strip()
+                    or "remote fetch-rollout failed"
+                )
                 print(f"host={alias}", file=sys.stderr)
                 print(f"rollout={rollout_relative_path.as_posix()}", file=sys.stderr)
                 print(f"error={message}", file=sys.stderr)
@@ -3406,21 +3780,27 @@ def cmd_fetch_rollout_chunk(args: argparse.Namespace) -> int:
                 "byte_end": args.byte_end,
                 "max_fetch_rollout_bytes": MAX_FETCH_ROLLOUT_BYTES,
                 "max_fetch_rollout_chunk_bytes": MAX_FETCH_ROLLOUT_CHUNK_BYTES,
-                "expected_source_identity": _rollout_identity_token(
-                    expected_identity
-                ),
+                "expected_source_identity": _rollout_identity_token(expected_identity),
                 "expected_source_bytes": expected_identity.size,
                 "authorized_source_bytes": authorized_source_bytes,
             }
             try:
-                result = _run_remote_python(alias, payload)
+                result = _run_remote_python_bounded(
+                    alias,
+                    payload,
+                    max_stdout_bytes=MAX_REMOTE_FETCH_ROLLOUT_CHUNK_STDOUT_BYTES,
+                )
             except RuntimeError as error:
                 print(f"host={alias}", file=sys.stderr)
                 print(f"rollout={rollout_relative_path.as_posix()}", file=sys.stderr)
                 print(f"error={error}", file=sys.stderr)
                 return 1
             if result.returncode != 0:
-                message = result.stderr.strip() or result.stdout.strip() or "remote fetch-rollout-chunk failed"
+                message = (
+                    result.stderr.strip()
+                    or result.stdout.strip()
+                    or "remote fetch-rollout-chunk failed"
+                )
                 print(f"host={alias}", file=sys.stderr)
                 print(f"rollout={rollout_relative_path.as_posix()}", file=sys.stderr)
                 print(f"error={message}", file=sys.stderr)
@@ -3433,9 +3813,7 @@ def cmd_fetch_rollout_chunk(args: argparse.Namespace) -> int:
                     host=alias,
                     command="fetch-rollout-chunk",
                     max_bytes=MAX_FETCH_ROLLOUT_CHUNK_BYTES,
-                    expected_source_identity=_rollout_identity_token(
-                        expected_identity
-                    ),
+                    expected_source_identity=_rollout_identity_token(expected_identity),
                 )
             except FileNotFoundError:
                 print(f"host={alias}", file=sys.stderr)
@@ -3514,7 +3892,9 @@ def _meaningful_prompt_text(text: str) -> str:
             index = stripped.rfind(marker)
             if index >= 0:
                 candidate = stripped[index + len(marker) :].strip()
-                if candidate and not any(candidate.startswith(prefix) for prefix in WRAPPER_PREFIXES):
+                if candidate and not any(
+                    candidate.startswith(prefix) for prefix in WRAPPER_PREFIXES
+                ):
                     return candidate
         return ""
     return stripped
@@ -3534,17 +3914,41 @@ def _meaningful_user_message_text(text: str) -> str:
 
 def _summary_signal_text(kind: str, text: str) -> str:
     signals: list[str] = []
-    if re.search(r"(?:exit(?:ed)?(?: with)? code [1-9]\d*|failed|traceback|error:|permission denied)", text, re.I):
+    if re.search(
+        r"(?:exit(?:ed)?(?: with)? code [1-9]\d*|failed|traceback|error:|permission denied)",
+        text,
+        re.I,
+    ):
         signals.append("error:")
-    if re.search(r"(?:approval|require_escalated|sandbox|\bauth(?:entication|orization|[-_ ]?gated)?\b|credential|permission denied|TCC)", text, re.I):
+    if re.search(
+        r"(?:approval|require_escalated|sandbox|\bauth(?:entication|orization|[-_ ]?gated)?\b|credential|permission denied|TCC)",
+        text,
+        re.I,
+    ):
         signals.append("approval")
-    if re.search(r"(?:not run|did not run|unable to run|could not run|untested|未运行|无法运行)", text, re.I):
+    if re.search(
+        r"(?:not run|did not run|unable to run|could not run|untested|未运行|无法运行)",
+        text,
+        re.I,
+    ):
         signals.append("could not run")
-    if re.search(r"(?:you missed|you forgot|wrong|incorrect|not what I asked|漏了|忘了|不对|错了)", text, re.I):
+    if re.search(
+        r"(?:you missed|you forgot|wrong|incorrect|not what I asked|漏了|忘了|不对|错了)",
+        text,
+        re.I,
+    ):
         signals.append("you missed")
-    if re.search(r"(?:lost context|misunderstood|I misunderstood|assumption|assumed|上下文|误解)", text, re.I):
+    if re.search(
+        r"(?:lost context|misunderstood|I misunderstood|assumption|assumed|上下文|误解)",
+        text,
+        re.I,
+    ):
         signals.append("assumed")
-    if PRIVATE_IPV4_SIGNAL_RE.search(text) or PRIVATE_IPV6_SIGNAL_RE.search(text) or INTERNAL_HOSTNAME_SIGNAL_RE.search(text):
+    if (
+        PRIVATE_IPV4_SIGNAL_RE.search(text)
+        or PRIVATE_IPV6_SIGNAL_RE.search(text)
+        or INTERNAL_HOSTNAME_SIGNAL_RE.search(text)
+    ):
         signals.append("secret")
     elif re.search(
         r"(?:\b(secret|token|credential|password|private key|production|destructive|rm -rf|reset --hard|customer data|privacy|pii)\b|"
@@ -3570,7 +3974,11 @@ def _safe_summary_text(kind: str, text: str) -> str:
 
 
 def _summary_record_has_signal(record: dict[str, Any] | None) -> bool:
-    if record is None or str(record.get("kind", "")) in {"session_meta", "scan_meta", "chunk_meta"}:
+    if record is None or str(record.get("kind", "")) in {
+        "session_meta",
+        "scan_meta",
+        "chunk_meta",
+    }:
         return False
     text = str(record.get("text", ""))
     return any(marker in text for marker in SUMMARY_SIGNAL_MARKERS)
@@ -3605,7 +4013,9 @@ def _build_summary_record(
         signal_text = _meaningful_user_message_text(text)
         if not signal_text:
             return None
-    normalized = _normalize_summary_text(_safe_summary_text(kind, signal_text), max_text_chars=max_text_chars)
+    normalized = _normalize_summary_text(
+        _safe_summary_text(kind, signal_text), max_text_chars=max_text_chars
+    )
     if not normalized:
         return None
     record = {
@@ -3632,6 +4042,47 @@ def _build_summary_record(
             keyword in match_text for keyword in search_keywords
         )
     return record
+
+
+def _read_bounded_session_meta(
+    handle: Any,
+    max_scan_bytes: int,
+) -> tuple[str, str, bool]:
+    if max_scan_bytes < 1:
+        raise ValueError("session-meta scan bytes must be positive")
+    file_descriptor = handle.fileno()
+    start_offset = os.lseek(file_descriptor, 0, os.SEEK_CUR)
+    chunks: list[bytes] = []
+    scanned = 0
+    while scanned < max_scan_bytes:
+        remaining = max_scan_bytes - scanned
+        chunk = os.read(file_descriptor, remaining)
+        if not chunk:
+            break
+        chunks.append(chunk)
+        scanned += len(chunk)
+    prefix = b"".join(chunks)
+    source_size = _rollout_identity_from_stat(os.fstat(file_descriptor)).size
+    cursor = 0
+    while cursor < len(prefix):
+        line_end = prefix.find(b"\n", cursor)
+        if line_end < 0:
+            return "", "", True
+        line_end += 1
+        raw_bytes = prefix[cursor:line_end]
+        cursor = line_end
+        try:
+            obj = json.loads(raw_bytes.decode("utf-8", "replace"))
+        except json.JSONDecodeError:
+            continue
+        if obj.get("type") != "session_meta":
+            continue
+        payload = obj.get("payload", {})
+        session_id = str(payload.get("id", ""))
+        cwd = str(payload.get("cwd", ""))
+        has_unread_bytes = source_size > start_offset + cursor
+        return session_id, cwd, bool(not session_id and has_unread_bytes)
+    return "", "", source_size > start_offset + len(prefix)
 
 
 def _bounded_text_lines(handle: Any, max_scan_bytes: int) -> Iterable[str]:
@@ -3864,7 +4315,8 @@ def _chunk_reason_codes(
     evidence_records = [
         record
         for record in records
-        if str(record.get("kind", "")) not in {"session_meta", "scan_meta", "chunk_meta"}
+        if str(record.get("kind", ""))
+        not in {"session_meta", "scan_meta", "chunk_meta"}
     ]
     codes: list[str] = []
     if chunk.oversized_record:
@@ -3873,7 +4325,10 @@ def _chunk_reason_codes(
         codes.append("no_structured_evidence")
     if not any(record.get("kind") == "user_message" for record in evidence_records):
         codes.append("missing_meaningful_user_message")
-    if not any(record.get("kind") in {"assistant_message", "task_complete"} for record in evidence_records):
+    if not any(
+        record.get("kind") in {"assistant_message", "task_complete"}
+        for record in evidence_records
+    ):
         codes.append("missing_final_summary")
     if any(_summary_record_has_signal(record) for record in evidence_records):
         codes.append("signal_or_redaction_present")
@@ -3936,9 +4391,10 @@ def _append_bounded_summary_record(
     record: dict[str, Any],
     serialized_bytes: int,
 ) -> int:
-    encoded_bytes = len(
-        json.dumps(record, separators=(",", ":"), sort_keys=True).encode("utf-8")
-    ) + 1
+    encoded_bytes = (
+        len(json.dumps(record, separators=(",", ":"), sort_keys=True).encode("utf-8"))
+        + 1
+    )
     updated_bytes = serialized_bytes + encoded_bytes
     if updated_bytes > MAX_CHUNKED_ROLLOUT_SUMMARY_OUTPUT_BYTES:
         raise ValueError(
@@ -3993,7 +4449,6 @@ def _chunked_rollout_summary_records(
             f"--chunk-bytes must stay between {MIN_ROLLOUT_CHUNK_BYTES} "
             f"and {MAX_ROLLOUT_CHUNK_BYTES}"
         )
-    target = _safe_rollout_path(codex_root, rollout_relative_path)
     _validate_source_read_budget(expected_identity, authorized_source_bytes)
     output: list[dict[str, Any]] = []
     serialized_bytes = 0
@@ -4041,16 +4496,7 @@ def _chunked_rollout_summary_records(
                     item,
                     serialized_bytes,
                 )
-        _assert_rollout_identity(
-            _rollout_identity_from_stat(os.fstat(handle.fileno())),
-            expected_identity,
-            phase="after summary scan",
-        )
-        _assert_rollout_path_identity(
-            target,
-            expected_identity,
-            phase="after summary scan",
-        )
+        handle.assert_identity(expected_identity, phase="after summary scan")
         if hashing_reader.bytes_read != expected_identity.size:
             raise ValueError(
                 "chunked summary scan did not cover expected source bytes: "
@@ -4083,7 +4529,10 @@ def cmd_rollout_summary(args: argparse.Namespace) -> int:
             raise ValueError(
                 f"--limit must stay between 1 and {MAX_ROLLOUT_SUMMARY_LIMIT}"
             )
-        if args.tail_records < 0 or args.tail_records > MAX_ROLLOUT_SUMMARY_TAIL_RECORDS:
+        if (
+            args.tail_records < 0
+            or args.tail_records > MAX_ROLLOUT_SUMMARY_TAIL_RECORDS
+        ):
             raise ValueError(
                 f"--tail-records must stay between 0 and {MAX_ROLLOUT_SUMMARY_TAIL_RECORDS}"
             )
@@ -4099,11 +4548,8 @@ def cmd_rollout_summary(args: argparse.Namespace) -> int:
     try:
         if HOSTS[alias]["kind"] == "local":
             codex_root = _local_codex_root()
-            target = _safe_rollout_path(codex_root, rollout_relative_path)
             with _open_local_rollout_text(codex_root, rollout_relative_path) as handle:
-                source_identity = _rollout_identity_from_stat(
-                    os.fstat(handle.fileno())
-                )
+                source_identity = _rollout_identity_from_stat(os.fstat(handle.fileno()))
                 records = _summarize_rollout_records(
                     lines=_bounded_text_lines(handle, MAX_ROLLOUT_SUMMARY_SCAN_BYTES),
                     keywords=args.keyword,
@@ -4111,16 +4557,7 @@ def cmd_rollout_summary(args: argparse.Namespace) -> int:
                     tail_records=args.tail_records,
                     max_text_chars=args.max_text_chars,
                 )
-                _assert_rollout_identity(
-                    _rollout_identity_from_stat(os.fstat(handle.fileno())),
-                    source_identity,
-                    phase="after summary scan",
-                )
-                _assert_rollout_path_identity(
-                    target,
-                    source_identity,
-                    phase="after summary scan",
-                )
+                handle.assert_identity(source_identity, phase="after summary scan")
             records.insert(
                 0,
                 _rollout_summary_scan_meta(
@@ -4142,7 +4579,11 @@ def cmd_rollout_summary(args: argparse.Namespace) -> int:
                 "summary_max_text_chars": args.max_text_chars,
             }
             try:
-                result = _run_remote_python(alias, payload)
+                result = _run_remote_python_bounded(
+                    alias,
+                    payload,
+                    max_stdout_bytes=MAX_REMOTE_ROLLOUT_SUMMARY_STDOUT_BYTES,
+                )
             except RuntimeError as error:
                 print(f"host={alias}", file=sys.stderr)
                 print(f"rollout={rollout_relative_path.as_posix()}", file=sys.stderr)
@@ -4221,7 +4662,10 @@ def cmd_chunked_rollout_summary(args: argparse.Namespace) -> int:
             raise ValueError(
                 f"--limit-per-chunk must stay between 1 and {MAX_ROLLOUT_SUMMARY_LIMIT}"
             )
-        if args.tail_records < 0 or args.tail_records > MAX_ROLLOUT_SUMMARY_TAIL_RECORDS:
+        if (
+            args.tail_records < 0
+            or args.tail_records > MAX_ROLLOUT_SUMMARY_TAIL_RECORDS
+        ):
             raise ValueError(
                 f"--tail-records must stay between 0 and {MAX_ROLLOUT_SUMMARY_TAIL_RECORDS}"
             )
@@ -4261,9 +4705,7 @@ def cmd_chunked_rollout_summary(args: argparse.Namespace) -> int:
                     MAX_CHUNKED_ROLLOUT_SUMMARY_OUTPUT_BYTES
                 ),
                 "max_fetch_range_plan_entries": MAX_FETCH_RANGE_PLAN_ENTRIES,
-                "expected_source_identity": _rollout_identity_token(
-                    expected_identity
-                ),
+                "expected_source_identity": _rollout_identity_token(expected_identity),
                 "expected_source_bytes": expected_identity.size,
                 "authorized_source_bytes": authorized_source_bytes,
                 "output_host": alias,
@@ -4305,9 +4747,7 @@ def cmd_chunked_rollout_summary(args: argparse.Namespace) -> int:
                     host=alias,
                     command="chunked-rollout-summary",
                     max_serialized_bytes=MAX_CHUNKED_ROLLOUT_SUMMARY_OUTPUT_BYTES,
-                    expected_source_identity=_rollout_identity_token(
-                        expected_identity
-                    ),
+                    expected_source_identity=_rollout_identity_token(expected_identity),
                     expected_source_bytes=expected_identity.size,
                 )
             except FileNotFoundError:
@@ -4448,7 +4888,9 @@ def build_parser() -> argparse.ArgumentParser:
         help="Relative rollout path under the remote Codex root (sessions/... or archived_sessions/...).",
     )
     chunked_rollout_summary.add_argument("--keyword", action="append", default=[])
-    chunked_rollout_summary.add_argument("--chunk-bytes", type=int, default=DEFAULT_ROLLOUT_CHUNK_BYTES)
+    chunked_rollout_summary.add_argument(
+        "--chunk-bytes", type=int, default=DEFAULT_ROLLOUT_CHUNK_BYTES
+    )
     chunked_rollout_summary.add_argument(
         "--expected-source-bytes", type=int, required=True
     )
