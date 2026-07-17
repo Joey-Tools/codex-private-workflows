@@ -160,12 +160,21 @@ jobs:
         run: python3 -m unittest discover -s tests
 
       - name: Validate sync manifest changes
-        if: steps.changes.outputs.changed == 'true' || steps.current-release.outputs.complete == 'false'
+        if: steps.changes.outputs.changed == 'true'
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: |
           python3 scripts/validate_sync_manifest_changes.py \
             --release-repo "$GITHUB_REPOSITORY"
+
+      - name: Validate release history before repair
+        if: steps.current-release.outputs.complete == 'false' && steps.changes.outputs.changed != 'true'
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          python3 scripts/validate_sync_manifest_changes.py \
+            --release-repo "$GITHUB_REPOSITORY" \
+            --repair-incomplete-head-release
 
       - name: Verify canonical review workflow
         if: steps.changes.outputs.changed == 'true' || steps.current-release.outputs.complete == 'false'
@@ -337,3 +346,11 @@ jobs:
             --sha "$RELEASE_SHA" \
             --dist dist \
             --source-event "$GITHUB_EVENT_NAME"
+
+      - name: Validate repaired release history
+        if: steps.current-release.outputs.complete == 'false' && steps.changes.outputs.changed != 'true'
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          python3 scripts/validate_sync_manifest_changes.py \
+            --release-repo "$GITHUB_REPOSITORY"
