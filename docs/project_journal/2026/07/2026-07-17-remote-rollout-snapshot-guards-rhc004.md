@@ -26,15 +26,18 @@ superseded_by:
 - A valid metadata record contained within the prefix still succeeds even when the remainder of the rollout is larger than the prefix budget.
 - Append, truncation, or pathname replacement during full fetch or prefix summary invalidates the operation before fetched bytes or summary rows are emitted.
 - A keyword beyond `--max-text-chars` can select the bounded signal row without storing or emitting the original long text.
+- The private retrospective materialization now matches public canonical merge `31f252e2356a1401559dc2a1c65a4569073a19d8`; integration coverage requires both retrospective and remote-host probes to retain only the transient keyword boolean and treats a truncated session-meta prefix as an explicit coverage error.
 
 ## Next Steps
 
-- Keep the private helper aligned with the public retrospective probe after the matching public canonical snapshot fixes merge and are synced into the private overlay.
+- Monitor subsequent scheduled source syncs for contract drift between public retrospective helpers and private cross-skill integration coverage.
 
 ## Evidence
 
 - Focused remote probe suite: 34 tests passed, including seven new local and embedded truncation, snapshot, bounded-capture, and keyword cases.
+- Private integration coverage: 2 focused compatibility tests and the full 588-test suite passed (`skipped=2`).
 - Python byte compilation, Ruff lint, isolated skill quick validation, project journal validation, and `git diff --check` passed.
 - `personal_codex/skills/remote-host-context/scripts/remote_codex_probe.py`
 - `personal_codex/skills/remote-host-context/SKILL.md`
 - `tests/test_remote_codex_probe.py`
+- Public source: `Joey-Tools/codex-workflow-hygiene#46`, merge `31f252e2356a1401559dc2a1c65a4569073a19d8`.
