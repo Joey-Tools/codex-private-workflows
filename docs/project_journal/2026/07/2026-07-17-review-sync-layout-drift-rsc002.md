@@ -5,7 +5,7 @@ status: completed
 created: 2026-07-17
 updated: 2026-07-17
 branch: codex/daily-skill-friction-20260717-codex-private-workflows-review-sync-layout-drift
-pr:
+pr: https://github.com/Joey-Tools/codex-private-workflows/pull/112
 supersedes: []
 superseded_by:
 ---
