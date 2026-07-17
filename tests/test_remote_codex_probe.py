@@ -1606,6 +1606,95 @@ class RemoteCodexProbeChunkTests(unittest.TestCase):
         )
         self.assertEqual(payload_lines, [])
 
+    def test_rollout_unlink_between_stat_and_open_fails_closed_local_and_embedded(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            codex_root = Path(temp_dir) / ".codex"
+            rollout = write_rollout(
+                codex_root,
+                ['{"type":"session_meta","payload":{"id":"trusted"}}'],
+            )
+            rollout_relative = MODULE._resolve_rollout_relative_path(rollout)
+            rollout_path = codex_root / rollout
+            real_open = MODULE.os.open
+            unlinked = False
+
+            def unlink_rollout_before_open(
+                path: object,
+                flags: int,
+                mode: int = 0o777,
+                *,
+                dir_fd: int | None = None,
+            ) -> int:
+                nonlocal unlinked
+                if path == rollout_path.name and dir_fd is not None and not unlinked:
+                    rollout_path.unlink()
+                    unlinked = True
+                return real_open(path, flags, mode, dir_fd=dir_fd)
+
+            with (
+                mock.patch.object(
+                    MODULE.os,
+                    "open",
+                    side_effect=unlink_rollout_before_open,
+                ),
+                self.assertRaisesRegex(ValueError, "rollout changed during open"),
+            ):
+                MODULE._read_local_rollout_bytes(
+                    codex_root,
+                    rollout_relative,
+                    max_bytes=MODULE.MAX_FETCH_ROLLOUT_BYTES,
+            )
+
+            self.assertTrue(unlinked)
+            rollout_path.write_text(
+                '{"type":"session_meta","payload":{"id":"trusted"}}\n',
+                encoding="utf-8",
+            )
+            script = MODULE._remote_python_script(
+                {
+                    "mode": "fetch-rollout",
+                    "rollout": rollout,
+                    "codex_root": str(codex_root),
+                    "max_fetch_rollout_bytes": MODULE.MAX_FETCH_ROLLOUT_BYTES,
+                }
+            )
+            marker = (
+                "    try:\n"
+                "        fd = os.open(name, regular_file_open_flags(), dir_fd=parent_fd)\n"
+            )
+            injection = (
+                "    try:\n"
+                f"        if name == {rollout_path.name!r} and not globals().get('_rollout_unlinked', False):\n"
+                "            globals()['_rollout_unlinked'] = True\n"
+                f"            pathlib.Path({str(rollout_path)!r}).unlink()\n"
+                "        fd = os.open(name, regular_file_open_flags(), dir_fd=parent_fd)\n"
+            )
+            self.assertEqual(script.count(marker), 1)
+            script = script.replace(marker, injection)
+            embedded = subprocess.run(
+                [sys.executable, "-"],
+                input=script,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+        self.assertEqual(embedded.returncode, 0, embedded.stderr)
+        payload_lines = MODULE._extract_framed_lines(
+            embedded.stdout,
+            begin_marker=MODULE.REMOTE_FETCH_ROLLOUT_BEGIN,
+            end_marker=MODULE.REMOTE_FETCH_ROLLOUT_END,
+            host="embedded",
+            command="fetch-rollout",
+        )
+        self.assertEqual(
+            [json.loads(line) for line in payload_lines],
+            [{"ok": False, "error": "rollout changed during open"}],
+        )
+        self.assertNotIn(str(rollout_path), embedded.stdout)
+
     @unittest.skipUnless(
         hasattr(os, "mkfifo") and hasattr(os, "O_NONBLOCK"),
         "FIFO nonblocking opens require POSIX mkfifo and O_NONBLOCK",
@@ -1685,13 +1774,16 @@ class RemoteCodexProbeChunkTests(unittest.TestCase):
                 }
             )
             marker = (
-                "    fd = os.open(name, regular_file_open_flags(), dir_fd=parent_fd)\n"
+                "    try:\n"
+                "        fd = os.open(name, regular_file_open_flags(), dir_fd=parent_fd)\n"
             )
             injection = (
-                f"    if name == {rollout_path.name!r} and not globals().get('_fifo_swapped', False):\n"
-                "        globals()['_fifo_swapped'] = True\n"
-                f"        os.replace({str(rollout_path)!r}, {str(moved_rollout)!r})\n"
-                f"        os.mkfifo({str(rollout_path)!r}, 0o600)\n" + marker
+                "    try:\n"
+                f"        if name == {rollout_path.name!r} and not globals().get('_fifo_swapped', False):\n"
+                "            globals()['_fifo_swapped'] = True\n"
+                f"            os.replace({str(rollout_path)!r}, {str(moved_rollout)!r})\n"
+                f"            os.mkfifo({str(rollout_path)!r}, 0o600)\n"
+                "        fd = os.open(name, regular_file_open_flags(), dir_fd=parent_fd)\n"
             )
             self.assertEqual(script.count(marker), 1)
             self.assertIn('getattr(os, "O_NONBLOCK", None)', script)

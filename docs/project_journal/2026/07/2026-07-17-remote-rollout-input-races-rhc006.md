@@ -21,6 +21,7 @@ superseded_by:
 - Rejected absolute rollout paths in both local and embedded descriptor traversal, and kept expected embedded safety rejections and post-preflight disappearance inside closed, structured frames.
 - Bounded remote `fetch-rollout-chunk` stdout capture to the exact base64-frame budget derived from the 2 MiB chunk ceiling, and added producer-backed parent caps for remote `session-meta` and `rollout-summary`.
 - Made an ancestor that disappears between descriptor-relative stat and open a hard identity-change error in both local and embedded traversal, while preserving a genuinely absent initial stat as optional evidence.
+- Made a final rollout entry that disappears between descriptor-relative stat and open the same hard identity-change error in both local and embedded traversal.
 - Made local `session-meta` return limit truncation before validating the oversized serialized output of the next row, matching the embedded producer.
 
 ## Current State
@@ -32,6 +33,7 @@ superseded_by:
 - CRLF records remain valid because they end in LF; bare CR records fail as truncated coverage rather than being parsed as JSON whitespace.
 - Missing Codex roots and optional session/archive directories remain empty evidence only when they are absent before their descriptor is opened. Post-open enumeration failures, permission, I/O, and rollout failures remain path-neutral and fail closed.
 - An optional directory that disappears after its successful initial stat now fails closed instead of being misclassified as originally absent.
+- A final rollout entry that disappears after its successful stat now fails closed instead of being misclassified as an originally missing optional entry.
 - Once `session-meta` has collected its requested row limit, the next valid metadata row proves truncation without allowing its output size to replace the limit result with a row-size error.
 - Local and remote `session-meta` reject the same serialized row above 64 KiB, and the remote parent caps complete stdout at 32,899,072 bytes; `rollout-summary` enforces its serialized-output budget and caps complete stdout at 31,462,656 bytes. Capture breaches return before any partial frame is parsed.
 
@@ -49,6 +51,9 @@ superseded_by:
 - The isolated OpenAI skill validator, project journal validator, and `git diff --check` passed.
 - GitHub Codex review comments `3601680440` and `3601680451` are covered by 2 focused local-plus-embedded regressions; the directly related race, scan-cap, row-budget, and limit group passed 8 tests.
 - The complete remote probe module passed 68 tests after the review fixes, including the updated embedded ancestor-swap fixture.
+- The complete remote probe module passed 69 tests after the current-head final-entry disappearance review fix.
+- The complete session-retrospective module passed 400 tests with 1 skip after the current-head fix and private sync compatibility update.
+- The five affected cross-probe compatibility tests passed against both the currently vendored public probe and the synced public `b1ce7f5` probe.
 - Python byte compilation, Ruff lint, and `git diff --check` passed for the review fixes.
 - `personal_codex/skills/remote-host-context/scripts/remote_codex_probe.py`
 - `personal_codex/skills/remote-host-context/SKILL.md`

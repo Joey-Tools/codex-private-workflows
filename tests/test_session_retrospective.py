@@ -60,10 +60,30 @@ VALID_SESSION_ID = f"{MODULE.SESSION_REF_PREFIX}:{'c' * 20}"
 VALID_SOURCE_HASH = f"{MODULE.SOURCE_HASH_PREFIX}:{'d' * 20}"
 
 
+def function_references_name(function: object, name: str) -> bool:
+    pending = [function.__code__]
+    while pending:
+        code = pending.pop()
+        if name in code.co_names:
+            return True
+        pending.extend(item for item in code.co_consts if isinstance(item, types.CodeType))
+    return False
+
+
 def session_meta_runner_name(probe: object) -> str:
-    if probe is REMOTE_HOST_CONTEXT_PROBE:
-        return "_run_remote_python_bounded"
+    for function_name in ("cmd_session_meta", "_scan_host_session_meta"):
+        function = getattr(probe, function_name, None)
+        if function is not None and function_references_name(function, "_run_remote_python_bounded"):
+            return "_run_remote_python_bounded"
     return "_run_remote_python"
+
+
+def session_meta_uses_scandir(probe: object) -> bool:
+    for function_name in ("_scan_session_meta_records", "_iter_session_meta_records"):
+        function = getattr(probe, function_name, None)
+        if function is not None and function_references_name(function, "scandir"):
+            return True
+    return False
 
 
 def write_jsonl(path: Path, rows: list[dict]) -> None:
@@ -653,24 +673,20 @@ class SessionRetrospectiveTests(unittest.TestCase):
                     root = Path(raw) / ".codex"
                     date_dir = root / "sessions" / "2026" / "05" / "01"
                     date_dir.mkdir(parents=True)
-                    resolved_date_dir = date_dir.resolve()
-                    real_glob = Path.glob
-
-                    def glob_or_raise(self: Path, pattern: str):
-                        if self == resolved_date_dir:
-                            raise PermissionError("blocked /home/hoteng/.codex/sessions/2026/05/01")
-                        return real_glob(self, pattern)
-
-                    if probe is REMOTE_HOST_CONTEXT_PROBE:
-                        real_scandir = probe.os.scandir
-
-                        def scandir_or_raise(path):
-                            if isinstance(path, int):
-                                raise PermissionError("blocked descriptor directory")
-                            return real_scandir(path)
+                    if session_meta_uses_scandir(probe):
+                        def scandir_or_raise(_path):
+                            raise PermissionError("blocked descriptor directory")
 
                         unreadable_directory = mock.patch.object(probe.os, "scandir", scandir_or_raise)
                     else:
+                        resolved_date_dir = date_dir.resolve()
+                        real_glob = Path.glob
+
+                        def glob_or_raise(self: Path, pattern: str):
+                            if self == resolved_date_dir:
+                                raise PermissionError("blocked /home/hoteng/.codex/sessions/2026/05/01")
+                            return real_glob(self, pattern)
+
                         unreadable_directory = mock.patch.object(Path, "glob", glob_or_raise)
 
                     stderr = io.StringIO()

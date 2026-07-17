@@ -524,7 +524,10 @@ def _open_pinned_regular_file_from_fd(parent_fd: int, name: str) -> int:
         raise ValueError("rollout path is a symlink")
     if not stat.S_ISREG(observed.st_mode):
         raise ValueError("rollout path is not a regular file")
-    fd = os.open(name, _regular_file_open_flags(), dir_fd=parent_fd)
+    try:
+        fd = os.open(name, _regular_file_open_flags(), dir_fd=parent_fd)
+    except FileNotFoundError as error:
+        raise ValueError("rollout changed during open") from error
     try:
         opened = os.fstat(fd)
         if not stat.S_ISREG(opened.st_mode):
@@ -1512,7 +1515,10 @@ def open_pinned_regular_file_from_fd(parent_fd, name):
         raise ValueError("rollout path is a symlink")
     if not stat.S_ISREG(observed.st_mode):
         raise ValueError("rollout path is not a regular file")
-    fd = os.open(name, regular_file_open_flags(), dir_fd=parent_fd)
+    try:
+        fd = os.open(name, regular_file_open_flags(), dir_fd=parent_fd)
+    except FileNotFoundError as error:
+        raise ValueError("rollout changed during open") from error
     try:
         opened = os.fstat(fd)
         if not stat.S_ISREG(opened.st_mode):
