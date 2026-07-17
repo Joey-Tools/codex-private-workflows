@@ -98,6 +98,30 @@
   ],
   "removed_links": [
     {
+      "id": "2026-07-02-retire-copilot-review-playbook",
+      "source": "personal_codex/skills/copilot-review-playbook",
+      "target": "skills/copilot-review-playbook",
+      "kind": "directory",
+      "replacement_target": "skills/review-orchestration-playbook",
+      "legacy": true
+    },
+    {
+      "id": "2026-07-02-retire-external-review-playbook",
+      "source": "personal_codex/skills/external-review-playbook",
+      "target": "skills/external-review-playbook",
+      "kind": "skill",
+      "replacement_target": "skills/review-orchestration-playbook",
+      "legacy": true
+    },
+    {
+      "id": "2026-07-02-retire-pr-readiness-review-workflow",
+      "source": "personal_codex/skills/pr-readiness-review-workflow",
+      "target": "skills/pr-readiness-review-workflow",
+      "kind": "skill",
+      "replacement_target": "skills/review-orchestration-playbook",
+      "legacy": true
+    },
+    {
       "id": "2026-07-15-move-submodule-linked-worktrees-to-public",
       "source": "personal_codex/skills/submodule-linked-worktrees",
       "target": "skills/submodule-linked-worktrees",

@@ -13,10 +13,11 @@ superseded_by:
 # Private Sync Removal Metadata
 
 ## Summary
-- The private overlay carries the reconciler and a durable legacy removal record for the skill that moved to the public toolbox.
+- The private overlay carries the reconciler and durable legacy removal records for skills moved to the public toolbox or consolidated into the canonical review workflow.
 
 ## Current State
 - `submodule-linked-worktrees` is recorded as a legacy private removal with its public replacement target.
+- The retired `copilot-review-playbook`, `external-review-playbook`, and `pr-readiness-review-workflow` paths are recorded as legacy removals with `review-orchestration-playbook` as their replacement.
 - Public sync scripts and manifest-diff validation are mirrored through the scheduled source-sync rules.
 - Private CI validates removal history against the unique complete Release that is a Git descendant of every other complete Release candidate; release SHAs come from the unique uploaded archive/checksum pair, are batch-bound through local tags, and do not depend on a potentially movable `target_commitish` branch. Explicit target SHAs must still match, publish timestamps do not define version order, and incomparable histories fail closed.
 - Release-manifest validation unions the normalized `removed_links` history from every unique complete Release before checking the baseline transition. Historical entries must remain exact across releases and the current manifest, while a later commit may precisely restore a non-legacy tombstone that an intervening release dropped; historical replacement-retirement obligations remain enforced. Every historical Release is also treated as a possible direct upgrade origin: an active link that is absent or changed in the current manifest requires at least one exact matching removal ID that origin has not seen, preserving repeated removal episodes while allowing explicit legacy repair of an older published omission.
@@ -54,7 +55,7 @@ superseded_by:
 - The exact ledger snapshot loaded for planning remains the transaction baseline, and established ledgers only retain targets already owned or created/replaced by the current transaction.
 - Ledger planning binds the canonical state parent and file inode, and rollback quarantines only the exact transaction-published inode while preserving same-content racers.
 - The install lock retains descriptor-bound parent and lock files throughout its critical section and revalidates canonical identities before yielding to the transaction.
-- The sync-home root itself is opened from a bound parent descriptor with `O_NOFOLLOW`; lock, pending-pointer, reconciliation, and internal-directory operations reject preexisting or concurrent home-root symlink replacement.
+- The sync-home root itself is opened from a bound parent descriptor with `O_NOFOLLOW`. While the install lock is held, beneath-home and create-or-bind operations automatically reuse its descriptor in the current execution context, so renaming and recreating the canonical home cannot redirect transaction writes before the final lock check. Lock, pending-pointer, reconciliation, and internal-directory operations reject preexisting or concurrent home-root replacement.
 - Published state, managed-link parent/inode/target snapshots, owner-to-release bindings, `current`, and canonical release directories are revalidated after full release scans; concurrent same-target replacements are preserved rather than reclaimed during rollback.
 - Strict Git inventory capture has streaming stdout/stderr limits with terminate/kill/reap cleanup; committed manifests are size-preflighted and strict snapshots no longer traverse the live worktree redundantly.
 - Strict package inventory filtering uses component-prefix tries instead of comparing every Git entry with every manifest source or copying every possible path prefix. Git pathspecs collapse to unique top-level roots under a 32 KiB argument budget and fall back to bounded full inventories when necessary; directory descendants are assigned during one tree scan, so duplicate, nested, exact-file, and deeply nested sources remain bounded by inventory size and path depth without approaching `ARG_MAX`.
@@ -102,9 +103,9 @@ superseded_by:
 - Manifest and durable synchronizer state versions require exact JSON integers, so booleans and numerically equal floats cannot select a schema version.
 - Private package verification now checks the checksum and extracts from one immutable archive snapshot, closing the verification-to-extraction path replacement window.
 - The required aggregate `test` check now verifies every direct Python 3.9, platform-safety, and platform-test dependency result instead of relying on transitive skip behavior.
-- The canonical review-workflow contract accepts scalar, block-list, and inline-list `needs` forms, including quoted dependency names, so the stricter aggregate dependency list remains covered after private-overlay sync.
-- Aggregate result guards preserve GitHub Actions environment scope: step-local bindings must be checked in the same step, while job-level bindings remain reusable across steps.
-- Aggregate result guards count only unconditional, non-tolerant default-shell steps whose non-empty commands are exact dependency-success assertions; comments, echoed assertions, masked failures, disabled errexit, custom shells, and job-level tolerance are rejected.
+- The canonical review-workflow contract accepts scalar, block-list, and inline-list `needs` forms, including quoted dependency names plus blank lines and comments inside block lists, so the stricter aggregate dependency list remains covered after private-overlay sync.
+- Aggregate result guards preserve GitHub Actions environment integrity: step-local bindings must be checked in the same step, while job-level bindings are rejected because earlier steps can overwrite them through `GITHUB_ENV`.
+- Aggregate result guards count only unconditional, non-tolerant default-shell steps whose non-empty commands are exact dependency-success assertions. The required `always()` condition is scoped to the aggregate job, and comments, echoed assertions, masked failures, disabled errexit, inherited workflow/job custom shells, step custom shells, and job-level tolerance are rejected.
 - Overlay verification accepts exact desired symlinks that intentionally remain outside the ownership ledger, while still rejecting conflicting recorded ownership and preserving those links on uninstall.
 
 ## Next Steps
@@ -112,8 +113,8 @@ superseded_by:
 - Add a combined public/private manifest capacity gate when the private release job has both exact manifests; the installer already performs this aggregate preflight and fails safely, while repository CI currently proves capacity one owner at a time.
 
 ## Evidence
-- Repository suite — 1060 tests completed successfully, with 2 skipped, using Python 3.13.0 and test-only Git configuration that disables commit signing to avoid a host keybox dependency, after integrating the latest `origin/master`.
-- Reconciliation safety module — 275 tests passed as part of the repository suite.
+- Repository suite — 1061 tests completed successfully, with 2 skipped, using Python 3.13.0 and test-only Git configuration that disables commit signing to avoid a host keybox dependency, after integrating the latest `origin/master`.
+- Reconciliation safety module — 276 tests passed as part of the repository suite.
 - Package builder safety module — 59 tests passed as part of the repository suite.
 - Manifest change validation module — 79 tests passed as part of the repository suite.
 - Release baseline validation module — 29 tests passed.
