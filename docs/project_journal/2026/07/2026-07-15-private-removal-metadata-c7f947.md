@@ -88,6 +88,7 @@ superseded_by:
 - GitHub CLI JSON parsing normalizes oversized integers and recursion failures for both single and concatenated-page responses, so malformed remote data cannot escape the synchronizer error boundary with a traceback.
 - Status reconciliation reads ledger-recorded links through descriptor-bound snapshots, rejects managed-link parent replacement instead of following a redirected path, and normalizes descriptor open/read races to sync-domain errors.
 - Read-only status validation records each full-tree manifest result or validation failure only for one status invocation, so public and overlay status scan every installed Release at most once per command without sharing cache with install, rollback, uninstall, or recovery.
+- First-bootstrap ownership reconstruction uses a separate cache scoped to one refresh operation, so each current or historical Release is fully hashed once while install, uninstall, rollback, and binding freshness checks continue to revalidate independently.
 - Cooperative installers lock the stable sync-home directory inode for the entire transaction, so replacing `personal-sync` or its named lock cannot admit a second synchronizer.
 - Current-release reads bind the owner root, `current`, `releases`, and the selected release through no-follow directory descriptors, then recheck every name and parent binding before returning a SHA; replacing the checked owner root can no longer redirect the read to a coherent attacker-controlled tree.
 - Same-content link and ledger inode racers moved during quarantine are restored exactly with no-replace renames; an occupied original name is preserved and reported instead of overwritten.
@@ -95,6 +96,7 @@ superseded_by:
 - Overlay uninstall keeps the outgoing release descriptor-bound through state publication and rollback, retaining pending evidence whenever release identity drift makes rollback unsafe. An already-missing outgoing `current` pointer is represented by a durable `current/retire-absent` record, including bounded metadata, exact before-state transition validation, claim omission, and foreign-target-preserving recovery.
 - Combined manifest validation rejects portable-key strict ancestor conflicts between active targets and historical `removed.target` entries for every owner, while continuing to allow exact migrations, removed-vs-removed history, and replacement-target-only hierarchy.
 - Runtime, package, and manifest-change validation cap owner path components at 255 UTF-8 bytes, including owners embedded in replacement-retirement keys.
+- Runtime, package, and manifest-change validation reject active links whose final relative symlink payload exceeds the macOS 1,023-byte limit, including combined owner, source, and target-depth growth; historical removal records remain loadable for negative cleanup and migration.
 - Planned installs, public upgrades, and public rollbacks honor every retained overlay's optional `base_release.sha` before reconciliation or release staging. Pinned overlays must match the selected public SHA, paired installs remain supported, and unpinned overlays retain their existing follow-selected-base behavior.
 - Runtime and validation helpers retain Python 3.9 compatibility, with a dedicated CI lane covering the previously incompatible pending-state and release-history paths.
 - Manifest and durable synchronizer state versions require exact JSON integers, so booleans and numerically equal floats cannot select a schema version.
@@ -109,10 +111,10 @@ superseded_by:
 - Add a combined public/private manifest capacity gate when the private release job has both exact manifests; the installer already performs this aggregate preflight and fails safely, while repository CI currently proves capacity one owner at a time.
 
 ## Evidence
-- Repository suite — 1042 tests completed successfully, with 2 skipped, using Python 3.13.0 and test-only Git configuration that disables commit signing to avoid a host keybox dependency, after integrating the latest `origin/master`.
-- Reconciliation safety module — 272 tests passed as part of the repository suite.
-- Package builder safety module — 57 tests passed as part of the repository suite.
-- Manifest change validation module — 77 tests passed as part of the repository suite.
+- Repository suite — 1046 tests completed successfully, with 2 skipped, using Python 3.13.0 and test-only Git configuration that disables commit signing to avoid a host keybox dependency, after integrating the latest `origin/master`.
+- Reconciliation safety module — 274 tests passed as part of the repository suite.
+- Package builder safety module — 58 tests passed as part of the repository suite.
+- Manifest change validation module — 78 tests passed as part of the repository suite.
 - Release baseline validation module — 24 tests passed.
 - Dedicated Python 3.9 compatibility selection — 8 tests passed.
 - Canonical review workflow suite — 706 tests passed, with 10 skipped.
