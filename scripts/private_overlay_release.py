@@ -2,15 +2,12 @@
 from __future__ import annotations
 
 import argparse
-import ctypes
 import datetime as dt
 import importlib.util
 import json
 import os
 from pathlib import Path
-import stat
 import sys
-import tempfile
 from typing import Any
 from urllib.parse import quote
 from urllib.request import Request, urlopen
@@ -21,8 +18,6 @@ API_ROOT = "https://api.github.com"
 UPLOAD_ROOT = "https://uploads.github.com"
 RELEASE_TAG_PREFIX = "personal-codex-"
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
-MAX_VERIFICATION_CLEANUP_ENTRIES = 20_000
-MAX_VERIFICATION_CLEANUP_DEPTH = 70
 
 
 class ReleaseError(RuntimeError):
@@ -226,384 +221,37 @@ def _load_sync_module(repo_root: Path):
     return module
 
 
-def _open_verification_workspace(
-    workspace: Path,
-) -> tuple[int, int, tuple[int, int]]:
-    flags = os.O_RDONLY
-    flags |= getattr(os, "O_CLOEXEC", 0)
-    flags |= getattr(os, "O_DIRECTORY", 0)
-    flags |= getattr(os, "O_NOFOLLOW", 0)
-    parent_fd = -1
-    workspace_fd = -1
-    try:
-        parent_fd = os.open(workspace.parent, flags)
-        workspace_fd = os.open(workspace.name, flags, dir_fd=parent_fd)
-        opened_metadata = os.fstat(workspace_fd)
-        path_metadata = os.stat(
-            workspace.name,
-            dir_fd=parent_fd,
-            follow_symlinks=False,
-        )
-    except OSError as error:
-        if workspace_fd >= 0:
-            os.close(workspace_fd)
-        if parent_fd >= 0:
-            os.close(parent_fd)
-        raise ReleaseError(
-            f"failed to bind verification workspace {workspace}: {error}"
-        ) from error
-    identity = (opened_metadata.st_dev, opened_metadata.st_ino)
-    if (
-        not stat.S_ISDIR(opened_metadata.st_mode)
-        or not stat.S_ISDIR(path_metadata.st_mode)
-        or (path_metadata.st_dev, path_metadata.st_ino) != identity
-    ):
-        os.close(workspace_fd)
-        os.close(parent_fd)
-        raise ReleaseError(
-            f"verification workspace changed while binding: {workspace}"
-        )
-    return parent_fd, workspace_fd, identity
-
-
-def _rename_noreplace_at(
-    parent_fd: int,
-    source_name: str,
-    destination_name: str,
-) -> None:
-    libc = ctypes.CDLL(None, use_errno=True)
-    source = os.fsencode(source_name)
-    destination = os.fsencode(destination_name)
-    if sys.platform == "darwin":
-        rename_function = libc.renameatx_np
-        rename_function.argtypes = [
-            ctypes.c_int,
-            ctypes.c_char_p,
-            ctypes.c_int,
-            ctypes.c_char_p,
-            ctypes.c_uint,
-        ]
-        rename_function.restype = ctypes.c_int
-        result = rename_function(
-            parent_fd,
-            source,
-            parent_fd,
-            destination,
-            0x00000004,
-        )
-    elif sys.platform.startswith("linux"):
-        try:
-            rename_function = libc.renameat2
-        except AttributeError as error:
-            raise ReleaseError(
-                "renameat2 is required for safe verification cleanup"
-            ) from error
-        rename_function.argtypes = [
-            ctypes.c_int,
-            ctypes.c_char_p,
-            ctypes.c_int,
-            ctypes.c_char_p,
-            ctypes.c_uint,
-        ]
-        rename_function.restype = ctypes.c_int
-        result = rename_function(
-            parent_fd,
-            source,
-            parent_fd,
-            destination,
-            0x00000001,
-        )
-    else:
-        raise ReleaseError(
-            f"safe verification cleanup is unsupported on {sys.platform}"
-        )
-    if result != 0:
-        error_number = ctypes.get_errno()
-        raise OSError(
-            error_number,
-            os.strerror(error_number),
-            f"{source_name} -> {destination_name}",
-        )
-
-
-def _cleanup_isolation_names():
-    for _attempt in range(128):
-        yield (
-            ".codex-private-overlay-cleanup-"
-            f"{os.getpid()}-{os.urandom(8).hex()}"
-        )
-    raise ReleaseError("failed to allocate verification cleanup name")
-
-
-def _isolate_verification_workspace_entry(
-    parent_fd: int,
-    name: str,
-    expected: os.stat_result,
-) -> str:
-    # This cleanup defends against accidental or untrusted path replacement,
-    # including symlink swaps, before the no-replace isolation step. A
-    # malicious process running as the same uid can observe and rewrite the
-    # user's private temporary directory after isolation; that process already
-    # has equivalent authority over the checkout and release artifacts and is
-    # outside this helper's threat model.
-    isolated_name: str | None = None
-    for candidate in _cleanup_isolation_names():
-        try:
-            _rename_noreplace_at(parent_fd, name, candidate)
-        except FileExistsError:
-            continue
-        isolated_name = candidate
-        break
-    assert isolated_name is not None
-    current = os.stat(
-        isolated_name,
-        dir_fd=parent_fd,
-        follow_symlinks=False,
-    )
-    if (
-        (current.st_dev, current.st_ino) != (expected.st_dev, expected.st_ino)
-        or stat.S_IFMT(current.st_mode) != stat.S_IFMT(expected.st_mode)
-    ):
-        raise ReleaseError(
-            "verification workspace entry changed during isolation; "
-            f"preserved as {isolated_name}"
-        )
-    return isolated_name
-
-
-def _remove_verification_workspace_entry(
-    parent_fd: int,
-    name: str,
-    budget: list[int],
-    *,
-    depth: int,
-) -> None:
-    if depth > MAX_VERIFICATION_CLEANUP_DEPTH:
-        raise ReleaseError("verification workspace cleanup exceeds depth limit")
-    if budget[0] <= 0:
-        raise ReleaseError("verification workspace cleanup exceeds entry limit")
-    budget[0] -= 1
-    metadata = os.stat(
-        name,
-        dir_fd=parent_fd,
-        follow_symlinks=False,
-    )
-    isolated_name = _isolate_verification_workspace_entry(
-        parent_fd,
-        name,
-        metadata,
-    )
-    if stat.S_ISREG(metadata.st_mode) or stat.S_ISLNK(metadata.st_mode):
-        os.unlink(isolated_name, dir_fd=parent_fd)
-        return
-    if not stat.S_ISDIR(metadata.st_mode):
-        raise ReleaseError(
-            "verification workspace contains an unsupported entry; "
-            f"preserved as {isolated_name}"
-        )
-    flags = os.O_RDONLY
-    flags |= getattr(os, "O_CLOEXEC", 0)
-    flags |= getattr(os, "O_DIRECTORY", 0)
-    flags |= getattr(os, "O_NOFOLLOW", 0)
-    child_fd = os.open(isolated_name, flags, dir_fd=parent_fd)
-    try:
-        opened_metadata = os.fstat(child_fd)
-        expected_identity = (metadata.st_dev, metadata.st_ino)
-        if (
-            not stat.S_ISDIR(opened_metadata.st_mode)
-            or (opened_metadata.st_dev, opened_metadata.st_ino)
-            != expected_identity
-        ):
-            raise ReleaseError(
-                "verification workspace entry changed after isolation; "
-                f"preserved as {isolated_name}"
-            )
-        for child_name in os.listdir(child_fd):
-            _remove_verification_workspace_entry(
-                child_fd,
-                child_name,
-                budget,
-                depth=depth + 1,
-            )
-        if os.listdir(child_fd):
-            raise ReleaseError(
-                "verification workspace directory gained an entry; "
-                f"preserved as {isolated_name}"
-            )
-        path_metadata = os.stat(
-            isolated_name,
-            dir_fd=parent_fd,
-            follow_symlinks=False,
-        )
-        if (
-            not stat.S_ISDIR(path_metadata.st_mode)
-            or (path_metadata.st_dev, path_metadata.st_ino)
-            != expected_identity
-        ):
-            raise ReleaseError(
-                "verification workspace entry changed before deletion; "
-                f"preserved as {isolated_name}"
-            )
-        os.rmdir(isolated_name, dir_fd=parent_fd)
-    finally:
-        active_error = sys.exc_info()[0] is not None
-        try:
-            os.close(child_fd)
-        except OSError:
-            if not active_error:
-                raise
-
-
-def _cleanup_verification_workspace(
-    workspace: Path,
-    parent_fd: int,
-    workspace_fd: int,
-    expected_identity: tuple[int, int],
-) -> None:
-    try:
-        opened_metadata = os.fstat(workspace_fd)
-        path_metadata = os.stat(
-            workspace.name,
-            dir_fd=parent_fd,
-            follow_symlinks=False,
-        )
-    except OSError as error:
-        raise ReleaseError(
-            f"failed to inspect verification workspace {workspace}: {error}"
-        ) from error
-    if (
-        not stat.S_ISDIR(opened_metadata.st_mode)
-        or (opened_metadata.st_dev, opened_metadata.st_ino) != expected_identity
-        or not stat.S_ISDIR(path_metadata.st_mode)
-        or (path_metadata.st_dev, path_metadata.st_ino) != expected_identity
-    ):
-        raise ReleaseError(
-            f"verification workspace changed; refusing cleanup: {workspace}"
-        )
-    try:
-        isolated_name = _isolate_verification_workspace_entry(
-            parent_fd,
-            workspace.name,
-            path_metadata,
-        )
-        budget = [MAX_VERIFICATION_CLEANUP_ENTRIES]
-        for name in os.listdir(workspace_fd):
-            _remove_verification_workspace_entry(
-                workspace_fd,
-                name,
-                budget,
-                depth=0,
-            )
-        if os.listdir(workspace_fd):
-            raise ReleaseError(
-                "verification workspace gained an entry; "
-                f"preserved as {isolated_name}"
-            )
-        opened_metadata = os.fstat(workspace_fd)
-        path_metadata = os.stat(
-            isolated_name,
-            dir_fd=parent_fd,
-            follow_symlinks=False,
-        )
-        if (
-            (opened_metadata.st_dev, opened_metadata.st_ino) != expected_identity
-            or not stat.S_ISDIR(path_metadata.st_mode)
-            or (path_metadata.st_dev, path_metadata.st_ino) != expected_identity
-        ):
-            raise ReleaseError(
-                "verification workspace changed before deletion; "
-                f"preserved as {isolated_name}"
-            )
-        os.rmdir(isolated_name, dir_fd=parent_fd)
-    except OSError as error:
-        raise ReleaseError(
-            f"failed to clean verification workspace {workspace}: {error}"
-        ) from error
-
-
 def verify_package(repo_root: Path, sha: str, dist: Path) -> None:
     module = _load_sync_module(repo_root)
     archive_path = dist / f"personal-codex-{sha}.tar.gz"
     checksum_path = dist / f"personal-codex-{sha}.sha256"
-    workspace = Path(tempfile.mkdtemp(prefix="codex-private-overlay-verify."))
-    created_metadata = os.lstat(workspace)
-    try:
-        parent_fd, workspace_fd, workspace_identity = (
-            _open_verification_workspace(workspace)
-        )
-    except BaseException:
-        try:
-            current = os.lstat(workspace)
-            if (
-                stat.S_ISDIR(current.st_mode)
-                and (current.st_dev, current.st_ino)
-                == (created_metadata.st_dev, created_metadata.st_ino)
-            ):
-                os.rmdir(workspace)
-        except OSError:
-            pass
-        raise
-    try:
-        release_root, _release_expectation = module.verify_and_extract_archive(
-            archive_path,
-            checksum_path,
-            workspace / "extract",
-        )
-        entries = module.validate_release_tree(release_root)
-        targets = {entry.target.as_posix() for entry in entries}
-        manifest = json.loads(
-            (release_root / "personal_codex" / "sync-manifest.json").read_text(
-                encoding="utf-8"
+    with module.bind_archive_workspace(dist) as read_workspace:
+        with module.temporary_archive_workspace(
+            prefix="codex-private-overlay-verify."
+        ) as archive_workspace:
+            workspace = archive_workspace.path
+            _release_root, release_expectation = module.verify_and_extract_archive(
+                archive_path,
+                checksum_path,
+                workspace / "extract",
+                workspace=archive_workspace,
+                read_workspace=read_workspace,
             )
-        )
-        if not entries or any(entry.owner != "private" for entry in entries):
-            raise ReleaseError("release manifest must contain only private-owned entries")
-        if manifest.get("base_release", {}).get("repo") != "Joey-Tools/codex-toolbox":
-            raise ReleaseError("release manifest must declare the public base release repo")
-        if "bin/codex-personal-sync" in targets:
-            raise ReleaseError("private overlay must not publish the public sync runner")
-    finally:
-        active_error = sys.exc_info()[0] is not None
-        cleanup_error: BaseException | None = None
-        try:
-            _cleanup_verification_workspace(
-                workspace,
-                parent_fd,
-                workspace_fd,
-                workspace_identity,
-            )
-        except BaseException as error:
-            cleanup_error = error
-        finally:
-            for descriptor, label in (
-                (workspace_fd, "workspace"),
-                (parent_fd, "workspace parent"),
-            ):
-                try:
-                    os.close(descriptor)
-                except OSError as error:
-                    if cleanup_error is None:
-                        cleanup_error = ReleaseError(
-                            f"failed to close verification {label} "
-                            f"{workspace}: {error}"
-                        )
-        if cleanup_error is not None:
-            if isinstance(cleanup_error, ReleaseError):
-                normalized_cleanup_error = cleanup_error
-            else:
-                normalized_cleanup_error = ReleaseError(
-                    "verification workspace cleanup failed: "
-                    f"{type(cleanup_error).__name__}: {cleanup_error}"
+            manifest_data = release_expectation[0][1]
+            entries = manifest_data.entries
+            targets = {entry.target.as_posix() for entry in entries}
+            if not entries or any(entry.owner != "private" for entry in entries):
+                raise ReleaseError(
+                    "release manifest must contain only private-owned entries"
                 )
-            if active_error:
-                print(
-                    f"warning: {normalized_cleanup_error}",
-                    file=sys.stderr,
+            if manifest_data.base_release_repo != "Joey-Tools/codex-toolbox":
+                raise ReleaseError(
+                    "release manifest must declare the public base release repo"
                 )
-            elif normalized_cleanup_error is cleanup_error:
-                raise normalized_cleanup_error
-            else:
-                raise normalized_cleanup_error from cleanup_error
+            if "bin/codex-personal-sync" in targets:
+                raise ReleaseError(
+                    "private overlay must not publish the public sync runner"
+                )
 
 
 def iter_releases(repo: str):

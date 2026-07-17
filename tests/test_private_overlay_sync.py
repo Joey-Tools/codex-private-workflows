@@ -23,6 +23,7 @@ from unittest import mock
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SYNC_SCRIPT = REPO_ROOT / "scripts" / "sync_private_overlay_sources.py"
 RELEASE_SCRIPT = REPO_ROOT / "scripts" / "private_overlay_release.py"
+RUNTIME_SCRIPT = REPO_ROOT / "scripts" / "codex_personal_sync.py"
 REVIEW_RUNTIME_ROOT = (
     REPO_ROOT
     / "personal_codex"
@@ -45,6 +46,7 @@ def load_module(name: str, path: Path):
 
 SYNC_MODULE = load_module("sync_private_overlay_sources", SYNC_SCRIPT)
 RELEASE_MODULE = load_module("private_overlay_release", RELEASE_SCRIPT)
+RUNTIME_MODULE = load_module("codex_personal_sync_private_overlay_sync", RUNTIME_SCRIPT)
 
 
 def load_private_review_synthetic_tokens():
@@ -96,9 +98,18 @@ class PrivateOverlaySyncTests(unittest.TestCase):
         self.external_prepared_parent_patcher.stop()
         self.tmpdir.cleanup()
 
-    def test_verify_package_uses_fresh_workspace_and_preserves_dist_extract(
-        self,
-    ) -> None:
+    @staticmethod
+    def _private_release_expectation(
+        *,
+        base_release_repo: str = "Joey-Tools/codex-toolbox",
+    ):
+        manifest_data = SimpleNamespace(
+            entries=[mock.Mock(owner="private", target=Path("skills/private"))],
+            base_release_repo=base_release_repo,
+        )
+        return (({}, manifest_data, "digest"), (1, 2))
+
+    def test_verify_package_uses_bound_read_and_temporary_workspaces(self) -> None:
         sha = "1" * 40
         dist = self.root / "dist"
         existing_extract = dist / "extract"
@@ -106,19 +117,88 @@ class PrivateOverlaySyncTests(unittest.TestCase):
         sentinel = existing_extract / "sentinel.txt"
         sentinel.write_text("keep\n", encoding="utf-8")
         destinations: list[Path] = []
-        sync_module = mock.Mock()
-        sync_module.validate_release_tree.return_value = [
-            mock.Mock(owner="private", target=Path("skills/private"))
-        ]
+        archive_workspaces: list[object] = []
+        read_workspaces: list[object] = []
+        expectation = self._private_release_expectation()
+
+        def verify_and_extract(
+            archive_path: Path,
+            checksum_path: Path,
+            destination: Path,
+            *,
+            workspace,
+            read_workspace,
+        ):
+            self.assertEqual(
+                archive_path,
+                dist / f"personal-codex-{sha}.tar.gz",
+            )
+            self.assertEqual(
+                checksum_path,
+                dist / f"personal-codex-{sha}.sha256",
+            )
+            self.assertEqual(workspace.path, destination.parent)
+            self.assertEqual(
+                read_workspace.path,
+                Path(os.path.abspath(dist)),
+            )
+            self.assertNotEqual(workspace.fd, read_workspace.fd)
+            for capability in (workspace, read_workspace):
+                metadata = os.fstat(capability.fd)
+                self.assertTrue(stat.S_ISDIR(metadata.st_mode))
+                self.assertEqual(
+                    (metadata.st_dev, metadata.st_ino),
+                    capability.identity,
+                )
+            destinations.append(destination)
+            archive_workspaces.append(workspace)
+            read_workspaces.append(read_workspace)
+            return destination / f"personal-codex-{sha}", expectation
+
+        with (
+            mock.patch.object(
+                RELEASE_MODULE,
+                "_load_sync_module",
+                return_value=RUNTIME_MODULE,
+            ),
+            mock.patch.object(
+                RUNTIME_MODULE,
+                "verify_and_extract_archive",
+                side_effect=verify_and_extract,
+            ),
+        ):
+            RELEASE_MODULE.verify_package(self.repo_root, sha, dist)
+            RELEASE_MODULE.verify_package(self.repo_root, sha, dist)
+
+        self.assertEqual(len(destinations), 2)
+        self.assertNotEqual(destinations[0], destinations[1])
+        self.assertTrue(all(not destination.parent.exists() for destination in destinations))
+        for capability in [*archive_workspaces, *read_workspaces]:
+            with self.assertRaises(OSError) as closed:
+                os.fstat(capability.fd)
+            self.assertEqual(closed.exception.errno, errno.EBADF)
+        self.assertEqual(sentinel.read_text(encoding="utf-8"), "keep\n")
+
+    def test_verify_package_uses_bound_manifest_expectation_not_release_path(
+        self,
+    ) -> None:
+        sha = "6" * 40
+        dist = self.root / "dist"
+        dist.mkdir()
+        expectation = self._private_release_expectation(
+            base_release_repo="Attacker/alternate-base",
+        )
 
         def verify_and_extract(
             _archive_path: Path,
             _checksum_path: Path,
             destination: Path,
-        ) -> tuple[Path, object]:
-            destinations.append(destination)
-            self.assertNotEqual(destination, existing_extract)
-            self.assertFalse(destination.exists())
+            *,
+            workspace,
+            read_workspace,
+        ):
+            self.assertEqual(workspace.path, destination.parent)
+            self.assertEqual(read_workspace.path, Path(os.path.abspath(dist)))
             release_root = destination / f"personal-codex-{sha}"
             manifest_path = (
                 release_root / "personal_codex" / "sync-manifest.json"
@@ -129,42 +209,39 @@ class PrivateOverlaySyncTests(unittest.TestCase):
                     {
                         "version": 1,
                         "owner": "private",
-                        "base_release": {"repo": "Joey-Tools/codex-toolbox"},
+                        "base_release": {
+                            "repo": "Joey-Tools/codex-toolbox"
+                        },
                     }
                 ),
                 encoding="utf-8",
             )
-            return release_root, object()
+            return release_root, expectation
 
-        sync_module.verify_and_extract_archive.side_effect = verify_and_extract
-        with mock.patch.object(
-            RELEASE_MODULE,
-            "_load_sync_module",
-            return_value=sync_module,
+        with (
+            mock.patch.object(
+                RELEASE_MODULE,
+                "_load_sync_module",
+                return_value=RUNTIME_MODULE,
+            ),
+            mock.patch.object(
+                RUNTIME_MODULE,
+                "verify_and_extract_archive",
+                side_effect=verify_and_extract,
+            ),
+            mock.patch.object(
+                RUNTIME_MODULE,
+                "validate_release_tree",
+                side_effect=AssertionError("release path must not be reopened"),
+            ) as validate_release_tree,
+            self.assertRaisesRegex(
+                RELEASE_MODULE.ReleaseError,
+                "declare the public base release repo",
+            ),
         ):
             RELEASE_MODULE.verify_package(self.repo_root, sha, dist)
-            RELEASE_MODULE.verify_package(self.repo_root, sha, dist)
 
-        self.assertEqual(len(destinations), 2)
-        self.assertNotEqual(destinations[0], destinations[1])
-        self.assertTrue(all(not destination.exists() for destination in destinations))
-        self.assertEqual(sentinel.read_text(encoding="utf-8"), "keep\n")
-        sync_module.verify_and_extract_archive.assert_has_calls(
-            [
-                mock.call(
-                    dist / f"personal-codex-{sha}.tar.gz",
-                    dist / f"personal-codex-{sha}.sha256",
-                    destinations[0],
-                ),
-                mock.call(
-                    dist / f"personal-codex-{sha}.tar.gz",
-                    dist / f"personal-codex-{sha}.sha256",
-                    destinations[1],
-                ),
-            ]
-        )
-        sync_module.verify_checksum.assert_not_called()
-        sync_module.safe_extract_archive.assert_not_called()
+        validate_release_tree.assert_not_called()
 
     def test_verify_package_cleanup_error_does_not_mask_primary_error(
         self,
@@ -172,30 +249,25 @@ class PrivateOverlaySyncTests(unittest.TestCase):
         sha = "2" * 40
         dist = self.root / "dist"
         dist.mkdir()
-        workspace = self.root / "verification-workspace"
-        sync_module = mock.Mock()
-        sync_module.verify_and_extract_archive.side_effect = (
-            RELEASE_MODULE.ReleaseError("primary verification failure")
-        )
         stderr = io.StringIO()
 
         with (
             mock.patch.object(
                 RELEASE_MODULE,
                 "_load_sync_module",
-                return_value=sync_module,
+                return_value=RUNTIME_MODULE,
             ),
             mock.patch.object(
-                RELEASE_MODULE.tempfile,
-                "mkdtemp",
-                side_effect=lambda **_kwargs: (
-                    workspace.mkdir() or str(workspace)
+                RUNTIME_MODULE,
+                "verify_and_extract_archive",
+                side_effect=RELEASE_MODULE.ReleaseError(
+                    "primary verification failure"
                 ),
             ),
             mock.patch.object(
-                RELEASE_MODULE,
-                "_cleanup_verification_workspace",
-                side_effect=RELEASE_MODULE.ReleaseError("cleanup failure"),
+                RUNTIME_MODULE,
+                "_cleanup_bound_temporary_archive_workspace",
+                side_effect=RUNTIME_MODULE.SyncError("cleanup failure"),
             ),
             contextlib.redirect_stderr(stderr),
             self.assertRaisesRegex(
@@ -207,232 +279,226 @@ class PrivateOverlaySyncTests(unittest.TestCase):
 
         self.assertIn("warning: cleanup failure", stderr.getvalue())
 
-    def test_verify_package_unexpected_cleanup_error_preserves_primary(
+    def test_verify_package_rejects_bound_dist_or_ancestor_replacement(
         self,
     ) -> None:
-        sha = "3" * 40
-        dist = self.root / "dist"
-        dist.mkdir()
-        workspace = self.root / "verification-workspace"
-        sync_module = mock.Mock()
-        sync_module.verify_and_extract_archive.side_effect = (
-            RELEASE_MODULE.ReleaseError("primary verification failure")
+        sha = "5" * 40
+        for replacement_kind in ("dist", "ancestor"):
+            for asset_role in ("checksum", "archive"):
+                with self.subTest(
+                    replacement_kind=replacement_kind,
+                    asset_role=asset_role,
+                ):
+                    case_root = (
+                        self.root
+                        / f"replace-{replacement_kind}-{asset_role}"
+                    )
+                    self._assert_verify_package_rejects_bound_replacement(
+                        case_root,
+                        sha,
+                        replacement_kind,
+                        asset_role,
+                    )
+
+    def _assert_verify_package_rejects_bound_replacement(
+        self,
+        case_root: Path,
+        sha: str,
+        replacement_kind: str,
+        asset_role: str,
+    ) -> None:
+        ancestor = case_root / "ancestor"
+        dist = ancestor / "dist"
+        dist.mkdir(parents=True)
+        moved = case_root / f"moved-{replacement_kind}"
+        replacement_sentinel = dist / "replacement.txt"
+        archive_path = dist / f"personal-codex-{sha}.tar.gz"
+        checksum_path = dist / f"personal-codex-{sha}.sha256"
+        archive_payload = b"archive payload"
+        archive_path.write_bytes(archive_payload)
+        checksum_path.write_text(
+            f"{RUNTIME_MODULE.hashlib.sha256(archive_payload).hexdigest()}  "
+            f"{archive_path.name}\n",
+            encoding="utf-8",
         )
-        stderr = io.StringIO()
-        real_close = RELEASE_MODULE.os.close
+        captured_read_workspace: list[object] = []
+        replaced = False
+        trigger_description = (
+            "checksum file"
+            if asset_role == "checksum"
+            else "compressed archive"
+        )
+        real_open_bounded_regular_file = (
+            RUNTIME_MODULE._open_bounded_regular_file
+        )
+
+        def open_after_replacement(
+            path: Path,
+            *,
+            maximum_bytes: int,
+            description: str,
+            workspace=None,
+        ):
+            nonlocal replaced
+            if not replaced and description == trigger_description:
+                replaced = True
+                captured_read_workspace.append(workspace)
+                if replacement_kind == "dist":
+                    dist.rename(moved)
+                    dist.mkdir()
+                else:
+                    ancestor.rename(moved)
+                    dist.mkdir(parents=True)
+                replacement_sentinel.write_text(
+                    "replacement\n",
+                    encoding="utf-8",
+                )
+            return real_open_bounded_regular_file(
+                path,
+                maximum_bytes=maximum_bytes,
+                description=description,
+                workspace=workspace,
+            )
 
         with (
             mock.patch.object(
                 RELEASE_MODULE,
                 "_load_sync_module",
-                return_value=sync_module,
+                return_value=RUNTIME_MODULE,
             ),
             mock.patch.object(
-                RELEASE_MODULE.tempfile,
-                "mkdtemp",
-                side_effect=lambda **_kwargs: (
-                    workspace.mkdir() or str(workspace)
-                ),
+                RUNTIME_MODULE,
+                "_open_bounded_regular_file",
+                side_effect=open_after_replacement,
             ),
-            mock.patch.object(
-                RELEASE_MODULE,
-                "_cleanup_verification_workspace",
-                side_effect=RecursionError("cleanup recursion"),
-            ),
-            mock.patch.object(
-                RELEASE_MODULE.os,
-                "close",
-                wraps=real_close,
-            ) as close_descriptor,
-            contextlib.redirect_stderr(stderr),
             self.assertRaisesRegex(
-                RELEASE_MODULE.ReleaseError,
-                "primary verification failure",
+                RUNTIME_MODULE.SyncError,
+                "archive workspace binding changed",
             ),
         ):
             RELEASE_MODULE.verify_package(self.repo_root, sha, dist)
 
-        self.assertEqual(close_descriptor.call_count, 2)
+        self.assertTrue(replaced)
+        self.assertEqual(len(captured_read_workspace), 1)
+        with self.assertRaises(OSError) as closed:
+            os.fstat(captured_read_workspace[0].fd)
+        self.assertEqual(closed.exception.errno, errno.EBADF)
+        self.assertTrue(moved.is_dir())
+        self.assertEqual(
+            replacement_sentinel.read_text(encoding="utf-8"),
+            "replacement\n",
+        )
+
+    def test_verify_package_dist_close_failure_preserves_primary(self) -> None:
+        sha = "6" * 40
+        dist = self.root / "dist-close-primary"
+        dist.mkdir()
+        captured_fd = -1
+        close_failed = False
+        real_close = RUNTIME_MODULE.os.close
+        stderr = io.StringIO()
+
+        def fail_verification(
+            _archive_path: Path,
+            _checksum_path: Path,
+            _destination: Path,
+            *,
+            workspace,
+            read_workspace,
+        ):
+            nonlocal captured_fd
+            self.assertNotEqual(workspace.fd, read_workspace.fd)
+            captured_fd = read_workspace.fd
+            raise RELEASE_MODULE.ReleaseError("primary verification failure")
+
+        def fail_dist_close(file_descriptor: int) -> None:
+            nonlocal close_failed
+            if file_descriptor == captured_fd and not close_failed:
+                close_failed = True
+                raise OSError("simulated dist close failure")
+            real_close(file_descriptor)
+
+        try:
+            with (
+                mock.patch.object(
+                    RELEASE_MODULE,
+                    "_load_sync_module",
+                    return_value=RUNTIME_MODULE,
+                ),
+                mock.patch.object(
+                    RUNTIME_MODULE,
+                    "verify_and_extract_archive",
+                    side_effect=fail_verification,
+                ),
+                mock.patch.object(
+                    RUNTIME_MODULE.os,
+                    "close",
+                    side_effect=fail_dist_close,
+                ),
+                contextlib.redirect_stderr(stderr),
+                self.assertRaisesRegex(
+                    RELEASE_MODULE.ReleaseError,
+                    "primary verification failure",
+                ),
+            ):
+                RELEASE_MODULE.verify_package(self.repo_root, sha, dist)
+        finally:
+            if captured_fd >= 0:
+                real_close(captured_fd)
+
+        self.assertTrue(close_failed)
         self.assertIn(
-            "warning: verification workspace cleanup failed: "
-            "RecursionError: cleanup recursion",
+            "warning: failed to close archive workspace",
             stderr.getvalue(),
         )
 
-    def test_verify_package_bind_failure_removes_empty_workspace(self) -> None:
-        sha = "4" * 40
-        dist = self.root / "dist"
-        dist.mkdir()
-        workspace = self.root / "verification-workspace"
-        sync_module = mock.Mock()
+    def test_verify_package_rejects_symlinked_archive_or_checksum_asset(
+        self,
+    ) -> None:
+        sha = "7" * 40
+        archive_name = f"personal-codex-{sha}.tar.gz"
+        checksum_name = f"personal-codex-{sha}.sha256"
+        archive_payload = b"not-a-tar-archive"
 
-        with (
-            mock.patch.object(
-                RELEASE_MODULE,
-                "_load_sync_module",
-                return_value=sync_module,
-            ),
-            mock.patch.object(
-                RELEASE_MODULE.tempfile,
-                "mkdtemp",
-                side_effect=lambda **_kwargs: (
-                    workspace.mkdir() or str(workspace)
-                ),
-            ),
-            mock.patch.object(
-                RELEASE_MODULE,
-                "_open_verification_workspace",
-                side_effect=RELEASE_MODULE.ReleaseError("bind failure"),
-            ),
-            self.assertRaisesRegex(
-                RELEASE_MODULE.ReleaseError,
-                "bind failure",
-            ),
-        ):
-            RELEASE_MODULE.verify_package(self.repo_root, sha, dist)
-
-        self.assertFalse(workspace.exists())
-
-    def test_verification_cleanup_preserves_replaced_root(self) -> None:
-        workspace = self.root / "verification-workspace"
-        moved_workspace = self.root / "moved-verification-workspace"
-        replacement = self.root / "replacement-workspace"
-        workspace.mkdir()
-        replacement.mkdir()
-        (workspace / "owned.txt").write_text("owned\n", encoding="utf-8")
-        sentinel = replacement / "sentinel.txt"
-        sentinel.write_text("keep\n", encoding="utf-8")
-        parent_fd, workspace_fd, workspace_identity = (
-            RELEASE_MODULE._open_verification_workspace(workspace)
-        )
-        real_rename = RELEASE_MODULE._rename_noreplace_at
-
-        def replace_root(
-            directory_fd: int,
-            source_name: str,
-            destination_name: str,
-        ) -> None:
-            if source_name == workspace.name:
-                workspace.rename(moved_workspace)
-                replacement.rename(workspace)
-            real_rename(directory_fd, source_name, destination_name)
-
-        try:
-            with (
-                mock.patch.object(
-                    RELEASE_MODULE,
-                    "_rename_noreplace_at",
-                    side_effect=replace_root,
-                ),
-                self.assertRaisesRegex(
-                    RELEASE_MODULE.ReleaseError,
-                    "changed during isolation",
-                ),
-            ):
-                RELEASE_MODULE._cleanup_verification_workspace(
-                    workspace,
-                    parent_fd,
-                    workspace_fd,
-                    workspace_identity,
+        for role in ("archive", "checksum"):
+            with self.subTest(role=role):
+                case_root = self.root / f"symlinked-{role}"
+                dist = case_root / "dist"
+                outside = case_root / "outside"
+                dist.mkdir(parents=True)
+                outside.mkdir()
+                archive_path = dist / archive_name
+                checksum_path = dist / checksum_name
+                digest = RUNTIME_MODULE.hashlib.sha256(archive_payload).hexdigest()
+                archive_path.write_bytes(archive_payload)
+                checksum_path.write_text(
+                    f"{digest}  {archive_name}\n",
+                    encoding="utf-8",
                 )
-        finally:
-            RELEASE_MODULE.os.close(workspace_fd)
-            RELEASE_MODULE.os.close(parent_fd)
+                unsafe_path = archive_path if role == "archive" else checksum_path
+                unsafe_path.unlink()
+                outside_path = outside / unsafe_path.name
+                if role == "archive":
+                    outside_path.write_bytes(archive_payload)
+                else:
+                    outside_path.write_text(
+                        f"{digest}  {archive_name}\n",
+                        encoding="utf-8",
+                    )
+                unsafe_path.symlink_to(outside_path)
 
-        retained = list(
-            self.root.glob(".codex-private-overlay-cleanup-*")
-        )
-        self.assertEqual(len(retained), 1)
-        self.assertEqual(
-            (retained[0] / "sentinel.txt").read_text(encoding="utf-8"),
-            "keep\n",
-        )
-        self.assertEqual(
-            (moved_workspace / "owned.txt").read_text(encoding="utf-8"),
-            "owned\n",
-        )
-
-    def test_verification_cleanup_preserves_replaced_leaf(self) -> None:
-        workspace = self.root / "verification-workspace"
-        workspace.mkdir()
-        (workspace / "owned.txt").write_text("owned\n", encoding="utf-8")
-        parent_fd, workspace_fd, workspace_identity = (
-            RELEASE_MODULE._open_verification_workspace(workspace)
-        )
-        real_rename = RELEASE_MODULE._rename_noreplace_at
-        replaced = False
-
-        def replace_leaf(
-            directory_fd: int,
-            source_name: str,
-            destination_name: str,
-        ) -> None:
-            nonlocal replaced
-            if source_name == "owned.txt" and not replaced:
-                replaced = True
-                RELEASE_MODULE.os.rename(
-                    source_name,
-                    "moved-owned.txt",
-                    src_dir_fd=directory_fd,
-                    dst_dir_fd=directory_fd,
-                )
-                replacement_fd = RELEASE_MODULE.os.open(
-                    source_name,
-                    RELEASE_MODULE.os.O_WRONLY
-                    | RELEASE_MODULE.os.O_CREAT
-                    | RELEASE_MODULE.os.O_EXCL,
-                    0o600,
-                    dir_fd=directory_fd,
-                )
-                try:
-                    RELEASE_MODULE.os.write(replacement_fd, b"replacement\n")
-                finally:
-                    RELEASE_MODULE.os.close(replacement_fd)
-            real_rename(directory_fd, source_name, destination_name)
-
-        try:
-            with (
-                mock.patch.object(
-                    RELEASE_MODULE,
-                    "_rename_noreplace_at",
-                    side_effect=replace_leaf,
-                ),
-                self.assertRaisesRegex(
-                    RELEASE_MODULE.ReleaseError,
-                    "changed during isolation",
-                ),
-            ):
-                RELEASE_MODULE._cleanup_verification_workspace(
-                    workspace,
-                    parent_fd,
-                    workspace_fd,
-                    workspace_identity,
-                )
-        finally:
-            RELEASE_MODULE.os.close(workspace_fd)
-            RELEASE_MODULE.os.close(parent_fd)
-
-        retained_roots = list(
-            self.root.glob(".codex-private-overlay-cleanup-*")
-        )
-        self.assertEqual(len(retained_roots), 1)
-        retained_root = retained_roots[0]
-        self.assertEqual(
-            (retained_root / "moved-owned.txt").read_text(encoding="utf-8"),
-            "owned\n",
-        )
-        retained_replacements = [
-            path
-            for path in retained_root.glob(
-                ".codex-private-overlay-cleanup-*"
-            )
-            if path.is_file()
-        ]
-        self.assertEqual(len(retained_replacements), 1)
-        self.assertEqual(
-            retained_replacements[0].read_text(encoding="utf-8"),
-            "replacement\n",
-        )
+                with (
+                    mock.patch.object(
+                        RELEASE_MODULE,
+                        "_load_sync_module",
+                        return_value=RUNTIME_MODULE,
+                    ),
+                    self.assertRaisesRegex(
+                        RUNTIME_MODULE.SyncError,
+                        "unsafe|non-regular",
+                    ),
+                ):
+                    RELEASE_MODULE.verify_package(self.repo_root, sha, dist)
 
     @contextlib.contextmanager
     def _regular_file_overlay_staging_directory(self, target: Path):

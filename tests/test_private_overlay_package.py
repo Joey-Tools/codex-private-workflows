@@ -99,9 +99,33 @@ class PrivateOverlayPackageTests(unittest.TestCase):
     def setUp(self) -> None:
         self.tmpdir = tempfile.TemporaryDirectory(prefix="codex-private-overlay.")
         self.root = Path(self.tmpdir.name)
+        self.archive_workspace_context = MODULE.bind_archive_workspace(self.root)
+        self.archive_workspace = self.archive_workspace_context.__enter__()
 
     def tearDown(self) -> None:
+        self.archive_workspace_context.__exit__(None, None, None)
         self.tmpdir.cleanup()
+
+    def safe_extract_archive(self, archive_path: Path, destination: Path) -> Path:
+        return MODULE.safe_extract_archive(
+            archive_path,
+            destination,
+            workspace=self.archive_workspace,
+        )
+
+    def download_and_extract_release(
+        self,
+        repo: str,
+        destination: Path,
+        *,
+        sha: str | None = None,
+    ) -> MODULE.DownloadedRelease:
+        return MODULE.download_and_extract_release(
+            repo,
+            destination,
+            workspace=self.archive_workspace,
+            sha=sha,
+        )
 
     def run_quietly(self, callback, *args, **kwargs):
         with contextlib.redirect_stdout(io.StringIO()):
@@ -153,7 +177,7 @@ class PrivateOverlayPackageTests(unittest.TestCase):
             )
             archive_path = self.build_private_package()
         extract_root = self.root / "extract"
-        release_root = MODULE.safe_extract_archive(archive_path, extract_root)
+        release_root = self.safe_extract_archive(archive_path, extract_root)
         entries = MODULE.validate_release_tree(release_root)
         targets = {entry.target.as_posix(): entry for entry in entries}
         manifest = json.loads(
@@ -260,7 +284,7 @@ class PrivateOverlayPackageTests(unittest.TestCase):
 
     def test_default_manifest_packages_private_overlay(self) -> None:
         archive_path = self.build_private_package(manifest=None)
-        release_root = MODULE.safe_extract_archive(archive_path, self.root / "extract")
+        release_root = self.safe_extract_archive(archive_path, self.root / "extract")
         entries = MODULE.validate_release_tree(release_root)
 
         self.assertTrue(all(entry.owner == "private" for entry in entries))
@@ -726,10 +750,14 @@ class PrivateOverlayPackageTests(unittest.TestCase):
         retained_archive = self.root / "verified.tar.gz"
         real_extract = MODULE._safe_extract_archive_snapshot
 
-        def replace_archive_path(snapshot, extract_root, destination_anchor):
+        def replace_archive_path(snapshot, extract_root, *, workspace):
             archive_path.rename(retained_archive)
             malicious_archive.rename(archive_path)
-            return real_extract(snapshot, extract_root, destination_anchor)
+            return real_extract(
+                snapshot,
+                extract_root,
+                workspace=workspace,
+            )
 
         with (
             mock.patch.object(MODULE, "find_latest_release", return_value={}),
@@ -741,7 +769,7 @@ class PrivateOverlayPackageTests(unittest.TestCase):
                 side_effect=replace_archive_path,
             ),
         ):
-            release = MODULE.download_and_extract_release("owner/repo", destination)
+            release = self.download_and_extract_release("owner/repo", destination)
 
         self.assertTrue(
             (release.release_root / "personal_codex" / "sync-manifest.json").is_file()
@@ -756,6 +784,94 @@ class PrivateOverlayPackageTests(unittest.TestCase):
         self.assertEqual(archive_path.read_bytes(), b"replacement")
         self.assertTrue(retained_archive.is_file())
 
+    def test_expected_release_file_rejects_release_root_name_replacement(
+        self,
+    ) -> None:
+        release_root = self.root / "expected-release"
+        retained_release = self.root / "retained-expected-release"
+        runner_path = MODULE.PurePosixPath("scripts/codex_personal_sync.py")
+        write_public_base_fixture(release_root)
+        original_runner = (release_root / Path(*runner_path.parts)).read_bytes()
+        release_expectation = MODULE._source_release_identity(release_root, None)
+
+        self.assertEqual(
+            MODULE.read_expected_release_file(
+                release_root,
+                runner_path,
+                release_expectation,
+            ),
+            original_runner,
+        )
+
+        release_root.rename(retained_release)
+        write_public_base_fixture(release_root)
+        (release_root / Path(*runner_path.parts)).write_text(
+            "#!/usr/bin/env python3\n# substitute\n",
+            encoding="utf-8",
+        )
+
+        with self.assertRaisesRegex(
+            MODULE.SyncError,
+            "release source changed after its captured identity",
+        ):
+            MODULE.read_expected_release_file(
+                release_root,
+                runner_path,
+                release_expectation,
+            )
+
+    def test_expected_release_file_rejects_descendant_replace_restore(
+        self,
+    ) -> None:
+        release_root = self.root / "expected-descendant-release"
+        substitute_root = self.root / "substitute-descendant-release"
+        retained_scripts = self.root / "retained-expected-scripts"
+        runner_path = MODULE.PurePosixPath("scripts/codex_personal_sync.py")
+        write_public_base_fixture(release_root)
+        write_public_base_fixture(substitute_root)
+        (substitute_root / Path(*runner_path.parts)).write_text(
+            "#!/usr/bin/env python3\n# install-private substitute\n",
+            encoding="utf-8",
+        )
+        release_expectation = MODULE._source_release_identity(release_root, None)
+        original_runner = (release_root / Path(*runner_path.parts)).read_bytes()
+        real_capture = (
+            MODULE._release_tree_identity_and_captured_files_from_directory_fd
+        )
+
+        def capture_substitute_then_restore(*args, **kwargs):
+            original_scripts = release_root / "scripts"
+            substitute_scripts = substitute_root / "scripts"
+            original_scripts.rename(retained_scripts)
+            substitute_scripts.rename(original_scripts)
+            try:
+                return real_capture(*args, **kwargs)
+            finally:
+                original_scripts.rename(substitute_scripts)
+                retained_scripts.rename(original_scripts)
+
+        with (
+            mock.patch.object(
+                MODULE,
+                "_release_tree_identity_and_captured_files_from_directory_fd",
+                side_effect=capture_substitute_then_restore,
+            ),
+            self.assertRaisesRegex(
+                MODULE.SyncError,
+                "release source changed after its captured identity",
+            ),
+        ):
+            MODULE.read_expected_release_file(
+                release_root,
+                runner_path,
+                release_expectation,
+            )
+
+        self.assertEqual(
+            (release_root / Path(*runner_path.parts)).read_bytes(),
+            original_runner,
+        )
+
     def test_safe_extract_rejects_exact_duplicate_before_writing(self) -> None:
         archive_path = self.root / "duplicate.tar.gz"
         member_name = "personal-codex/payload.txt"
@@ -768,7 +884,7 @@ class PrivateOverlayPackageTests(unittest.TestCase):
 
         destination = self.root / "duplicate-extract"
         with self.assertRaisesRegex(MODULE.SyncError, "duplicate archive member path"):
-            MODULE.safe_extract_archive(archive_path, destination)
+            self.safe_extract_archive(archive_path, destination)
 
         self.assertFalse(destination.exists())
 
@@ -806,7 +922,7 @@ class PrivateOverlayPackageTests(unittest.TestCase):
                     for patcher in patches:
                         stack.enter_context(patcher)
                     with self.assertRaisesRegex(MODULE.SyncError, expected):
-                        MODULE.safe_extract_archive(archive_path, destination)
+                        self.safe_extract_archive(archive_path, destination)
                 self.assertFalse(destination.exists())
 
     def test_safe_extract_counts_pax_metadata_against_expanded_limit(self) -> None:
@@ -828,7 +944,7 @@ class PrivateOverlayPackageTests(unittest.TestCase):
                 MODULE.SyncError,
                 "total expanded byte limit",
             ):
-                MODULE.safe_extract_archive(archive_path, destination)
+                self.safe_extract_archive(archive_path, destination)
 
         self.assertFalse(destination.exists())
 
@@ -852,7 +968,7 @@ class PrivateOverlayPackageTests(unittest.TestCase):
                 MODULE.SyncError,
                 "total expanded byte limit",
             ):
-                MODULE.safe_extract_archive(archive_path, destination)
+                self.safe_extract_archive(archive_path, destination)
 
         self.assertFalse(destination.exists())
 
@@ -901,7 +1017,7 @@ class PrivateOverlayPackageTests(unittest.TestCase):
             side_effect=rewrite_after_identity,
         ):
             with self.assertRaisesRegex(MODULE.SyncError, "file changed during validation"):
-                MODULE.safe_extract_archive(archive_path, destination)
+                self.safe_extract_archive(archive_path, destination)
 
         self.assertEqual(identity_calls, 1)
         self.assertIsNotNone(raced_path)
@@ -925,7 +1041,7 @@ class PrivateOverlayPackageTests(unittest.TestCase):
                     MODULE.SyncError,
                     "unsafe archive member path",
                 ):
-                    MODULE.safe_extract_archive(archive_path, destination)
+                    self.safe_extract_archive(archive_path, destination)
                 self.assertFalse(destination.exists())
 
     def test_safe_extract_rejects_pax_path_with_embedded_nul_before_writing(
@@ -948,7 +1064,7 @@ class PrivateOverlayPackageTests(unittest.TestCase):
             MODULE.SyncError,
             "unsafe archive member path: embedded NUL",
         ):
-            MODULE.safe_extract_archive(archive_path, destination)
+            self.safe_extract_archive(archive_path, destination)
 
         self.assertFalse(destination.exists())
 
@@ -996,7 +1112,7 @@ class PrivateOverlayPackageTests(unittest.TestCase):
                             )
                         )
                     with self.assertRaisesRegex(MODULE.SyncError, expected):
-                        MODULE.safe_extract_archive(archive_path, destination)
+                        self.safe_extract_archive(archive_path, destination)
                 self.assertFalse(destination.exists())
 
     def test_archive_member_path_limits_accept_boundaries_and_shared_prefixes(
@@ -1073,7 +1189,7 @@ class PrivateOverlayPackageTests(unittest.TestCase):
             ) as create_destination,
             self.assertRaisesRegex(MODULE.SyncError, "path entry limit"),
         ):
-            MODULE.safe_extract_archive(archive_path, destination)
+            self.safe_extract_archive(archive_path, destination)
 
         create_destination.assert_not_called()
         self.assertFalse(destination.exists())
@@ -1126,7 +1242,7 @@ class PrivateOverlayPackageTests(unittest.TestCase):
                     MODULE.SyncError,
                     "portable archive member path conflict",
                 ):
-                    MODULE.safe_extract_archive(archive_path, destination)
+                    self.safe_extract_archive(archive_path, destination)
 
                 self.assertFalse(destination.exists())
 
@@ -1141,7 +1257,7 @@ class PrivateOverlayPackageTests(unittest.TestCase):
             MODULE.SyncError,
             "pre-existing archive destination",
         ):
-            MODULE.safe_extract_archive(archive_path, destination)
+            self.safe_extract_archive(archive_path, destination)
 
         self.assertTrue(destination.is_symlink())
         self.assertEqual(list(outside.iterdir()), [])
@@ -1159,9 +1275,9 @@ class PrivateOverlayPackageTests(unittest.TestCase):
 
         with self.assertRaisesRegex(
             MODULE.SyncError,
-            "unsafe archive destination parent",
+            "unsafe archive directory",
         ):
-            MODULE.safe_extract_archive(archive_path, destination)
+            self.safe_extract_archive(archive_path, destination)
 
         self.assertEqual(sentinel.read_text(encoding="utf-8"), "keep\n")
         self.assertEqual(list(nested_outside.iterdir()), [])
@@ -1188,7 +1304,7 @@ class PrivateOverlayPackageTests(unittest.TestCase):
             swap_destination,
         ):
             with self.assertRaisesRegex(MODULE.SyncError, "destination changed"):
-                MODULE.safe_extract_archive(archive_path, destination)
+                self.safe_extract_archive(archive_path, destination)
 
         self.assertEqual(sentinel.read_text(encoding="utf-8"), "keep\n")
         self.assertEqual(list(redirected.iterdir()), [sentinel])
@@ -1228,7 +1344,7 @@ class PrivateOverlayPackageTests(unittest.TestCase):
             swap_parent,
         ):
             with self.assertRaisesRegex(MODULE.SyncError, "parent changed"):
-                MODULE.safe_extract_archive(archive_path, destination)
+                self.safe_extract_archive(archive_path, destination)
 
         self.assertEqual(sentinel.read_text(encoding="utf-8"), "keep\n")
         self.assertEqual(list(redirected.iterdir()), [sentinel])
@@ -1286,7 +1402,7 @@ class PrivateOverlayPackageTests(unittest.TestCase):
                     insert_expected_leaf,
                 ):
                     with self.assertRaisesRegex(MODULE.SyncError, "entry already exists"):
-                        MODULE.safe_extract_archive(archive_path, destination)
+                        self.safe_extract_archive(archive_path, destination)
 
                 existing = (
                     destination
@@ -1316,7 +1432,7 @@ class PrivateOverlayPackageTests(unittest.TestCase):
             "extractall",
             side_effect=AssertionError("extractall must not be used"),
         ) as extractall:
-            release_root = MODULE.safe_extract_archive(archive_path, destination)
+            release_root = self.safe_extract_archive(archive_path, destination)
 
         extractall.assert_not_called()
         self.assertTrue(
@@ -1328,7 +1444,7 @@ class PrivateOverlayPackageTests(unittest.TestCase):
         public_release = self.root / "public-release"
         home = self.root / "home" / ".codex"
         write_public_base_fixture(public_release)
-        private_release = MODULE.safe_extract_archive(
+        private_release = self.safe_extract_archive(
             self.build_private_package(),
             self.root / "private-extract",
         )
@@ -1357,13 +1473,19 @@ class PrivateOverlayPackageTests(unittest.TestCase):
         public_release = self.root / "public-release"
         home = self.root / "home" / ".codex"
         write_public_base_fixture(public_release)
-        private_release = MODULE.safe_extract_archive(
+        private_release = self.safe_extract_archive(
             self.build_private_package(),
             self.root / "private-extract",
         )
         downloads: list[tuple[str, str | None]] = []
 
-        def fake_download(repo: str, destination: Path, *, sha: str | None = None):
+        def fake_download(
+            repo: str,
+            destination: Path,
+            *,
+            workspace,
+            sha: str | None = None,
+        ):
             downloads.append((repo, sha))
             if repo == "Joey-Tools/codex-private-workflows":
                 return MODULE.DownloadedRelease(
@@ -1418,11 +1540,74 @@ class PrivateOverlayPackageTests(unittest.TestCase):
         self.assertTrue((home / "AGENTS.md").is_symlink())
         self.run_quietly(MODULE.verify_overlay, home, "private")
 
+    def test_install_private_rejects_replaced_extracted_overlay_root(self) -> None:
+        overlay_root = self.root / "downloaded-private-release"
+        retained_overlay = self.root / "retained-downloaded-private-release"
+        home = self.root / "home" / ".codex"
+        overlay_root = self.safe_extract_archive(
+            self.build_private_package(),
+            overlay_root,
+        )
+        overlay_expectation = MODULE._source_release_identity(overlay_root, None)
+        overlay_root.rename(retained_overlay)
+        replacement_overlay = self.safe_extract_archive(
+            self.build_private_package(),
+            self.root / "replacement-private-extract",
+        )
+        replacement_overlay.rename(overlay_root)
+        manifest_path = overlay_root / "personal_codex" / "sync-manifest.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest["base_release"]["repo"] = "Attacker/substitute"
+        manifest_path.write_text(json.dumps(manifest) + "\n", encoding="utf-8")
+        assets = MODULE.ReleaseAssets(
+            tag_name="personal-codex-20260520-120000-2222222",
+            sha=PRIVATE_SHA,
+            archive_name=f"personal-codex-{PRIVATE_SHA}.tar.gz",
+            checksum_name=f"personal-codex-{PRIVATE_SHA}.sha256",
+            archive_id=1,
+            archive_size=1,
+            checksum_id=2,
+            checksum_size=1,
+        )
+        downloads: list[str] = []
+
+        def fake_download(repo, destination, *, workspace, sha=None):
+            downloads.append(repo)
+            return MODULE.DownloadedRelease(
+                repo=repo,
+                assets=assets,
+                release_root=overlay_root,
+                release_expectation=overlay_expectation,
+            )
+
+        with (
+            mock.patch.object(
+                MODULE,
+                "download_and_extract_release",
+                side_effect=fake_download,
+            ),
+            self.assertRaisesRegex(
+                MODULE.SyncError,
+                "release manifest changed after install preflight",
+            ),
+        ):
+            self.run_quietly(
+                MODULE.install_private_from_github,
+                "Joey-Tools/codex-private-workflows",
+                home,
+                base_repo="Joey-Tools/codex-toolbox",
+                owner="private",
+                dry_run=False,
+            )
+
+        self.assertEqual(downloads, ["Joey-Tools/codex-private-workflows"])
+        self.assertFalse((home / "personal-sync" / "current").exists())
+
     def test_install_private_uses_validated_base_release_spec(self) -> None:
         public_release = self.root / "public-release"
         home = self.root / "home" / ".codex"
         write_public_base_fixture(public_release)
-        private_release = MODULE.safe_extract_archive(
+        private_release = self.safe_extract_archive(
             self.build_private_package(),
             self.root / "private-extract",
         )
@@ -1453,7 +1638,13 @@ class PrivateOverlayPackageTests(unittest.TestCase):
                 overlay_validated = True
             return manifest
 
-        def fake_download(repo: str, destination: Path, *, sha: str | None = None):
+        def fake_download(
+            repo: str,
+            destination: Path,
+            *,
+            workspace,
+            sha: str | None = None,
+        ):
             downloads.append((repo, sha))
             if repo == "Joey-Tools/codex-private-workflows":
                 return MODULE.DownloadedRelease(
