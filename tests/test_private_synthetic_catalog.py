@@ -33,9 +33,9 @@ class PrivateSyntheticCatalogTest(unittest.TestCase):
         catalog = json.loads(override_bytes)
 
         self.assertEqual(catalog["schema_version"], 1)
-        self.assertEqual(catalog["authoring_pool"]["version"], "joey-private-v1")
+        self.assertEqual(catalog["authoring_pool"]["version"], "joey-private-v2")
         authoring_tokens = catalog["authoring_pool"]["tokens"]
-        self.assertEqual(len(authoring_tokens), 10)
+        self.assertEqual(len(authoring_tokens), 11)
         self.assertEqual(
             {token["rule"] for token in authoring_tokens},
             {"generic-secret-assignment"},

@@ -5050,13 +5050,14 @@ class PrivateOverlaySyncTests(unittest.TestCase):
         catalog = parser.parse_catalog_bytes(catalog_bytes)
 
         self.assertEqual(catalog.schema_version, 1)
-        self.assertEqual(catalog.pool_version, "joey-private-v1")
+        self.assertEqual(catalog.pool_version, "joey-private-v2")
         expected_authoring = {
             "access-a": ("access", "active"),
             "access-b": ("access", "active"),
             "access-expired": ("access", "expired"),
             "refresh-a": ("refresh", "active"),
             "refresh-b": ("refresh", "active"),
+            "refresh-c": ("refresh", "active"),
             "refresh-consumed": ("refresh", "consumed"),
             "id-a": ("id", "active"),
             "id-b": ("id", "active"),
@@ -5069,6 +5070,7 @@ class PrivateOverlaySyncTests(unittest.TestCase):
             "access-expired": "bce04e6a1f6bc2c3359fe4132bd290863ba7fd03559842c4b0b9daa7b5663ab4",
             "refresh-a": "c28443d3517b1a1c7f838da8ae2c422c6cb9eca041679faebb2ecf2e8105e2cd",
             "refresh-b": "7f1fc893d30288dc8a8c31e81e3c104d1a00fb5a63cb4f8c78edfa5eb9f393e7",
+            "refresh-c": "dea6d071dabff935154073ee2f59435222721a036e35dc4f3e394e4ce65064ac",
             "refresh-consumed": "b0ba4734994dcb74e17a490c4e1cf8182ebb4a3ab9ffa8a239087a80b9d163f2",
             "id-a": "e56c3e8a834e46c7a6de2292ab026d113bf76d496c20eb5f926fbbe031351be8",
             "id-b": "635e5d26d428b4d6114e5aeb248f11315755ebe14f847ea3963941326569c293",

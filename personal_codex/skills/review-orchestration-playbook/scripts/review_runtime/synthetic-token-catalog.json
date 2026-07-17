@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "authoring_pool": {
-    "version": "joey-private-v1",
+    "version": "joey-private-v2",
     "tokens": [
       {
         "id": "access-a",
@@ -37,6 +37,13 @@
         "state": "active",
         "rule": "generic-secret-assignment",
         "value": "codex_synth_v1_refresh_b"
+      },
+      {
+        "id": "refresh-c",
+        "role": "refresh",
+        "state": "active",
+        "rule": "generic-secret-assignment",
+        "value": "codex_synth_v2_refresh_c"
       },
       {
         "id": "refresh-consumed",
