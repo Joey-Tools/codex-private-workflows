@@ -410,20 +410,6 @@ SYNC_RULES = (
         "codex-review-workflows",
         "skills/review-orchestration-playbook",
         "personal_codex/skills/review-orchestration-playbook",
-        (
-            Replacement(
-                "REPO_ROOT = SKILL_ROOT.parents[1]",
-                "OVERLAY_ROOT = SKILL_ROOT.parents[1]\nREPO_ROOT = OVERLAY_ROOT.parent",
-            ),
-            Replacement(
-                "(REPO_ROOT / relative).exists()",
-                "(OVERLAY_ROOT / relative).exists()",
-            ),
-            Replacement(
-                'with (REPO_ROOT / "agents/reviewer.toml").open("rb") as handle:',
-                'with (OVERLAY_ROOT / "agents/reviewer.toml").open("rb") as handle:',
-            ),
-        ),
         common_joey_text=True,
         regular_file_overlays=(
             RegularFileOverlay(

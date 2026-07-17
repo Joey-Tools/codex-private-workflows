@@ -29,20 +29,21 @@ superseded_by:
 - The synchronized skill contains `tests/fixtures/ci/canonical.yml` and
   `tests/fixtures/ci/private.yml`. The private source-sync required-file list
   includes both, so an incomplete canonical review target is rejected.
-- The contract chooses `private.yml` from the exact
-  `personal_codex/skills/review-orchestration-playbook` layout relative to the
-  repository root, then requires `.github/workflows/ci.yml` to match it byte
-  for byte. Unknown layouts fail; repository names are not consulted.
+- One closed resolver recognizes the exact canonical/private skill-layout
+  suffixes and derives the repository root plus profile together. The private
+  copy therefore selects `private.yml` without source-specific test rewrites,
+  then requires `.github/workflows/ci.yml` to match it byte for byte. Unknown
+  layouts fail; repository names are not consulted.
 - Human-readable assertions document that private aggregate CI directly needs
   `platform_tests`, `python-39-compatibility`, and `platform-safety` and checks
   each result for `success`. No generic YAML parser semantics are claimed.
 
 ## Evidence
 
-- Both focused canonical and private contract files passed (`16` tests each)
+- Both focused canonical and private contract files passed (`18` tests each)
   after the snapshot redesign.
-- The complete canonical review suite passed (`707` tests; `9` skipped), and
-  the synchronized private review suite passed (`707` tests; `10` skipped).
+- The complete canonical review suite passed (`709` tests; `9` skipped), and
+  the synchronized private review suite passed (`709` tests; `10` skipped).
 - Both synchronized fixture copies byte-match their canonical skill sources;
   each profile fixture byte-matches its corresponding live CI workflow.
 - Ruff, Python compilation, Actionlint 1.7.12 for both live workflows, the two
