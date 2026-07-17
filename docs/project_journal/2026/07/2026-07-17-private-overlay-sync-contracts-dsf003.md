@@ -5,7 +5,7 @@ status: completed
 created: 2026-07-17
 updated: 2026-07-17
 branch: codex/daily-skill-friction-20260717-codex-private-workflows-private-session-retrospective-contract-sync
-pr:
+pr: https://github.com/Joey-Tools/codex-private-workflows/pull/104
 supersedes: []
 superseded_by:
 ---
@@ -30,6 +30,7 @@ superseded_by:
 
 ## Evidence
 
+- https://github.com/Joey-Tools/codex-private-workflows/pull/104
 - https://github.com/Joey-Tools/codex-private-workflows/actions/runs/29550022797
 - https://github.com/Joey-Tools/codex-workflow-hygiene/pull/46
 - https://github.com/Joey-Tools/codex-workflow-hygiene/pull/47
