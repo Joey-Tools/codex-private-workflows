@@ -1452,7 +1452,7 @@ class SessionRetrospectiveTests(unittest.TestCase):
 
         self.assertEqual(turns[0].session_id, MODULE.opaque_session_id(raw_session))
 
-    def test_remote_probe_session_meta_uses_bounded_input_scan(self) -> None:
+    def test_remote_probe_session_meta_truncation_fails_closed(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw) / ".codex"
             rollout = root / "sessions" / "2026" / "05" / "01" / "rollout-2026-05-01T10-00-00-large.jsonl"
@@ -1472,14 +1472,21 @@ class SessionRetrospectiveTests(unittest.TestCase):
             )
 
             with mock.patch.object(REMOTE_PROBE, "MAX_SESSION_META_SCAN_BYTES", len(first) - 1):
-                rows = REMOTE_PROBE._iter_session_meta_records(
-                    codex_root=root,
-                    dates=[dt.date(2026, 5, 1)],
-                    limit=10,
-                    host="local",
-                )
+                with self.assertRaisesRegex(
+                    REMOTE_PROBE.SessionMetaRolloutError,
+                    "session metadata scan truncated",
+                ) as raised:
+                    REMOTE_PROBE._iter_session_meta_records(
+                        codex_root=root,
+                        dates=[dt.date(2026, 5, 1)],
+                        limit=10,
+                        host="local",
+                    )
 
-        self.assertEqual(rows, [])
+        self.assertEqual(
+            raised.exception.rollout,
+            "sessions/2026/05/01/rollout-2026-05-01T10-00-00-large.jsonl",
+        )
 
     def test_explicit_sources_still_require_default_host_coverage(self) -> None:
         sources = MODULE.parse_sources(["local=/tmp/local", "miku-bot-dev=/tmp/miku"])
@@ -9823,23 +9830,33 @@ class SessionRetrospectiveTests(unittest.TestCase):
 
                 self.assertIsNone(record)
 
-    def test_remote_probe_keeps_normal_review_prompt_before_signaling(self) -> None:
+    def test_remote_probes_handle_normal_review_prompt_without_signaling(self) -> None:
         prompt = "Review the code changes against the base branch and report only actionable findings."
 
-        for probe in (REMOTE_PROBE, REMOTE_HOST_CONTEXT_PROBE):
-            with self.subTest(probe=probe.__name__):
-                record = probe._build_summary_record(
-                    kind="user_message",
-                    text=prompt,
-                    line_no=1,
-                    timestamp="2026-05-22T10:01:00Z",
-                    max_text_chars=1200,
-                    session_id="s1",
-                )
+        retrospective_record = REMOTE_PROBE._build_summary_record(
+            kind="user_message",
+            text=prompt,
+            line_no=1,
+            timestamp="2026-05-22T10:01:00Z",
+            max_text_chars=1200,
+            session_id="s1",
+        )
+        remote_host_record = REMOTE_HOST_CONTEXT_PROBE._build_summary_record(
+            kind="user_message",
+            text=prompt,
+            line_no=1,
+            timestamp="2026-05-22T10:01:00Z",
+            max_text_chars=1200,
+            session_id="s1",
+        )
 
-                self.assertIsNotNone(record)
-                assert record is not None
-                self.assertEqual(record["_match_text"], prompt)
+        self.assertIsNotNone(retrospective_record)
+        self.assertIsNotNone(remote_host_record)
+        assert retrospective_record is not None
+        assert remote_host_record is not None
+        self.assertNotIn("_match_text", retrospective_record)
+        self.assertNotIn("_keyword_matched", retrospective_record)
+        self.assertEqual(remote_host_record["_match_text"], prompt)
 
     def test_remote_probe_ignores_automation_prompt_before_signaling(self) -> None:
         for probe in (REMOTE_PROBE, REMOTE_HOST_CONTEXT_PROBE):
