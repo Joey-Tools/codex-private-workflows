@@ -418,6 +418,8 @@ def _regular_file_open_flags() -> int:
 def _validate_relative_path_parts(
     relative_path: pathlib.PurePosixPath,
 ) -> tuple[str, ...]:
+    if relative_path.is_absolute():
+        raise ValueError("path must stay under Codex root")
     parts = relative_path.parts
     if any(part in ("", ".", "..") for part in parts):
         raise ValueError("path must stay under Codex root")
@@ -1402,6 +1404,8 @@ def regular_file_open_flags():
 
 
 def validate_relative_path_parts(rel):
+    if rel.is_absolute():
+        raise ValueError("path must stay under Codex root")
     parts = rel.parts
     if any(part in ("", ".", "..") for part in parts):
         raise ValueError("path must stay under Codex root")
@@ -2418,6 +2422,10 @@ def summarize_rollout_chunks():
         )
         if meta_bytes + serialized_bytes > MAX_CHUNKED_ROLLOUT_SUMMARY_OUTPUT_BYTES:
             raise ValueError("chunked summary output too large")
+    except FileNotFoundError:
+        print(json.dumps({{"ok": False, "error": "rollout not found"}}, separators=(",", ":"), sort_keys=True))
+        print(CHUNKED_ROLLOUT_SUMMARY_END)
+        return
     except OSError:
         print(json.dumps({{"ok": False, "error": "rollout unreadable"}}, separators=(",", ":"), sort_keys=True))
         print(CHUNKED_ROLLOUT_SUMMARY_END)
@@ -2477,6 +2485,9 @@ def summarize_rollout():
         return
     except OSError:
         summary_error("rollout unreadable")
+        return
+    except ValueError as error:
+        summary_error(str(error))
         return
     with handle:
         try:

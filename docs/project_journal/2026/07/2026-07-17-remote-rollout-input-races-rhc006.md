@@ -18,6 +18,7 @@ superseded_by:
 - Kept the rollout parent descriptor through each read so descriptor and current-entry identity checks cannot be redirected by mutable ancestor paths.
 - Made `session-meta` accept only complete LF-terminated JSONL records inside its byte cap, reject bare CR termination, and propagate directory-enumeration failures through path-neutral errors while preserving optional directories that disappear during enumeration.
 - Opened final rollout entries with `O_NONBLOCK` before the regular-file `fstat` check so a stat-to-open FIFO replacement cannot hang the probe.
+- Rejected absolute rollout paths in both local and embedded descriptor traversal, and kept expected embedded safety rejections and post-preflight disappearance inside closed, structured frames.
 - Bounded remote `fetch-rollout-chunk` stdout capture to the exact base64-frame budget derived from the 2 MiB chunk ceiling.
 
 ## Current State
@@ -35,10 +36,11 @@ superseded_by:
 ## Evidence
 
 - Focused FIFO and record-termination regressions: 6 tests passed.
-- Complete remote probe regression module: 56 tests passed.
+- Final absolute-path, framed-safety-rejection, and post-preflight disappearance regressions: 3 tests passed.
+- Complete remote probe regression module: 59 tests passed.
 - Nine previously failing cross-probe compatibility regressions: 9 tests passed.
 - Complete retrospective regression module: 397 tests passed, 1 skipped.
-- Complete repository regression suite: 611 tests passed, 1 skipped.
+- Complete repository regression suite: 614 tests passed, 1 skipped.
 - Ruff check passed for the probe and its direct tests; the retrospective compatibility file passed with its pre-existing, out-of-diff `F541` excluded. Ruff format check passed for the two directly formatted files.
 - The isolated OpenAI skill validator, project journal validator, and `git diff --check` passed.
 - `personal_codex/skills/remote-host-context/scripts/remote_codex_probe.py`

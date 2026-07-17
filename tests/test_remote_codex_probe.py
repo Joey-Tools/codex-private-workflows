@@ -1110,6 +1110,59 @@ class RemoteCodexProbeChunkTests(unittest.TestCase):
         ):
             MODULE._regular_file_open_flags()
 
+    def test_relative_path_validator_rejects_absolute_local_and_embedded(
+        self,
+    ) -> None:
+        absolute_path = MODULE.pathlib.PurePosixPath(
+            "/tmp/rollout-absolute-must-not-open.jsonl"
+        )
+        with self.assertRaisesRegex(ValueError, "path must stay under Codex root"):
+            MODULE._validate_relative_path_parts(absolute_path)
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            codex_root = Path(temp_dir) / ".codex"
+            codex_root.mkdir()
+            script = MODULE._remote_python_script(
+                {
+                    "mode": "session-meta",
+                    "dates": [],
+                    "limit": 10,
+                    "codex_root": str(codex_root),
+                    "session_meta_scan_bytes": MODULE.MAX_SESSION_META_SCAN_BYTES,
+                }
+            )
+            marker = 'if CONFIG["mode"] == "session-meta":\n'
+            injection = (
+                "try:\n"
+                f"    validate_relative_path_parts(pathlib.PurePosixPath({absolute_path.as_posix()!r}))\n"
+                "except ValueError as error:\n"
+                "    if str(error) != 'path must stay under Codex root':\n"
+                "        raise\n"
+                "else:\n"
+                "    raise AssertionError('absolute path passed embedded validator')\n\n"
+            )
+            self.assertEqual(script.count(marker), 1)
+            self.assertIn("if rel.is_absolute():", script)
+            script = script.replace(marker, injection + marker)
+            result = subprocess.run(
+                [sys.executable, "-"],
+                input=script,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stderr, "")
+        payload_lines = MODULE._extract_framed_lines(
+            result.stdout,
+            begin_marker=MODULE.REMOTE_SESSION_META_BEGIN,
+            end_marker=MODULE.REMOTE_SESSION_META_END,
+            host="embedded",
+            command="session-meta",
+        )
+        self.assertEqual(payload_lines, [])
+
     @unittest.skipUnless(
         hasattr(os, "mkfifo") and hasattr(os, "O_NONBLOCK"),
         "FIFO nonblocking opens require POSIX mkfifo and O_NONBLOCK",
@@ -1708,6 +1761,63 @@ class RemoteCodexProbeChunkTests(unittest.TestCase):
             run_remote.call_args.kwargs["max_stdout_bytes"],
             MODULE.MAX_CHUNKED_ROLLOUT_SUMMARY_OUTPUT_BYTES
             + MODULE.REMOTE_CHUNKED_SUMMARY_FRAME_OVERHEAD_BYTES,
+        )
+
+    def test_embedded_chunk_summary_missing_at_actual_open_stays_not_found(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            codex_root = Path(temp_dir) / ".codex"
+            rollout = write_rollout(
+                codex_root,
+                ['{"type":"session_meta","payload":{"id":"vanished"}}'],
+            )
+            identity = rollout_identity(codex_root, rollout)
+            script = MODULE._remote_python_script(
+                {
+                    "mode": "chunked-rollout-summary",
+                    "rollout": rollout,
+                    "codex_root": str(codex_root),
+                    "summary_keywords": [],
+                    "summary_limit": 10,
+                    "summary_tail_records": 0,
+                    "summary_max_text_chars": 200,
+                    "chunk_bytes": MODULE.MIN_ROLLOUT_CHUNK_BYTES,
+                    "max_fetch_rollout_bytes": MODULE.MAX_FETCH_ROLLOUT_BYTES,
+                    "max_fetch_rollout_chunk_bytes": MODULE.MAX_FETCH_ROLLOUT_CHUNK_BYTES,
+                    "min_rollout_chunk_bytes": MODULE.MIN_ROLLOUT_CHUNK_BYTES,
+                    "max_rollout_chunk_bytes": MODULE.MAX_ROLLOUT_CHUNK_BYTES,
+                    "max_chunked_summary_output_bytes": MODULE.MAX_CHUNKED_ROLLOUT_SUMMARY_OUTPUT_BYTES,
+                    "max_fetch_range_plan_entries": MODULE.MAX_FETCH_RANGE_PLAN_ENTRIES,
+                    "expected_source_bytes": identity.size,
+                    "expected_source_identity": MODULE._rollout_identity_token(
+                        identity
+                    ),
+                    "authorized_source_bytes": None,
+                    "output_host": "embedded",
+                }
+            )
+            (codex_root / rollout).unlink()
+            result = subprocess.run(
+                [sys.executable, "-"],
+                input=script,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stderr, "")
+        payload_lines = MODULE._extract_framed_lines(
+            result.stdout,
+            begin_marker=MODULE.REMOTE_CHUNKED_ROLLOUT_SUMMARY_BEGIN,
+            end_marker=MODULE.REMOTE_CHUNKED_ROLLOUT_SUMMARY_END,
+            host="embedded",
+            command="chunked-rollout-summary",
+        )
+        self.assertEqual(
+            [json.loads(line) for line in payload_lines],
+            [{"ok": False, "error": "rollout not found"}],
         )
 
     def test_embedded_remote_rejects_fetch_range_plan_before_allocation(self) -> None:
@@ -2667,6 +2777,58 @@ class RemoteCodexProbeChunkTests(unittest.TestCase):
         self.assertEqual(rc, 1)
         self.assertEqual(output.getvalue(), "")
         self.assertIn("identity changed after summary scan", error_output.getvalue())
+
+    def test_embedded_rollout_summary_symlink_rejection_stays_framed(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            base = Path(temp_dir)
+            codex_root = base / ".codex"
+            outside = base / "outside-rollout.jsonl"
+            outside.write_text(
+                '{"type":"session_meta","payload":{"id":"must-not-escape"}}\n',
+                encoding="utf-8",
+            )
+            rollout = "sessions/2026/05/26/rollout-2026-05-26T10-00-00-symlink.jsonl"
+            rollout_path = codex_root / rollout
+            rollout_path.parent.mkdir(parents=True)
+            rollout_path.symlink_to(outside)
+            script = MODULE._remote_python_script(
+                {
+                    "mode": "rollout-summary",
+                    "rollout": rollout,
+                    "codex_root": str(codex_root),
+                    "summary_keywords": [],
+                    "summary_limit": 10,
+                    "summary_scan_bytes": MODULE.MAX_ROLLOUT_SUMMARY_SCAN_BYTES,
+                    "summary_line_bytes": MODULE.MAX_ROLLOUT_SUMMARY_LINE_BYTES,
+                    "summary_tail_records": 0,
+                    "summary_max_text_chars": 200,
+                }
+            )
+            result = subprocess.run(
+                [sys.executable, "-"],
+                input=script,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stderr, "")
+        payload_lines = MODULE._extract_framed_lines(
+            result.stdout,
+            begin_marker=MODULE.REMOTE_ROLLOUT_SUMMARY_BEGIN,
+            end_marker=MODULE.REMOTE_ROLLOUT_SUMMARY_END,
+            host="embedded",
+            command="rollout-summary",
+        )
+        self.assertEqual(
+            [json.loads(line) for line in payload_lines],
+            [{"ok": False, "error": "rollout path is a symlink"}],
+        )
+        self.assertNotIn("must-not-escape", result.stdout)
+        self.assertNotIn("Traceback", result.stdout)
 
     def test_rollout_summary_rejects_path_mutation_before_output(self) -> None:
         for mutation in ("append", "replace"):
