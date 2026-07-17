@@ -8,6 +8,7 @@ import binascii
 import collections
 import dataclasses
 import datetime as dt
+import errno
 import hashlib
 import json
 import os
@@ -897,6 +898,46 @@ def _assert_append_only_rollout_identity(
         raise ValueError(f"rollout identity changed {phase}")
 
 
+def _capture_rollout_candidate_identity_from_parent_fd(
+    parent_fd: int,
+    name: str,
+) -> RolloutCandidateIdentity:
+    try:
+        fd = os.open(name, _regular_file_open_flags(), dir_fd=parent_fd)
+    except FileNotFoundError as exc:
+        raise ValueError("rollout identity changed during enumeration") from exc
+    except OSError as exc:
+        if exc.errno == errno.ELOOP:
+            raise ValueError("rollout path is a symlink") from exc
+        raise
+    try:
+        descriptor_identity = _rollout_candidate_identity_from_stat(os.fstat(fd))
+        try:
+            path_before_identity = _rollout_candidate_identity_from_stat(
+                os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+            )
+            path_after_identity = _rollout_candidate_identity_from_stat(
+                os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+            )
+        except FileNotFoundError as exc:
+            raise ValueError(
+                "rollout identity changed during enumeration"
+            ) from exc
+        _assert_rollout_identity(
+            path_before_identity.snapshot,
+            descriptor_identity.snapshot,
+            phase="during enumeration",
+        )
+        _assert_rollout_identity(
+            path_after_identity.snapshot,
+            descriptor_identity.snapshot,
+            phase="during enumeration",
+        )
+        return descriptor_identity
+    finally:
+        os.close(fd)
+
+
 def _read_rollout_prefix_proof(
     fd: int,
     length: int,
@@ -1705,6 +1746,7 @@ def _remote_python_script(payload: dict[str, object]) -> str:
     return f"""
 import base64
 import collections
+import errno
 import hashlib
 import json
 import os
@@ -2153,6 +2195,43 @@ def assert_append_only_rollout_identity(actual, expected, phase):
     unchanged_snapshot = actual["size"] != expected["size"] or actual == expected
     if not same_file or actual["size"] < expected["size"] or not unchanged_snapshot:
         raise ValueError("rollout identity changed " + phase)
+
+
+def capture_rollout_candidate_identity_from_parent_fd(parent_fd, name):
+    try:
+        fd = os.open(name, regular_file_open_flags(), dir_fd=parent_fd)
+    except FileNotFoundError as error:
+        raise ValueError("rollout identity changed during enumeration") from error
+    except OSError as error:
+        if error.errno == errno.ELOOP:
+            raise ValueError("rollout path is a symlink") from error
+        raise
+    try:
+        descriptor_identity = rollout_candidate_identity_from_stat(os.fstat(fd))
+        try:
+            path_before_identity = rollout_candidate_identity_from_stat(
+                os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+            )
+            path_after_identity = rollout_candidate_identity_from_stat(
+                os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+            )
+        except FileNotFoundError as error:
+            raise ValueError(
+                "rollout identity changed during enumeration"
+            ) from error
+        assert_rollout_identity(
+            path_before_identity["snapshot"],
+            descriptor_identity["snapshot"],
+            "during enumeration",
+        )
+        assert_rollout_identity(
+            path_after_identity["snapshot"],
+            descriptor_identity["snapshot"],
+            "during enumeration",
+        )
+        return descriptor_identity
+    finally:
+        os.close(fd)
 
 
 def read_rollout_prefix_proof(
@@ -3417,7 +3496,6 @@ def iter_session_meta():
         flat_archive,
     ):
         try:
-            directory_device = os.fstat(directory_fd).st_dev
             candidates = []
             with os.scandir(directory_fd) as entries:
                 for entry in entries:
@@ -3430,27 +3508,14 @@ def iter_session_meta():
                     ):
                         continue
                     try:
-                        dirent_inode = entry.inode()
-                        stat_result = entry.stat(follow_symlinks=False)
-                    except FileNotFoundError:
-                        session_rollout_error(
-                            rel,
-                            "rollout identity changed during enumeration",
+                        identity = capture_rollout_candidate_identity_from_parent_fd(
+                            directory_fd,
+                            entry.name,
                         )
-                    except OSError:
-                        session_rollout_error(rel, "rollout unreadable")
-                    if (
-                        stat_result.st_ino != dirent_inode
-                        or stat_result.st_dev != directory_device
-                    ):
-                        session_rollout_error(
-                            rel,
-                            "rollout identity changed during enumeration",
-                        )
-                    try:
-                        identity = rollout_candidate_identity_from_stat(stat_result)
                     except ValueError as error:
                         session_rollout_error(rel, str(error))
+                    except OSError:
+                        session_rollout_error(rel, "rollout unreadable")
                     candidates.append((entry.name, identity))
         except OSError:
             session_directory_unreadable()
@@ -3771,7 +3836,6 @@ def _scan_session_meta_records(
         flat_archive: bool,
     ) -> list[tuple[str, RolloutCandidateIdentity]]:
         try:
-            directory_device = os.fstat(directory_fd).st_dev
             candidates: list[tuple[str, RolloutCandidateIdentity]] = []
             with os.scandir(directory_fd) as entries:
                 for entry in entries:
@@ -3784,31 +3848,20 @@ def _scan_session_meta_records(
                     ):
                         continue
                     try:
-                        dirent_inode = entry.inode()
-                        stat_result = entry.stat(follow_symlinks=False)
-                    except FileNotFoundError as exc:
+                        identity = (
+                            _capture_rollout_candidate_identity_from_parent_fd(
+                                directory_fd,
+                                entry.name,
+                            )
+                        )
+                    except ValueError as exc:
                         raise SessionMetaRolloutError(
-                            "rollout identity changed during enumeration",
+                            str(exc),
                             rollout=relative_path.as_posix(),
                         ) from exc
                     except OSError as exc:
                         raise SessionMetaRolloutError(
                             "rollout unreadable",
-                            rollout=relative_path.as_posix(),
-                        ) from exc
-                    if (
-                        stat_result.st_ino != dirent_inode
-                        or stat_result.st_dev != directory_device
-                    ):
-                        raise SessionMetaRolloutError(
-                            "rollout identity changed during enumeration",
-                            rollout=relative_path.as_posix(),
-                        )
-                    try:
-                        identity = _rollout_candidate_identity_from_stat(stat_result)
-                    except ValueError as exc:
-                        raise SessionMetaRolloutError(
-                            str(exc),
                             rollout=relative_path.as_posix(),
                         ) from exc
                     candidates.append((entry.name, identity))

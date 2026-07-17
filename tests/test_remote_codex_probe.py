@@ -112,25 +112,46 @@ def embedded_session_meta_records(namespace: dict[str, object]) -> list[dict[str
     ]
 
 
-def entry_mutating_scandir(
-    real_scandir,
+def candidate_mutating_stat(
+    real_stat,
     target_name: str,
     mutate,
     *,
-    before_stat: bool = False,
+    before_first_stat: bool,
 ):
+    matching_calls = 0
+
+    def mutating_stat(path, *args, **kwargs):
+        nonlocal matching_calls
+        is_candidate_stat = (
+            path == target_name
+            and kwargs.get("dir_fd") is not None
+            and kwargs.get("follow_symlinks") is False
+        )
+        if not is_candidate_stat:
+            return real_stat(path, *args, **kwargs)
+        matching_calls += 1
+        if matching_calls == 1 and before_first_stat:
+            mutate()
+        result = real_stat(path, *args, **kwargs)
+        if matching_calls == 1 and not before_first_stat:
+            mutate()
+        return result
+
+    return mutating_stat
+
+
+def poisoned_entry_scandir(real_scandir, target_name: str):
     class EntryProxy:
         def __init__(self, entry) -> None:
             self._entry = entry
             self.name = entry.name
 
+        def inode(self):
+            raise AssertionError("DirEntry.inode must not bind rollout identity")
+
         def stat(self, *, follow_symlinks: bool = True):
-            if before_stat:
-                mutate()
-            result = self._entry.stat(follow_symlinks=follow_symlinks)
-            if not before_stat:
-                mutate()
-            return result
+            raise AssertionError("DirEntry.stat must not bind rollout identity")
 
         def __getattr__(self, name: str):
             return getattr(self._entry, name)
@@ -149,10 +170,10 @@ def entry_mutating_scandir(
         def __exit__(self, *args: object):
             return self._iterator.__exit__(*args)
 
-    def mutating_scandir(path):
+    def poisoned_scandir(path):
         return ScandirProxy(real_scandir(path))
 
-    return mutating_scandir
+    return poisoned_scandir
 
 
 class RemoteHostContextDocumentationTests(unittest.TestCase):
@@ -201,7 +222,9 @@ class RemoteHostContextDocumentationTests(unittest.TestCase):
         self.assertIn("cap cuts through a record", skill)
         self.assertIn("ordinary truncation", skill)
         self.assertIn("narrow the date or host scope, or raise `--limit`", skill)
-        self.assertIn("same `scandir` entry", skill)
+        self.assertIn("name-only discovery", skill)
+        self.assertIn("two fresh descriptor-relative no-follow stats", skill)
+        self.assertIn("cached dirent inode", skill)
         self.assertIn("at most `limit + 1` candidates", skill)
         self.assertIn("latest observed high-water mark", skill)
         self.assertIn("aligned verified-snapshot identity", skill)
@@ -367,7 +390,7 @@ class SizeGuardedBytesIO(io.BytesIO):
 
 
 class RemoteCodexProbeChunkTests(unittest.TestCase):
-    def test_session_meta_binds_identity_captured_during_scandir(self) -> None:
+    def test_session_meta_binds_descriptor_identity_during_scandir(self) -> None:
         for scope in ("local", "embedded"):
             for mutation in (
                 "delete_before_stat",
@@ -438,17 +461,17 @@ class RemoteCodexProbeChunkTests(unittest.TestCase):
                         def run_scan():
                             return embedded_session_meta_records(namespace)
 
-                    real_scandir = target_os.scandir
-                    patched_scandir = entry_mutating_scandir(
-                        real_scandir,
+                    real_stat = target_os.stat
+                    patched_stat = candidate_mutating_stat(
+                        real_stat,
                         rollout.name,
                         mutate,
-                        before_stat=mutation.endswith("before_stat"),
+                        before_first_stat=mutation.endswith("before_stat"),
                     )
                     with mock.patch.object(
                         target_os,
-                        "scandir",
-                        side_effect=patched_scandir,
+                        "stat",
+                        side_effect=patched_stat,
                     ):
                         if scope == "local":
                             with self.assertRaises(
@@ -467,6 +490,192 @@ class RemoteCodexProbeChunkTests(unittest.TestCase):
                     self.assertIn("identity changed", error)
                     self.assertEqual(error_rollout, rollout_ref)
                     self.assertNotIn("replacement-session", error)
+
+    def test_session_meta_uses_scandir_entries_for_names_only(self) -> None:
+        for scope in ("local", "embedded"):
+            with self.subTest(scope=scope), tempfile.TemporaryDirectory() as temp_dir:
+                codex_root = Path(temp_dir) / ".codex"
+                rollout = (
+                    codex_root
+                    / "sessions/2026/05/26/"
+                    "rollout-2026-05-26T10-00-00-name-only.jsonl"
+                )
+                write_session_meta_rollout(
+                    rollout,
+                    "trusted-session",
+                    "/trusted",
+                    "trusted follow-up",
+                )
+                if scope == "local":
+                    target_os = MODULE.os
+
+                    def run_scan():
+                        return MODULE._scan_session_meta_records(
+                            codex_root=codex_root,
+                            dates=[MODULE.dt.date(2026, 5, 26)],
+                            limit=10,
+                            host="local",
+                        ).rows
+
+                else:
+                    namespace = embedded_probe_namespace(
+                        {
+                            "mode": "session-meta",
+                            "dates": ["2026/05/26"],
+                            "limit": 10,
+                            "codex_root": str(codex_root),
+                            "session_meta_scan_bytes": (
+                                MODULE.MAX_SESSION_META_SCAN_BYTES
+                            ),
+                        }
+                    )
+                    target_os = namespace["os"]
+
+                    def run_scan():
+                        return embedded_session_meta_records(namespace)
+
+                patched_scandir = poisoned_entry_scandir(
+                    target_os.scandir,
+                    rollout.name,
+                )
+                with mock.patch.object(
+                    target_os,
+                    "scandir",
+                    side_effect=patched_scandir,
+                ):
+                    rows = run_scan()
+
+                self.assertEqual(
+                    [row["session_id"] for row in rows if "session_id" in row],
+                    ["trusted-session"],
+                )
+
+    @unittest.skipUnless(
+        hasattr(os, "symlink") and hasattr(os, "O_NOFOLLOW"),
+        "symlink rejection requires POSIX O_NOFOLLOW",
+    )
+    def test_candidate_identity_open_maps_symlink_to_precise_error(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            parent = Path(temp_dir)
+            target = parent / "target.jsonl"
+            target.write_text("{}\n", encoding="utf-8")
+            candidate = parent / "rollout-2026-05-26T10-00-00-link.jsonl"
+            candidate.symlink_to(target)
+            parent_fd = os.open(parent, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                for scope in ("local", "embedded"):
+                    if scope == "local":
+                        capture = (
+                            MODULE._capture_rollout_candidate_identity_from_parent_fd
+                        )
+                    else:
+                        namespace = embedded_probe_namespace(
+                            {
+                                "mode": "session-meta",
+                                "dates": [],
+                                "limit": 10,
+                                "codex_root": str(parent),
+                                "session_meta_scan_bytes": (
+                                    MODULE.MAX_SESSION_META_SCAN_BYTES
+                                ),
+                            }
+                        )
+                        capture = namespace[
+                            "capture_rollout_candidate_identity_from_parent_fd"
+                        ]
+                    with self.subTest(scope=scope), self.assertRaisesRegex(
+                        ValueError,
+                        "rollout path is a symlink",
+                    ):
+                        capture(parent_fd, candidate.name)
+            finally:
+                os.close(parent_fd)
+
+    def test_candidate_identity_enumeration_bounds_transient_rollout_fds(
+        self,
+    ) -> None:
+        for scope in ("local", "embedded"):
+            with self.subTest(scope=scope), tempfile.TemporaryDirectory() as temp_dir:
+                codex_root = Path(temp_dir) / ".codex"
+                rollout_names: set[str] = set()
+                for index in range(3):
+                    rollout = (
+                        codex_root
+                        / "sessions/2026/05/26/"
+                        f"rollout-2026-05-26T10-00-0{index}-fd-bound.jsonl"
+                    )
+                    write_session_meta_rollout(
+                        rollout,
+                        f"trusted-{index}",
+                        "/trusted",
+                        "trusted follow-up",
+                    )
+                    rollout_names.add(rollout.name)
+                rollout_parent = (
+                    codex_root / "sessions" / "2026" / "05" / "26"
+                )
+                if scope == "local":
+                    target_os = MODULE.os
+                    capture = MODULE._capture_rollout_candidate_identity_from_parent_fd
+
+                else:
+                    namespace = embedded_probe_namespace(
+                        {
+                            "mode": "session-meta",
+                            "dates": ["2026/05/26"],
+                            "limit": 10,
+                            "codex_root": str(codex_root),
+                            "session_meta_scan_bytes": (
+                                MODULE.MAX_SESSION_META_SCAN_BYTES
+                            ),
+                        }
+                    )
+                    target_os = namespace["os"]
+                    capture = namespace[
+                        "capture_rollout_candidate_identity_from_parent_fd"
+                    ]
+
+                real_open = target_os.open
+                real_close = target_os.close
+                active_rollout_fds: set[int] = set()
+                peak_rollout_fds = 0
+
+                def tracking_open(path, *args, **kwargs):
+                    nonlocal peak_rollout_fds
+                    fd = real_open(path, *args, **kwargs)
+                    if path in rollout_names and kwargs.get("dir_fd") is not None:
+                        active_rollout_fds.add(fd)
+                        peak_rollout_fds = max(
+                            peak_rollout_fds,
+                            len(active_rollout_fds),
+                        )
+                    return fd
+
+                def tracking_close(fd: int) -> None:
+                    active_rollout_fds.discard(fd)
+                    real_close(fd)
+
+                parent_fd = os.open(rollout_parent, os.O_RDONLY | os.O_DIRECTORY)
+                try:
+                    with (
+                        mock.patch.object(
+                            target_os,
+                            "open",
+                            side_effect=tracking_open,
+                        ),
+                        mock.patch.object(
+                            target_os,
+                            "close",
+                            side_effect=tracking_close,
+                        ),
+                    ):
+                        for rollout_name in sorted(rollout_names):
+                            capture(parent_fd, rollout_name)
+                finally:
+                    os.close(parent_fd)
+
+                self.assertEqual(peak_rollout_fds, 1)
+                self.assertEqual(active_rollout_fds, set())
 
     def test_active_session_meta_enforces_append_only_policy(self) -> None:
         for scope in ("local", "embedded"):
@@ -2077,7 +2286,7 @@ class RemoteCodexProbeChunkTests(unittest.TestCase):
             self.assertEqual(raised.exception.error, "rollout unreadable")
             self.assertEqual(raised.exception.rollout, rollout)
             self.assertNotIn(secret_error, str(raised.exception))
-            self.assertEqual(len(rollout_fds), 2)
+            self.assertEqual(len(rollout_fds), 3)
             for rollout_fd in rollout_fds:
                 with self.assertRaises(OSError):
                     os.fstat(rollout_fd)
@@ -3081,7 +3290,7 @@ class RemoteCodexProbeChunkTests(unittest.TestCase):
                 f"            pathlib.Path({str(rollout_path)!r}).unlink()\n"
                 "        fd = os.open(name, regular_file_open_flags(), dir_fd=parent_fd)\n"
             )
-            self.assertEqual(script.count(marker), 2)
+            self.assertEqual(script.count(marker), 3)
             script = script.replace(marker, injection, 1)
             embedded = subprocess.run(
                 [sys.executable, "-"],
@@ -3195,7 +3404,7 @@ class RemoteCodexProbeChunkTests(unittest.TestCase):
                 f"            os.mkfifo({str(rollout_path)!r}, 0o600)\n"
                 "        fd = os.open(name, regular_file_open_flags(), dir_fd=parent_fd)\n"
             )
-            self.assertEqual(script.count(marker), 2)
+            self.assertEqual(script.count(marker), 3)
             self.assertIn('getattr(os, "O_NONBLOCK", None)', script)
             self.assertIn("| nonblocking_flag", script)
             script = script.replace(marker, injection, 1)
