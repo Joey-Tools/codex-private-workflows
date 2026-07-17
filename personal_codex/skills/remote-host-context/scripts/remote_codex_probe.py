@@ -3657,10 +3657,55 @@ def iter_session_meta():
                                     snapshot_identity["size"],
                                 )
                             )
-                            handle.assert_append_only_identity(
+                            high_water_identity = handle.assert_append_only_identity(
                                 high_water_identity,
                                 "after session-meta scan",
                             )
+                            if not session_id:
+                                refreshed_identity = (
+                                    handle.verified_snapshot_identity
+                                )
+                                refreshed_snapshot = handle.verified_snapshot
+                                if (
+                                    refreshed_identity is None
+                                    or refreshed_snapshot is None
+                                ):
+                                    raise ValueError(
+                                        "rollout identity changed after session-meta scan"
+                                    )
+                                if (
+                                    refreshed_identity == snapshot_identity
+                                    and high_water_identity != refreshed_identity
+                                ):
+                                    scan_truncated = True
+                                elif refreshed_identity != snapshot_identity:
+                                    session_id, cwd, scan_truncated = (
+                                        parse_bounded_session_meta_prefix(
+                                            refreshed_snapshot,
+                                            refreshed_identity["size"],
+                                        )
+                                    )
+                                    high_water_identity = (
+                                        handle.assert_append_only_identity(
+                                            high_water_identity,
+                                            "after refreshed session-meta scan",
+                                        )
+                                    )
+                                    latest_identity = (
+                                        handle.verified_snapshot_identity
+                                    )
+                                    if latest_identity is None:
+                                        raise ValueError(
+                                            "rollout identity changed after refreshed session-meta scan"
+                                        )
+                                    if (
+                                        not session_id
+                                        and (
+                                            latest_identity != refreshed_identity
+                                            or high_water_identity != latest_identity
+                                        )
+                                    ):
+                                        scan_truncated = True
                         else:
                             session_id, cwd, scan_truncated = read_bounded_session_meta(
                                 handle,
@@ -3957,10 +4002,57 @@ def _scan_session_meta_records(
                                     source_size=snapshot_identity.size,
                                 )
                             )
-                            handle.assert_append_only_identity(
+                            high_water_identity = handle.assert_append_only_identity(
                                 high_water_identity,
                                 phase="after session-meta scan",
                             )
+                            if not session_id:
+                                refreshed_identity = (
+                                    handle.verified_snapshot_identity
+                                )
+                                refreshed_snapshot = handle.verified_snapshot
+                                if (
+                                    refreshed_identity is None
+                                    or refreshed_snapshot is None
+                                ):
+                                    raise ValueError(
+                                        "rollout identity changed after session-meta scan"
+                                    )
+                                if (
+                                    refreshed_identity == snapshot_identity
+                                    and high_water_identity != refreshed_identity
+                                ):
+                                    scan_truncated = True
+                                elif refreshed_identity != snapshot_identity:
+                                    session_id, cwd, scan_truncated = (
+                                        _parse_bounded_session_meta_prefix(
+                                            refreshed_snapshot,
+                                            source_size=refreshed_identity.size,
+                                        )
+                                    )
+                                    high_water_identity = (
+                                        handle.assert_append_only_identity(
+                                            high_water_identity,
+                                            phase=(
+                                                "after refreshed session-meta scan"
+                                            ),
+                                        )
+                                    )
+                                    latest_identity = (
+                                        handle.verified_snapshot_identity
+                                    )
+                                    if latest_identity is None:
+                                        raise ValueError(
+                                            "rollout identity changed after refreshed session-meta scan"
+                                        )
+                                    if (
+                                        not session_id
+                                        and (
+                                            latest_identity != refreshed_identity
+                                            or high_water_identity != latest_identity
+                                        )
+                                    ):
+                                        scan_truncated = True
                         else:
                             session_id, cwd, scan_truncated = (
                                 _read_bounded_session_meta(

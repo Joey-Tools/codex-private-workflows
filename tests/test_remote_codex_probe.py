@@ -231,6 +231,9 @@ class RemoteHostContextDocumentationTests(unittest.TestCase):
         self.assertIn("latest observed high-water mark", skill)
         self.assertIn("aligned verified-snapshot identity", skill)
         self.assertIn("immutable verified snapshot", skill)
+        self.assertIn("parse the refreshed snapshot once", skill)
+        self.assertIn("scan-truncated coverage error", skill)
+        self.assertIn("high-water identity outpaces", skill)
         self.assertIn(
             "`archived_sessions/**` candidates bind a full descriptor identity",
             skill,
@@ -473,6 +476,286 @@ class RemoteCodexProbeChunkTests(unittest.TestCase):
                     [row["session_id"] for row in rows if "session_id" in row],
                     ["trusted-session"],
                 )
+
+    def test_active_refresh_finds_first_session_meta_appended_after_parse(
+        self,
+    ) -> None:
+        for scope in ("local", "embedded"):
+            with self.subTest(scope=scope), tempfile.TemporaryDirectory() as temp_dir:
+                codex_root = Path(temp_dir) / ".codex"
+                rollout = (
+                    codex_root
+                    / "sessions/2026/05/26/"
+                    "rollout-2026-05-26T10-00-00-late-meta.jsonl"
+                )
+                rollout.parent.mkdir(parents=True)
+                rollout.write_bytes(b"{}\n")
+                parse_calls = 0
+                late_meta = (
+                    json.dumps(
+                        {
+                            "type": "session_meta",
+                            "payload": {
+                                "id": "late-session",
+                                "cwd": "/late",
+                            },
+                        },
+                        separators=(",", ":"),
+                    ).encode()
+                    + b"\n"
+                )
+
+                if scope == "local":
+                    real_parser = MODULE._parse_bounded_session_meta_prefix
+
+                    def run_scan():
+                        return MODULE._scan_session_meta_records(
+                            codex_root=codex_root,
+                            dates=[MODULE.dt.date(2026, 5, 26)],
+                            limit=10,
+                            host="local",
+                        ).rows
+
+                else:
+                    namespace = embedded_probe_namespace(
+                        {
+                            "mode": "session-meta",
+                            "dates": ["2026/05/26"],
+                            "limit": 10,
+                            "codex_root": str(codex_root),
+                            "session_meta_scan_bytes": (
+                                MODULE.MAX_SESSION_META_SCAN_BYTES
+                            ),
+                        }
+                    )
+                    real_parser = namespace["parse_bounded_session_meta_prefix"]
+
+                    def run_scan():
+                        return embedded_session_meta_records(namespace)
+
+                def append_meta_after_first_parse(*args, **kwargs):
+                    nonlocal parse_calls
+                    result = real_parser(*args, **kwargs)
+                    parse_calls += 1
+                    if parse_calls == 1:
+                        with rollout.open("ab") as handle:
+                            handle.write(late_meta)
+                    return result
+
+                if scope == "local":
+                    patcher = mock.patch.object(
+                        MODULE,
+                        "_parse_bounded_session_meta_prefix",
+                        side_effect=append_meta_after_first_parse,
+                    )
+                else:
+                    patcher = mock.patch.dict(
+                        namespace,
+                        {
+                            "parse_bounded_session_meta_prefix": (
+                                append_meta_after_first_parse
+                            )
+                        },
+                    )
+
+                with patcher:
+                    records = run_scan()
+                self.assertEqual(parse_calls, 2)
+                self.assertEqual(
+                    [record["session_id"] for record in records if "session_id" in record],
+                    ["late-session"],
+                )
+
+    def test_active_repeated_growth_after_refresh_is_coverage_gap(self) -> None:
+        for scope in ("local", "embedded"):
+            with self.subTest(scope=scope), tempfile.TemporaryDirectory() as temp_dir:
+                codex_root = Path(temp_dir) / ".codex"
+                rollout_ref = (
+                    "sessions/2026/05/26/"
+                    "rollout-2026-05-26T10-00-00-repeated-growth.jsonl"
+                )
+                rollout = codex_root / rollout_ref
+                rollout.parent.mkdir(parents=True)
+                rollout.write_bytes(b"{}\n")
+                parse_calls = 0
+                late_meta = (
+                    json.dumps(
+                        {
+                            "type": "session_meta",
+                            "payload": {
+                                "id": "too-late-session",
+                                "cwd": "/late",
+                            },
+                        },
+                        separators=(",", ":"),
+                    ).encode()
+                    + b"\n"
+                )
+
+                if scope == "local":
+                    real_parser = MODULE._parse_bounded_session_meta_prefix
+
+                    def run_scan():
+                        return MODULE._scan_session_meta_records(
+                            codex_root=codex_root,
+                            dates=[MODULE.dt.date(2026, 5, 26)],
+                            limit=10,
+                            host="local",
+                        )
+
+                else:
+                    namespace = embedded_probe_namespace(
+                        {
+                            "mode": "session-meta",
+                            "dates": ["2026/05/26"],
+                            "limit": 10,
+                            "codex_root": str(codex_root),
+                            "session_meta_scan_bytes": (
+                                MODULE.MAX_SESSION_META_SCAN_BYTES
+                            ),
+                        }
+                    )
+                    real_parser = namespace["parse_bounded_session_meta_prefix"]
+
+                    def run_scan():
+                        return embedded_session_meta_records(namespace)
+
+                def grow_after_each_parse(*args, **kwargs):
+                    nonlocal parse_calls
+                    result = real_parser(*args, **kwargs)
+                    parse_calls += 1
+                    with rollout.open("ab") as handle:
+                        handle.write(b"{}\n" if parse_calls == 1 else late_meta)
+                    return result
+
+                if scope == "local":
+                    patcher = mock.patch.object(
+                        MODULE,
+                        "_parse_bounded_session_meta_prefix",
+                        side_effect=grow_after_each_parse,
+                    )
+                else:
+                    patcher = mock.patch.dict(
+                        namespace,
+                        {
+                            "parse_bounded_session_meta_prefix": (
+                                grow_after_each_parse
+                            )
+                        },
+                    )
+
+                with patcher:
+                    if scope == "local":
+                        with self.assertRaises(
+                            MODULE.SessionMetaRolloutError
+                        ) as raised:
+                            run_scan()
+                        error = raised.exception.error
+                        error_rollout = raised.exception.rollout
+                    else:
+                        records = run_scan()
+                        self.assertEqual(len(records), 1)
+                        error = str(records[0]["error"])
+                        error_rollout = records[0].get("rollout")
+                self.assertEqual(parse_calls, 2)
+                self.assertEqual(error, MODULE.SESSION_META_SCAN_TRUNCATED_ERROR)
+                self.assertEqual(error_rollout, rollout_ref)
+
+    def test_active_late_checkpoint_growth_is_coverage_gap(self) -> None:
+        for scope in ("local", "embedded"):
+            with self.subTest(scope=scope), tempfile.TemporaryDirectory() as temp_dir:
+                codex_root = Path(temp_dir) / ".codex"
+                rollout_ref = (
+                    "sessions/2026/05/26/"
+                    "rollout-2026-05-26T10-00-00-late-checkpoint.jsonl"
+                )
+                rollout = codex_root / rollout_ref
+                rollout.parent.mkdir(parents=True)
+                rollout.write_bytes(b"{}\n")
+                read_calls = 0
+                late_meta = (
+                    json.dumps(
+                        {
+                            "type": "session_meta",
+                            "payload": {
+                                "id": "late-window-session",
+                                "cwd": "/late",
+                            },
+                        },
+                        separators=(",", ":"),
+                    ).encode()
+                    + b"\n"
+                )
+
+                if scope == "local":
+                    real_read = MODULE._read_rollout_prefix_proof
+
+                    def run_scan():
+                        return MODULE._scan_session_meta_records(
+                            codex_root=codex_root,
+                            dates=[MODULE.dt.date(2026, 5, 26)],
+                            limit=10,
+                            host="local",
+                        )
+
+                else:
+                    namespace = embedded_probe_namespace(
+                        {
+                            "mode": "session-meta",
+                            "dates": ["2026/05/26"],
+                            "limit": 10,
+                            "codex_root": str(codex_root),
+                            "session_meta_scan_bytes": (
+                                MODULE.MAX_SESSION_META_SCAN_BYTES
+                            ),
+                        }
+                    )
+                    real_read = namespace["read_rollout_prefix_proof"]
+
+                    def run_scan():
+                        return embedded_session_meta_records(namespace)
+
+                def append_after_aligned_checkpoint_read(*args, **kwargs):
+                    nonlocal read_calls
+                    result = real_read(*args, **kwargs)
+                    read_calls += 1
+                    if read_calls == 5:
+                        with rollout.open("ab") as handle:
+                            handle.write(late_meta)
+                    return result
+
+                if scope == "local":
+                    patcher = mock.patch.object(
+                        MODULE,
+                        "_read_rollout_prefix_proof",
+                        side_effect=append_after_aligned_checkpoint_read,
+                    )
+                else:
+                    patcher = mock.patch.dict(
+                        namespace,
+                        {
+                            "read_rollout_prefix_proof": (
+                                append_after_aligned_checkpoint_read
+                            )
+                        },
+                    )
+
+                with patcher:
+                    if scope == "local":
+                        with self.assertRaises(
+                            MODULE.SessionMetaRolloutError
+                        ) as raised:
+                            run_scan()
+                        error = raised.exception.error
+                        error_rollout = raised.exception.rollout
+                    else:
+                        records = run_scan()
+                        self.assertEqual(len(records), 1)
+                        error = str(records[0]["error"])
+                        error_rollout = records[0].get("rollout")
+                self.assertEqual(read_calls, 5)
+                self.assertEqual(error, MODULE.SESSION_META_SCAN_TRUNCATED_ERROR)
+                self.assertEqual(error_rollout, rollout_ref)
 
     def test_session_meta_uses_scandir_entries_for_names_only(self) -> None:
         for scope in ("local", "embedded"):
