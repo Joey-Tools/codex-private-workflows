@@ -28,16 +28,25 @@ superseded_by:
   mapping with one inline `working-directory` scalar under workflow/job
   `defaults.run`. Custom shells and unstructured YAML nodes fail closed.
 - `needs` block sequences support bare-dash ordinary job-ID scalars without
-  accepting partial results. Block-scalar payloads are excluded from physical
+  accepting partial results. Inline sequences accept YAML's legal single
+  trailing comma while empty or repeated-comma items still invalidate the
+  complete dependency list. Block-scalar payloads are excluded from physical
   mapping-key checks by treating an explicit indentation indicator as the
   minimum payload indent, while an implicit scalar still infers its indent from
   the first non-empty line. The aggregate job requires one structural `steps`
   block header while retaining ordinary quoted/spaced/commented spellings.
+- Each direct dependency job must propagate its own failure: job-level
+  `continue-on-error` accepts only an absent value or the canonical unquoted
+  `false` boolean. Tolerant values, expressions, duplicates, aliases, tags,
+  anchors, flow nodes, block scalars, and malformed values fail closed.
 - Literal `run` body collection follows the same explicit minimum instead of
   locking its boundary to a more-indented first command. A later payload line
   cannot hide a `GITHUB_ENV` update that installs `BASH_ENV` and redefines
   `test` for a subsequent dependency-check step; folded `run` scalars remain
-  rejected.
+  rejected. Multiline single- and double-quoted YAML scalars are outside the
+  accepted structural subset, so quoted text cannot impersonate step-level
+  `env` or `run` keys. Every accepted guard step has exactly one real `run`
+  key, exactly one real `env` block, and no `uses` key.
 
 ## Next Steps
 
@@ -62,6 +71,11 @@ superseded_by:
 - The explicit-indentation `run` regression passed both focused and complete
   contract files (`17` tests each), Ruff, Python compilation, Actionlint 1.7.12
   coverage for both chomping/indicator orders and quoted/sequence `run` keys,
+  project-journal validation, normalized copy comparison, and diff checks.
+- The exact-head dependency-propagation, multiline-quoted-scalar, and inline
+  trailing-comma regressions passed both focused contract files (`19` tests
+  each), Ruff, Python compilation, Actionlint 1.7.12 checks for the live
+  workflows plus an Actionlint-valid combined decoy/trailing-comma fixture,
   project-journal validation, normalized copy comparison, and diff checks.
 - `scripts/sync_private_overlay_sources.py`
 - `personal_codex/private-sync-manifest.json`
