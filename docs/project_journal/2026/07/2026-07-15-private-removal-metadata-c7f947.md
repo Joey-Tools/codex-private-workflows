@@ -5,7 +5,7 @@ status: completed
 created: 2026-07-15
 updated: 2026-07-17
 branch: codex/sync-removed-link-metadata
-pr:
+pr: https://github.com/Joey-Tools/codex-private-workflows/pull/97
 supersedes: []
 superseded_by:
 ---
@@ -22,6 +22,7 @@ superseded_by:
 - Private CI validates removal history against the unique complete Release that is a Git descendant of every other complete Release candidate; release SHAs come from the unique uploaded archive/checksum pair, are batch-bound through local tags, and do not depend on a potentially movable `target_commitish` branch. Explicit target SHAs must still match, publish timestamps do not define version order, and incomparable histories fail closed.
 - Release-manifest validation unions the normalized `removed_links` history from every unique complete Release before checking the baseline transition. Historical entries must remain exact across releases and the current manifest, while a later commit may precisely restore a non-legacy tombstone that an intervening release dropped; historical replacement-retirement obligations remain enforced. Every historical Release is also treated as a possible direct upgrade origin: an active link that is absent or changed in the current manifest requires at least one exact matching removal ID that origin has not seen, preserving repeated removal episodes while allowing explicit legacy repair of an older published omission.
 - Portable target identities, create-before-remove reconciliation, and descriptor-bound transactional rollback are mirrored from the public runner.
+- Overlay owner directories share the same NFC/case-folded portability namespace, so spellings such as `private` and `Private` cannot coexist in manifests, the ledger, or the installed directory tree. The special `public` root remains distinct from an overlay named `Public` because they occupy different filesystem locations.
 - Cross-version target checks and replacement-retirement cycle validation are mirrored from the public runner.
 - Install and rollback activation plus overlay uninstall now use a durable exact-inode write-ahead log: a fixed regular-file pointer at the stable sync-home root binds one fsynced quarantine batch containing staged link inodes, preimages, and exact managed-state before/after evidence.
 - Each WAL batch records exact before/after evidence for every `current` pointer and managed link in the corresponding ledger states, including unchanged paths: present entries use hard-linked inode claims, while state-claimed create repairs use parent-bound absence records. Bounded metadata parsing validates and indexes records and claims in `O(n)` time.
@@ -59,7 +60,8 @@ superseded_by:
 - Published state, managed-link parent/inode/target snapshots, owner-to-release bindings, `current`, and canonical release directories are revalidated after full release scans; concurrent same-target replacements are preserved rather than reclaimed during rollback.
 - Strict Git inventory capture has streaming stdout/stderr limits with terminate/kill/reap cleanup; committed manifests are size-preflighted and strict snapshots no longer traverse the live worktree redundantly.
 - Strict package inventory filtering uses component-prefix tries instead of comparing every Git entry with every manifest source or copying every possible path prefix. Git pathspecs collapse to unique top-level roots under a 32 KiB argument budget and fall back to bounded full inventories when necessary; directory descendants are assigned during one tree scan, so duplicate, nested, exact-file, and deeply nested sources remain bounded by inventory size and path depth without approaching `ARG_MAX`.
-- Strict package creation validates complete root-prefixed member paths, count, depth, per-blob size, expanded tar size, and compressed output before publication; actual blob reads are bounded by the preflighted size, duplicate raw Git paths fail closed, and archive/checksum failures remove partial outputs.
+- Strict package creation validates complete root-prefixed member paths, count, depth, per-blob size, expanded tar size, and compressed output before publication; actual blob reads are bounded by the preflighted size, duplicate raw Git paths fail closed, and archive/checksum failures remove only transaction-owned partial outputs.
+- Package archive/checksum publication writes both outputs through descriptor-bound exclusive temporary files and no-replace renames. Failure cleanup isolates and verifies only the transaction-owned inode and restores a raced foreign replacement to its original name when possible. A rerun can complete an interrupted one-sided publication only after matching content, owner, link count, permissions, and final-name bindings are revalidated; mismatched or unsafe existing outputs are preserved and rejected.
 - Runtime parsing plus strict and non-strict package creation cap active manifests at 9,999 links so the WAL retains capacity for a `current` action; both package paths share the same member, path, portable-collision, expanded-size, and tar-stream preflight before creating output.
 - Install preflight validates aggregate action, record, claim, release-expectation, managed-state, and conservatively projected v4 WAL metadata capacity before release staging. Every incoming owner reserves a worst-case `current` record, batch names are byte-bounded, and the real metadata serializer retains the same streaming byte limit as defense in depth.
 - Manifest-change validation projects each complete single-owner transition through the runtime-owned serializer model: healthy claims, missing-link creates, replacements, removals, `retire-absent`, quarantine actions from all declared removal history, release expectations, managed state, and the `current` switch must fit both the 10,000-record/claim limits and the exact 16 MiB WAL byte limit before publication. The current profile is cached across release-history comparisons without rebuilding a 16 MiB payload.
@@ -103,9 +105,9 @@ superseded_by:
 - Manifest and durable synchronizer state versions require exact JSON integers, so booleans and numerically equal floats cannot select a schema version.
 - Private package verification now checks the checksum and extracts from one immutable archive snapshot, closing the verification-to-extraction path replacement window.
 - The required aggregate `test` check now verifies every direct Python 3.9, platform-safety, and platform-test dependency result instead of relying on transitive skip behavior.
-- The canonical review-workflow contract accepts scalar, block-list, and inline-list `needs` forms, including quoted dependency names plus blank lines and comments inside block lists, so the stricter aggregate dependency list remains covered after private-overlay sync.
+- The canonical review-workflow contract accepts scalar, block-list, and inline-list `needs` forms, including quoted dependency names plus standalone or trailing YAML comments outside quoted values, so the stricter aggregate dependency list remains covered after private-overlay sync.
 - Aggregate result guards preserve GitHub Actions environment integrity: step-local bindings must be checked in the same step, while job-level bindings are rejected because earlier steps can overwrite them through `GITHUB_ENV`.
-- Aggregate result guards count only unconditional, non-tolerant default-shell steps whose non-empty commands are exact dependency-success assertions. The required `always()` condition is scoped to the aggregate job, and comments, echoed assertions, masked failures, disabled errexit, inherited workflow/job custom shells, step custom shells, and job-level tolerance are rejected.
+- Aggregate result guards count only unconditional, non-tolerant default-shell steps whose non-empty commands are exact dependency-success assertions, and every aggregate-job step must meet that shape so an earlier step cannot poison the shell environment. Result bindings must use safe `_RESULT` shell identifiers and direct `needs.<job>.result` values. The aggregate job must use `always()`, run exactly once on `ubuntu-latest`, and avoid custom containers, services, and matrix strategies. Escaped, explicit, tagged, anchored, and aliased mapping keys fail closed; blank lines and full-line comments cannot truncate job or step scope; and echoed assertions, masked failures, disabled errexit, inherited workflow/job custom shells, step custom shells, and job-level tolerance are rejected.
 - Overlay verification accepts exact desired symlinks that intentionally remain outside the ownership ledger, while still rejecting conflicting recorded ownership and preserving those links on uninstall.
 
 ## Next Steps
@@ -113,9 +115,9 @@ superseded_by:
 - Add a combined public/private manifest capacity gate when the private release job has both exact manifests; the installer already performs this aggregate preflight and fails safely, while repository CI currently proves capacity one owner at a time.
 
 ## Evidence
-- Repository suite — 1062 tests completed successfully, with 2 skipped, using Python 3.13.0 and test-only Git configuration that disables commit signing to avoid a host keybox dependency, after integrating the latest `origin/master`.
-- Reconciliation safety module — 276 tests passed as part of the repository suite.
-- Package builder safety module — 59 tests passed as part of the repository suite.
+- Repository suite — 1077 tests completed successfully, with 2 skipped, using Python 3.13.0 and test-only Git configuration that disables commit signing to avoid a host keybox dependency, after integrating the latest `origin/master`.
+- Reconciliation safety module — 282 tests passed as part of the repository suite.
+- Package builder safety module — 68 tests passed as part of the repository suite.
 - Manifest change validation module — 79 tests passed as part of the repository suite.
 - Release baseline validation module — 29 tests passed.
 - Dedicated Python 3.9 compatibility selection — 8 tests passed.
