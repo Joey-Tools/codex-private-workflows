@@ -5,7 +5,7 @@ status: completed
 created: 2026-07-17
 updated: 2026-07-17
 branch: codex/daily-skill-friction-20260717-codex-private-workflows-remote-host-context-append-proof-parity-final
-pr:
+pr: https://github.com/Joey-Tools/codex-private-workflows/pull/113
 supersedes: []
 superseded_by:
 ---
