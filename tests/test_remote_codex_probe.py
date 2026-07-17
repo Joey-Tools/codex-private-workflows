@@ -274,6 +274,75 @@ class SizeGuardedBytesIO(io.BytesIO):
 
 
 class RemoteCodexProbeChunkTests(unittest.TestCase):
+    def test_session_meta_missing_codex_root_is_empty(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            scan = MODULE._scan_session_meta_records(
+                codex_root=Path(temp_dir) / "missing-codex-root",
+                dates=[MODULE.dt.date(2026, 5, 26)],
+                limit=10,
+                host="local",
+            )
+
+        self.assertEqual(scan, MODULE.SessionMetaScan(rows=[], truncated=False))
+
+    def test_session_meta_root_io_errors_fail_closed_without_path_leak(self) -> None:
+        secret_root = "/sensitive/codex/root"
+        errors = (
+            PermissionError(13, "Permission denied", secret_root),
+            OSError(5, "Input/output error", secret_root),
+        )
+        for root_error in errors:
+            with self.subTest(error_type=type(root_error).__name__):
+                with (
+                    mock.patch.object(
+                        MODULE,
+                        "_resolve_safe_codex_root",
+                        side_effect=root_error,
+                    ),
+                    self.assertRaises(MODULE.SessionMetaRolloutError) as raised,
+                ):
+                    MODULE._scan_session_meta_records(
+                        codex_root=Path(secret_root),
+                        dates=[MODULE.dt.date(2026, 5, 26)],
+                        limit=10,
+                        host="local",
+                    )
+
+                self.assertEqual(raised.exception.error, "session directory unreadable")
+                self.assertIsNone(raised.exception.rollout)
+                self.assertNotIn(secret_root, str(raised.exception))
+
+    def test_session_meta_root_permission_error_uses_cli_error_channel(self) -> None:
+        secret_root = "/sensitive/codex/root"
+        output = io.StringIO()
+        error_output = io.StringIO()
+        with (
+            mock.patch.object(
+                MODULE,
+                "_resolve_safe_codex_root",
+                side_effect=PermissionError(13, "Permission denied", secret_root),
+            ),
+            redirect_stdout(output),
+            redirect_stderr(error_output),
+        ):
+            rc = MODULE.cmd_session_meta(
+                argparse.Namespace(
+                    host=["local"],
+                    date=["2026/05/26"],
+                    from_date=None,
+                    to_date=None,
+                    limit=10,
+                )
+            )
+
+        self.assertEqual(rc, 1)
+        self.assertEqual(output.getvalue(), "")
+        self.assertEqual(
+            error_output.getvalue(),
+            "host=local\nerror=session directory unreadable\n",
+        )
+        self.assertNotIn(secret_root, error_output.getvalue())
+
     def test_private_output_rejects_parent_symlink_swap_after_resolution(self) -> None:
         with tempfile.TemporaryDirectory(dir="/tmp") as temp_dir:
             root = Path(temp_dir).resolve()
