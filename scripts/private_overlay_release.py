@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 import argparse
+from dataclasses import dataclass
 import datetime as dt
+import hashlib
 import importlib.util
 import json
 import os
@@ -24,10 +26,20 @@ RELEASE_TAG_RE = re.compile(
 PERSONAL_CODEX_ASSET_RE = re.compile(
     r"personal-codex-[0-9a-f]{40}\.(?:tar\.gz|sha256)"
 )
+ASSET_DIGEST_RE = re.compile(r"sha256:[0-9a-f]{64}")
+MAX_RELEASE_ASSET_BYTES = 64 * 1024 * 1024
+RELEASE_ASSET_READ_CHUNK_BYTES = 1024 * 1024
 
 
 class ReleaseError(RuntimeError):
     pass
+
+
+@dataclass(frozen=True)
+class LocalAssetContent:
+    data: bytes
+    size: int
+    digest: str
 
 
 def _github_token() -> str:
@@ -156,6 +168,33 @@ def _expected_asset_names(sha: str) -> set[str]:
     }
 
 
+def _read_local_asset_content(asset: Path) -> LocalAssetContent:
+    content = bytearray()
+    digest = hashlib.sha256()
+    size = 0
+    try:
+        with asset.open("rb") as asset_file:
+            while True:
+                chunk = asset_file.read(RELEASE_ASSET_READ_CHUNK_BYTES)
+                if not chunk:
+                    break
+                size += len(chunk)
+                if size > MAX_RELEASE_ASSET_BYTES:
+                    raise ReleaseError(
+                        f"release asset exceeds {MAX_RELEASE_ASSET_BYTES} bytes: "
+                        f"{asset}"
+                    )
+                content.extend(chunk)
+                digest.update(chunk)
+    except OSError as error:
+        raise ReleaseError(f"failed to read release asset {asset}: {error}") from error
+    return LocalAssetContent(
+        data=bytes(content),
+        size=size,
+        digest=f"sha256:{digest.hexdigest()}",
+    )
+
+
 def _personal_codex_release_assets(release: dict[str, Any]) -> list[dict[str, Any]]:
     return [
         asset
@@ -176,6 +215,80 @@ def _has_exact_uploaded_assets(
     )
 
 
+def _validated_uploaded_assets(
+    release: dict[str, Any],
+    expected_asset_names: set[str],
+    *,
+    context: str,
+    expected_asset_content: dict[str, LocalAssetContent] | None = None,
+) -> list[dict[str, Any]]:
+    release_assets = release.get("assets")
+    if not isinstance(release_assets, list):
+        raise ReleaseError(f"{context} has no release asset array")
+
+    matching_assets: list[dict[str, Any]] = []
+    for asset in release_assets:
+        if not isinstance(asset, dict):
+            raise ReleaseError(f"{context} has a non-object release asset")
+        if _is_personal_codex_asset_name(asset.get("name")):
+            matching_assets.append(asset)
+
+    matching_names = [asset["name"] for asset in matching_assets]
+    matching_name_set = set(matching_names)
+    if (
+        len(matching_assets) != len(expected_asset_names)
+        or len(matching_name_set) != len(matching_names)
+        or matching_name_set != expected_asset_names
+    ):
+        raise ReleaseError(f"{context} release assets are not exact")
+
+    seen_ids: set[int] = set()
+    for asset in matching_assets:
+        asset_name = asset["name"]
+        if asset.get("state") != "uploaded":
+            raise ReleaseError(f"{context} release asset is not uploaded: {asset_name}")
+        asset_id = asset.get("id")
+        if (
+            not isinstance(asset_id, int)
+            or isinstance(asset_id, bool)
+            or asset_id <= 0
+        ):
+            raise ReleaseError(
+                f"{context} release asset has no positive integer id: {asset_name}"
+            )
+        if asset_id in seen_ids:
+            raise ReleaseError(f"{context} release assets reuse id {asset_id}")
+        seen_ids.add(asset_id)
+
+        asset_size = asset.get("size")
+        if (
+            not isinstance(asset_size, int)
+            or isinstance(asset_size, bool)
+            or asset_size < 0
+        ):
+            raise ReleaseError(
+                f"{context} release asset has invalid size: {asset_name}"
+            )
+        asset_digest = asset.get("digest")
+        if (
+            not isinstance(asset_digest, str)
+            or ASSET_DIGEST_RE.fullmatch(asset_digest) is None
+        ):
+            raise ReleaseError(
+                f"{context} release asset has invalid digest: {asset_name}"
+            )
+
+        if expected_asset_content is None:
+            continue
+        expected_content = expected_asset_content[asset_name]
+        if asset_size != expected_content.size:
+            raise ReleaseError(f"{context} release asset size mismatch: {asset_name}")
+        if asset_digest != expected_content.digest:
+            raise ReleaseError(f"{context} release asset digest mismatch: {asset_name}")
+
+    return matching_assets
+
+
 def _validated_repair_assets(
     release: dict[str, Any],
 ) -> list[tuple[int, dict[str, Any]]]:
@@ -184,11 +297,7 @@ def _validated_repair_assets(
     for asset in _personal_codex_release_assets(release):
         asset_id = asset.get("id")
         asset_name = asset.get("name", "unknown")
-        if (
-            not isinstance(asset_id, int)
-            or isinstance(asset_id, bool)
-            or asset_id <= 0
-        ):
+        if not isinstance(asset_id, int) or isinstance(asset_id, bool) or asset_id <= 0:
             raise ReleaseError(
                 f"matching release asset has no positive integer id: {asset_name}"
             )
@@ -206,6 +315,29 @@ def _release_has_complete_assets(release: dict[str, Any]) -> bool:
     if not _release_tag_matches_sha(release.get("tag_name"), sha):
         return False
     return _has_exact_uploaded_assets(release, _expected_asset_names(sha))
+
+
+def _release_has_remote_integrity(release: dict[str, Any]) -> bool:
+    sha = release.get("target_commitish")
+    tag_name = release.get("tag_name")
+    if (
+        not isinstance(sha, str)
+        or SHA_RE.fullmatch(sha) is None
+        or not isinstance(tag_name, str)
+        or not _release_tag_matches_sha(tag_name, sha)
+    ):
+        return False
+    try:
+        draft, prerelease = _personal_release_publication_flags(release, tag_name)
+        _positive_release_id(release, tag_name)
+        _validated_uploaded_assets(
+            release,
+            _expected_asset_names(sha),
+            context=f"published release {tag_name}",
+        )
+    except ReleaseError:
+        return False
+    return not draft and not prerelease and release.get("immutable") is True
 
 
 def _release_source_event(release: dict[str, Any]) -> str | None:
@@ -249,7 +381,7 @@ def recent_complete_releases(
             continue
         if event == "schedule" and _release_source_event(release) == "schedule":
             continue
-        if _release_has_complete_assets(release):
+        if _release_has_remote_integrity(release):
             recent.append(release)
     return recent
 
@@ -362,6 +494,10 @@ def _matching_release_candidates(
         if not isinstance(tag_name, str) or not tag_name.startswith(RELEASE_TAG_PREFIX):
             continue
         draft, prerelease = _personal_release_publication_flags(candidate, tag_name)
+        if draft and prerelease:
+            raise ReleaseError(
+                f"personal-codex release {tag_name} cannot be both draft and prerelease"
+            )
         if prerelease:
             continue
         if not _release_tag_matches_sha(tag_name, sha):
@@ -426,7 +562,6 @@ def create_or_find_release(
             if isinstance(asset.get("name"), str)
             and asset.get("state") == "uploaded"
         }
-        print(f"Release already exists: {candidate['tag_name']}")
         return candidate, uploaded_asset_names, True
     if len(draft_candidates) > 1:
         raise ReleaseError(
@@ -476,16 +611,25 @@ def release_complete(repo: str, sha: str) -> bool:
     complete_candidates, incomplete_candidates, _draft_candidates = (
         _matching_release_candidates(repo, sha)
     )
-    return bool(complete_candidates) and not incomplete_candidates
+    return (
+        bool(complete_candidates)
+        and not incomplete_candidates
+        and all(
+            _release_has_remote_integrity(candidate)
+            for candidate in complete_candidates
+        )
+    )
 
 
 def _validated_release_snapshot(
     release: object,
     expected_identity: tuple[int, str, str],
     expected_asset_names: set[str],
+    expected_asset_content: dict[str, LocalAssetContent],
     *,
     phase: str,
     require_published: bool,
+    require_immutable: bool,
 ) -> tuple[dict[str, Any], bool]:
     if not isinstance(release, dict):
         raise ReleaseError(f"release lookup returned an unexpected payload {phase}")
@@ -502,10 +646,16 @@ def _validated_release_snapshot(
     draft, prerelease = _personal_release_publication_flags(release, tag_name)
     if prerelease:
         raise ReleaseError(f"release became a prerelease {phase}")
-    if not _has_exact_uploaded_assets(release, expected_asset_names):
-        raise ReleaseError(f"release assets are not exact {phase}")
+    _validated_uploaded_assets(
+        release,
+        expected_asset_names,
+        context=f"release {phase}",
+        expected_asset_content=expected_asset_content,
+    )
     if require_published and draft:
         raise ReleaseError(f"release remained a draft {phase}")
+    if require_immutable and release.get("immutable") is not True:
+        raise ReleaseError(f"published release is not immutable {phase}")
     return release, draft
 
 
@@ -514,82 +664,108 @@ def publish_release(repo: str, sha: str, dist: Path, *, source_event: str = "unk
         dist / f"personal-codex-{sha}.tar.gz",
         dist / f"personal-codex-{sha}.sha256",
     ]
-    for asset in assets:
-        if not asset.is_file():
-            raise ReleaseError(f"release asset is missing: {asset}")
-    expected_asset_names = _expected_asset_names(sha)
+    expected_asset_content = {
+        asset.name: _read_local_asset_content(asset) for asset in assets
+    }
+    expected_asset_names = set(expected_asset_content)
     release, _uploaded_asset_names, done = create_or_find_release(
         repo,
         sha,
         expected_asset_names,
         source_event=source_event,
     )
-    if done:
-        return
 
     tag_name = release.get("tag_name")
     if not isinstance(tag_name, str):
         raise ReleaseError("selected release has an invalid tag name")
-    release_id = _positive_release_id(release, tag_name)
-    release_identity = (release_id, tag_name, sha)
-    needs_upload = not _has_exact_uploaded_assets(
+    if release.get("target_commitish") != sha or not _release_tag_matches_sha(
+        tag_name, sha
+    ):
+        raise ReleaseError("selected release has a mismatched identity")
+    selected_draft, prerelease = _personal_release_publication_flags(
         release,
-        expected_asset_names,
+        tag_name,
     )
-    if needs_upload:
-        repair_assets = _validated_repair_assets(release)
-        for asset_id, stale_asset in repair_assets:
-            asset_name = stale_asset.get("name", "unknown")
-            request_json(
-                f"{API_ROOT}/repos/{repo}/releases/assets/{asset_id}",
-                method="DELETE",
-            )
-            print(f"Deleted release asset for repair: {asset_name}")
+    if prerelease:
+        raise ReleaseError("selected release is a prerelease")
+    release_id = _positive_release_id(release, tag_name)
+    if not isinstance(release.get("assets"), list):
+        raise ReleaseError("selected release has no release asset array")
+    release_identity = (release_id, tag_name, sha)
+    if done:
+        _validated_release_snapshot(
+            release,
+            release_identity,
+            expected_asset_names,
+            expected_asset_content,
+            phase="during published release reuse",
+            require_published=True,
+            require_immutable=True,
+        )
+        print(f"Release already exists: {tag_name}")
+        return
 
-        content_types = {
-            ".gz": "application/gzip",
-            ".sha256": "text/plain",
-        }
-        for asset in assets:
-            suffix = ".sha256" if asset.name.endswith(".sha256") else asset.suffix
-            url = (
-                f"{UPLOAD_ROOT}/repos/{repo}/releases/{release_id}/assets"
-                f"?name={quote(asset.name)}"
+    if not selected_draft and release.get("immutable") is True:
+        raise ReleaseError(
+            f"immutable published release cannot be repaired: {tag_name}"
+        )
+    repair_assets = _validated_repair_assets(release)
+    for asset_id, stale_asset in repair_assets:
+        asset_name = stale_asset.get("name", "unknown")
+        request_json(
+            f"{API_ROOT}/repos/{repo}/releases/assets/{asset_id}",
+            method="DELETE",
+        )
+        print(f"Deleted release asset for repair: {asset_name}")
+
+    content_types = {
+        ".gz": "application/gzip",
+        ".sha256": "text/plain",
+    }
+    for asset in assets:
+        asset_content = expected_asset_content[asset.name]
+        suffix = ".sha256" if asset.name.endswith(".sha256") else asset.suffix
+        url = (
+            f"{UPLOAD_ROOT}/repos/{repo}/releases/{release_id}/assets"
+            f"?name={quote(asset.name)}"
+        )
+        request = Request(
+            url,
+            data=asset_content.data,
+            headers={
+                "Accept": "application/vnd.github+json",
+                "Authorization": f"Bearer {_github_token()}",
+                "Content-Type": content_types[suffix],
+                "X-GitHub-Api-Version": "2022-11-28",
+            },
+            method="POST",
+        )
+        with urlopen(request, timeout=30) as response:
+            uploaded = json.loads(response.read().decode("utf-8"))
+        if (
+            not isinstance(uploaded, dict)
+            or uploaded.get("name") != asset.name
+            or uploaded.get("state") != "uploaded"
+        ):
+            raise ReleaseError(
+                f"release asset upload returned an unexpected payload for {asset.name}"
             )
-            request = Request(
-                url,
-                data=asset.read_bytes(),
-                headers={
-                    "Accept": "application/vnd.github+json",
-                    "Authorization": f"Bearer {_github_token()}",
-                    "Content-Type": content_types[suffix],
-                    "X-GitHub-Api-Version": "2022-11-28",
-                },
-                method="POST",
-            )
-            with urlopen(request, timeout=30) as response:
-                uploaded = json.loads(response.read().decode("utf-8"))
-            if (
-                not isinstance(uploaded, dict)
-                or uploaded.get("name") != asset.name
-                or uploaded.get("state") != "uploaded"
-            ):
-                raise ReleaseError(
-                    "release asset upload returned an unexpected payload for "
-                    f"{asset.name}"
-                )
-            print(f"Uploaded {asset.name}")
+        print(f"Uploaded {asset.name}")
 
     release_url = f"{API_ROOT}/repos/{repo}/releases/{release_id}"
     refreshed = request_json(release_url)
-    refreshed, draft = _validated_release_snapshot(
+    refreshed, refreshed_draft = _validated_release_snapshot(
         refreshed,
         release_identity,
         expected_asset_names,
-        phase="after upload" if needs_upload else "before publish",
+        expected_asset_content,
+        phase="after upload",
         require_published=False,
+        require_immutable=False,
     )
-    if draft:
+    if refreshed_draft != selected_draft:
+        raise ReleaseError("release draft flag changed after upload")
+    if selected_draft:
         request_json(
             release_url,
             method="PATCH",
@@ -600,8 +776,10 @@ def publish_release(repo: str, sha: str, dist: Path, *, source_event: str = "unk
             published,
             release_identity,
             expected_asset_names,
+            expected_asset_content,
             phase="after publish",
             require_published=True,
+            require_immutable=True,
         )
         print(f"Published {tag_name}")
     else:

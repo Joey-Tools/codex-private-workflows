@@ -4,6 +4,7 @@ import base64
 import datetime as dt
 import contextlib
 import errno
+import hashlib
 import hmac
 import importlib.util
 import io
@@ -6291,6 +6292,22 @@ class PrivateOverlaySyncTests(unittest.TestCase):
 
 class PrivateOverlayReleaseTests(unittest.TestCase):
     @staticmethod
+    def _release_asset(
+        asset_id: int,
+        name: str,
+        data: bytes,
+        *,
+        state: str = "uploaded",
+    ) -> dict[str, object]:
+        return {
+            "id": asset_id,
+            "name": name,
+            "state": state,
+            "size": len(data),
+            "digest": f"sha256:{hashlib.sha256(data).hexdigest()}",
+        }
+
+    @staticmethod
     def _release_candidate(
         sha: str,
         *,
@@ -6302,16 +6319,16 @@ class PrivateOverlayReleaseTests(unittest.TestCase):
     ) -> dict[str, object]:
         if assets is None:
             assets = [
-                {
-                    "id": release_id * 10 + 1,
-                    "name": f"personal-codex-{sha}.tar.gz",
-                    "state": "uploaded",
-                },
-                {
-                    "id": release_id * 10 + 2,
-                    "name": f"personal-codex-{sha}.sha256",
-                    "state": "uploaded",
-                },
+                PrivateOverlayReleaseTests._release_asset(
+                    release_id * 10 + 1,
+                    f"personal-codex-{sha}.tar.gz",
+                    b"archive",
+                ),
+                PrivateOverlayReleaseTests._release_asset(
+                    release_id * 10 + 2,
+                    f"personal-codex-{sha}.sha256",
+                    b"checksum\n",
+                ),
             ]
         return {
             "id": release_id,
@@ -6322,6 +6339,7 @@ class PrivateOverlayReleaseTests(unittest.TestCase):
             "target_commitish": sha,
             "draft": draft,
             "prerelease": prerelease,
+            "immutable": not draft,
             "assets": assets,
         }
 
@@ -6805,6 +6823,29 @@ class PrivateOverlayReleaseTests(unittest.TestCase):
                 ],
             },
         ]
+        for release_id, release in enumerate(
+            (releases[0], releases[1], releases[4]),
+            start=10,
+        ):
+            release_sha = str(release["target_commitish"])
+            release.update(
+                {
+                    "id": release_id,
+                    "immutable": True,
+                    "assets": [
+                        self._release_asset(
+                            release_id * 10 + 1,
+                            f"personal-codex-{release_sha}.tar.gz",
+                            b"archive",
+                        ),
+                        self._release_asset(
+                            release_id * 10 + 2,
+                            f"personal-codex-{release_sha}.sha256",
+                            b"checksum\n",
+                        ),
+                    ],
+                }
+            )
         with mock.patch.object(
             RELEASE_MODULE, "iter_releases", return_value=iter(releases)
         ):
@@ -6850,16 +6891,167 @@ class PrivateOverlayReleaseTests(unittest.TestCase):
                 "target_commitish": sha,
                 "draft": False,
                 "prerelease": False,
+                "immutable": True,
                 "assets": [
-                    {"name": f"personal-codex-{sha}.tar.gz", "state": "uploaded"},
-                    {"name": f"personal-codex-{sha}.sha256", "state": "uploaded"},
+                    self._release_asset(
+                        11,
+                        f"personal-codex-{sha}.tar.gz",
+                        b"archive",
+                    ),
+                    self._release_asset(
+                        12,
+                        f"personal-codex-{sha}.sha256",
+                        b"checksum\n",
+                    ),
                 ],
             }
-            with mock.patch.object(
-                RELEASE_MODULE, "iter_releases", return_value=iter([release])
+            with (
+                mock.patch.object(
+                    RELEASE_MODULE,
+                    "iter_releases",
+                    return_value=iter([release]),
+                ),
+                mock.patch.object(RELEASE_MODULE, "request_json") as request_json,
+                mock.patch.object(RELEASE_MODULE, "urlopen") as urlopen,
+                mock.patch.object(
+                    RELEASE_MODULE,
+                    "_github_token",
+                ) as github_token,
             ):
                 with contextlib.redirect_stdout(io.StringIO()):
                     RELEASE_MODULE.publish_release("owner/repo", sha, dist)
+
+            request_json.assert_not_called()
+            urlopen.assert_not_called()
+            github_token.assert_not_called()
+
+    def test_publish_reuse_rejects_unbound_release_metadata_without_mutation(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory(
+            prefix="private-overlay-release."
+        ) as temp_dir_raw:
+            dist = Path(temp_dir_raw)
+            sha = "a" * 40
+            archive_name = f"personal-codex-{sha}.tar.gz"
+            checksum_name = f"personal-codex-{sha}.sha256"
+            (dist / archive_name).write_bytes(b"archive")
+            (dist / checksum_name).write_bytes(b"checksum\n")
+            release = self._release_candidate(sha)
+            release_without_immutable = dict(release)
+            release_without_immutable.pop("immutable")
+            cases = {
+                "mutable": dict(release, immutable=False),
+                "missing-immutable": release_without_immutable,
+                "invalid-id": dict(
+                    release,
+                    assets=[
+                        dict(release["assets"][0], id=0),
+                        release["assets"][1],
+                    ],
+                ),
+                "duplicate-id": dict(
+                    release,
+                    assets=[
+                        release["assets"][0],
+                        dict(
+                            release["assets"][1],
+                            id=release["assets"][0]["id"],
+                        ),
+                    ],
+                ),
+                "wrong-size": dict(
+                    release,
+                    assets=[
+                        dict(release["assets"][0], size=999),
+                        release["assets"][1],
+                    ],
+                ),
+                "wrong-digest": dict(
+                    release,
+                    assets=[
+                        dict(
+                            release["assets"][0],
+                            digest=f"sha256:{'b' * 64}",
+                        ),
+                        release["assets"][1],
+                    ],
+                ),
+                "uppercase-digest": dict(
+                    release,
+                    assets=[
+                        dict(
+                            release["assets"][0],
+                            digest=str(release["assets"][0]["digest"]).upper(),
+                        ),
+                        release["assets"][1],
+                    ],
+                ),
+                "non-object-asset": dict(
+                    release,
+                    assets=[*release["assets"], "invalid"],
+                ),
+            }
+
+            for name, candidate in cases.items():
+                with self.subTest(case=name):
+                    with (
+                        mock.patch.object(
+                            RELEASE_MODULE,
+                            "iter_releases",
+                            return_value=iter([candidate]),
+                        ),
+                        mock.patch.object(
+                            RELEASE_MODULE,
+                            "request_json",
+                        ) as request_json,
+                        mock.patch.object(
+                            RELEASE_MODULE,
+                            "urlopen",
+                        ) as urlopen,
+                        mock.patch.object(
+                            RELEASE_MODULE,
+                            "_github_token",
+                        ) as github_token,
+                        contextlib.redirect_stdout(io.StringIO()),
+                        self.assertRaises(RELEASE_MODULE.ReleaseError),
+                    ):
+                        RELEASE_MODULE.publish_release(
+                            "owner/repo",
+                            sha,
+                            dist,
+                        )
+
+                    request_json.assert_not_called()
+                    urlopen.assert_not_called()
+                    github_token.assert_not_called()
+
+    def test_publish_reads_bounded_assets_before_remote_mutation(self) -> None:
+        with tempfile.TemporaryDirectory(
+            prefix="private-overlay-release."
+        ) as temp_dir_raw:
+            dist = Path(temp_dir_raw)
+            sha = "a" * 40
+            (dist / f"personal-codex-{sha}.tar.gz").write_bytes(b"12345")
+            (dist / f"personal-codex-{sha}.sha256").write_bytes(b"ok")
+            with (
+                mock.patch.object(
+                    RELEASE_MODULE,
+                    "MAX_RELEASE_ASSET_BYTES",
+                    4,
+                ),
+                mock.patch.object(
+                    RELEASE_MODULE,
+                    "iter_releases",
+                ) as iter_releases,
+                self.assertRaisesRegex(
+                    RELEASE_MODULE.ReleaseError,
+                    "release asset exceeds 4 bytes",
+                ),
+            ):
+                RELEASE_MODULE.publish_release("owner/repo", sha, dist)
+
+            iter_releases.assert_not_called()
 
     def test_other_sha_pending_asset_keeps_uploaded_pair_eligible_for_repair(
         self,
@@ -6997,16 +7189,18 @@ class PrivateOverlayReleaseTests(unittest.TestCase):
 
                 request_json.assert_not_called()
 
-    def test_publish_existing_draft_updates_source_event(self) -> None:
+    def test_publish_existing_exact_pair_draft_reuploads_before_publish(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory(
             prefix="private-overlay-release."
         ) as temp_dir_raw:
             dist = Path(temp_dir_raw)
             sha = "a" * 40
-            (dist / f"personal-codex-{sha}.tar.gz").write_bytes(b"archive")
-            (dist / f"personal-codex-{sha}.sha256").write_text(
-                "checksum\n", encoding="utf-8"
-            )
+            archive_name = f"personal-codex-{sha}.tar.gz"
+            checksum_name = f"personal-codex-{sha}.sha256"
+            (dist / archive_name).write_bytes(b"archive")
+            (dist / checksum_name).write_text("checksum\n", encoding="utf-8")
             release = {
                 "id": 10,
                 "tag_name": f"personal-codex-20260522-100000-{sha[:7]}",
@@ -7015,47 +7209,256 @@ class PrivateOverlayReleaseTests(unittest.TestCase):
                 "draft": True,
                 "prerelease": False,
                 "assets": [
-                    {"name": f"personal-codex-{sha}.tar.gz", "state": "uploaded"},
-                    {"name": f"personal-codex-{sha}.sha256", "state": "uploaded"},
+                    {"id": 11, "name": archive_name, "state": "uploaded"},
+                    {"id": 12, "name": checksum_name, "state": "uploaded"},
+                    {"id": 13, "name": "release-notes.txt", "state": "uploaded"},
                 ],
             }
             requests: list[dict[str, object]] = []
+            uploads: list[tuple[str, str, bytes]] = []
+            events: list[str] = []
+            published = False
 
             def fake_request_json(
                 url: str, *, method: str = "GET", payload=None, token=None
             ):
+                nonlocal published
                 requests.append({"url": url, "method": method, "payload": payload})
-                if method == "GET" and len(requests) == 1:
-                    return release
+                if method == "DELETE":
+                    events.append(f"DELETE:{url.rsplit('/', 1)[-1]}")
+                else:
+                    events.append(method)
                 if method == "GET":
-                    return dict(release, draft=False)
+                    return dict(
+                        release,
+                        draft=not published,
+                        immutable=published,
+                        assets=[
+                            self._release_asset(
+                                21,
+                                archive_name,
+                                b"archive",
+                            ),
+                            self._release_asset(
+                                22,
+                                checksum_name,
+                                b"checksum\n",
+                            ),
+                            release["assets"][2],
+                        ],
+                    )
+                if method == "PATCH":
+                    published = True
                 return {"untrusted": True}
 
-            with mock.patch.object(
-                RELEASE_MODULE, "iter_releases", return_value=iter([release])
+            def fake_urlopen(request, timeout=30):
+                asset_name = request.full_url.rpartition("?name=")[2]
+                uploads.append((request.get_method(), asset_name, request.data))
+                events.append(f"{request.get_method()}:{asset_name}")
+                if asset_name == archive_name:
+                    (dist / checksum_name).write_bytes(b"changed after snapshot")
+                return io.BytesIO(
+                    json.dumps(
+                        {"name": asset_name, "state": "uploaded"}
+                    ).encode("utf-8")
+                )
+
+            with (
+                mock.patch.object(
+                    RELEASE_MODULE,
+                    "iter_releases",
+                    return_value=iter([release]),
+                ),
+                mock.patch.object(
+                    RELEASE_MODULE,
+                    "request_json",
+                    side_effect=fake_request_json,
+                ),
+                mock.patch.object(
+                    RELEASE_MODULE,
+                    "urlopen",
+                    side_effect=fake_urlopen,
+                ),
+                mock.patch.object(
+                    RELEASE_MODULE,
+                    "_github_token",
+                    return_value="token",
+                ),
+                contextlib.redirect_stdout(io.StringIO()),
             ):
-                with mock.patch.object(
-                    RELEASE_MODULE, "request_json", fake_request_json
-                ):
-                    with contextlib.redirect_stdout(io.StringIO()):
-                        RELEASE_MODULE.publish_release(
-                            "owner/repo",
-                            sha,
-                            dist,
-                            source_event="workflow_dispatch",
-                        )
+                RELEASE_MODULE.publish_release(
+                    "owner/repo",
+                    sha,
+                    dist,
+                    source_event="workflow_dispatch",
+                )
 
         self.assertEqual(
             [request["method"] for request in requests],
-            ["GET", "PATCH", "GET"],
+            ["DELETE", "DELETE", "GET", "PATCH", "GET"],
         )
         self.assertEqual(
-            requests[1]["payload"],
+            events,
+            [
+                "DELETE:11",
+                "DELETE:12",
+                f"POST:{archive_name}",
+                f"POST:{checksum_name}",
+                "GET",
+                "PATCH",
+                "GET",
+            ],
+        )
+        self.assertEqual(
+            {
+                str(request["url"]).rsplit("/", 1)[-1]
+                for request in requests
+                if request["method"] == "DELETE"
+            },
+            {"11", "12"},
+        )
+        self.assertEqual(
+            uploads,
+            [
+                ("POST", archive_name, b"archive"),
+                ("POST", checksum_name, b"checksum\n"),
+            ],
+        )
+        self.assertEqual(
+            requests[3]["payload"],
             {
                 "body": f"Private Codex overlay release for {sha}.\n\nsource_event=workflow_dispatch",
                 "draft": False,
             },
         )
+
+    def test_publish_existing_draft_rejects_flag_drift_before_patch(self) -> None:
+        with tempfile.TemporaryDirectory(
+            prefix="private-overlay-release."
+        ) as temp_dir_raw:
+            dist = Path(temp_dir_raw)
+            sha = "a" * 40
+            archive_name = f"personal-codex-{sha}.tar.gz"
+            checksum_name = f"personal-codex-{sha}.sha256"
+            (dist / archive_name).write_bytes(b"archive")
+            (dist / checksum_name).write_text("checksum\n", encoding="utf-8")
+            draft = self._release_candidate(sha, draft=True)
+            requests: list[str] = []
+
+            def fake_request_json(
+                url: str, *, method: str = "GET", payload=None, token=None
+            ):
+                requests.append(method)
+                if method == "GET":
+                    return dict(draft, draft=False)
+                return {}
+
+            def fake_urlopen(request, timeout=30):
+                asset_name = request.full_url.rpartition("?name=")[2]
+                return io.BytesIO(
+                    json.dumps(
+                        {"name": asset_name, "state": "uploaded"}
+                    ).encode("utf-8")
+                )
+
+            with (
+                mock.patch.object(
+                    RELEASE_MODULE,
+                    "iter_releases",
+                    return_value=iter([draft]),
+                ),
+                mock.patch.object(
+                    RELEASE_MODULE,
+                    "request_json",
+                    side_effect=fake_request_json,
+                ),
+                mock.patch.object(
+                    RELEASE_MODULE,
+                    "urlopen",
+                    side_effect=fake_urlopen,
+                ) as urlopen,
+                mock.patch.object(
+                    RELEASE_MODULE,
+                    "_github_token",
+                    return_value="token",
+                ),
+                contextlib.redirect_stdout(io.StringIO()),
+                self.assertRaisesRegex(
+                    RELEASE_MODULE.ReleaseError,
+                    "draft flag changed",
+                ),
+            ):
+                RELEASE_MODULE.publish_release("owner/repo", sha, dist)
+
+        self.assertEqual(requests, ["DELETE", "DELETE", "GET"])
+        self.assertEqual(urlopen.call_count, 2)
+
+    def test_publish_existing_draft_binds_pre_patch_get_to_local_content(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory(
+            prefix="private-overlay-release."
+        ) as temp_dir_raw:
+            dist = Path(temp_dir_raw)
+            sha = "a" * 40
+            archive_name = f"personal-codex-{sha}.tar.gz"
+            checksum_name = f"personal-codex-{sha}.sha256"
+            (dist / archive_name).write_bytes(b"archive")
+            (dist / checksum_name).write_bytes(b"checksum\n")
+            draft = self._release_candidate(sha, draft=True)
+            requests: list[str] = []
+            wrong_assets = [
+                dict(draft["assets"][0], digest=f"sha256:{'b' * 64}"),
+                draft["assets"][1],
+            ]
+
+            def fake_request_json(
+                url: str, *, method: str = "GET", payload=None, token=None
+            ):
+                requests.append(method)
+                if method == "GET":
+                    return dict(draft, assets=wrong_assets)
+                return {}
+
+            def fake_urlopen(request, timeout=30):
+                asset_name = request.full_url.rpartition("?name=")[2]
+                return io.BytesIO(
+                    json.dumps(
+                        {"name": asset_name, "state": "uploaded"}
+                    ).encode("utf-8")
+                )
+
+            with (
+                mock.patch.object(
+                    RELEASE_MODULE,
+                    "iter_releases",
+                    return_value=iter([draft]),
+                ),
+                mock.patch.object(
+                    RELEASE_MODULE,
+                    "request_json",
+                    side_effect=fake_request_json,
+                ),
+                mock.patch.object(
+                    RELEASE_MODULE,
+                    "urlopen",
+                    side_effect=fake_urlopen,
+                ),
+                mock.patch.object(
+                    RELEASE_MODULE,
+                    "_github_token",
+                    return_value="token",
+                ),
+                contextlib.redirect_stdout(io.StringIO()),
+                self.assertRaisesRegex(
+                    RELEASE_MODULE.ReleaseError,
+                    "digest mismatch",
+                ),
+            ):
+                RELEASE_MODULE.publish_release("owner/repo", sha, dist)
+
+        self.assertEqual(requests, ["DELETE", "DELETE", "GET"])
+        self.assertNotIn("PATCH", requests)
 
     def test_publish_existing_draft_rejects_post_publish_drift(self) -> None:
         with tempfile.TemporaryDirectory(
@@ -7068,6 +7471,14 @@ class PrivateOverlayReleaseTests(unittest.TestCase):
             (dist / archive_name).write_bytes(b"archive")
             (dist / checksum_name).write_text("checksum\n", encoding="utf-8")
             draft = self._release_candidate(sha, draft=True)
+            wrong_digest_assets = [
+                dict(draft["assets"][0], digest=f"sha256:{'b' * 64}"),
+                draft["assets"][1],
+            ]
+            wrong_size_assets = [
+                dict(draft["assets"][0], size=999),
+                draft["assets"][1],
+            ]
             drift_cases = {
                 "id": dict(draft, id=99, draft=False),
                 "tag": dict(
@@ -7078,6 +7489,19 @@ class PrivateOverlayReleaseTests(unittest.TestCase):
                 "target": dict(draft, target_commitish="b" * 40, draft=False),
                 "draft": draft,
                 "prerelease": dict(draft, draft=False, prerelease=True),
+                "immutable": dict(draft, draft=False, immutable=False),
+                "digest": dict(
+                    draft,
+                    draft=False,
+                    immutable=True,
+                    assets=wrong_digest_assets,
+                ),
+                "size": dict(
+                    draft,
+                    draft=False,
+                    immutable=True,
+                    assets=wrong_size_assets,
+                ),
                 "assets": dict(
                     draft,
                     draft=False,
@@ -7111,6 +7535,14 @@ class PrivateOverlayReleaseTests(unittest.TestCase):
                             return draft if get_count == 1 else published
                         return {"untrusted": True}
 
+                    def fake_urlopen(request, timeout=30):
+                        asset_name = request.full_url.rpartition("?name=")[2]
+                        return io.BytesIO(
+                            json.dumps(
+                                {"name": asset_name, "state": "uploaded"}
+                            ).encode("utf-8")
+                        )
+
                     with (
                         mock.patch.object(
                             RELEASE_MODULE,
@@ -7122,14 +7554,26 @@ class PrivateOverlayReleaseTests(unittest.TestCase):
                             "request_json",
                             side_effect=fake_request_json,
                         ),
-                        mock.patch.object(RELEASE_MODULE, "urlopen") as urlopen,
+                        mock.patch.object(
+                            RELEASE_MODULE,
+                            "urlopen",
+                            side_effect=fake_urlopen,
+                        ) as urlopen,
+                        mock.patch.object(
+                            RELEASE_MODULE,
+                            "_github_token",
+                            return_value="token",
+                        ),
                         contextlib.redirect_stdout(io.StringIO()),
                         self.assertRaises(RELEASE_MODULE.ReleaseError),
                     ):
                         RELEASE_MODULE.publish_release("owner/repo", sha, dist)
 
-                    self.assertEqual(requests, ["GET", "PATCH", "GET"])
-                    urlopen.assert_not_called()
+                    self.assertEqual(
+                        requests,
+                        ["DELETE", "DELETE", "GET", "PATCH", "GET"],
+                    )
+                    self.assertEqual(urlopen.call_count, 2)
 
     def test_incomplete_published_release_repairs_successfully(self) -> None:
         with tempfile.TemporaryDirectory(
@@ -7151,6 +7595,7 @@ class PrivateOverlayReleaseTests(unittest.TestCase):
                     }
                 ],
             )
+            release["immutable"] = False
             final_release = self._release_candidate(sha)
             requests: list[str] = []
             uploads: list[str] = []
@@ -7252,17 +7697,18 @@ class PrivateOverlayReleaseTests(unittest.TestCase):
                         "target_commitish": sha,
                         "draft": not published,
                         "prerelease": False,
+                        "immutable": published,
                         "assets": [
-                            {
-                                "id": 21,
-                                "name": f"personal-codex-{sha}.tar.gz",
-                                "state": "uploaded",
-                            },
-                            {
-                                "id": 22,
-                                "name": f"personal-codex-{sha}.sha256",
-                                "state": "uploaded",
-                            },
+                            self._release_asset(
+                                21,
+                                f"personal-codex-{sha}.tar.gz",
+                                b"archive",
+                            ),
+                            self._release_asset(
+                                22,
+                                f"personal-codex-{sha}.sha256",
+                                b"checksum\n",
+                            ),
                         ],
                     }
                 if method == "PATCH":
@@ -7318,7 +7764,7 @@ class PrivateOverlayReleaseTests(unittest.TestCase):
         self.assertIn(f"personal-codex-{sha}.tar.gz", uploads[0])
         self.assertIn(f"personal-codex-{sha}.sha256", uploads[1])
 
-    def test_repair_validates_all_matching_asset_ids_before_mutation(self) -> None:
+    def test_exact_pair_draft_validates_asset_ids_before_mutation(self) -> None:
         with tempfile.TemporaryDirectory(
             prefix="private-overlay-release."
         ) as temp_dir_raw:
@@ -7329,17 +7775,31 @@ class PrivateOverlayReleaseTests(unittest.TestCase):
             (dist / archive_name).write_bytes(b"archive")
             (dist / checksum_name).write_text("checksum\n", encoding="utf-8")
             cases = {
+                "missing": (
+                    [
+                        {"id": 11, "name": archive_name, "state": "uploaded"},
+                        {"name": checksum_name, "state": "uploaded"},
+                    ],
+                    "positive integer id",
+                ),
                 "invalid": (
                     [
                         {"id": 11, "name": archive_name, "state": "uploaded"},
-                        {"id": 0, "name": checksum_name, "state": "starter"},
+                        {"id": 0, "name": checksum_name, "state": "uploaded"},
+                    ],
+                    "positive integer id",
+                ),
+                "boolean": (
+                    [
+                        {"id": 11, "name": archive_name, "state": "uploaded"},
+                        {"id": True, "name": checksum_name, "state": "uploaded"},
                     ],
                     "positive integer id",
                 ),
                 "duplicate": (
                     [
                         {"id": 11, "name": archive_name, "state": "uploaded"},
-                        {"id": 11, "name": checksum_name, "state": "starter"},
+                        {"id": 11, "name": checksum_name, "state": "uploaded"},
                     ],
                     "reuse id 11",
                 ),
@@ -7351,7 +7811,7 @@ class PrivateOverlayReleaseTests(unittest.TestCase):
                         "id": 10,
                         "tag_name": f"personal-codex-20260522-100000-{sha[:7]}",
                         "target_commitish": sha,
-                        "draft": False,
+                        "draft": True,
                         "prerelease": False,
                         "assets": assets,
                     }
@@ -7373,6 +7833,52 @@ class PrivateOverlayReleaseTests(unittest.TestCase):
                             RELEASE_MODULE.ReleaseError,
                             error_pattern,
                         ),
+                    ):
+                        RELEASE_MODULE.publish_release("owner/repo", sha, dist)
+
+                    request_json.assert_not_called()
+                    urlopen.assert_not_called()
+
+    def test_publish_rejects_invalid_release_metadata_before_mutation(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory(
+            prefix="private-overlay-release."
+        ) as temp_dir_raw:
+            dist = Path(temp_dir_raw)
+            sha = "a" * 40
+            archive_name = f"personal-codex-{sha}.tar.gz"
+            checksum_name = f"personal-codex-{sha}.sha256"
+            (dist / archive_name).write_bytes(b"archive")
+            (dist / checksum_name).write_text("checksum\n", encoding="utf-8")
+            cases = {
+                "release-id-missing": {"id": None},
+                "release-id": {"id": 0},
+                "release-id-boolean": {"id": True},
+                "draft-flag": {"draft": 1},
+                "prerelease-flag": {"prerelease": None},
+                "draft-prerelease": {"prerelease": True},
+            }
+
+            for name, changes in cases.items():
+                with self.subTest(case=name):
+                    release = self._release_candidate(sha, draft=True)
+                    release.update(changes)
+                    with (
+                        mock.patch.object(
+                            RELEASE_MODULE,
+                            "iter_releases",
+                            return_value=iter([release]),
+                        ),
+                        mock.patch.object(
+                            RELEASE_MODULE,
+                            "request_json",
+                        ) as request_json,
+                        mock.patch.object(
+                            RELEASE_MODULE,
+                            "urlopen",
+                        ) as urlopen,
+                        self.assertRaises(RELEASE_MODULE.ReleaseError),
                     ):
                         RELEASE_MODULE.publish_release("owner/repo", sha, dist)
 
@@ -7513,7 +8019,7 @@ class PrivateOverlayReleaseTests(unittest.TestCase):
                 ),
                 self.assertRaisesRegex(
                     RELEASE_MODULE.ReleaseError,
-                    "not exact after upload",
+                    "after upload.*not exact",
                 ),
             ):
                 RELEASE_MODULE.publish_release("owner/repo", sha, dist)
@@ -7622,17 +8128,7 @@ class PrivateOverlayReleaseTests(unittest.TestCase):
     def test_release_complete_requires_published_assets(self) -> None:
         sha = "a" * 40
         other_sha = "b" * 40
-        complete_release = {
-            "id": 10,
-            "tag_name": f"personal-codex-20260522-100000-{sha[:7]}",
-            "target_commitish": sha,
-            "draft": False,
-            "prerelease": False,
-            "assets": [
-                {"name": f"personal-codex-{sha}.tar.gz", "state": "uploaded"},
-                {"name": f"personal-codex-{sha}.sha256", "state": "uploaded"},
-            ],
-        }
+        complete_release = self._release_candidate(sha)
         draft_release = dict(complete_release, draft=True)
         missing_asset_release = dict(
             complete_release,
@@ -7684,6 +8180,68 @@ class PrivateOverlayReleaseTests(unittest.TestCase):
             RELEASE_MODULE, "iter_releases", return_value=iter([complete_release])
         ):
             self.assertTrue(RELEASE_MODULE.release_complete("owner/repo", sha))
+
+        valid_remote_only_digest = dict(
+            complete_release,
+            assets=[
+                dict(
+                    complete_release["assets"][0],
+                    digest=f"sha256:{'b' * 64}",
+                ),
+                complete_release["assets"][1],
+            ],
+        )
+        with mock.patch.object(
+            RELEASE_MODULE,
+            "iter_releases",
+            return_value=iter([valid_remote_only_digest]),
+        ):
+            self.assertTrue(RELEASE_MODULE.release_complete("owner/repo", sha))
+
+        invalid_remote_metadata = {
+            "mutable": dict(complete_release, immutable=False),
+            "missing-immutable": {
+                key: value
+                for key, value in complete_release.items()
+                if key != "immutable"
+            },
+            "asset-id": dict(
+                complete_release,
+                assets=[
+                    dict(complete_release["assets"][0], id=True),
+                    complete_release["assets"][1],
+                ],
+            ),
+            "asset-size": dict(
+                complete_release,
+                assets=[
+                    dict(complete_release["assets"][0], size=-1),
+                    complete_release["assets"][1],
+                ],
+            ),
+            "asset-digest": dict(
+                complete_release,
+                assets=[
+                    dict(complete_release["assets"][0], digest="sha256:BAD"),
+                    complete_release["assets"][1],
+                ],
+            ),
+            "non-object-asset": dict(
+                complete_release,
+                assets=[*complete_release["assets"], "invalid"],
+            ),
+        }
+        for name, release in invalid_remote_metadata.items():
+            with self.subTest(remote_metadata=name):
+                with mock.patch.object(
+                    RELEASE_MODULE,
+                    "iter_releases",
+                    return_value=iter([release]),
+                ):
+                    self.assertFalse(
+                        RELEASE_MODULE.release_complete("owner/repo", sha)
+                    )
+
         with mock.patch.object(
             RELEASE_MODULE, "iter_releases", return_value=iter([draft_release])
         ):
