@@ -597,7 +597,10 @@ class SessionRetrospectiveTests(unittest.TestCase):
                         )
                     if probe is REMOTE_HOST_CONTEXT_PROBE:
                         self.assertIsInstance(caught.exception, probe.SessionMetaRolloutError)
-                        self.assertEqual(caught.exception.error, "rollout unreadable")
+                        self.assertEqual(
+                            caught.exception.error,
+                            "rollout path is a symlink",
+                        )
                         self.assertEqual(
                             caught.exception.rollout,
                             "sessions/2026/05/01/rollout-2026-05-01T10-00-00-link.jsonl",
@@ -10553,14 +10556,24 @@ class SessionRetrospectiveTests(unittest.TestCase):
                 self.assertIn("internal|corp|local|lan|example|invalid|test", script)
                 self.assertIn("meaningful_user_message_text", script)
                 self.assertIn("Persistent internal Codex readonly review contract", script)
-                if probe is REMOTE_HOST_CONTEXT_PROBE:
-                    self.assertIn("resolved_root = ROOT.resolve(strict=True)", script)
-                    self.assertIn("os.stat(part, dir_fd=directory_fd, follow_symlinks=False)", script)
-                    self.assertIn("os.open(part, directory_open_flags(), dir_fd=directory_fd)", script)
+                self.assertIn("ROOT.lstat()", script)
+                self.assertIn("Codex root is a symlink", script)
+                if "def open_pinned_codex_root()" in script:
+                    self.assertIn(
+                        "os.open(str(ROOT), directory_open_flags())",
+                        script,
+                    )
+                    self.assertIn(
+                        "os.stat(part, dir_fd=directory_fd, follow_symlinks=False)",
+                        script,
+                    )
+                    self.assertIn(
+                        "os.open(part, directory_open_flags(), dir_fd=directory_fd)",
+                        script,
+                    )
                     self.assertIn("dir_fd=self.parent_fd", script)
                 else:
-                    self.assertIn("ROOT.lstat()", script)
-                    self.assertIn("Codex root is a symlink", script)
+                    self.assertIn("return ROOT.resolve(strict=True)", script)
                 self.assertIn('os.fdopen(fd, "rb")', script)
                 self.assertIn("raw_bytes.splitlines(keepends=True)", script)
                 self.assertIn("if max_scan_bytes and scanned >= max_scan_bytes:\n            if dropping_oversized_line:", script)
@@ -10595,6 +10608,10 @@ class SessionRetrospectiveTests(unittest.TestCase):
                             "session_meta_scan_bytes": 1024,
                         }
                     )
+                    frames_root_errors = (
+                        "except (OSError, ValueError):\n"
+                        "        session_directory_unreadable()"
+                    ) in script
 
                     result = subprocess.run(
                         [sys.executable, "-"],
@@ -10604,7 +10621,7 @@ class SessionRetrospectiveTests(unittest.TestCase):
                         check=False,
                     )
 
-                if probe is REMOTE_HOST_CONTEXT_PROBE:
+                if frames_root_errors:
                     self.assertEqual(result.returncode, 0)
                     self.assertEqual(result.stderr, "")
                     payload_lines = probe._extract_framed_lines(
