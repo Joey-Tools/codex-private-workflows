@@ -1575,7 +1575,12 @@ def _raw_line_parts(raw_line: Any) -> tuple[bytes, str]:
     if isinstance(raw_line, str):
         return raw_line.encode("utf-8", "surrogatepass"), raw_line
     raw_bytes = bytes(raw_line)
-    return raw_bytes, raw_bytes.decode("utf-8", "replace")
+    try:
+        return raw_bytes, raw_bytes.decode("utf-8")
+    except UnicodeDecodeError:
+        # Let the JSON summarizer count the physical record as malformed
+        # without emitting replacement-altered evidence.
+        return raw_bytes, ""
 
 
 def _raw_line_endswith_newline(raw_line: Any) -> bool:
@@ -2925,7 +2930,12 @@ def raw_line_parts(raw_line):
     if isinstance(raw_line, str):
         return raw_line.encode("utf-8", "surrogatepass"), raw_line
     raw_bytes = bytes(raw_line)
-    return raw_bytes, raw_bytes.decode("utf-8", "replace")
+    try:
+        return raw_bytes, raw_bytes.decode("utf-8")
+    except UnicodeDecodeError:
+        # Let the JSON summarizer count the physical record as malformed
+        # without emitting replacement-altered evidence.
+        return raw_bytes, ""
 
 
 def raw_line_endswith_newline(raw_line):
