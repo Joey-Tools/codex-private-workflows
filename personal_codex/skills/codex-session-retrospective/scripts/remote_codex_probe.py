@@ -8,7 +8,9 @@ import binascii
 import collections
 import dataclasses
 import datetime as dt
+import errno
 import hashlib
+import io
 import json
 import os
 import pathlib
@@ -25,6 +27,7 @@ from typing import Any, BinaryIO
 
 DATE_FORMAT = "%Y/%m/%d"
 MAX_SESSION_META_LIMIT = 500
+MAX_SESSION_META_CANDIDATE_LIMIT = MAX_SESSION_META_LIMIT + 1
 MAX_SESSION_META_DATE_COUNT = 31
 MAX_FETCH_ROLLOUT_BYTES = 16 * 1024 * 1024
 MAX_REMOTE_SESSION_META_SERIALIZED_ROW_BYTES = 64 * 1024
@@ -108,6 +111,14 @@ ARCHIVED_ROLLOUT_RELATIVE_RE = re.compile(
     r"^archived_sessions/(?:\d{4}/\d{2}/\d{2}/)?rollout-(?!summary)[^/]+\.jsonl$"
 )
 ROOT_ROLLOUT_RELATIVE_RE = re.compile(r"^rollout-(?!summary)[^/]+\.jsonl$")
+RAW_ROLLOUT_BASENAME_RE = re.compile(r"^rollout-(?!summary)[^/]+\.jsonl$")
+SECURE_ROLLOUT_DIR_FD_SUPPORTED = (
+    getattr(os, "O_DIRECTORY", None) is not None
+    and getattr(os, "O_NOFOLLOW", None) is not None
+    and os.open in os.supports_dir_fd
+    and os.stat in os.supports_dir_fd
+    and os.stat in os.supports_follow_symlinks
+)
 ROLLOUT_FILENAME_TIME_RE = re.compile(
     r"^rollout-(\d{4}-\d{2}-\d{2})(?:T(\d{2})-(\d{2})-(\d{2}))?(?:-|\.jsonl$)"
 )
@@ -324,6 +335,9 @@ SUMMARY_SENSITIVE_SIGNAL_RE = re.compile(SUMMARY_SENSITIVE_SIGNAL_PATTERN_TEXT, 
 REMOTE_SESSION_META_BEGIN = "__REMOTE_CODEX_PROBE_SESSION_META_BEGIN__"
 REMOTE_SESSION_META_END = "__REMOTE_CODEX_PROBE_SESSION_META_END__"
 SESSION_META_LIMIT_TRUNCATED_REASON = "session_meta_limit_truncated"
+SESSION_META_CANDIDATE_LIMIT_TRUNCATED_REASON = (
+    "session_meta_candidate_limit_truncated"
+)
 SESSION_META_OUTPUT_ROW_TOO_LARGE_ERROR = "session-meta output row too large"
 REMOTE_FETCH_ROLLOUT_BEGIN = "__REMOTE_CODEX_PROBE_FETCH_ROLLOUT_BEGIN__"
 REMOTE_FETCH_ROLLOUT_END = "__REMOTE_CODEX_PROBE_FETCH_ROLLOUT_END__"
@@ -379,6 +393,42 @@ class RolloutIdentity:
     inode: int
     mtime_ns: int
     ctime_ns: int
+
+
+@dataclasses.dataclass(frozen=True)
+class RolloutInventoryIdentity:
+    mode: int
+    size: int
+    device: int
+    inode: int
+    mtime_ns: int
+    ctime_ns: int
+
+
+@dataclasses.dataclass(frozen=True)
+class RolloutStableIdentity:
+    device: int
+    inode: int
+
+
+@dataclasses.dataclass(frozen=True)
+class RolloutPrefixProof:
+    length: int
+    sha256: str
+
+
+@dataclasses.dataclass(frozen=True)
+class RolloutCandidateIdentity:
+    snapshot: RolloutIdentity
+    stable: RolloutStableIdentity
+    prefix_proof: RolloutPrefixProof | None = None
+
+
+@dataclasses.dataclass(frozen=True)
+class EnumeratedRolloutParent:
+    fd: int
+    expected_identity: RolloutCandidateIdentity
+    allow_append: bool
 
 
 class SessionMetaRolloutError(ValueError):
@@ -642,57 +692,97 @@ def _path_is_relative_to(path: pathlib.Path, root: pathlib.Path) -> bool:
     return True
 
 
-def _resolve_safe_codex_root(codex_root: pathlib.Path) -> pathlib.Path:
-    expanded_root = codex_root.expanduser()
-    root_stat = expanded_root.lstat()
-    if stat.S_ISLNK(root_stat.st_mode):
-        raise ValueError("Codex root is a symlink")
-    if not stat.S_ISDIR(root_stat.st_mode):
-        raise ValueError("Codex root is not a directory")
-    return expanded_root.resolve(strict=True)
+def _directory_open_flags() -> int:
+    if not SECURE_ROLLOUT_DIR_FD_SUPPORTED:
+        raise OSError(
+            "secure rollout reads require O_DIRECTORY, O_NOFOLLOW, and descriptor-relative open/stat"
+        )
+    return os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
 
 
-def _safe_relative_path(
-    codex_root: pathlib.Path,
+def _regular_file_open_flags() -> int:
+    _directory_open_flags()
+    nonblocking_flag = getattr(os, "O_NONBLOCK", None)
+    if nonblocking_flag is None:
+        raise OSError("secure rollout reads require O_NONBLOCK")
+    return os.O_RDONLY | os.O_NOFOLLOW | nonblocking_flag | getattr(os, "O_CLOEXEC", 0)
+
+
+def _validate_relative_path_parts(
     relative_path: pathlib.PurePosixPath,
-    *,
-    expect_directory: bool = False,
-    expect_regular_file: bool = False,
-) -> pathlib.Path:
-    root = _resolve_safe_codex_root(codex_root)
-    target = root
+) -> tuple[str, ...]:
+    if relative_path.is_absolute():
+        raise ValueError("path must stay under Codex root")
     parts = relative_path.parts
-    for index, part in enumerate(parts):
-        if part in ("", ".", ".."):
-            raise ValueError("path must stay under Codex root")
-        target = target / part
-        target_stat = target.lstat()
-        if stat.S_ISLNK(target_stat.st_mode):
-            raise ValueError("path uses a symlink ancestor")
-        is_last = index == len(parts) - 1
-        if not is_last:
-            if not stat.S_ISDIR(target_stat.st_mode):
+    if any(part in ("", ".", "..") for part in parts):
+        raise ValueError("path must stay under Codex root")
+    return parts
+
+
+def _inspect_safe_codex_root(
+    codex_root: pathlib.Path,
+) -> tuple[pathlib.Path, os.stat_result]:
+    expanded_root = codex_root.expanduser()
+    root_entry = expanded_root.lstat()
+    if stat.S_ISLNK(root_entry.st_mode):
+        raise ValueError("Codex root is a symlink")
+    if not stat.S_ISDIR(root_entry.st_mode):
+        raise ValueError("Codex root is not a directory")
+    return expanded_root, root_entry
+
+
+def _open_pinned_codex_root(codex_root: pathlib.Path) -> int:
+    expanded_root, observed = _inspect_safe_codex_root(codex_root)
+    try:
+        fd = os.open(str(expanded_root), _directory_open_flags())
+    except FileNotFoundError as error:
+        raise ValueError("Codex root changed after initial inspection") from error
+    try:
+        opened = os.fstat(fd)
+        if not stat.S_ISDIR(opened.st_mode):
+            raise ValueError("Codex root is not a directory")
+        if (opened.st_dev, opened.st_ino) != (observed.st_dev, observed.st_ino):
+            raise ValueError("Codex root changed during open")
+        return fd
+    except Exception:
+        os.close(fd)
+        raise
+
+
+def _open_pinned_directory_from_fd(
+    root_fd: int,
+    relative_path: pathlib.PurePosixPath,
+) -> int:
+    directory_fd = os.dup(root_fd)
+    try:
+        for part in _validate_relative_path_parts(relative_path):
+            observed = os.stat(part, dir_fd=directory_fd, follow_symlinks=False)
+            if stat.S_ISLNK(observed.st_mode):
+                raise ValueError("path uses a symlink ancestor")
+            if not stat.S_ISDIR(observed.st_mode):
                 raise ValueError("path ancestor is not a directory")
-        elif expect_directory and not stat.S_ISDIR(target_stat.st_mode):
-            raise ValueError("path is not a directory")
-        elif expect_regular_file and not stat.S_ISREG(target_stat.st_mode):
-            raise ValueError("rollout path is not a regular file")
-    target_resolved = target.resolve(strict=True)
-    if not _path_is_relative_to(target_resolved, root):
-        raise ValueError("path escapes Codex root")
-    return target_resolved
-
-
-def _safe_rollout_path(
-    codex_root: pathlib.Path, rollout_relative_path: pathlib.PurePosixPath
-) -> pathlib.Path:
-    return _safe_relative_path(codex_root, rollout_relative_path, expect_regular_file=True)
-
-
-def _safe_directory_path(
-    codex_root: pathlib.Path, relative_path: pathlib.PurePosixPath
-) -> pathlib.Path:
-    return _safe_relative_path(codex_root, relative_path, expect_directory=True)
+            try:
+                next_fd = os.open(part, _directory_open_flags(), dir_fd=directory_fd)
+            except FileNotFoundError as error:
+                raise ValueError("path ancestor changed during open") from error
+            try:
+                opened = os.fstat(next_fd)
+                if not stat.S_ISDIR(opened.st_mode):
+                    raise ValueError("path ancestor is not a directory")
+                if (opened.st_dev, opened.st_ino) != (
+                    observed.st_dev,
+                    observed.st_ino,
+                ):
+                    raise ValueError("path ancestor changed during open")
+            except Exception:
+                os.close(next_fd)
+                raise
+            os.close(directory_fd)
+            directory_fd = next_fd
+        return directory_fd
+    except Exception:
+        os.close(directory_fd)
+        raise
 
 
 def _rollout_identity_from_stat(stat_result: os.stat_result) -> RolloutIdentity:
@@ -707,6 +797,165 @@ def _rollout_identity_from_stat(stat_result: os.stat_result) -> RolloutIdentity:
     )
 
 
+def _stable_rollout_identity_from_stat(
+    stat_result: os.stat_result,
+) -> RolloutStableIdentity:
+    if stat.S_ISLNK(stat_result.st_mode):
+        raise ValueError("rollout path is a symlink")
+    if not stat.S_ISREG(stat_result.st_mode):
+        raise ValueError("rollout path is not a regular file")
+    return RolloutStableIdentity(
+        device=stat_result.st_dev,
+        inode=stat_result.st_ino,
+    )
+
+
+def _rollout_inventory_identity_from_stat(
+    stat_result: os.stat_result,
+) -> RolloutInventoryIdentity:
+    return RolloutInventoryIdentity(
+        mode=stat_result.st_mode,
+        size=stat_result.st_size,
+        device=stat_result.st_dev,
+        inode=stat_result.st_ino,
+        mtime_ns=stat_result.st_mtime_ns,
+        ctime_ns=stat_result.st_ctime_ns,
+    )
+
+
+def _capture_rollout_inventory_identity_from_parent_fd(
+    parent_fd: int,
+    name: str,
+) -> RolloutInventoryIdentity:
+    try:
+        stat_result = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+    except FileNotFoundError as error:
+        raise ValueError("rollout identity changed during enumeration") from error
+    return _rollout_inventory_identity_from_stat(stat_result)
+
+
+def _assert_rollout_inventory_identity(
+    actual: RolloutInventoryIdentity,
+    expected: RolloutInventoryIdentity,
+    *,
+    allow_append: bool,
+    phase: str,
+) -> None:
+    if allow_append:
+        same_file = (
+            actual.device == expected.device
+            and actual.inode == expected.inode
+        )
+        unchanged_snapshot = actual.size != expected.size or actual == expected
+        matches = (
+            same_file
+            and actual.size >= expected.size
+            and unchanged_snapshot
+        )
+    else:
+        matches = actual == expected
+    if not matches:
+        raise ValueError(f"rollout identity changed {phase}")
+
+
+def _validated_rollout_inventory_identity_from_parent_fd(
+    parent_fd: int,
+    name: str,
+    expected: RolloutInventoryIdentity,
+    *,
+    allow_append: bool,
+    phase: str,
+) -> RolloutInventoryIdentity:
+    try:
+        stat_result = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+    except FileNotFoundError as error:
+        raise ValueError(f"rollout identity changed {phase}") from error
+    actual = _rollout_inventory_identity_from_stat(stat_result)
+    _assert_rollout_inventory_identity(
+        actual,
+        expected,
+        allow_append=allow_append,
+        phase=phase,
+    )
+    if stat.S_ISLNK(actual.mode):
+        raise ValueError("rollout path is a symlink")
+    if not stat.S_ISREG(actual.mode):
+        raise ValueError("rollout path is not a regular file")
+    return actual
+
+
+def _rollout_candidate_identity_from_stat(
+    stat_result: os.stat_result,
+) -> RolloutCandidateIdentity:
+    stable = _stable_rollout_identity_from_stat(stat_result)
+    return RolloutCandidateIdentity(
+        snapshot=_rollout_identity_from_stat(stat_result),
+        stable=stable,
+    )
+
+
+def _capture_rollout_candidate_identity_from_parent_fd(
+    parent_fd: int,
+    name: str,
+    inventory_identity: RolloutInventoryIdentity,
+) -> RolloutCandidateIdentity:
+    phase = "after enumeration"
+    _validated_rollout_inventory_identity_from_parent_fd(
+        parent_fd,
+        name,
+        inventory_identity,
+        allow_append=False,
+        phase=phase,
+    )
+    try:
+        fd = os.open(name, _regular_file_open_flags(), dir_fd=parent_fd)
+    except FileNotFoundError as error:
+        raise ValueError("rollout identity changed during open") from error
+    except OSError as error:
+        if error.errno == errno.ELOOP:
+            raise ValueError("rollout identity changed during open") from error
+        raise
+    try:
+        descriptor_stat = os.fstat(fd)
+        descriptor_inventory_identity = _rollout_inventory_identity_from_stat(
+            descriptor_stat
+        )
+        _assert_rollout_inventory_identity(
+            descriptor_inventory_identity,
+            inventory_identity,
+            allow_append=False,
+            phase="during open",
+        )
+        descriptor_identity = _rollout_candidate_identity_from_stat(descriptor_stat)
+        for _ in range(2):
+            try:
+                path_stat = os.stat(
+                    name,
+                    dir_fd=parent_fd,
+                    follow_symlinks=False,
+                )
+            except FileNotFoundError as error:
+                raise ValueError("rollout identity changed during open") from error
+            path_inventory_identity = _rollout_inventory_identity_from_stat(
+                path_stat
+            )
+            _assert_rollout_inventory_identity(
+                path_inventory_identity,
+                inventory_identity,
+                allow_append=False,
+                phase="during open",
+            )
+            path_identity = _rollout_candidate_identity_from_stat(path_stat)
+            _assert_rollout_identity(
+                path_identity.snapshot,
+                descriptor_identity.snapshot,
+                phase="during open",
+            )
+        return descriptor_identity
+    finally:
+        os.close(fd)
+
+
 def _assert_rollout_identity(
     actual: RolloutIdentity,
     expected: RolloutIdentity,
@@ -717,21 +966,475 @@ def _assert_rollout_identity(
         raise ValueError(f"rollout identity changed {phase}")
 
 
-def _rollout_path_identity(target: pathlib.Path) -> RolloutIdentity:
-    return _rollout_identity_from_stat(target.lstat())
-
-
-def _assert_rollout_path_identity(
-    target: pathlib.Path,
+def _assert_append_only_rollout_identity(
+    actual: RolloutIdentity,
     expected: RolloutIdentity,
     *,
     phase: str,
 ) -> None:
+    same_file = (
+        actual.device == expected.device
+        and actual.inode == expected.inode
+    )
+    unchanged_snapshot = actual.size != expected.size or actual == expected
+    if not same_file or actual.size < expected.size or not unchanged_snapshot:
+        raise ValueError(f"rollout identity changed {phase}")
+
+
+def _read_rollout_prefix_proof(
+    fd: int,
+    length: int,
+    *,
+    expected_prefix: RolloutPrefixProof | None = None,
+    phase: str,
+) -> tuple[RolloutPrefixProof, bytes]:
+    if length < 0 or length > MAX_SESSION_META_SCAN_BYTES:
+        raise ValueError(f"rollout identity changed {phase}")
+    if expected_prefix is not None and (
+        expected_prefix.length < 0
+        or expected_prefix.length > length
+        or expected_prefix.length > MAX_SESSION_META_SCAN_BYTES
+    ):
+        raise ValueError(f"rollout identity changed {phase}")
+    digest = hashlib.sha256()
+    snapshot = bytearray()
+    offset = 0
+    verified_length = expected_prefix.length if expected_prefix is not None else 0
+
+    def read_through(target: int) -> None:
+        nonlocal offset
+        while offset < target:
+            requested = min(SESSION_META_READ_CHUNK_BYTES, target - offset)
+            chunk = os.pread(fd, requested, offset)
+            if not chunk or len(chunk) > requested:
+                raise ValueError(f"rollout identity changed {phase}")
+            digest.update(chunk)
+            snapshot.extend(chunk)
+            offset += len(chunk)
+
+    read_through(verified_length)
+    if (
+        expected_prefix is not None
+        and digest.hexdigest() != expected_prefix.sha256
+    ):
+        raise ValueError(f"rollout identity changed {phase}")
+    read_through(length)
+    return (
+        RolloutPrefixProof(length=length, sha256=digest.hexdigest()),
+        bytes(snapshot),
+    )
+
+
+def _capture_active_rollout_candidate_identity_from_parent_fd(
+    parent_fd: int,
+    name: str,
+    inventory_identity: RolloutInventoryIdentity,
+) -> RolloutCandidateIdentity:
+    phase = "during prefix proof capture"
+    observed_inventory_identity = (
+        _validated_rollout_inventory_identity_from_parent_fd(
+            parent_fd,
+            name,
+            inventory_identity,
+            allow_append=False,
+            phase="after enumeration",
+        )
+    )
     try:
-        actual = _rollout_path_identity(target)
+        fd = os.open(name, _regular_file_open_flags(), dir_fd=parent_fd)
+    except FileNotFoundError as error:
+        raise ValueError(f"rollout identity changed {phase}") from error
+    except OSError as error:
+        if error.errno == errno.ELOOP:
+            raise ValueError(f"rollout identity changed {phase}") from error
+        raise
+    try:
+        initial_stat = os.fstat(fd)
+        initial_inventory_identity = _rollout_inventory_identity_from_stat(
+            initial_stat
+        )
+        _assert_rollout_inventory_identity(
+            initial_inventory_identity,
+            observed_inventory_identity,
+            allow_append=False,
+            phase=phase,
+        )
+        initial = _rollout_candidate_identity_from_stat(initial_stat)
+        initial_proof, _snapshot = _read_rollout_prefix_proof(
+            fd,
+            min(initial.snapshot.size, MAX_SESSION_META_SCAN_BYTES),
+            phase=phase,
+        )
+        descriptor_after_proof = _rollout_inventory_identity_from_stat(
+            os.fstat(fd)
+        )
+        _assert_rollout_inventory_identity(
+            descriptor_after_proof,
+            inventory_identity,
+            allow_append=False,
+            phase=phase,
+        )
+        _validated_rollout_inventory_identity_from_parent_fd(
+            parent_fd,
+            name,
+            inventory_identity,
+            allow_append=False,
+            phase=phase,
+        )
+        current, _snapshot_identity, proof, _verified_snapshot = (
+            _assert_append_only_rollout_checkpoint(
+                fd,
+                parent_fd,
+                name,
+                initial.snapshot,
+                initial_proof,
+                phase=phase,
+            )
+        )
+        return RolloutCandidateIdentity(
+            snapshot=current,
+            stable=RolloutStableIdentity(
+                device=current.device,
+                inode=current.inode,
+            ),
+            prefix_proof=proof,
+        )
+    finally:
+        os.close(fd)
+
+
+def _assert_append_only_rollout_checkpoint(
+    fd: int,
+    parent_fd: int,
+    name: str,
+    expected: RolloutIdentity,
+    prefix_proof: RolloutPrefixProof | None,
+    *,
+    phase: str,
+) -> tuple[RolloutIdentity, RolloutIdentity, RolloutPrefixProof, bytes]:
+    if prefix_proof is None:
+        raise ValueError(f"rollout identity changed {phase}")
+    descriptor_identity = _rollout_identity_from_stat(os.fstat(fd))
+    _assert_append_only_rollout_identity(
+        descriptor_identity,
+        expected,
+        phase=phase,
+    )
+    try:
+        current = _rollout_identity_from_stat(
+            os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+        )
     except (FileNotFoundError, ValueError) as error:
         raise ValueError(f"rollout identity changed {phase}") from error
-    _assert_rollout_identity(actual, expected, phase=phase)
+    _assert_append_only_rollout_identity(current, descriptor_identity, phase=phase)
+    advanced_proof, _snapshot = _read_rollout_prefix_proof(
+        fd,
+        min(current.size, MAX_SESSION_META_SCAN_BYTES),
+        expected_prefix=prefix_proof,
+        phase=phase,
+    )
+    descriptor_after = _rollout_identity_from_stat(os.fstat(fd))
+    _assert_append_only_rollout_identity(descriptor_after, current, phase=phase)
+    try:
+        current_after = _rollout_identity_from_stat(
+            os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+        )
+    except (FileNotFoundError, ValueError) as error:
+        raise ValueError(f"rollout identity changed {phase}") from error
+    _assert_append_only_rollout_identity(
+        current_after,
+        descriptor_after,
+        phase=phase,
+    )
+    _verified_proof, verified_snapshot = _read_rollout_prefix_proof(
+        fd,
+        advanced_proof.length,
+        expected_prefix=advanced_proof,
+        phase=phase,
+    )
+    descriptor_final = _rollout_identity_from_stat(os.fstat(fd))
+    _assert_append_only_rollout_identity(
+        descriptor_final,
+        current_after,
+        phase=phase,
+    )
+    try:
+        current_final = _rollout_identity_from_stat(
+            os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+        )
+    except (FileNotFoundError, ValueError) as error:
+        raise ValueError(f"rollout identity changed {phase}") from error
+    _assert_append_only_rollout_identity(
+        current_final,
+        descriptor_final,
+        phase=phase,
+    )
+    if current_final != current_after:
+        _reverified_proof, verified_snapshot = _read_rollout_prefix_proof(
+            fd,
+            advanced_proof.length,
+            expected_prefix=advanced_proof,
+            phase=phase,
+        )
+        descriptor_reverified = _rollout_identity_from_stat(os.fstat(fd))
+        _assert_rollout_identity(
+            descriptor_reverified,
+            current_final,
+            phase=phase,
+        )
+        try:
+            current_reverified = _rollout_identity_from_stat(
+                os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+            )
+        except (FileNotFoundError, ValueError) as error:
+            raise ValueError(f"rollout identity changed {phase}") from error
+        _assert_rollout_identity(
+            current_reverified,
+            current_final,
+            phase=phase,
+        )
+    return current_final, current, advanced_proof, verified_snapshot
+
+
+def _open_pinned_regular_file_from_fd(
+    parent_fd: int,
+    name: str,
+    *,
+    expected_identity: RolloutCandidateIdentity | None = None,
+    allow_append: bool = False,
+) -> tuple[
+    int,
+    RolloutIdentity,
+    RolloutIdentity | None,
+    RolloutPrefixProof | None,
+    bytes | None,
+]:
+    if name in ("", ".", "..") or "/" in name:
+        raise ValueError("rollout path has an invalid file name")
+    try:
+        observed_stat = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+    except FileNotFoundError as error:
+        if expected_identity is not None:
+            raise ValueError("rollout identity changed after enumeration") from error
+        raise
+    if stat.S_ISLNK(observed_stat.st_mode):
+        raise ValueError("rollout path is a symlink")
+    observed = _rollout_identity_from_stat(observed_stat)
+    if expected_identity is not None:
+        if allow_append:
+            _assert_append_only_rollout_identity(
+                observed,
+                expected_identity.snapshot,
+                phase="after enumeration",
+            )
+        else:
+            _assert_rollout_identity(
+                observed,
+                expected_identity.snapshot,
+                phase="after enumeration",
+            )
+    try:
+        fd = os.open(name, _regular_file_open_flags(), dir_fd=parent_fd)
+    except FileNotFoundError as error:
+        raise ValueError("rollout changed during open") from error
+    try:
+        opened_stat = os.fstat(fd)
+        opened = _rollout_identity_from_stat(opened_stat)
+        if expected_identity is None:
+            _assert_rollout_identity(opened, observed, phase="during open")
+        elif allow_append:
+            current, snapshot_identity, prefix_proof, verified_snapshot = (
+                _assert_append_only_rollout_checkpoint(
+                    fd,
+                    parent_fd,
+                    name,
+                    observed,
+                    expected_identity.prefix_proof,
+                    phase="during open",
+                )
+            )
+            return fd, current, snapshot_identity, prefix_proof, verified_snapshot
+        else:
+            _assert_rollout_identity(
+                opened,
+                expected_identity.snapshot,
+                phase="during open",
+            )
+        try:
+            current_stat = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+        except FileNotFoundError as error:
+            raise ValueError("rollout changed during open") from error
+        current = _rollout_identity_from_stat(current_stat)
+        if expected_identity is None:
+            _assert_rollout_identity(current, opened, phase="during open")
+        elif allow_append:
+            _assert_append_only_rollout_identity(
+                current,
+                opened,
+                phase="during open",
+            )
+        else:
+            _assert_rollout_identity(
+                current,
+                expected_identity.snapshot,
+                phase="during open",
+            )
+        return fd, current, None, None, None
+    except Exception:
+        os.close(fd)
+        raise
+
+
+class _PinnedRolloutHandle:
+    def __init__(
+        self,
+        fd: int,
+        parent_fd: int,
+        name: str,
+        open_identity: RolloutIdentity,
+        verified_snapshot_identity: RolloutIdentity | None,
+        prefix_proof: RolloutPrefixProof | None,
+        verified_snapshot: bytes | None,
+    ) -> None:
+        try:
+            self._handle = os.fdopen(fd, "rb")
+        except Exception:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+            os.close(parent_fd)
+            raise
+        self._parent_fd = parent_fd
+        self._name = name
+        self._open_identity = open_identity
+        self._verified_snapshot_identity = verified_snapshot_identity
+        self._prefix_proof = prefix_proof
+        self._verified_snapshot = verified_snapshot
+
+    def __enter__(self) -> _PinnedRolloutHandle:
+        return self
+
+    def __exit__(self, *args: object) -> None:
+        self.close()
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._handle, name)
+
+    def close(self) -> None:
+        try:
+            close = getattr(self._handle, "close", None)
+            if close is not None:
+                close()
+            else:
+                self._handle.__exit__(None, None, None)
+        finally:
+            if self._parent_fd != -1:
+                os.close(self._parent_fd)
+                self._parent_fd = -1
+
+    def assert_identity(self, expected: RolloutIdentity, *, phase: str) -> None:
+        _assert_rollout_identity(
+            _rollout_identity_from_stat(os.fstat(self.fileno())),
+            expected,
+            phase=phase,
+        )
+        try:
+            current = _rollout_identity_from_stat(
+                os.stat(
+                    self._name,
+                    dir_fd=self._parent_fd,
+                    follow_symlinks=False,
+                )
+            )
+        except (FileNotFoundError, ValueError) as error:
+            raise ValueError(f"rollout identity changed {phase}") from error
+        _assert_rollout_identity(current, expected, phase=phase)
+
+    def assert_append_only_identity(
+        self,
+        expected: RolloutIdentity,
+        *,
+        phase: str,
+    ) -> RolloutIdentity:
+        current, snapshot_identity, prefix_proof, verified_snapshot = (
+            _assert_append_only_rollout_checkpoint(
+                self.fileno(),
+                self._parent_fd,
+                self._name,
+                expected,
+                self._prefix_proof,
+                phase=phase,
+            )
+        )
+        self._verified_snapshot_identity = snapshot_identity
+        self._prefix_proof = prefix_proof
+        self._verified_snapshot = verified_snapshot
+        return current
+
+    @property
+    def open_identity(self) -> RolloutIdentity:
+        return self._open_identity
+
+    @property
+    def verified_snapshot(self) -> bytes | None:
+        return self._verified_snapshot
+
+    @property
+    def verified_snapshot_identity(self) -> RolloutIdentity | None:
+        return self._verified_snapshot_identity
+
+
+def _open_pinned_rollout_text_from_parent_fd(
+    parent_fd: int,
+    name: str,
+    *,
+    expected_identity: RolloutCandidateIdentity | None = None,
+    allow_append: bool = False,
+) -> _PinnedRolloutHandle:
+    fd, open_identity, snapshot_identity, prefix_proof, verified_snapshot = (
+        _open_pinned_regular_file_from_fd(
+            parent_fd,
+            name,
+            expected_identity=expected_identity,
+            allow_append=allow_append,
+        )
+    )
+    try:
+        pinned_parent_fd = os.dup(parent_fd)
+    except Exception:
+        os.close(fd)
+        raise
+    return _PinnedRolloutHandle(
+        fd,
+        pinned_parent_fd,
+        name,
+        open_identity,
+        snapshot_identity,
+        prefix_proof,
+        verified_snapshot,
+    )
+
+
+def _open_pinned_rollout_text(
+    codex_root: pathlib.Path,
+    rollout_relative_path: pathlib.PurePosixPath,
+) -> _PinnedRolloutHandle:
+    parts = _validate_relative_path_parts(rollout_relative_path)
+    if not parts:
+        raise ValueError("rollout path must name a file")
+    root_fd = _open_pinned_codex_root(codex_root)
+    try:
+        parent_fd = _open_pinned_directory_from_fd(
+            root_fd,
+            pathlib.PurePosixPath(*parts[:-1]),
+        )
+        try:
+            return _open_pinned_rollout_text_from_parent_fd(parent_fd, parts[-1])
+        finally:
+            os.close(parent_fd)
+    finally:
+        os.close(root_fd)
 
 
 class _HashingReader:
@@ -748,41 +1451,47 @@ class _HashingReader:
         self.bytes_read += len(data)
         return data
 
+    def tell(self) -> int:
+        return self.handle.tell()
+
     def hexdigest(self) -> str:
         return self.hasher.hexdigest()
 
 
 def _open_local_rollout_text(
-    codex_root: pathlib.Path, rollout_relative_path: pathlib.PurePosixPath
+    codex_root: pathlib.Path | int | EnumeratedRolloutParent,
+    rollout_relative_path: pathlib.PurePosixPath,
 ):
-    target = _safe_rollout_path(codex_root, rollout_relative_path)
-    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
-    fd = os.open(str(target), flags)
-    try:
-        if not stat.S_ISREG(os.fstat(fd).st_mode):
-            raise ValueError("rollout path is not a regular file")
-        handle = os.fdopen(fd, "rb")
-        fd = -1
-        return handle
-    finally:
-        if fd != -1:
-            os.close(fd)
+    if isinstance(codex_root, EnumeratedRolloutParent):
+        return _open_pinned_rollout_text_from_parent_fd(
+            codex_root.fd,
+            rollout_relative_path.name,
+            expected_identity=codex_root.expected_identity,
+            allow_append=codex_root.allow_append,
+        )
+    if isinstance(codex_root, int):
+        return _open_pinned_rollout_text_from_parent_fd(
+            codex_root,
+            rollout_relative_path.name,
+        )
+    return _open_pinned_rollout_text(codex_root, rollout_relative_path)
 
 
 def _file_sha256(path: pathlib.Path) -> str:
-    digest = hashlib.sha256()
-    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
-    fd = os.open(str(path), flags)
+    parent_fd = _open_pinned_codex_root(path.parent)
     try:
-        if not stat.S_ISREG(os.fstat(fd).st_mode):
-            raise OSError("rollout path is not a regular file")
-        with os.fdopen(fd, "rb") as handle:
-            fd = -1
-            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-                digest.update(chunk)
+        try:
+            handle = _open_pinned_rollout_text_from_parent_fd(parent_fd, path.name)
+        except ValueError as error:
+            raise OSError(str(error)) from error
     finally:
-        if fd != -1:
-            os.close(fd)
+        os.close(parent_fd)
+    digest = hashlib.sha256()
+    with handle:
+        identity = _rollout_identity_from_stat(os.fstat(handle.fileno()))
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+        handle.assert_identity(identity, phase="after hash")
     return digest.hexdigest()
 
 
@@ -792,32 +1501,18 @@ def _read_local_rollout_bytes(
     *,
     max_bytes: int,
 ) -> bytes:
-    target = _safe_rollout_path(codex_root, rollout_relative_path)
-    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
-    fd = os.open(str(target), flags)
-    try:
-        identity = _rollout_identity_from_stat(os.fstat(fd))
-        _assert_rollout_path_identity(target, identity, phase="before read")
+    with _open_pinned_rollout_text(codex_root, rollout_relative_path) as handle:
+        identity = _rollout_identity_from_stat(os.fstat(handle.fileno()))
         if max_bytes and identity.size > max_bytes:
             raise ValueError(f"rollout too large: {identity.size} bytes > {max_bytes}")
-        with os.fdopen(fd, "rb") as handle:
-            fd = -1
-            data = handle.read(identity.size + 1)
-            _assert_rollout_identity(
-                _rollout_identity_from_stat(os.fstat(handle.fileno())),
-                identity,
-                phase="after read",
+        data = handle.read(identity.size + 1)
+        handle.assert_identity(identity, phase="after read")
+        if len(data) != identity.size:
+            raise ValueError(
+                "rollout read did not match snapshot size: "
+                f"{len(data)} bytes != {identity.size}"
             )
-            _assert_rollout_path_identity(target, identity, phase="after read")
-            if len(data) != identity.size:
-                raise ValueError(
-                    "rollout identity changed during read: "
-                    f"{len(data)} bytes != {identity.size}"
-                )
-            return data
-    finally:
-        if fd != -1:
-            os.close(fd)
+        return data
 
 
 def _open_output_parent(output: pathlib.Path) -> int:
@@ -964,13 +1659,19 @@ def _session_meta_is_flat_archived_undated(relative_path: pathlib.PurePosixPath)
     return relative_path.parts[:1] == ("archived_sessions",) and _session_meta_flat_undated_alias(relative_path) is not None
 
 
+def _session_meta_allows_append(
+    relative_path: pathlib.PurePosixPath,
+) -> bool:
+    return len(relative_path.parts) == 1 or relative_path.parts[0] == "sessions"
+
+
 def _session_meta_record_timestamp(row: dict[str, Any]) -> dt.datetime | None:
     timestamp = row.get("timestamp")
     if not isinstance(timestamp, str) or not timestamp.strip():
         return None
     try:
         return _parse_rollout_bound(timestamp, "session_meta.timestamp")
-    except ValueError:
+    except (ValueError, OverflowError):
         return None
 
 
@@ -992,6 +1693,24 @@ def _session_meta_record_matches_window(
     return True
 
 
+def _session_meta_snapshot_reader(
+    identity: RolloutIdentity,
+    verified_snapshot: bytes | None,
+) -> io.BytesIO:
+    phase = "before session-meta scan"
+    if (
+        verified_snapshot is None
+        or len(verified_snapshot) > MAX_SESSION_META_SCAN_BYTES
+        or identity.size < len(verified_snapshot)
+    ):
+        raise ValueError(f"rollout identity changed {phase}")
+    source_has_unread_bytes = identity.size > len(verified_snapshot)
+    if source_has_unread_bytes and len(verified_snapshot) < MAX_SESSION_META_SCAN_BYTES:
+        raise ValueError(f"rollout identity changed {phase}")
+    unread_sentinel = b"\0" if source_has_unread_bytes else b""
+    return io.BytesIO(verified_snapshot + unread_sentinel)
+
+
 def _session_meta_date_overlaps_window(
     date_value: dt.date,
     rollout_start: dt.datetime | None,
@@ -1006,66 +1725,209 @@ def _session_meta_date_overlaps_window(
     return True
 
 
+def _decode_session_meta_line(raw_bytes: bytes) -> str:
+    try:
+        return raw_bytes.decode("utf-8")
+    except UnicodeDecodeError as error:
+        raise ValueError("session-meta record is not valid UTF-8") from error
+
+
+def _parse_session_meta_snapshot(
+    scan_handle: Any,
+    *,
+    date_value: dt.date | None,
+    require_record_date_match: bool,
+    rollout_start: dt.datetime | None,
+    rollout_end: dt.datetime | None,
+) -> tuple[dt.date | None, str, str, dt.datetime | None] | None:
+    for line in _bounded_session_meta_lines(
+        scan_handle,
+        MAX_SESSION_META_SCAN_BYTES,
+    ):
+        try:
+            obj = json.loads(line)
+        except (ValueError, RecursionError):
+            continue
+        if not isinstance(obj, dict):
+            continue
+        if obj.get("type") != "session_meta":
+            continue
+        timestamp = _session_meta_record_timestamp(obj)
+        if require_record_date_match:
+            if date_value is None or not _session_meta_record_matches_window(
+                obj,
+                date_value,
+                rollout_start,
+                rollout_end,
+            ):
+                continue
+        elif timestamp is None:
+            if date_value is None or not _session_meta_date_overlaps_window(
+                date_value,
+                rollout_start,
+                rollout_end,
+            ):
+                continue
+        else:
+            if rollout_start is not None and timestamp < rollout_start:
+                continue
+            if rollout_end is not None and timestamp >= rollout_end:
+                continue
+        payload = obj.get("payload", {})
+        if not isinstance(payload, dict):
+            continue
+        session_id_value = payload.get("id")
+        if not isinstance(session_id_value, str) or not session_id_value:
+            continue
+        session_id = session_id_value
+        cwd = str(payload.get("cwd", ""))
+        return (
+            timestamp.date() if timestamp is not None else date_value,
+            session_id,
+            cwd,
+            timestamp,
+        )
+    return None
+
+
 def _session_meta_from_rollout(
-    resolved_root: pathlib.Path,
+    codex_root: pathlib.Path,
     rollout_relative_path: pathlib.PurePosixPath,
     *,
+    parent_fd: int | None = None,
+    expected_identity: RolloutCandidateIdentity | None = None,
     date_value: dt.date | None = None,
     require_record_date_match: bool = False,
     rollout_start: dt.datetime | None = None,
     rollout_end: dt.datetime | None = None,
 ) -> tuple[dt.date | None, str, str, dt.datetime | None] | None:
+    allow_append = _session_meta_allows_append(
+        rollout_relative_path
+    )
+    rollout_source: pathlib.Path | int | EnumeratedRolloutParent
+    if parent_fd is not None and expected_identity is not None:
+        rollout_source = EnumeratedRolloutParent(
+            parent_fd,
+            expected_identity,
+            allow_append,
+        )
+    else:
+        rollout_source = parent_fd if parent_fd is not None else codex_root
     try:
-        handle = _open_local_rollout_text(resolved_root, rollout_relative_path)
-    except FileNotFoundError:
+        handle = _open_local_rollout_text(
+            rollout_source,
+            rollout_relative_path,
+        )
+    except FileNotFoundError as error:
+        if expected_identity is not None:
+            raise SessionMetaRolloutError(
+                "rollout identity changed after enumeration",
+                rollout=rollout_relative_path.as_posix(),
+            ) from error
         return None
     except OSError as exc:
         raise SessionMetaRolloutError(
             "rollout unreadable",
             rollout=rollout_relative_path.as_posix(),
         ) from exc
+    except ValueError as exc:
+        raise SessionMetaRolloutError(
+            str(exc),
+            rollout=rollout_relative_path.as_posix(),
+        ) from exc
     try:
         with handle:
-            for line in _bounded_session_meta_lines(handle, MAX_SESSION_META_SCAN_BYTES):
-                try:
-                    obj = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                if obj.get("type") != "session_meta":
-                    continue
-                timestamp = _session_meta_record_timestamp(obj)
-                if require_record_date_match:
-                    if date_value is None or not _session_meta_record_matches_window(
-                        obj,
-                        date_value,
-                        rollout_start,
-                        rollout_end,
+            if expected_identity is not None and allow_append:
+                identity = handle.assert_append_only_identity(
+                    handle.open_identity,
+                    phase="before session-meta scan",
+                )
+                snapshot_identity = handle.verified_snapshot_identity
+                if snapshot_identity is None:
+                    raise ValueError("rollout identity changed before session-meta scan")
+                scan_handle = _session_meta_snapshot_reader(
+                    snapshot_identity,
+                    handle.verified_snapshot,
+                )
+            else:
+                identity = _rollout_identity_from_stat(os.fstat(handle.fileno()))
+                scan_handle = handle
+            result = _parse_session_meta_snapshot(
+                scan_handle,
+                date_value=date_value,
+                require_record_date_match=require_record_date_match,
+                rollout_start=rollout_start,
+                rollout_end=rollout_end,
+            )
+            if expected_identity is None:
+                handle.assert_identity(identity, phase="after session-meta scan")
+            elif allow_append:
+                refreshed_identity = handle.assert_append_only_identity(
+                    identity,
+                    phase="after session-meta scan",
+                )
+                refreshed_snapshot_identity = handle.verified_snapshot_identity
+                if refreshed_snapshot_identity is None:
+                    raise ValueError(
+                        "rollout identity changed after session-meta scan"
+                    )
+                if (
+                    result is None
+                    and refreshed_snapshot_identity == snapshot_identity
+                    and refreshed_identity != refreshed_snapshot_identity
+                ):
+                    raise ValueError(
+                        "rollout identity changed after session-meta scan"
+                    )
+                if (
+                    result is None
+                    and refreshed_snapshot_identity != snapshot_identity
+                ):
+                    result = _parse_session_meta_snapshot(
+                        _session_meta_snapshot_reader(
+                            refreshed_snapshot_identity,
+                            handle.verified_snapshot,
+                        ),
+                        date_value=date_value,
+                        require_record_date_match=require_record_date_match,
+                        rollout_start=rollout_start,
+                        rollout_end=rollout_end,
+                    )
+                    final_identity = handle.assert_append_only_identity(
+                        refreshed_identity,
+                        phase="after refreshed session-meta scan",
+                    )
+                    final_snapshot_identity = handle.verified_snapshot_identity
+                    if final_snapshot_identity is None:
+                        raise ValueError(
+                            "rollout identity changed after session-meta scan"
+                        )
+                    if (
+                        result is None
+                        and (
+                            final_snapshot_identity != refreshed_snapshot_identity
+                            or final_identity != final_snapshot_identity
+                        )
                     ):
-                        continue
-                elif timestamp is None:
-                    if date_value is None or not _session_meta_date_overlaps_window(
-                        date_value,
-                        rollout_start,
-                        rollout_end,
-                    ):
-                        continue
-                else:
-                    if rollout_start is not None and timestamp < rollout_start:
-                        continue
-                    if rollout_end is not None and timestamp >= rollout_end:
-                        continue
-                payload = obj.get("payload", {})
-                session_id = str(payload.get("id", ""))
-                if not session_id:
-                    return None
-                cwd = str(payload.get("cwd", ""))
-                return (timestamp.date() if timestamp is not None else date_value), session_id, cwd, timestamp
+                        raise ValueError(
+                            "rollout identity changed after session-meta scan"
+                        )
+            else:
+                handle.assert_identity(
+                    expected_identity.snapshot,
+                    phase="after session-meta scan",
+                )
+            return result
+    except OSError as error:
+        raise SessionMetaRolloutError(
+            "rollout unreadable",
+            rollout=rollout_relative_path.as_posix(),
+        ) from error
     except ValueError as error:
         raise SessionMetaRolloutError(
             str(error),
             rollout=rollout_relative_path.as_posix(),
         ) from error
-    return None
 
 
 def _session_meta_rollout_sort_key(
@@ -1268,7 +2130,9 @@ def _remote_python_script(payload: dict[str, object]) -> str:
 import base64
 import collections
 import datetime
+import errno
 import hashlib
+import io
 import json
 import os
 import pathlib
@@ -1283,6 +2147,8 @@ ROOT = pathlib.Path(CONFIG["codex_root"]).expanduser()
 MAX_FETCH_ROLLOUT_BYTES = int(CONFIG.get("max_fetch_rollout_bytes", 0))
 SESSION_META_SCAN_BYTES = int(CONFIG.get("session_meta_scan_bytes", 0))
 SESSION_META_READ_CHUNK_BYTES = {SESSION_META_READ_CHUNK_BYTES}
+SESSION_META_PREFIX_PROOF_BYTES = {MAX_SESSION_META_SCAN_BYTES}
+SESSION_META_CANDIDATE_LIMIT = {MAX_SESSION_META_CANDIDATE_LIMIT}
 SESSION_META_SERIALIZED_ROW_BYTES = {MAX_REMOTE_SESSION_META_SERIALIZED_ROW_BYTES}
 SESSION_META_OUTPUT_ROW_TOO_LARGE_ERROR = {SESSION_META_OUTPUT_ROW_TOO_LARGE_ERROR!r}
 SUMMARY_LIMIT = int(CONFIG.get("summary_limit", 0))
@@ -1301,6 +2167,14 @@ ROLLOUT_FILENAME_MODE = str(CONFIG.get("rollout_filename_mode", "all"))
 ACTIVE_ROLLOUT_RELATIVE_RE = re.compile({ACTIVE_ROLLOUT_RELATIVE_RE.pattern!r})
 ARCHIVED_ROLLOUT_RELATIVE_RE = re.compile({ARCHIVED_ROLLOUT_RELATIVE_RE.pattern!r})
 ROOT_ROLLOUT_RELATIVE_RE = re.compile({ROOT_ROLLOUT_RELATIVE_RE.pattern!r})
+RAW_ROLLOUT_BASENAME_RE = re.compile({RAW_ROLLOUT_BASENAME_RE.pattern!r})
+SECURE_ROLLOUT_DIR_FD_SUPPORTED = (
+    getattr(os, "O_DIRECTORY", None) is not None
+    and getattr(os, "O_NOFOLLOW", None) is not None
+    and os.open in os.supports_dir_fd
+    and os.stat in os.supports_dir_fd
+    and os.stat in os.supports_follow_symlinks
+)
 ROLLOUT_FILENAME_TIME_RE = re.compile({ROLLOUT_FILENAME_TIME_RE.pattern!r})
 BARE_64_HEX_SIGNAL_RE = re.compile({BARE_64_HEX_SIGNAL_RE.pattern!r})
 SAFE_CREDENTIAL_VALUE_PATTERN_TEXT = {SAFE_CREDENTIAL_VALUE_PATTERN_TEXT!r}
@@ -1346,6 +2220,7 @@ REMOTE_GENERATED_SUMMARY_SOURCE_IDENTITY_PROOF = {REMOTE_GENERATED_SUMMARY_SOURC
 SESSION_META_BEGIN = {REMOTE_SESSION_META_BEGIN!r}
 SESSION_META_END = {REMOTE_SESSION_META_END!r}
 SESSION_META_LIMIT_TRUNCATED_REASON = {SESSION_META_LIMIT_TRUNCATED_REASON!r}
+SESSION_META_CANDIDATE_LIMIT_TRUNCATED_REASON = {SESSION_META_CANDIDATE_LIMIT_TRUNCATED_REASON!r}
 SESSION_META_FLAT_UNDATED_ALIAS_PREFIX = {SESSION_META_FLAT_UNDATED_ALIAS_PREFIX!r}
 FETCH_ROLLOUT_BEGIN = {REMOTE_FETCH_ROLLOUT_BEGIN!r}
 FETCH_ROLLOUT_END = {REMOTE_FETCH_ROLLOUT_END!r}
@@ -1353,54 +2228,91 @@ ROLLOUT_SUMMARY_BEGIN = {REMOTE_ROLLOUT_SUMMARY_BEGIN!r}
 ROLLOUT_SUMMARY_END = {REMOTE_ROLLOUT_SUMMARY_END!r}
 
 
-def path_is_relative_to(path, root):
-    try:
-        path.relative_to(root)
-    except ValueError:
-        return False
-    return True
+def directory_open_flags():
+    if not SECURE_ROLLOUT_DIR_FD_SUPPORTED:
+        raise OSError(
+            "secure rollout reads require O_DIRECTORY, O_NOFOLLOW, and descriptor-relative open/stat"
+        )
+    return (
+        os.O_RDONLY
+        | os.O_DIRECTORY
+        | os.O_NOFOLLOW
+        | getattr(os, "O_CLOEXEC", 0)
+    )
 
 
-def safe_codex_root():
-    root_stat = ROOT.lstat()
-    if stat.S_ISLNK(root_stat.st_mode):
-        raise ValueError("Codex root is a symlink")
-    if not stat.S_ISDIR(root_stat.st_mode):
-        raise ValueError("Codex root is not a directory")
-    return ROOT.resolve(strict=True)
+def regular_file_open_flags():
+    directory_open_flags()
+    nonblocking_flag = getattr(os, "O_NONBLOCK", None)
+    if nonblocking_flag is None:
+        raise OSError("secure rollout reads require O_NONBLOCK")
+    return (
+        os.O_RDONLY
+        | os.O_NOFOLLOW
+        | nonblocking_flag
+        | getattr(os, "O_CLOEXEC", 0)
+    )
 
 
-def safe_relative_path(rel, *, expect_directory=False, expect_regular_file=False):
-    root = safe_codex_root()
-    target = root
+def validate_relative_path_parts(rel):
+    if rel.is_absolute():
+        raise ValueError("path must stay under Codex root")
     parts = rel.parts
-    for index, part in enumerate(parts):
-        if part in ("", ".", ".."):
-            raise ValueError("path must stay under Codex root")
-        target = target / part
-        target_stat = target.lstat()
-        if stat.S_ISLNK(target_stat.st_mode):
-            raise ValueError("path uses a symlink ancestor")
-        is_last = index == len(parts) - 1
-        if not is_last:
-            if not stat.S_ISDIR(target_stat.st_mode):
+    if any(part in ("", ".", "..") for part in parts):
+        raise ValueError("path must stay under Codex root")
+    return parts
+
+
+def open_pinned_codex_root():
+    root_entry = ROOT.lstat()
+    if stat.S_ISLNK(root_entry.st_mode):
+        raise ValueError("Codex root is a symlink")
+    if not stat.S_ISDIR(root_entry.st_mode):
+        raise ValueError("Codex root is not a directory")
+    try:
+        fd = os.open(str(ROOT), directory_open_flags())
+    except FileNotFoundError as error:
+        raise ValueError("Codex root changed after initial inspection") from error
+    try:
+        opened = os.fstat(fd)
+        if not stat.S_ISDIR(opened.st_mode):
+            raise ValueError("Codex root is not a directory")
+        if (opened.st_dev, opened.st_ino) != (root_entry.st_dev, root_entry.st_ino):
+            raise ValueError("Codex root changed during open")
+        return fd
+    except Exception:
+        os.close(fd)
+        raise
+
+
+def open_pinned_directory_from_fd(root_fd, rel):
+    directory_fd = os.dup(root_fd)
+    try:
+        for part in validate_relative_path_parts(rel):
+            observed = os.stat(part, dir_fd=directory_fd, follow_symlinks=False)
+            if stat.S_ISLNK(observed.st_mode):
+                raise ValueError("path uses a symlink ancestor")
+            if not stat.S_ISDIR(observed.st_mode):
                 raise ValueError("path ancestor is not a directory")
-        elif expect_directory and not stat.S_ISDIR(target_stat.st_mode):
-            raise ValueError("path is not a directory")
-        elif expect_regular_file and not stat.S_ISREG(target_stat.st_mode):
-            raise ValueError("rollout path is not a regular file")
-    target_resolved = target.resolve(strict=True)
-    if not path_is_relative_to(target_resolved, root):
-        raise ValueError("path escapes Codex root")
-    return target_resolved
-
-
-def safe_rollout_path(rel):
-    return safe_relative_path(rel, expect_regular_file=True)
-
-
-def safe_directory_path(rel):
-    return safe_relative_path(rel, expect_directory=True)
+            try:
+                next_fd = os.open(part, directory_open_flags(), dir_fd=directory_fd)
+            except FileNotFoundError as error:
+                raise ValueError("path ancestor changed during open") from error
+            try:
+                opened = os.fstat(next_fd)
+                if not stat.S_ISDIR(opened.st_mode):
+                    raise ValueError("path ancestor is not a directory")
+                if (opened.st_dev, opened.st_ino) != (observed.st_dev, observed.st_ino):
+                    raise ValueError("path ancestor changed during open")
+            except Exception:
+                os.close(next_fd)
+                raise
+            os.close(directory_fd)
+            directory_fd = next_fd
+        return directory_fd
+    except Exception:
+        os.close(directory_fd)
+        raise
 
 
 def rollout_identity_from_stat(stat_result):
@@ -1415,21 +2327,566 @@ def rollout_identity_from_stat(stat_result):
     }}
 
 
+def stable_rollout_identity_from_stat(stat_result):
+    if stat.S_ISLNK(stat_result.st_mode):
+        raise ValueError("rollout path is a symlink")
+    if not stat.S_ISREG(stat_result.st_mode):
+        raise ValueError("rollout path is not a regular file")
+    return {{
+        "device": stat_result.st_dev,
+        "inode": stat_result.st_ino,
+    }}
+
+
+def rollout_inventory_identity_from_stat(stat_result):
+    return {{
+        "mode": stat_result.st_mode,
+        "size": stat_result.st_size,
+        "device": stat_result.st_dev,
+        "inode": stat_result.st_ino,
+        "mtime_ns": stat_result.st_mtime_ns,
+        "ctime_ns": stat_result.st_ctime_ns,
+    }}
+
+
+def capture_rollout_inventory_identity_from_parent_fd(parent_fd, name):
+    try:
+        stat_result = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+    except FileNotFoundError as error:
+        raise ValueError("rollout identity changed during enumeration") from error
+    return rollout_inventory_identity_from_stat(stat_result)
+
+
+def assert_rollout_inventory_identity(
+    actual,
+    expected,
+    allow_append,
+    phase,
+):
+    if allow_append:
+        same_file = (
+            actual["device"] == expected["device"]
+            and actual["inode"] == expected["inode"]
+        )
+        unchanged_snapshot = actual["size"] != expected["size"] or actual == expected
+        matches = (
+            same_file
+            and actual["size"] >= expected["size"]
+            and unchanged_snapshot
+        )
+    else:
+        matches = actual == expected
+    if not matches:
+        raise ValueError("rollout identity changed " + phase)
+
+
+def validated_rollout_inventory_identity_from_parent_fd(
+    parent_fd,
+    name,
+    expected,
+    allow_append,
+    phase,
+):
+    try:
+        stat_result = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+    except FileNotFoundError as error:
+        raise ValueError("rollout identity changed " + phase) from error
+    actual = rollout_inventory_identity_from_stat(stat_result)
+    assert_rollout_inventory_identity(
+        actual,
+        expected,
+        allow_append,
+        phase,
+    )
+    if stat.S_ISLNK(actual["mode"]):
+        raise ValueError("rollout path is a symlink")
+    if not stat.S_ISREG(actual["mode"]):
+        raise ValueError("rollout path is not a regular file")
+    return actual
+
+
+def rollout_candidate_identity_from_stat(stat_result, prefix_proof=None):
+    stable = stable_rollout_identity_from_stat(stat_result)
+    return {{
+        "snapshot": rollout_identity_from_stat(stat_result),
+        "stable": stable,
+        "prefix_proof": prefix_proof,
+    }}
+
+
+def capture_rollout_candidate_identity_from_parent_fd(
+    parent_fd,
+    name,
+    inventory_identity,
+):
+    phase = "after enumeration"
+    validated_rollout_inventory_identity_from_parent_fd(
+        parent_fd,
+        name,
+        inventory_identity,
+        False,
+        phase,
+    )
+    try:
+        fd = os.open(name, regular_file_open_flags(), dir_fd=parent_fd)
+    except FileNotFoundError as error:
+        raise ValueError("rollout identity changed during open") from error
+    except OSError as error:
+        if error.errno == errno.ELOOP:
+            raise ValueError("rollout identity changed during open") from error
+        raise
+    try:
+        descriptor_stat = os.fstat(fd)
+        descriptor_inventory_identity = rollout_inventory_identity_from_stat(
+            descriptor_stat
+        )
+        assert_rollout_inventory_identity(
+            descriptor_inventory_identity,
+            inventory_identity,
+            False,
+            "during open",
+        )
+        descriptor_identity = rollout_candidate_identity_from_stat(descriptor_stat)
+        for _ in range(2):
+            try:
+                path_stat = os.stat(
+                    name,
+                    dir_fd=parent_fd,
+                    follow_symlinks=False,
+                )
+            except FileNotFoundError as error:
+                raise ValueError("rollout identity changed during open") from error
+            path_inventory_identity = rollout_inventory_identity_from_stat(path_stat)
+            assert_rollout_inventory_identity(
+                path_inventory_identity,
+                inventory_identity,
+                False,
+                "during open",
+            )
+            path_identity = rollout_candidate_identity_from_stat(path_stat)
+            assert_rollout_identity(
+                path_identity["snapshot"],
+                descriptor_identity["snapshot"],
+                "during open",
+            )
+        return descriptor_identity
+    finally:
+        os.close(fd)
+
+
 def assert_rollout_identity(actual, expected, phase):
     if actual != expected:
         raise ValueError("rollout identity changed " + phase)
 
 
-def rollout_path_identity(target):
-    return rollout_identity_from_stat(target.lstat())
+def assert_append_only_rollout_identity(actual, expected, phase):
+    same_file = (
+        actual["device"] == expected["device"]
+        and actual["inode"] == expected["inode"]
+    )
+    unchanged_snapshot = actual["size"] != expected["size"] or actual == expected
+    if not same_file or actual["size"] < expected["size"] or not unchanged_snapshot:
+        raise ValueError("rollout identity changed " + phase)
 
 
-def assert_rollout_path_identity(target, expected, phase):
+def read_rollout_prefix_proof(
+    fd,
+    length,
+    expected_prefix=None,
+    phase="during prefix proof capture",
+):
+    if length < 0 or length > SESSION_META_PREFIX_PROOF_BYTES:
+        raise ValueError("rollout identity changed " + phase)
+    if expected_prefix is not None and (
+        expected_prefix["length"] < 0
+        or expected_prefix["length"] > length
+        or expected_prefix["length"] > SESSION_META_PREFIX_PROOF_BYTES
+    ):
+        raise ValueError("rollout identity changed " + phase)
+    digest = hashlib.sha256()
+    snapshot = bytearray()
+    offset = 0
+    verified_length = expected_prefix["length"] if expected_prefix is not None else 0
+
+    def read_through(target):
+        nonlocal offset
+        while offset < target:
+            requested = min(SESSION_META_READ_CHUNK_BYTES, target - offset)
+            chunk = os.pread(fd, requested, offset)
+            if not chunk or len(chunk) > requested:
+                raise ValueError("rollout identity changed " + phase)
+            digest.update(chunk)
+            snapshot.extend(chunk)
+            offset += len(chunk)
+
+    read_through(verified_length)
+    if (
+        expected_prefix is not None
+        and digest.hexdigest() != expected_prefix["sha256"]
+    ):
+        raise ValueError("rollout identity changed " + phase)
+    read_through(length)
+    return (
+        {{"length": length, "sha256": digest.hexdigest()}},
+        bytes(snapshot),
+    )
+
+
+def capture_active_rollout_candidate_identity_from_parent_fd(
+    parent_fd,
+    name,
+    inventory_identity,
+):
+    phase = "during prefix proof capture"
+    observed_inventory_identity = (
+        validated_rollout_inventory_identity_from_parent_fd(
+            parent_fd,
+            name,
+            inventory_identity,
+            False,
+            "after enumeration",
+        )
+    )
     try:
-        actual = rollout_path_identity(target)
+        fd = os.open(name, regular_file_open_flags(), dir_fd=parent_fd)
+    except FileNotFoundError as error:
+        raise ValueError("rollout identity changed " + phase) from error
+    except OSError as error:
+        if error.errno == errno.ELOOP:
+            raise ValueError("rollout identity changed " + phase) from error
+        raise
+    try:
+        initial_stat = os.fstat(fd)
+        initial_inventory_identity = rollout_inventory_identity_from_stat(
+            initial_stat
+        )
+        assert_rollout_inventory_identity(
+            initial_inventory_identity,
+            observed_inventory_identity,
+            False,
+            phase,
+        )
+        initial = rollout_candidate_identity_from_stat(initial_stat)
+        initial_proof, _snapshot = read_rollout_prefix_proof(
+            fd,
+            min(initial["snapshot"]["size"], SESSION_META_PREFIX_PROOF_BYTES),
+            phase=phase,
+        )
+        descriptor_after_proof = rollout_inventory_identity_from_stat(os.fstat(fd))
+        assert_rollout_inventory_identity(
+            descriptor_after_proof,
+            inventory_identity,
+            False,
+            phase,
+        )
+        validated_rollout_inventory_identity_from_parent_fd(
+            parent_fd,
+            name,
+            inventory_identity,
+            False,
+            phase,
+        )
+        current, _snapshot_identity, proof, _verified_snapshot = (
+            assert_append_only_rollout_checkpoint(
+                fd,
+                parent_fd,
+                name,
+                initial["snapshot"],
+                initial_proof,
+                phase,
+            )
+        )
+        return {{
+            "snapshot": current,
+            "stable": {{
+                "device": current["device"],
+                "inode": current["inode"],
+            }},
+            "prefix_proof": proof,
+        }}
+    finally:
+        os.close(fd)
+
+
+def assert_append_only_rollout_checkpoint(
+    fd,
+    parent_fd,
+    name,
+    expected,
+    prefix_proof,
+    phase,
+):
+    if prefix_proof is None:
+        raise ValueError("rollout identity changed " + phase)
+    descriptor_identity = rollout_identity_from_stat(os.fstat(fd))
+    assert_append_only_rollout_identity(descriptor_identity, expected, phase)
+    try:
+        current = rollout_identity_from_stat(
+            os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+        )
     except (FileNotFoundError, ValueError) as error:
         raise ValueError("rollout identity changed " + phase) from error
-    assert_rollout_identity(actual, expected, phase)
+    assert_append_only_rollout_identity(current, descriptor_identity, phase)
+    advanced_proof, _snapshot = read_rollout_prefix_proof(
+        fd,
+        min(current["size"], SESSION_META_PREFIX_PROOF_BYTES),
+        expected_prefix=prefix_proof,
+        phase=phase,
+    )
+    descriptor_after = rollout_identity_from_stat(os.fstat(fd))
+    assert_append_only_rollout_identity(descriptor_after, current, phase)
+    try:
+        current_after = rollout_identity_from_stat(
+            os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+        )
+    except (FileNotFoundError, ValueError) as error:
+        raise ValueError("rollout identity changed " + phase) from error
+    assert_append_only_rollout_identity(current_after, descriptor_after, phase)
+    _verified_proof, verified_snapshot = read_rollout_prefix_proof(
+        fd,
+        advanced_proof["length"],
+        expected_prefix=advanced_proof,
+        phase=phase,
+    )
+    descriptor_final = rollout_identity_from_stat(os.fstat(fd))
+    assert_append_only_rollout_identity(descriptor_final, current_after, phase)
+    try:
+        current_final = rollout_identity_from_stat(
+            os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+        )
+    except (FileNotFoundError, ValueError) as error:
+        raise ValueError("rollout identity changed " + phase) from error
+    assert_append_only_rollout_identity(current_final, descriptor_final, phase)
+    if current_final != current_after:
+        _reverified_proof, verified_snapshot = read_rollout_prefix_proof(
+            fd,
+            advanced_proof["length"],
+            expected_prefix=advanced_proof,
+            phase=phase,
+        )
+        descriptor_reverified = rollout_identity_from_stat(os.fstat(fd))
+        assert_rollout_identity(descriptor_reverified, current_final, phase)
+        try:
+            current_reverified = rollout_identity_from_stat(
+                os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+            )
+        except (FileNotFoundError, ValueError) as error:
+            raise ValueError("rollout identity changed " + phase) from error
+        assert_rollout_identity(current_reverified, current_final, phase)
+    return current_final, current, advanced_proof, verified_snapshot
+
+
+def open_pinned_regular_file_from_fd(
+    parent_fd,
+    name,
+    expected_identity=None,
+    allow_append=False,
+):
+    if name in ("", ".", "..") or "/" in name:
+        raise ValueError("rollout path has an invalid file name")
+    try:
+        observed_stat = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+    except FileNotFoundError as error:
+        if expected_identity is not None:
+            raise ValueError("rollout identity changed after enumeration") from error
+        raise
+    if stat.S_ISLNK(observed_stat.st_mode):
+        raise ValueError("rollout path is a symlink")
+    observed = rollout_identity_from_stat(observed_stat)
+    if expected_identity is not None:
+        if allow_append:
+            assert_append_only_rollout_identity(
+                observed,
+                expected_identity["snapshot"],
+                "after enumeration",
+            )
+        else:
+            assert_rollout_identity(
+                observed,
+                expected_identity["snapshot"],
+                "after enumeration",
+            )
+    try:
+        fd = os.open(name, regular_file_open_flags(), dir_fd=parent_fd)
+    except FileNotFoundError as error:
+        raise ValueError("rollout changed during open") from error
+    try:
+        opened_stat = os.fstat(fd)
+        opened = rollout_identity_from_stat(opened_stat)
+        if expected_identity is None:
+            assert_rollout_identity(opened, observed, "during open")
+        elif allow_append:
+            current, snapshot_identity, prefix_proof, verified_snapshot = (
+                assert_append_only_rollout_checkpoint(
+                    fd,
+                    parent_fd,
+                    name,
+                    observed,
+                    expected_identity["prefix_proof"],
+                    "during open",
+                )
+            )
+            return fd, current, snapshot_identity, prefix_proof, verified_snapshot
+        else:
+            assert_rollout_identity(
+                opened,
+                expected_identity["snapshot"],
+                "during open",
+            )
+        try:
+            current_stat = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+        except FileNotFoundError as error:
+            raise ValueError("rollout changed during open") from error
+        current = rollout_identity_from_stat(current_stat)
+        if expected_identity is None:
+            assert_rollout_identity(current, opened, "during open")
+        elif allow_append:
+            assert_append_only_rollout_identity(
+                current,
+                opened,
+                "during open",
+            )
+        else:
+            assert_rollout_identity(
+                current,
+                expected_identity["snapshot"],
+                "during open",
+            )
+        return fd, current, None, None, None
+    except Exception:
+        os.close(fd)
+        raise
+
+
+class PinnedRolloutHandle:
+    def __init__(
+        self,
+        fd,
+        parent_fd,
+        name,
+        open_identity,
+        verified_snapshot_identity,
+        prefix_proof,
+        verified_snapshot,
+    ):
+        try:
+            self.handle = os.fdopen(fd, "rb")
+        except Exception:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+            os.close(parent_fd)
+            raise
+        self.parent_fd = parent_fd
+        self.name = name
+        self.open_identity = open_identity
+        self.verified_snapshot_identity = verified_snapshot_identity
+        self.prefix_proof = prefix_proof
+        self.verified_snapshot = verified_snapshot
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        self.close()
+
+    def __getattr__(self, name):
+        return getattr(self.handle, name)
+
+    def close(self):
+        try:
+            close = getattr(self.handle, "close", None)
+            if close is not None:
+                close()
+            else:
+                self.handle.__exit__(None, None, None)
+        finally:
+            if self.parent_fd != -1:
+                os.close(self.parent_fd)
+                self.parent_fd = -1
+
+    def assert_identity(self, expected, phase):
+        assert_rollout_identity(
+            rollout_identity_from_stat(os.fstat(self.fileno())),
+            expected,
+            phase,
+        )
+        try:
+            current = rollout_identity_from_stat(
+                os.stat(
+                    self.name,
+                    dir_fd=self.parent_fd,
+                    follow_symlinks=False,
+                )
+            )
+        except (FileNotFoundError, ValueError) as error:
+            raise ValueError("rollout identity changed " + phase) from error
+        assert_rollout_identity(current, expected, phase)
+
+    def assert_append_only_identity(self, expected, phase):
+        current, snapshot_identity, prefix_proof, verified_snapshot = (
+            assert_append_only_rollout_checkpoint(
+                self.fileno(),
+                self.parent_fd,
+                self.name,
+                expected,
+                self.prefix_proof,
+                phase,
+            )
+        )
+        self.verified_snapshot_identity = snapshot_identity
+        self.prefix_proof = prefix_proof
+        self.verified_snapshot = verified_snapshot
+        return current
+
+
+def open_pinned_rollout_text_from_parent_fd(
+    parent_fd,
+    name,
+    expected_identity=None,
+    allow_append=False,
+):
+    fd, open_identity, snapshot_identity, prefix_proof, verified_snapshot = (
+        open_pinned_regular_file_from_fd(
+            parent_fd,
+            name,
+            expected_identity=expected_identity,
+            allow_append=allow_append,
+        )
+    )
+    try:
+        pinned_parent_fd = os.dup(parent_fd)
+    except Exception:
+        os.close(fd)
+        raise
+    return PinnedRolloutHandle(
+        fd,
+        pinned_parent_fd,
+        name,
+        open_identity,
+        snapshot_identity,
+        prefix_proof,
+        verified_snapshot,
+    )
+
+
+def open_pinned_rollout_text(rel):
+    parts = validate_relative_path_parts(rel)
+    if not parts:
+        raise ValueError("rollout path must name a file")
+    root_fd = open_pinned_codex_root()
+    try:
+        parent_fd = open_pinned_directory_from_fd(
+            root_fd,
+            pathlib.PurePosixPath(*parts[:-1]),
+        )
+        try:
+            return open_pinned_rollout_text_from_parent_fd(parent_fd, parts[-1])
+        finally:
+            os.close(parent_fd)
+    finally:
+        os.close(root_fd)
 
 
 class HashingReader:
@@ -1445,6 +2902,9 @@ class HashingReader:
         self.hasher.update(data)
         self.bytes_read += len(data)
         return data
+
+    def tell(self):
+        return self.handle.tell()
 
     def hexdigest(self):
         return self.hasher.hexdigest()
@@ -1511,65 +2971,32 @@ def rollout_matches_bounds(path):
     return True
 
 
-def open_rollout_text(target):
-    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
-    fd = os.open(str(target), flags)
-    try:
-        if not stat.S_ISREG(os.fstat(fd).st_mode):
-            raise ValueError("rollout path is not a regular file")
-        handle = os.fdopen(fd, "rb")
-        fd = -1
-        return handle
-    finally:
-        if fd != -1:
-            os.close(fd)
+def open_rollout_text(
+    rel,
+    parent_fd=None,
+    expected_identity=None,
+    allow_append=False,
+):
+    if parent_fd is not None:
+        return open_pinned_rollout_text_from_parent_fd(
+            parent_fd,
+            rel.name,
+            expected_identity=expected_identity,
+            allow_append=allow_append,
+        )
+    return open_pinned_rollout_text(rel)
 
 
-def file_sha256(path):
-    digest = hashlib.sha256()
-    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
-    fd = os.open(str(path), flags)
-    try:
-        if not stat.S_ISREG(os.fstat(fd).st_mode):
-            raise OSError("rollout path is not a regular file")
-        with os.fdopen(fd, "rb") as handle:
-            fd = -1
-            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-                digest.update(chunk)
-    finally:
-        if fd != -1:
-            os.close(fd)
-    return digest.hexdigest()
-
-
-def read_rollout_bytes(target, max_bytes):
-    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
-    fd = os.open(str(target), flags)
-    try:
-        identity = rollout_identity_from_stat(os.fstat(fd))
-        assert_rollout_path_identity(target, identity, "before read")
+def read_rollout_bytes(rel, max_bytes):
+    with open_pinned_rollout_text(rel) as handle:
+        identity = rollout_identity_from_stat(os.fstat(handle.fileno()))
         if max_bytes and identity["size"] > max_bytes:
             raise ValueError("rollout too large: " + str(identity["size"]) + " bytes > " + str(max_bytes))
-        with os.fdopen(fd, "rb") as handle:
-            fd = -1
-            data = handle.read(identity["size"] + 1)
-            assert_rollout_identity(
-                rollout_identity_from_stat(os.fstat(handle.fileno())),
-                identity,
-                "after read",
-            )
-            assert_rollout_path_identity(target, identity, "after read")
-            if len(data) != identity["size"]:
-                raise ValueError(
-                    "rollout identity changed during read: "
-                    + str(len(data))
-                    + " bytes != "
-                    + str(identity["size"])
-                )
-            return identity["size"], data
-    finally:
-        if fd != -1:
-            os.close(fd)
+        data = handle.read(identity["size"] + 1)
+        handle.assert_identity(identity, "after read")
+        if len(data) != identity["size"]:
+            raise ValueError("rollout read did not match snapshot size")
+        return identity["size"], data
 
 
 def flat_archived_rollout_matches_date(rollout, date_text):
@@ -1619,13 +3046,17 @@ def session_meta_is_flat_archived_undated(rel):
     return rel.parts[:1] == ("archived_sessions",) and session_meta_flat_undated_alias(rel) is not None
 
 
+def session_meta_allows_append(rel):
+    return len(rel.parts) == 1 or rel.parts[0] == "sessions"
+
+
 def session_meta_record_timestamp(row):
     timestamp = row.get("timestamp")
     if not isinstance(timestamp, str) or not timestamp.strip():
         return None
     try:
         return parse_config_time(timestamp)
-    except Exception:
+    except (ValueError, OverflowError):
         return None
 
 
@@ -1642,6 +3073,24 @@ def session_meta_record_matches_window(row, date_text):
     return True
 
 
+def session_meta_snapshot_reader(identity, verified_snapshot):
+    phase = "before session-meta scan"
+    if (
+        verified_snapshot is None
+        or len(verified_snapshot) > SESSION_META_PREFIX_PROOF_BYTES
+        or identity["size"] < len(verified_snapshot)
+    ):
+        raise ValueError("rollout identity changed " + phase)
+    source_has_unread_bytes = identity["size"] > len(verified_snapshot)
+    if (
+        source_has_unread_bytes
+        and len(verified_snapshot) < SESSION_META_PREFIX_PROOF_BYTES
+    ):
+        raise ValueError("rollout identity changed " + phase)
+    unread_sentinel = b"\\0" if source_has_unread_bytes else b""
+    return io.BytesIO(verified_snapshot + unread_sentinel)
+
+
 def session_meta_date_overlaps_window(date_text):
     try:
         date_value = datetime.datetime.strptime(date_text, "%Y/%m/%d").date()
@@ -1656,6 +3105,58 @@ def session_meta_date_overlaps_window(date_text):
     return True
 
 
+def decode_session_meta_line(raw_bytes):
+    try:
+        return raw_bytes.decode("utf-8")
+    except UnicodeDecodeError as error:
+        raise ValueError("session-meta record is not valid UTF-8") from error
+
+
+def parse_session_meta_snapshot(
+    scan_handle,
+    date_text,
+    require_record_date_match,
+):
+    for line in bounded_session_meta_lines(
+        scan_handle,
+        SESSION_META_SCAN_BYTES,
+    ):
+        try:
+            obj = json.loads(line)
+        except (ValueError, RecursionError):
+            continue
+        if not isinstance(obj, dict):
+            continue
+        if obj.get("type") != "session_meta":
+            continue
+        timestamp = session_meta_record_timestamp(obj)
+        if require_record_date_match:
+            if date_text is None or not session_meta_record_matches_window(obj, date_text):
+                continue
+        elif timestamp is None:
+            if date_text is None or not session_meta_date_overlaps_window(date_text):
+                continue
+        else:
+            if ROLLOUT_START_TIME is not None and timestamp < ROLLOUT_START_TIME:
+                continue
+            if ROLLOUT_END_TIME is not None and timestamp >= ROLLOUT_END_TIME:
+                continue
+        payload = obj.get("payload", {{}})
+        if not isinstance(payload, dict):
+            continue
+        session_id_value = payload.get("id")
+        if not isinstance(session_id_value, str) or not session_id_value:
+            continue
+        session_id = session_id_value
+        cwd = str(payload.get("cwd", ""))
+        if timestamp is None:
+            meta_date = date_text
+        else:
+            meta_date = timestamp.strftime("%Y/%m/%d")
+        return (meta_date, session_id, cwd, timestamp)
+    return None
+
+
 def emit_session_meta_item(item):
     serialized = json.dumps(item, separators=(",", ":"), sort_keys=True)
     if len(serialized.encode("utf-8")) > SESSION_META_SERIALIZED_ROW_BYTES:
@@ -1665,53 +3166,122 @@ def emit_session_meta_item(item):
     return True
 
 
-def session_meta_from_rollout(rel, date_text=None, require_record_date_match=False):
+def session_meta_from_rollout(
+    parent_fd,
+    rel,
+    expected_identity=None,
+    date_text=None,
+    require_record_date_match=False,
+):
+    allow_append = session_meta_allows_append(rel)
     try:
-        target = safe_rollout_path(rel)
+        handle = open_rollout_text(
+            rel,
+            parent_fd=parent_fd,
+            expected_identity=expected_identity,
+            allow_append=allow_append,
+        )
     except FileNotFoundError:
+        if expected_identity is not None:
+            emit_session_meta_item({{"kind": "error", "error": "rollout identity changed after enumeration", "rollout": rel.as_posix()}})
+            print(SESSION_META_END)
+            raise SystemExit(0)
         return None
-    try:
-        handle = open_rollout_text(target)
     except OSError:
         emit_session_meta_item({{"kind": "error", "error": "rollout unreadable", "rollout": rel.as_posix()}})
         print(SESSION_META_END)
         raise SystemExit(0)
-    try:
-        with handle:
-            for line in bounded_session_meta_lines(handle, SESSION_META_SCAN_BYTES):
-                try:
-                    obj = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                if obj.get("type") != "session_meta":
-                    continue
-                timestamp = session_meta_record_timestamp(obj)
-                if require_record_date_match:
-                    if date_text is None or not session_meta_record_matches_window(obj, date_text):
-                        continue
-                elif timestamp is None:
-                    if date_text is None or not session_meta_date_overlaps_window(date_text):
-                        continue
-                else:
-                    if ROLLOUT_START_TIME is not None and timestamp < ROLLOUT_START_TIME:
-                        continue
-                    if ROLLOUT_END_TIME is not None and timestamp >= ROLLOUT_END_TIME:
-                        continue
-                payload = obj.get("payload", {{}})
-                session_id = str(payload.get("id", ""))
-                if not session_id:
-                    return None
-                cwd = str(payload.get("cwd", ""))
-                if timestamp is None:
-                    meta_date = date_text
-                else:
-                    meta_date = timestamp.strftime("%Y/%m/%d")
-                return meta_date, session_id, cwd, timestamp
     except ValueError as error:
         emit_session_meta_item({{"kind": "error", "error": str(error), "rollout": rel.as_posix()}})
         print(SESSION_META_END)
         raise SystemExit(0)
-    return None
+    try:
+        with handle:
+            if expected_identity is not None and allow_append:
+                identity = handle.assert_append_only_identity(
+                    handle.open_identity,
+                    "before session-meta scan",
+                )
+                snapshot_identity = handle.verified_snapshot_identity
+                if snapshot_identity is None:
+                    raise ValueError("rollout identity changed before session-meta scan")
+                scan_handle = session_meta_snapshot_reader(
+                    snapshot_identity,
+                    handle.verified_snapshot,
+                )
+            else:
+                identity = rollout_identity_from_stat(os.fstat(handle.fileno()))
+                scan_handle = handle
+            result = parse_session_meta_snapshot(
+                scan_handle,
+                date_text,
+                require_record_date_match,
+            )
+            if expected_identity is None:
+                handle.assert_identity(identity, "after session-meta scan")
+            elif allow_append:
+                refreshed_identity = handle.assert_append_only_identity(
+                    identity,
+                    "after session-meta scan",
+                )
+                refreshed_snapshot_identity = handle.verified_snapshot_identity
+                if refreshed_snapshot_identity is None:
+                    raise ValueError(
+                        "rollout identity changed after session-meta scan"
+                    )
+                if (
+                    result is None
+                    and refreshed_snapshot_identity == snapshot_identity
+                    and refreshed_identity != refreshed_snapshot_identity
+                ):
+                    raise ValueError(
+                        "rollout identity changed after session-meta scan"
+                    )
+                if (
+                    result is None
+                    and refreshed_snapshot_identity != snapshot_identity
+                ):
+                    result = parse_session_meta_snapshot(
+                        session_meta_snapshot_reader(
+                            refreshed_snapshot_identity,
+                            handle.verified_snapshot,
+                        ),
+                        date_text,
+                        require_record_date_match,
+                    )
+                    final_identity = handle.assert_append_only_identity(
+                        refreshed_identity,
+                        "after refreshed session-meta scan",
+                    )
+                    final_snapshot_identity = handle.verified_snapshot_identity
+                    if final_snapshot_identity is None:
+                        raise ValueError(
+                            "rollout identity changed after session-meta scan"
+                        )
+                    if (
+                        result is None
+                        and (
+                            final_snapshot_identity != refreshed_snapshot_identity
+                            or final_identity != final_snapshot_identity
+                        )
+                    ):
+                        raise ValueError(
+                            "rollout identity changed after session-meta scan"
+                        )
+            else:
+                handle.assert_identity(
+                    expected_identity["snapshot"],
+                    "after session-meta scan",
+                )
+            return result
+    except OSError:
+        emit_session_meta_item({{"kind": "error", "error": "rollout unreadable", "rollout": rel.as_posix()}})
+        print(SESSION_META_END)
+        raise SystemExit(0)
+    except ValueError as error:
+        emit_session_meta_item({{"kind": "error", "error": str(error), "rollout": rel.as_posix()}})
+        print(SESSION_META_END)
+        raise SystemExit(0)
 
 
 def session_meta_rollout_sort_key(rel, cached_timestamp=None):
@@ -1727,6 +3297,29 @@ def normalize_text(text, max_chars):
     return collapsed
 
 
+def message_content_is_valid(content):
+    if not isinstance(content, list):
+        return False
+    for item in content:
+        if not isinstance(item, dict):
+            return False
+        item_type = item.get("type")
+        if not isinstance(item_type, str):
+            return False
+        if item_type in ("input_text", "output_text", "text") and not isinstance(item.get("text"), str):
+            return False
+    return True
+
+
+def message_payload_is_valid(payload):
+    role = payload.get("role")
+    return (
+        isinstance(role, str)
+        and role in ("assistant", "developer", "system", "user")
+        and message_content_is_valid(payload.get("content"))
+    )
+
+
 def message_summary_from_payload(payload):
     role = str(payload.get("role", ""))
     if role not in ("assistant", "user"):
@@ -1735,11 +3328,14 @@ def message_summary_from_payload(payload):
     for item in payload.get("content", []):
         if not isinstance(item, dict):
             continue
-        if item.get("type") not in ("input_text", "output_text", "text"):
+        item_type = item.get("type")
+        if not isinstance(item_type, str):
+            continue
+        if item_type not in ("input_text", "output_text", "text"):
             continue
         text = item.get("text")
-        if text:
-            parts.append(str(text))
+        if isinstance(text, str) and text:
+            parts.append(text)
     if not parts:
         return None, None
     kind = "user_message" if role == "user" else "assistant_message"
@@ -1835,6 +3431,7 @@ def summary_matches_keywords(text, search_keywords):
 
 
 def event_user_message_text(payload):
+    message_present = "message" in payload
     message = payload.get("message")
     if isinstance(message, str):
         return message.strip()
@@ -1842,9 +3439,10 @@ def event_user_message_text(payload):
         kind, text = message_summary_from_payload(message)
         if kind == "user_message" and text:
             return text.strip()
-    text = payload.get("text")
-    if isinstance(text, str):
-        return text.strip()
+    if not message_present:
+        text = payload.get("text")
+        if isinstance(text, str):
+            return text.strip()
     return ""
 
 
@@ -1890,7 +3488,7 @@ def bounded_session_meta_lines(handle, max_scan_bytes):
         chunk = os.read(file_descriptor, read_size) if file_descriptor is not None else handle.read(read_size)
         if not chunk:
             if buffer:
-                yield bytes(buffer).decode("utf-8", "replace")
+                yield decode_session_meta_line(bytes(buffer))
             return
         raw_bytes = chunk.encode("utf-8", "surrogatepass") if isinstance(chunk, str) else bytes(chunk)
         if len(raw_bytes) > read_size:
@@ -1918,62 +3516,79 @@ def bounded_session_meta_lines(handle, max_scan_bytes):
             line = bytes(buffer[:line_size])
             del buffer[:line_size]
             buffer_offset = absolute_line_end
-            yield line.decode("utf-8", "replace")
+            yield decode_session_meta_line(line)
         if scanned == max_scan_bytes:
             if cap_has_unread_bytes:
                 raise ValueError("session metadata scan truncated at " + str(max_scan_bytes) + " bytes")
             if buffer:
-                yield bytes(buffer).decode("utf-8", "replace")
+                yield decode_session_meta_line(bytes(buffer))
             return
 
 
-def bounded_text_lines(handle, max_scan_bytes):
+def decode_summary_line(raw_bytes):
+    try:
+        return raw_bytes.decode("utf-8")
+    except UnicodeDecodeError:
+        return "\\n"
+
+
+def bounded_text_lines(handle, max_scan_bytes, source_size):
+    try:
+        start_offset = handle.tell()
+    except (AttributeError, OSError, TypeError, ValueError) as error:
+        raise ValueError("rollout summary reader offset is unavailable") from error
+    if (
+        isinstance(start_offset, bool)
+        or not isinstance(start_offset, int)
+        or start_offset < 0
+        or start_offset > source_size
+    ):
+        raise ValueError("rollout summary reader offset is invalid")
+    if start_offset != 0:
+        raise ValueError("rollout summary reader must start at byte 0")
     scanned = 0
     buffer = bytearray()
     dropping_oversized_line = False
     chunk_bytes = 64 * 1024
+    scan_limit = min(max_scan_bytes, source_size) if max_scan_bytes else source_size
 
-    def line_ended(part):
-        return part.endswith(b"\\n") or part.endswith(b"\\r")
-
-    while True:
-        if max_scan_bytes and scanned >= max_scan_bytes:
-            if dropping_oversized_line:
-                yield "\\n"
-            elif buffer:
-                yield bytes(buffer).decode("utf-8", "replace")
-            return
-        remaining = max_scan_bytes - scanned if max_scan_bytes else 0
-        read_size = min(chunk_bytes, remaining) if remaining else chunk_bytes
+    while scanned < scan_limit:
+        read_size = min(chunk_bytes, scan_limit - scanned)
         chunk = handle.read(read_size)
         if not chunk:
-            if dropping_oversized_line:
-                yield "\\n"
-            elif buffer:
-                yield bytes(buffer).decode("utf-8", "replace")
-            return
+            break
         if isinstance(chunk, str):
             raw_bytes = chunk.encode("utf-8", "surrogatepass")
         else:
             raw_bytes = bytes(chunk)
         scanned += len(raw_bytes)
-        for part in raw_bytes.splitlines(keepends=True):
+        offset = 0
+        while offset < len(raw_bytes):
+            line_end = raw_bytes.find(b"\\n", offset)
+            part_end = len(raw_bytes) if line_end < 0 else line_end + 1
+            part = raw_bytes[offset:part_end]
             if dropping_oversized_line:
-                if line_ended(part):
+                if line_end >= 0:
                     yield "\\n"
                     dropping_oversized_line = False
-                continue
-            if len(buffer) + len(part) > SUMMARY_LINE_BYTES:
+            elif len(buffer) + len(part) > SUMMARY_LINE_BYTES:
                 buffer.clear()
                 dropping_oversized_line = True
-                if line_ended(part):
+                if line_end >= 0:
                     yield "\\n"
                     dropping_oversized_line = False
-                continue
-            buffer.extend(part)
-            if line_ended(part):
-                yield bytes(buffer).decode("utf-8", "replace")
-                buffer.clear()
+            else:
+                buffer.extend(part)
+                if line_end >= 0:
+                    yield decode_summary_line(bytes(buffer))
+                    buffer.clear()
+            offset = part_end
+
+    if scanned == source_size:
+        if dropping_oversized_line:
+            yield "\\n"
+        elif buffer:
+            yield decode_summary_line(bytes(buffer))
 
 
 def summarize_rollout():
@@ -1992,17 +3607,6 @@ def summarize_rollout():
         print(json.dumps({{"ok": False, "error": "invalid rollout path"}}, separators=(",", ":"), sort_keys=True))
         print(ROLLOUT_SUMMARY_END)
         return
-    try:
-        target = safe_rollout_path(rel)
-    except FileNotFoundError:
-        print(json.dumps({{"ok": False, "error": "rollout not found"}}, separators=(",", ":"), sort_keys=True))
-        print(ROLLOUT_SUMMARY_END)
-        return
-    except ValueError as error:
-        print(json.dumps({{"ok": False, "error": str(error)}}, separators=(",", ":"), sort_keys=True))
-        print(ROLLOUT_SUMMARY_END)
-        return
-
     keywords = [value.casefold() for value in SUMMARY_KEYWORDS if value]
     matched = []
     matched_seen = set()
@@ -2019,9 +3623,17 @@ def summarize_rollout():
     last_task_complete_record = None
 
     try:
-        handle = open_rollout_text(target)
-        identity = rollout_identity_from_stat(os.fstat(handle.fileno()))
-        assert_rollout_path_identity(target, identity, "before summary scan")
+        handle = open_rollout_text(rel)
+        try:
+            identity = rollout_identity_from_stat(os.fstat(handle.fileno()))
+            handle.assert_identity(identity, "before summary scan")
+        except Exception:
+            handle.close()
+            raise
+    except FileNotFoundError:
+        print(json.dumps({{"ok": False, "error": "rollout not found"}}, separators=(",", ":"), sort_keys=True))
+        print(ROLLOUT_SUMMARY_END)
+        return
     except OSError:
         print(json.dumps({{"ok": False, "error": "rollout unreadable"}}, separators=(",", ":"), sort_keys=True))
         print(ROLLOUT_SUMMARY_END)
@@ -2034,32 +3646,64 @@ def summarize_rollout():
     effective_summary_scan_bytes = SUMMARY_SCAN_BYTES or target_size
     hashing_reader = HashingReader(handle)
     with handle:
-        for line_no, line in enumerate(bounded_text_lines(hashing_reader, effective_summary_scan_bytes), 1):
+        for line_no, line in enumerate(
+            bounded_text_lines(hashing_reader, effective_summary_scan_bytes, target_size),
+            1,
+        ):
             try:
                 obj = json.loads(line)
-            except json.JSONDecodeError:
+            except (ValueError, RecursionError):
                 json_error_count += 1
                 continue
-            timestamp = str(obj.get("timestamp", ""))
+            if not isinstance(obj, dict):
+                json_error_count += 1
+                continue
+            timestamp_value = obj.get("timestamp")
+            if "timestamp" in obj and not isinstance(timestamp_value, str):
+                json_error_count += 1
+                continue
+            timestamp = timestamp_value if isinstance(timestamp_value, str) else ""
             record = None
-            record_type = str(obj.get("type", ""))
-            if record_type == "session_meta" and session_meta_record is None:
-                payload = obj.get("payload", {{}})
-                record = summary_record(
-                    "session_meta",
-                    "session_id=" + str(payload.get("id", ""))
-                    + " cwd_present="
-                    + str(bool(payload.get("cwd", ""))).lower(),
-                    line_no=line_no,
-                    timestamp=timestamp,
-                    session_id=str(payload.get("id", "")),
-                    search_keywords=keywords,
-                )
-                session_meta_record = record
+            record_type = obj.get("type")
+            if not isinstance(record_type, str):
+                json_error_count += 1
+                continue
+            payload = obj.get("payload")
+            if record_type in ("session_meta", "response_item", "event_msg") and not isinstance(payload, dict):
+                json_error_count += 1
+                continue
+            if record_type == "session_meta":
+                session_id_value = payload.get("id")
+                if not isinstance(session_id_value, str) or not session_id_value:
+                    json_error_count += 1
+                    continue
+                cwd_value = payload.get("cwd")
+                if "cwd" in payload and not isinstance(cwd_value, str):
+                    json_error_count += 1
+                    continue
+                cwd_present = isinstance(cwd_value, str) and bool(cwd_value)
+                if session_meta_record is None:
+                    record = summary_record(
+                        "session_meta",
+                        "session_id=" + session_id_value
+                        + " cwd_present="
+                        + str(cwd_present).lower(),
+                        line_no=line_no,
+                        timestamp=timestamp,
+                        session_id=session_id_value,
+                        search_keywords=keywords,
+                    )
+                    session_meta_record = record
+                continue
             elif record_type == "response_item":
-                payload = obj.get("payload", {{}})
-                payload_type = str(payload.get("type", ""))
+                payload_type = payload.get("type")
+                if not isinstance(payload_type, str):
+                    json_error_count += 1
+                    continue
                 if payload_type == "message":
+                    if not message_payload_is_valid(payload):
+                        json_error_count += 1
+                        continue
                     kind, text = message_summary_from_payload(payload)
                     if text:
                         record = summary_record(
@@ -2075,7 +3719,10 @@ def summarize_rollout():
                             last_user_record = record
                 elif payload_type == "function_call_output":
                     output = payload.get("output")
-                    if isinstance(output, str) and output.strip():
+                    if not isinstance(output, str):
+                        json_error_count += 1
+                        continue
+                    if output.strip():
                         record = summary_record(
                             "function_call_output",
                             output,
@@ -2084,11 +3731,16 @@ def summarize_rollout():
                             search_keywords=keywords,
                         )
             elif record_type == "event_msg":
-                payload = obj.get("payload", {{}})
-                payload_type = str(payload.get("type", ""))
+                payload_type = payload.get("type")
+                if not isinstance(payload_type, str):
+                    json_error_count += 1
+                    continue
                 if payload_type == "task_complete":
                     text = payload.get("last_agent_message")
-                    if text:
+                    if not isinstance(text, str):
+                        json_error_count += 1
+                        continue
+                    if text.strip():
                         record = summary_record(
                             "task_complete",
                             text,
@@ -2098,6 +3750,20 @@ def summarize_rollout():
                         )
                         last_task_complete_record = record
                 elif payload_type == "user_message":
+                    message = payload.get("message")
+                    if "message" in payload:
+                        if isinstance(message, dict):
+                            if message.get("role") != "user" or not message_content_is_valid(
+                                message.get("content")
+                            ):
+                                json_error_count += 1
+                                continue
+                        elif not isinstance(message, str):
+                            json_error_count += 1
+                            continue
+                    elif not isinstance(payload.get("text"), str):
+                        json_error_count += 1
+                        continue
                     text = event_user_message_text(payload)
                     if text:
                         record = summary_record(
@@ -2135,12 +3801,7 @@ def summarize_rollout():
                 tail.append(record)
 
         try:
-            assert_rollout_identity(
-                rollout_identity_from_stat(os.fstat(handle.fileno())),
-                identity,
-                "after summary scan",
-            )
-            assert_rollout_path_identity(target, identity, "after summary scan")
+            handle.assert_identity(identity, "after summary scan")
         except (OSError, ValueError) as error:
             print(json.dumps({{"ok": False, "error": str(error)}}, separators=(",", ":"), sort_keys=True))
             print(ROLLOUT_SUMMARY_END)
@@ -2283,12 +3944,6 @@ def summarize_rollout():
 
 
 def iter_session_meta():
-    try:
-        root = safe_codex_root()
-    except FileNotFoundError:
-        print(SESSION_META_BEGIN)
-        print(SESSION_META_END)
-        return
     print(SESSION_META_BEGIN)
 
     def session_directory_unreadable():
@@ -2296,120 +3951,234 @@ def iter_session_meta():
         print(SESSION_META_END)
         raise SystemExit(0)
 
-    def sorted_rollout_paths(directory):
+    def session_rollout_error(rel, error):
+        emit_session_meta_item({{"kind": "error", "error": error, "rollout": rel.as_posix()}})
+        print(SESSION_META_END)
+        raise SystemExit(0)
+
+    try:
+        root_fd = open_pinned_codex_root()
+    except FileNotFoundError:
+        print(SESSION_META_END)
+        return
+    except (OSError, ValueError):
+        session_directory_unreadable()
+
+    opened_directories = {{}}
+    prefix_proof_candidate_limit = SESSION_META_CANDIDATE_LIMIT
+    prefix_proof_candidate_captures = 0
+
+    def open_directory(rel_dir):
+        key = rel_dir.as_posix()
+        if key in opened_directories:
+            return opened_directories[key]
         try:
-            with os.scandir(directory) as entries:
-                paths = [
-                    pathlib.Path(entry.path)
-                    for entry in entries
-                    if entry.name.startswith("rollout-") and entry.name.endswith(".jsonl")
-                ]
-            return sorted(paths, reverse=True)
+            directory_fd = open_pinned_directory_from_fd(root_fd, rel_dir)
         except FileNotFoundError:
-            return []
+            return None
+        except (OSError, ValueError):
+            session_directory_unreadable()
+        opened_directories[key] = directory_fd
+        return directory_fd
+
+    def close_directory(rel_dir):
+        key = rel_dir.as_posix()
+        directory_fd = opened_directories.pop(key, None)
+        if directory_fd is not None:
+            os.close(directory_fd)
+
+    def prepare_candidate_for_consumption(parent_fd, rel, inventory_identity):
+        nonlocal prefix_proof_candidate_captures
+        try:
+            if session_meta_allows_append(rel):
+                if prefix_proof_candidate_captures >= prefix_proof_candidate_limit:
+                    return None
+                prefix_proof_candidate_captures += 1
+                return capture_active_rollout_candidate_identity_from_parent_fd(
+                    parent_fd,
+                    rel.name,
+                    inventory_identity,
+                )
+            return capture_rollout_candidate_identity_from_parent_fd(
+                parent_fd,
+                rel.name,
+                inventory_identity,
+            )
+        except ValueError as error:
+            session_rollout_error(rel, str(error))
+        except OSError:
+            session_rollout_error(rel, "rollout unreadable")
+
+    def sorted_rollout_candidates(rel_dir, predicate):
+        directory_fd = open_directory(rel_dir)
+        if directory_fd is None:
+            return None, []
+        try:
+            candidates = []
+            with os.scandir(directory_fd) as entries:
+                for entry in entries:
+                    name = entry.name
+                    if not RAW_ROLLOUT_BASENAME_RE.fullmatch(name):
+                        continue
+                    rel = rel_dir / name
+                    if not predicate(rel):
+                        continue
+                    try:
+                        inventory_identity = (
+                            capture_rollout_inventory_identity_from_parent_fd(
+                                directory_fd,
+                                name,
+                            )
+                        )
+                    except ValueError as error:
+                        session_rollout_error(rel, str(error))
+                    except OSError:
+                        session_rollout_error(rel, "rollout unreadable")
+                    candidates.append((name, inventory_identity))
         except OSError:
             session_directory_unreadable()
+        candidates.sort(key=lambda candidate: candidate[0], reverse=True)
+        return directory_fd, candidates
+
+    def add_directory_candidates(selected, rel_dir, predicate):
+        directory_fd, candidates = sorted_rollout_candidates(rel_dir, predicate)
+        if directory_fd is None:
+            return
+        for name, inventory_identity in candidates:
+            rel = rel_dir / name
+            key = session_meta_rollout_dedupe_key(rel)
+            selected.setdefault(key, (rel, directory_fd, inventory_identity))
 
     count = 0
     seen_rollout_paths = set()
     flat_archived_unknown_by_date = {{}}
-    if ROLLOUT_FILENAME_MODE != "known":
-        try:
-            flat_archived_dir = safe_directory_path(pathlib.PurePosixPath("archived_sessions"))
+    flat_archived_inventory_identities = {{}}
+    try:
+        if ROLLOUT_FILENAME_MODE != "known":
+            flat_archived_rel_dir = pathlib.PurePosixPath("archived_sessions")
+            flat_archived_fd, flat_archived_candidates = sorted_rollout_candidates(
+                flat_archived_rel_dir,
+                lambda rel: session_meta_rollout_filename_date(rel.name) is None,
+            )
             date_set = set(DATE_STRINGS)
-            for rollout in sorted_rollout_paths(flat_archived_dir):
-                if not is_raw_rollout_file(rollout):
-                    continue
-                if session_meta_rollout_filename_date(rollout.name) is not None:
-                    continue
-                rel = pathlib.PurePosixPath(rollout.relative_to(root).as_posix())
-                meta = session_meta_from_rollout(rel)
-                if meta is None:
-                    continue
-                meta_date, session_id, cwd, timestamp = meta
-                if meta_date in date_set:
-                    flat_archived_unknown_by_date.setdefault(meta_date, {{}})[rollout] = (session_id, cwd, timestamp)
-        except FileNotFoundError:
-            pass
-        except OSError:
-            session_directory_unreadable()
-    for date_text in reversed(DATE_STRINGS):
-        rollout_paths = []
-        for rel_dir in (pathlib.PurePosixPath("sessions") / date_text, pathlib.PurePosixPath("archived_sessions") / date_text):
-            try:
-                date_dir = safe_directory_path(rel_dir)
-            except FileNotFoundError:
-                continue
-            except OSError:
-                session_directory_unreadable()
-            rollout_paths.extend(
-                rollout
-                for rollout in sorted_rollout_paths(date_dir)
-                if is_raw_rollout_file(rollout) and rollout_matches_bounds(rollout)
+            if flat_archived_fd is not None:
+                for name, inventory_identity in flat_archived_candidates:
+                    rel = flat_archived_rel_dir / name
+                    consumed_identity = prepare_candidate_for_consumption(
+                        flat_archived_fd,
+                        rel,
+                        inventory_identity,
+                    )
+                    meta = session_meta_from_rollout(
+                        flat_archived_fd,
+                        rel,
+                        consumed_identity,
+                    )
+                    if meta is None:
+                        continue
+                    meta_date, session_id, cwd, timestamp = meta
+                    if meta_date in date_set:
+                        flat_archived_unknown_by_date.setdefault(meta_date, {{}})[
+                            rel.as_posix()
+                        ] = (session_id, cwd, timestamp)
+                        flat_archived_inventory_identities[
+                            rel.as_posix()
+                        ] = inventory_identity
+
+        for date_text in reversed(DATE_STRINGS):
+            date_rel_dirs = (
+                pathlib.PurePosixPath("sessions") / date_text,
+                pathlib.PurePosixPath("archived_sessions") / date_text,
             )
-        try:
-            flat_archived_dir = safe_directory_path(pathlib.PurePosixPath("archived_sessions"))
-            rollout_paths.extend(
-                rollout
-                for rollout in sorted_rollout_paths(flat_archived_dir)
-                if is_raw_rollout_file(rollout)
-                and flat_archived_rollout_matches_date(rollout, date_text)
-                and flat_archived_rollout_matches_bounds_or_unknown(rollout)
-            )
-        except FileNotFoundError:
-            pass
-        except OSError:
-            session_directory_unreadable()
-        rollout_paths.extend(flat_archived_unknown_by_date.get(date_text, {{}}))
-        rollout_paths.extend(
-            rollout
-            for rollout in sorted_rollout_paths(root)
-            if is_raw_rollout_file(rollout)
-            and flat_archived_rollout_matches_date(rollout, date_text)
-            and rollout_matches_bounds(rollout)
-        )
-        selected_rollout_paths = {{}}
-        for rollout in rollout_paths:
-            rel = pathlib.PurePosixPath(rollout.relative_to(root).as_posix())
-            rel_key = session_meta_rollout_dedupe_key(rel)
-            selected_rollout_paths.setdefault(rel_key, rollout)
-        cached_rollout_meta = flat_archived_unknown_by_date.get(date_text, {{}})
-        selected_rollouts = sorted(
-            selected_rollout_paths.values(),
-            key=lambda rollout: session_meta_rollout_sort_key(
-                pathlib.PurePosixPath(rollout.relative_to(root).as_posix()),
-                cached_rollout_meta.get(rollout, ("", "", None))[2],
-            ),
-            reverse=True,
-        )
-        for rollout in selected_rollouts:
-            rel = pathlib.PurePosixPath(rollout.relative_to(root).as_posix())
-            rel_key = rel.as_posix()
-            if rel_key in seen_rollout_paths:
-                continue
-            seen_rollout_paths.add(rel_key)
-            require_record_date_match = session_meta_is_flat_archived_undated(rel)
-            cached_meta = cached_rollout_meta.get(rollout)
-            if cached_meta is not None:
-                session_id, cwd, _timestamp = cached_meta
-            else:
-                meta = session_meta_from_rollout(
-                    rel,
-                    date_text,
-                    require_record_date_match=require_record_date_match,
+            selected_rollout_paths = {{}}
+            for rel_dir in date_rel_dirs:
+                add_directory_candidates(
+                    selected_rollout_paths,
+                    rel_dir,
+                    lambda rel: rollout_matches_bounds(rel),
                 )
-                if meta is None:
+            flat_archived_rel_dir = pathlib.PurePosixPath("archived_sessions")
+            add_directory_candidates(
+                selected_rollout_paths,
+                flat_archived_rel_dir,
+                lambda rel: flat_archived_rollout_matches_date(rel, date_text)
+                and flat_archived_rollout_matches_bounds_or_unknown(rel),
+            )
+            flat_archived_fd = open_directory(flat_archived_rel_dir)
+            if flat_archived_fd is not None:
+                for rel_key in flat_archived_unknown_by_date.get(date_text, {{}}):
+                    rel = pathlib.PurePosixPath(rel_key)
+                    selected_rollout_paths.setdefault(
+                        rel_key,
+                        (
+                            rel,
+                            flat_archived_fd,
+                            flat_archived_inventory_identities[rel_key],
+                        ),
+                    )
+            root_rel_dir = pathlib.PurePosixPath()
+            add_directory_candidates(
+                selected_rollout_paths,
+                root_rel_dir,
+                lambda rel: flat_archived_rollout_matches_date(rel, date_text)
+                and rollout_matches_bounds(rel),
+            )
+            cached_rollout_meta = flat_archived_unknown_by_date.get(date_text, {{}})
+            selected_rollouts = sorted(
+                selected_rollout_paths.values(),
+                key=lambda candidate: session_meta_rollout_sort_key(
+                    candidate[0],
+                    cached_rollout_meta.get(
+                        candidate[0].as_posix(),
+                        ("", "", None),
+                    )[2],
+                ),
+                reverse=True,
+            )
+            for rel, parent_fd, inventory_identity in selected_rollouts:
+                rel_key = rel.as_posix()
+                if rel_key in seen_rollout_paths:
                     continue
-                _meta_date, session_id, cwd, _timestamp = meta
-            if session_id:
-                count += 1
-                if LIMIT and count > LIMIT:
-                    emit_session_meta_item({{"kind": "truncation", "reason": SESSION_META_LIMIT_TRUNCATED_REASON, "date": date_text, "limit": LIMIT}})
-                    print(SESSION_META_END)
-                    return
-                if not emit_session_meta_item({{"date": date_text, "session_id": session_id, "cwd": cwd, "rollout": rollout.relative_to(root).as_posix()}}):
-                    print(SESSION_META_END)
-                    return
+                seen_rollout_paths.add(rel_key)
+                require_record_date_match = session_meta_is_flat_archived_undated(rel)
+                cached_meta = cached_rollout_meta.get(rel_key)
+                if cached_meta is not None:
+                    session_id, cwd, _timestamp = cached_meta
+                else:
+                    consumed_identity = prepare_candidate_for_consumption(
+                        parent_fd,
+                        rel,
+                        inventory_identity,
+                    )
+                    if consumed_identity is None:
+                        emit_session_meta_item({{"kind": "truncation", "reason": SESSION_META_CANDIDATE_LIMIT_TRUNCATED_REASON, "date": date_text, "candidate_limit": SESSION_META_CANDIDATE_LIMIT}})
+                        print(SESSION_META_END)
+                        return
+                    meta = session_meta_from_rollout(
+                        parent_fd,
+                        rel,
+                        consumed_identity,
+                        date_text=date_text,
+                        require_record_date_match=require_record_date_match,
+                    )
+                    if meta is None:
+                        continue
+                    _meta_date, session_id, cwd, _timestamp = meta
+                if session_id:
+                    count += 1
+                    if LIMIT and count > LIMIT:
+                        emit_session_meta_item({{"kind": "truncation", "reason": SESSION_META_LIMIT_TRUNCATED_REASON, "date": date_text, "limit": LIMIT}})
+                        print(SESSION_META_END)
+                        return
+                    if not emit_session_meta_item({{"date": date_text, "session_id": session_id, "cwd": cwd, "rollout": rel_key}}):
+                        print(SESSION_META_END)
+                        return
+            for rel_dir in date_rel_dirs:
+                close_directory(rel_dir)
+    finally:
+        for directory_fd in opened_directories.values():
+            os.close(directory_fd)
+        os.close(root_fd)
     print(SESSION_META_END)
 
 
@@ -2426,8 +4195,7 @@ def fetch_rollout():
         print(FETCH_ROLLOUT_END)
         return
     try:
-        target = safe_rollout_path(rel)
-        size, data = read_rollout_bytes(target, MAX_FETCH_ROLLOUT_BYTES)
+        size, data = read_rollout_bytes(rel, MAX_FETCH_ROLLOUT_BYTES)
     except FileNotFoundError:
         print(json.dumps({{"ok": False, "error": "rollout not found"}}, separators=(",", ":"), sort_keys=True))
         print(FETCH_ROLLOUT_END)
@@ -2515,168 +4283,325 @@ def _scan_session_meta_records(
     rollout_filename_mode: str = "all",
 ) -> SessionMetaScan:
     try:
-        resolved_root = _resolve_safe_codex_root(codex_root)
+        root_fd = _open_pinned_codex_root(codex_root)
     except FileNotFoundError:
         return SessionMetaScan(rows=[], truncated=False)
     except OSError as exc:
         raise SessionMetaRolloutError("session directory unreadable") from exc
     rows: list[dict[str, str]] = []
     seen_rollout_paths: set[str] = set()
+    opened_directories: dict[str, int] = {}
+    prefix_proof_candidate_limit = MAX_SESSION_META_CANDIDATE_LIMIT
+    prefix_proof_candidate_captures = 0
 
-    def sorted_rollout_paths(directory: pathlib.Path) -> list[pathlib.Path]:
+    def open_directory(relative_dir: pathlib.PurePosixPath) -> int | None:
+        key = relative_dir.as_posix()
+        if key in opened_directories:
+            return opened_directories[key]
         try:
-            with os.scandir(directory) as entries:
-                paths = [
-                    pathlib.Path(entry.path)
-                    for entry in entries
-                    if entry.name.startswith("rollout-")
-                    and entry.name.endswith(".jsonl")
-                ]
-            return sorted(paths, reverse=True)
+            directory_fd = _open_pinned_directory_from_fd(root_fd, relative_dir)
         except FileNotFoundError:
-            return []
+            return None
         except OSError as exc:
             raise SessionMetaRolloutError("session directory unreadable") from exc
+        opened_directories[key] = directory_fd
+        return directory_fd
 
-    flat_archived_unknown_by_date: dict[dt.date, dict[pathlib.Path, tuple[str, str, dt.datetime | None]]] = {}
-    if rollout_filename_mode != "known":
+    def close_directory(relative_dir: pathlib.PurePosixPath) -> None:
+        key = relative_dir.as_posix()
+        directory_fd = opened_directories.pop(key, None)
+        if directory_fd is not None:
+            os.close(directory_fd)
+
+    def prepare_candidate_for_consumption(
+        parent_fd: int,
+        relative_path: pathlib.PurePosixPath,
+        inventory_identity: RolloutInventoryIdentity,
+    ) -> RolloutCandidateIdentity | None:
+        nonlocal prefix_proof_candidate_captures
         try:
-            flat_archived_dir = _safe_directory_path(resolved_root, pathlib.PurePosixPath("archived_sessions"))
+            if _session_meta_allows_append(relative_path):
+                if prefix_proof_candidate_captures >= prefix_proof_candidate_limit:
+                    return None
+                prefix_proof_candidate_captures += 1
+                return _capture_active_rollout_candidate_identity_from_parent_fd(
+                    parent_fd,
+                    relative_path.name,
+                    inventory_identity,
+                )
+            return _capture_rollout_candidate_identity_from_parent_fd(
+                parent_fd,
+                relative_path.name,
+                inventory_identity,
+            )
+        except ValueError as exc:
+            raise SessionMetaRolloutError(
+                str(exc),
+                rollout=relative_path.as_posix(),
+            ) from exc
+        except OSError as exc:
+            raise SessionMetaRolloutError(
+                "rollout unreadable",
+                rollout=relative_path.as_posix(),
+            ) from exc
+
+    def sorted_rollout_candidates(
+        relative_dir: pathlib.PurePosixPath,
+        predicate: Any,
+    ) -> tuple[
+        int | None,
+        list[tuple[str, RolloutInventoryIdentity]],
+    ]:
+        directory_fd = open_directory(relative_dir)
+        if directory_fd is None:
+            return None, []
+        try:
+            candidates: list[tuple[str, RolloutInventoryIdentity]] = []
+            with os.scandir(directory_fd) as entries:
+                for entry in entries:
+                    name = entry.name
+                    if not RAW_ROLLOUT_BASENAME_RE.fullmatch(name):
+                        continue
+                    relative_path = relative_dir / name
+                    if not predicate(relative_path):
+                        continue
+                    try:
+                        inventory_identity = (
+                            _capture_rollout_inventory_identity_from_parent_fd(
+                                directory_fd,
+                                name,
+                            )
+                        )
+                    except ValueError as exc:
+                        raise SessionMetaRolloutError(
+                            str(exc),
+                            rollout=relative_path.as_posix(),
+                        ) from exc
+                    except OSError as exc:
+                        raise SessionMetaRolloutError(
+                            "rollout unreadable",
+                            rollout=relative_path.as_posix(),
+                        ) from exc
+                    candidates.append((name, inventory_identity))
+        except OSError as exc:
+            raise SessionMetaRolloutError("session directory unreadable") from exc
+        candidates.sort(key=lambda candidate: candidate[0], reverse=True)
+        return directory_fd, candidates
+
+    def add_directory_candidates(
+        selected: dict[
+            str,
+            tuple[
+                pathlib.PurePosixPath,
+                int,
+                RolloutInventoryIdentity,
+            ],
+        ],
+        relative_dir: pathlib.PurePosixPath,
+        predicate: Any,
+    ) -> None:
+        directory_fd, candidates = sorted_rollout_candidates(
+            relative_dir,
+            predicate,
+        )
+        if directory_fd is None:
+            return
+        for name, inventory_identity in candidates:
+            relative_path = relative_dir / name
+            key = _session_meta_rollout_dedupe_key(relative_path)
+            selected.setdefault(
+                key,
+                (relative_path, directory_fd, inventory_identity),
+            )
+
+    flat_archived_unknown_by_date: dict[
+        dt.date,
+        dict[str, tuple[str, str, dt.datetime | None]],
+    ] = {}
+    flat_archived_inventory_identities: dict[
+        str,
+        RolloutInventoryIdentity,
+    ] = {}
+    try:
+        if rollout_filename_mode != "known":
+            flat_archived_relative_dir = pathlib.PurePosixPath("archived_sessions")
+            flat_archived_fd, flat_archived_candidates = sorted_rollout_candidates(
+                flat_archived_relative_dir,
+                lambda relative_path: _session_meta_rollout_filename_date(
+                    relative_path.name
+                )
+                is None,
+            )
             date_set = set(dates)
-            for rollout_path in sorted_rollout_paths(flat_archived_dir):
-                if not _is_raw_rollout_file(rollout_path):
-                    continue
-                if _session_meta_rollout_filename_date(rollout_path.name) is not None:
-                    continue
-                rollout_relative_path = pathlib.PurePosixPath(
-                    rollout_path.relative_to(resolved_root).as_posix()
-                )
-                meta = _session_meta_from_rollout(
-                    resolved_root,
-                    rollout_relative_path,
-                    rollout_start=rollout_start,
-                    rollout_end=rollout_end,
-                )
-                if meta is None:
-                    continue
-                meta_date, session_id, cwd, timestamp = meta
-                if meta_date in date_set:
-                    flat_archived_unknown_by_date.setdefault(meta_date, {})[rollout_path] = (session_id, cwd, timestamp)
-        except FileNotFoundError:
-            pass
-        except OSError as exc:
-            raise SessionMetaRolloutError("session directory unreadable") from exc
+            if flat_archived_fd is not None:
+                for name, inventory_identity in flat_archived_candidates:
+                    rollout_relative_path = flat_archived_relative_dir / name
+                    consumed_identity = prepare_candidate_for_consumption(
+                        flat_archived_fd,
+                        rollout_relative_path,
+                        inventory_identity,
+                    )
+                    meta = _session_meta_from_rollout(
+                        codex_root,
+                        rollout_relative_path,
+                        parent_fd=flat_archived_fd,
+                        expected_identity=consumed_identity,
+                        rollout_start=rollout_start,
+                        rollout_end=rollout_end,
+                    )
+                    if meta is None:
+                        continue
+                    meta_date, session_id, cwd, timestamp = meta
+                    if meta_date in date_set:
+                        flat_archived_unknown_by_date.setdefault(meta_date, {})[
+                            rollout_relative_path.as_posix()
+                        ] = (session_id, cwd, timestamp)
+                        flat_archived_inventory_identities[
+                            rollout_relative_path.as_posix()
+                        ] = inventory_identity
 
-    for date_value in reversed(dates):
-        date_text = date_value.strftime(DATE_FORMAT)
-        rollout_paths: list[pathlib.Path] = []
-        for relative_dir in (
-            pathlib.PurePosixPath("sessions") / date_text,
-            pathlib.PurePosixPath("archived_sessions") / date_text,
-        ):
-            try:
-                date_dir = _safe_directory_path(resolved_root, relative_dir)
-            except FileNotFoundError:
-                continue
-            except OSError as exc:
-                raise SessionMetaRolloutError("session directory unreadable") from exc
-            rollout_paths.extend(
-                rollout_path
-                for rollout_path in sorted_rollout_paths(date_dir)
-                if _is_raw_rollout_file(rollout_path)
-                and _rollout_matches_bounds(
-                    rollout_path,
-                    rollout_start,
-                    rollout_end,
-                    filename_mode=rollout_filename_mode,
-                )
+        for date_value in reversed(dates):
+            date_text = date_value.strftime(DATE_FORMAT)
+            date_relative_dirs = (
+                pathlib.PurePosixPath("sessions") / date_text,
+                pathlib.PurePosixPath("archived_sessions") / date_text,
             )
-        try:
-            flat_archived_dir = _safe_directory_path(resolved_root, pathlib.PurePosixPath("archived_sessions"))
-            rollout_paths.extend(
-                rollout_path
-                for rollout_path in sorted_rollout_paths(flat_archived_dir)
-                if _is_raw_rollout_file(rollout_path)
-                and _flat_archived_rollout_matches_date(rollout_path, date_value)
+            selected_rollout_paths: dict[
+                str,
+                tuple[
+                    pathlib.PurePosixPath,
+                    int,
+                    RolloutInventoryIdentity,
+                ],
+            ] = {}
+            for relative_dir in date_relative_dirs:
+                add_directory_candidates(
+                    selected_rollout_paths,
+                    relative_dir,
+                    lambda relative_path: _rollout_matches_bounds(
+                        relative_path,
+                        rollout_start,
+                        rollout_end,
+                        filename_mode=rollout_filename_mode,
+                    ),
+                )
+            flat_archived_relative_dir = pathlib.PurePosixPath("archived_sessions")
+            add_directory_candidates(
+                selected_rollout_paths,
+                flat_archived_relative_dir,
+                lambda relative_path: _flat_archived_rollout_matches_date(
+                    pathlib.Path(relative_path.name),
+                    date_value,
+                )
                 and _flat_archived_rollout_matches_bounds_or_unknown(
-                    rollout_path,
+                    pathlib.Path(relative_path.name),
                     rollout_start,
                     rollout_end,
                     filename_mode=rollout_filename_mode,
+                ),
+            )
+            flat_archived_fd = open_directory(flat_archived_relative_dir)
+            if flat_archived_fd is not None:
+                for relative_key in flat_archived_unknown_by_date.get(
+                    date_value,
+                    {},
+                ):
+                    relative_path = pathlib.PurePosixPath(relative_key)
+                    selected_rollout_paths.setdefault(
+                        relative_key,
+                        (
+                            relative_path,
+                            flat_archived_fd,
+                            flat_archived_inventory_identities[relative_key],
+                        ),
+                    )
+            root_relative_dir = pathlib.PurePosixPath()
+            add_directory_candidates(
+                selected_rollout_paths,
+                root_relative_dir,
+                lambda relative_path: _flat_archived_rollout_matches_date(
+                    pathlib.Path(relative_path.name),
+                    date_value,
                 )
+                and _rollout_matches_bounds(
+                    relative_path,
+                    rollout_start,
+                    rollout_end,
+                    filename_mode=rollout_filename_mode,
+                ),
             )
-        except FileNotFoundError:
-            pass
-        except OSError as exc:
-            raise SessionMetaRolloutError("session directory unreadable") from exc
-        rollout_paths.extend(flat_archived_unknown_by_date.get(date_value, {}))
-        rollout_paths.extend(
-            rollout_path
-            for rollout_path in sorted_rollout_paths(resolved_root)
-            if _is_raw_rollout_file(rollout_path)
-            and _flat_archived_rollout_matches_date(rollout_path, date_value)
-            and _rollout_matches_bounds(
-                rollout_path,
-                rollout_start,
-                rollout_end,
-                filename_mode=rollout_filename_mode,
+            cached_rollout_meta = flat_archived_unknown_by_date.get(date_value, {})
+            selected_rollouts = sorted(
+                selected_rollout_paths.values(),
+                key=lambda candidate: _session_meta_rollout_sort_key(
+                    candidate[0],
+                    cached_rollout_meta.get(
+                        candidate[0].as_posix(),
+                        ("", "", None),
+                    )[2],
+                ),
+                reverse=True,
             )
-        )
-        selected_rollout_paths: dict[str, pathlib.Path] = {}
-        for rollout_path in rollout_paths:
-            rollout_relative_path = pathlib.PurePosixPath(
-                rollout_path.relative_to(resolved_root).as_posix()
-            )
-            rollout_relative_key = _session_meta_rollout_dedupe_key(rollout_relative_path)
-            selected_rollout_paths.setdefault(rollout_relative_key, rollout_path)
-        cached_rollout_meta = flat_archived_unknown_by_date.get(date_value, {})
-        selected_rollout_values = sorted(
-            selected_rollout_paths.values(),
-            key=lambda candidate: _session_meta_rollout_sort_key(
-                pathlib.PurePosixPath(candidate.relative_to(resolved_root).as_posix()),
-                cached_rollout_meta.get(candidate, ("", "", None))[2],
-            ),
-            reverse=True,
-        )
-        for rollout_path in selected_rollout_values:
-            rollout_relative_path = pathlib.PurePosixPath(
-                rollout_path.relative_to(resolved_root).as_posix()
-            )
-            rollout_relative_key = rollout_relative_path.as_posix()
-            if rollout_relative_key in seen_rollout_paths:
-                continue
-            seen_rollout_paths.add(rollout_relative_key)
-            require_record_date_match = _session_meta_is_flat_archived_undated(rollout_relative_path)
-            cached_meta = cached_rollout_meta.get(rollout_path)
-            if cached_meta is not None:
-                session_id, cwd, _timestamp = cached_meta
-            else:
-                meta = _session_meta_from_rollout(
-                    resolved_root,
-                    rollout_relative_path,
-                    date_value=date_value,
-                    require_record_date_match=require_record_date_match,
-                    rollout_start=rollout_start,
-                    rollout_end=rollout_end,
-                )
-                if meta is None:
+            for (
+                rollout_relative_path,
+                parent_fd,
+                inventory_identity,
+            ) in selected_rollouts:
+                rollout_relative_key = rollout_relative_path.as_posix()
+                if rollout_relative_key in seen_rollout_paths:
                     continue
-                _meta_date, session_id, cwd, _timestamp = meta
-            if not session_id:
-                continue
-            if limit and len(rows) >= limit:
-                return SessionMetaScan(rows=rows, truncated=True)
-            try:
-                item = _validated_session_meta_output_item(
-                    date=date_value.strftime(DATE_FORMAT),
-                    session_id=session_id,
-                    cwd=cwd,
-                    rollout=rollout_relative_key,
+                seen_rollout_paths.add(rollout_relative_key)
+                require_record_date_match = _session_meta_is_flat_archived_undated(
+                    rollout_relative_path
                 )
-            except ValueError as exc:
-                raise SessionMetaRolloutError(str(exc), rollout=rollout_relative_key) from exc
-            rows.append({"host": host, **item})
-    return SessionMetaScan(rows=rows, truncated=False)
+                cached_meta = cached_rollout_meta.get(rollout_relative_key)
+                if cached_meta is not None:
+                    session_id, cwd, _timestamp = cached_meta
+                else:
+                    consumed_identity = prepare_candidate_for_consumption(
+                        parent_fd,
+                        rollout_relative_path,
+                        inventory_identity,
+                    )
+                    if consumed_identity is None:
+                        return SessionMetaScan(rows=rows, truncated=True)
+                    meta = _session_meta_from_rollout(
+                        codex_root,
+                        rollout_relative_path,
+                        parent_fd=parent_fd,
+                        expected_identity=consumed_identity,
+                        date_value=date_value,
+                        require_record_date_match=require_record_date_match,
+                        rollout_start=rollout_start,
+                        rollout_end=rollout_end,
+                    )
+                    if meta is None:
+                        continue
+                    _meta_date, session_id, cwd, _timestamp = meta
+                if not session_id:
+                    continue
+                if limit and len(rows) >= limit:
+                    return SessionMetaScan(rows=rows, truncated=True)
+                try:
+                    item = _validated_session_meta_output_item(
+                        date=date_value.strftime(DATE_FORMAT),
+                        session_id=session_id,
+                        cwd=cwd,
+                        rollout=rollout_relative_key,
+                    )
+                except ValueError as exc:
+                    raise SessionMetaRolloutError(
+                        str(exc),
+                        rollout=rollout_relative_key,
+                    ) from exc
+                rows.append({"host": host, **item})
+            for relative_dir in date_relative_dirs:
+                close_directory(relative_dir)
+        return SessionMetaScan(rows=rows, truncated=False)
+    finally:
+        for directory_fd in opened_directories.values():
+            os.close(directory_fd)
+        os.close(root_fd)
 
 
 def _iter_session_meta_records(
@@ -2730,7 +4655,7 @@ def _sort_session_meta_rows(rows: list[dict[str, str]]) -> list[dict[str, str]]:
 def _json_line_to_dict(line: str, *, host: str) -> dict[str, Any]:
     try:
         value = json.loads(line)
-    except json.JSONDecodeError as exc:
+    except (ValueError, RecursionError) as exc:
         raise ValueError(
             f"remote helper returned a non-JSON line for host {host}: {line!r}"
         ) from exc
@@ -2887,7 +4812,11 @@ def _session_meta_row_from_item(item: dict[str, Any], *, host: str) -> dict[str,
 def _is_session_meta_truncation_item(item: dict[str, Any]) -> bool:
     return (
         item.get("kind") == "truncation"
-        and item.get("reason") == SESSION_META_LIMIT_TRUNCATED_REASON
+        and item.get("reason")
+        in {
+            SESSION_META_LIMIT_TRUNCATED_REASON,
+            SESSION_META_CANDIDATE_LIMIT_TRUNCATED_REASON,
+        }
     )
 
 
@@ -3263,6 +5192,31 @@ def _normalize_summary_text(value: str, *, max_text_chars: int) -> str:
     return collapsed
 
 
+def _message_content_is_valid(content: Any) -> bool:
+    if not isinstance(content, list):
+        return False
+    for item in content:
+        if not isinstance(item, dict):
+            return False
+        item_type = item.get("type")
+        if not isinstance(item_type, str):
+            return False
+        if item_type in ("input_text", "output_text", "text") and not isinstance(
+            item.get("text"), str
+        ):
+            return False
+    return True
+
+
+def _message_payload_is_valid(payload: dict[str, Any]) -> bool:
+    role = payload.get("role")
+    return (
+        isinstance(role, str)
+        and role in ("assistant", "developer", "system", "user")
+        and _message_content_is_valid(payload.get("content"))
+    )
+
+
 def _message_summary(payload: dict[str, Any]) -> tuple[str, str]:
     role = str(payload.get("role", ""))
     if role not in {"assistant", "user"}:
@@ -3271,11 +5225,14 @@ def _message_summary(payload: dict[str, Any]) -> tuple[str, str]:
     for item in payload.get("content", []):
         if not isinstance(item, dict):
             continue
-        if item.get("type") not in {"input_text", "output_text", "text"}:
+        item_type = item.get("type")
+        if not isinstance(item_type, str):
+            continue
+        if item_type not in ("input_text", "output_text", "text"):
             continue
         text = item.get("text")
-        if text:
-            parts.append(str(text))
+        if isinstance(text, str) and text:
+            parts.append(text)
     kind = "user_message" if role == "user" else "assistant_message"
     return kind, "\n".join(parts).strip()
 
@@ -3376,6 +5333,7 @@ def _summary_record_has_signal(record: dict[str, Any] | None) -> bool:
 
 
 def _event_user_message_text(payload: dict[str, Any]) -> str:
+    message_present = "message" in payload
     message = payload.get("message")
     if isinstance(message, str):
         return message.strip()
@@ -3383,9 +5341,10 @@ def _event_user_message_text(payload: dict[str, Any]) -> str:
         kind, text = _message_summary(message)
         if kind == "user_message" and text:
             return text.strip()
-    text = payload.get("text")
-    if isinstance(text, str):
-        return text.strip()
+    if not message_present:
+        text = payload.get("text")
+        if isinstance(text, str):
+            return text.strip()
     return ""
 
 
@@ -3441,7 +5400,7 @@ def _bounded_session_meta_lines(handle: Any, max_scan_bytes: int) -> Iterable[st
         chunk = os.read(file_descriptor, read_size) if file_descriptor is not None else handle.read(read_size)
         if not chunk:
             if buffer:
-                yield bytes(buffer).decode("utf-8", "replace")
+                yield _decode_session_meta_line(bytes(buffer))
             return
         raw_bytes = (
             chunk.encode("utf-8", "surrogatepass")
@@ -3473,62 +5432,83 @@ def _bounded_session_meta_lines(handle: Any, max_scan_bytes: int) -> Iterable[st
             line = bytes(buffer[:line_size])
             del buffer[:line_size]
             buffer_offset = absolute_line_end
-            yield line.decode("utf-8", "replace")
+            yield _decode_session_meta_line(line)
         if scanned == max_scan_bytes:
             if cap_has_unread_bytes:
                 raise ValueError(f"session metadata scan truncated at {max_scan_bytes} bytes")
             if buffer:
-                yield bytes(buffer).decode("utf-8", "replace")
+                yield _decode_session_meta_line(bytes(buffer))
             return
 
 
-def _bounded_text_lines(handle: Any, max_scan_bytes: int) -> Iterable[str]:
+def _decode_summary_line(raw_bytes: bytes) -> str:
+    try:
+        return raw_bytes.decode("utf-8")
+    except UnicodeDecodeError:
+        return "\n"
+
+
+def _bounded_text_lines(
+    handle: Any,
+    max_scan_bytes: int,
+    source_size: int,
+) -> Iterable[str]:
+    try:
+        start_offset = handle.tell()
+    except (AttributeError, OSError, TypeError, ValueError) as error:
+        raise ValueError("rollout summary reader offset is unavailable") from error
+    if (
+        isinstance(start_offset, bool)
+        or not isinstance(start_offset, int)
+        or start_offset < 0
+        or start_offset > source_size
+    ):
+        raise ValueError("rollout summary reader offset is invalid")
+    if start_offset != 0:
+        raise ValueError("rollout summary reader must start at byte 0")
     scanned = 0
     buffer = bytearray()
     dropping_oversized_line = False
     chunk_bytes = 64 * 1024
+    scan_limit = min(max_scan_bytes, source_size) if max_scan_bytes else source_size
 
-    def line_ended(part: bytes) -> bool:
-        return part.endswith(b"\n") or part.endswith(b"\r")
-
-    while True:
-        if max_scan_bytes and scanned >= max_scan_bytes:
-            if dropping_oversized_line:
-                yield "\n"
-            elif buffer:
-                yield bytes(buffer).decode("utf-8", "replace")
-            return
-        remaining = max_scan_bytes - scanned if max_scan_bytes else 0
-        read_size = min(chunk_bytes, remaining) if remaining else chunk_bytes
+    while scanned < scan_limit:
+        read_size = min(chunk_bytes, scan_limit - scanned)
         chunk = handle.read(read_size)
         if not chunk:
-            if dropping_oversized_line:
-                yield "\n"
-            elif buffer:
-                yield bytes(buffer).decode("utf-8", "replace")
-            return
+            break
         if isinstance(chunk, str):
             raw_bytes = chunk.encode("utf-8", "surrogatepass")
         else:
             raw_bytes = bytes(chunk)
         scanned += len(raw_bytes)
-        for part in raw_bytes.splitlines(keepends=True):
+        offset = 0
+        while offset < len(raw_bytes):
+            line_end = raw_bytes.find(b"\n", offset)
+            part_end = len(raw_bytes) if line_end < 0 else line_end + 1
+            part = raw_bytes[offset:part_end]
             if dropping_oversized_line:
-                if line_ended(part):
+                if line_end >= 0:
                     yield "\n"
                     dropping_oversized_line = False
-                continue
-            if len(buffer) + len(part) > MAX_ROLLOUT_SUMMARY_LINE_BYTES:
+            elif len(buffer) + len(part) > MAX_ROLLOUT_SUMMARY_LINE_BYTES:
                 buffer.clear()
                 dropping_oversized_line = True
-                if line_ended(part):
+                if line_end >= 0:
                     yield "\n"
                     dropping_oversized_line = False
-                continue
-            buffer.extend(part)
-            if line_ended(part):
-                yield bytes(buffer).decode("utf-8", "replace")
-                buffer.clear()
+            else:
+                buffer.extend(part)
+                if line_end >= 0:
+                    yield _decode_summary_line(bytes(buffer))
+                    buffer.clear()
+            offset = part_end
+
+    if scanned == source_size:
+        if dropping_oversized_line:
+            yield "\n"
+        elif buffer:
+            yield _decode_summary_line(bytes(buffer))
 
 
 def _summarize_rollout_records(
@@ -3575,30 +5555,58 @@ def _summarize_rollout_records_with_meta(
     for line_no, line in enumerate(lines, 1):
         try:
             obj = json.loads(line)
-        except json.JSONDecodeError:
+        except (ValueError, RecursionError):
             json_error_count += 1
             continue
-        timestamp = str(obj.get("timestamp", ""))
+        if not isinstance(obj, dict):
+            json_error_count += 1
+            continue
+        timestamp_value = obj.get("timestamp")
+        if "timestamp" in obj and not isinstance(timestamp_value, str):
+            json_error_count += 1
+            continue
+        timestamp = timestamp_value if isinstance(timestamp_value, str) else ""
         record: dict[str, Any] | None = None
-        record_type = str(obj.get("type", ""))
+        record_type = obj.get("type")
+        if not isinstance(record_type, str):
+            json_error_count += 1
+            continue
+        payload = obj.get("payload")
+        if record_type in ("session_meta", "response_item", "event_msg") and not isinstance(payload, dict):
+            json_error_count += 1
+            continue
 
-        if record_type == "session_meta" and session_meta_record is None:
-            payload = obj.get("payload", {})
-            session_meta_record = _build_summary_record(
-                kind="session_meta",
-                text=f"session_id={payload.get('id', '')} cwd_present={str(bool(payload.get('cwd', ''))).lower()}",
-                line_no=line_no,
-                timestamp=timestamp,
-                max_text_chars=max_text_chars,
-                session_id=str(payload.get("id", "")),
-                search_keywords=search_keywords,
-            )
+        if record_type == "session_meta":
+            session_id_value = payload.get("id")
+            if not isinstance(session_id_value, str) or not session_id_value:
+                json_error_count += 1
+                continue
+            cwd_value = payload.get("cwd")
+            if "cwd" in payload and not isinstance(cwd_value, str):
+                json_error_count += 1
+                continue
+            cwd_present = isinstance(cwd_value, str) and bool(cwd_value)
+            if session_meta_record is None:
+                session_meta_record = _build_summary_record(
+                    kind="session_meta",
+                    text=f"session_id={session_id_value} cwd_present={str(cwd_present).lower()}",
+                    line_no=line_no,
+                    timestamp=timestamp,
+                    max_text_chars=max_text_chars,
+                    session_id=session_id_value,
+                    search_keywords=search_keywords,
+                )
             continue
 
         if record_type == "response_item":
-            payload = obj.get("payload", {})
-            payload_type = str(payload.get("type", ""))
+            payload_type = payload.get("type")
+            if not isinstance(payload_type, str):
+                json_error_count += 1
+                continue
             if payload_type == "message":
+                if not _message_payload_is_valid(payload):
+                    json_error_count += 1
+                    continue
                 kind, text = _message_summary(payload)
                 if text:
                     record = _build_summary_record(
@@ -3615,7 +5623,10 @@ def _summarize_rollout_records_with_meta(
                         last_user_record = record
             elif payload_type == "function_call_output":
                 output = payload.get("output")
-                if isinstance(output, str) and output.strip():
+                if not isinstance(output, str):
+                    json_error_count += 1
+                    continue
+                if output.strip():
                     record = _build_summary_record(
                         kind="function_call_output",
                         text=output,
@@ -3625,14 +5636,19 @@ def _summarize_rollout_records_with_meta(
                         search_keywords=search_keywords,
                     )
         elif record_type == "event_msg":
-            payload = obj.get("payload", {})
-            payload_type = str(payload.get("type", ""))
+            payload_type = payload.get("type")
+            if not isinstance(payload_type, str):
+                json_error_count += 1
+                continue
             if payload_type == "task_complete":
                 text = payload.get("last_agent_message")
-                if text:
+                if not isinstance(text, str):
+                    json_error_count += 1
+                    continue
+                if text.strip():
                     record = _build_summary_record(
                         kind="task_complete",
-                        text=str(text),
+                        text=text,
                         line_no=line_no,
                         timestamp=timestamp,
                         max_text_chars=max_text_chars,
@@ -3640,6 +5656,20 @@ def _summarize_rollout_records_with_meta(
                     )
                     last_task_complete_record = record
             elif payload_type == "user_message":
+                message = payload.get("message")
+                if "message" in payload:
+                    if isinstance(message, dict):
+                        if message.get("role") != "user" or not _message_content_is_valid(
+                            message.get("content")
+                        ):
+                            json_error_count += 1
+                            continue
+                    elif not isinstance(message, str):
+                        json_error_count += 1
+                        continue
+                elif not isinstance(payload.get("text"), str):
+                    json_error_count += 1
+                    continue
                 text = _event_user_message_text(payload)
                 if text:
                     record = _build_summary_record(
@@ -3828,14 +5858,9 @@ def cmd_rollout_summary(args: argparse.Namespace) -> int:
     try:
         if HOSTS[alias]["kind"] == "local":
             codex_root = _local_codex_root()
-            rollout_path = _safe_rollout_path(codex_root, rollout_relative_path)
             with _open_local_rollout_text(codex_root, rollout_relative_path) as handle:
                 identity = _rollout_identity_from_stat(os.fstat(handle.fileno()))
-                _assert_rollout_path_identity(
-                    rollout_path,
-                    identity,
-                    phase="before summary scan",
-                )
+                handle.assert_identity(identity, phase="before summary scan")
                 effective_summary_scan_bytes = (
                     MAX_ROLLOUT_SUMMARY_SCAN_BYTES or identity.size
                 )
@@ -3844,22 +5869,14 @@ def cmd_rollout_summary(args: argparse.Namespace) -> int:
                     lines=_bounded_text_lines(
                         hashing_reader,
                         effective_summary_scan_bytes,
+                        identity.size,
                     ),
                     keywords=args.keyword,
                     limit=args.limit,
                     tail_records=args.tail_records,
                     max_text_chars=args.max_text_chars,
                 )
-                _assert_rollout_identity(
-                    _rollout_identity_from_stat(os.fstat(handle.fileno())),
-                    identity,
-                    phase="after summary scan",
-                )
-                _assert_rollout_path_identity(
-                    rollout_path,
-                    identity,
-                    phase="after summary scan",
-                )
+                handle.assert_identity(identity, phase="after summary scan")
             source_sha256 = (
                 hashing_reader.hexdigest()
                 if hashing_reader.bytes_read == identity.size

@@ -3,7 +3,7 @@ id: 20260715-c7f947
 title: Private Sync Removal Metadata
 status: completed
 created: 2026-07-15
-updated: 2026-07-18
+updated: 2026-07-19
 branch: codex/sync-removed-link-metadata
 pr: https://github.com/Joey-Tools/codex-private-workflows/pull/97
 supersedes: []
@@ -127,7 +127,7 @@ superseded_by:
 - Overlay verification accepts exact desired symlinks that intentionally remain outside the ownership ledger, while still rejecting conflicting recorded ownership and preserving those links on uninstall.
 
 ## Next Steps
-- Publish the private overlay release after the matching public reconciler is available and verify scheduled local consumption.
+- Verify scheduled local consumption of the published public/private Release pair after the workspace timer advances.
 - Add a combined public/private manifest capacity gate when the private release job has both exact manifests; the installer already performs this aggregate preflight and fails safely, while repository CI currently proves capacity one owner at a time.
 
 ## Evidence
@@ -139,6 +139,8 @@ superseded_by:
 - Synthetic-token catalog `joey-private-v3` validated, and the distinct active access fixtures `access-a` / `access-b` were inserted verbatim for the Release-write and capability-read credential roles.
 - Focused read-only security review of the byte-identical optional-claim diff — no findings.
 - Repository suite — 1241 tests completed successfully in 216.076 seconds using Python 3.13.0 after immutable-history enforcement, exact legacy `target_commitish` binding, immutable symbolic-target publisher reuse, private fail-closed repair handling, separate Administration-read capability authentication with pre-PATCH revalidation, filtered-leaf plus selected-source ancestor preservation, and package-root-aware bounded directory-tree identity/copy handling. The test process used a process-local `commit.gpgsign=false` override so temporary fixture repositories did not inherit the host's signing policy; no Git configuration was changed.
+- Post-master reconciliation gate — the branch was reconciled with private `master` at `697d031796ebd61a74c4a41fc1f048284aba8389` while retaining the exact reviewed hardening blobs for all five overlapping files. The repository suite completed 1267 tests successfully in 236.815 seconds; changed-file Ruff 0.13.2, actionlint 1.7.12, Python compilation, and `git diff --check` passed.
+- Public dependency Release — `Joey-Tools/codex-toolbox#17` merged as signed commit `ed0483554242a3c40b6e27b6a0b3ddfa353ef177`; workflow run `29665575176` published immutable Release `personal-codex-20260718-234005-ed04835` with the exact uploaded archive/checksum pair and GitHub SHA-256 digests.
 - Reconciliation safety module — 302 tests passed, including existing-ledger tombstone preservation for update and uninstall plus first-bootstrap legacy cleanup.
 - Package builder safety module — 70 tests passed as part of the repository suite.
 - Private package module — 45 tests passed.

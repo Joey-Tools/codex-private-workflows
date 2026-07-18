@@ -5,11 +5,13 @@ from __future__ import annotations
 import argparse
 import base64
 import binascii
+import codecs
 import collections
 import dataclasses
 import datetime as dt
 import errno
 import hashlib
+import io
 import json
 import os
 import pathlib
@@ -26,11 +28,13 @@ from typing import Any
 
 DATE_FORMAT = "%Y/%m/%d"
 MAX_SESSION_META_LIMIT = 500
+MAX_SESSION_META_ACTIVE_CANDIDATES = MAX_SESSION_META_LIMIT + 1
 MAX_SESSION_META_DATE_COUNT = 31
 MAX_FETCH_ROLLOUT_BYTES = 16 * 1024 * 1024
 MIN_ROLLOUT_CHUNK_BYTES = 64 * 1024
 DEFAULT_ROLLOUT_CHUNK_BYTES = 1024 * 1024
 MAX_ROLLOUT_CHUNK_BYTES = 2 * 1024 * 1024
+MAX_ROLLOUT_CHUNK_RECORDS = 4096
 MAX_FETCH_ROLLOUT_CHUNK_BYTES = 2 * 1024 * 1024
 MAX_CHUNKED_ROLLOUT_SUMMARY_OUTPUT_BYTES = 4 * 1024 * 1024
 # Reserve 1 KiB of the serialized summary budget per in-memory range entry.
@@ -150,9 +154,13 @@ SUMMARY_SIGNAL_MARKERS = (
 REMOTE_SESSION_META_BEGIN = "__REMOTE_CODEX_PROBE_SESSION_META_BEGIN__"
 REMOTE_SESSION_META_END = "__REMOTE_CODEX_PROBE_SESSION_META_END__"
 SESSION_META_LIMIT_TRUNCATED_REASON = "session_meta_limit_truncated"
+SESSION_META_CANDIDATE_LIMIT_TRUNCATED_REASON = (
+    "session_meta_candidate_limit_truncated"
+)
 SESSION_META_SCAN_TRUNCATED_ERROR = (
     "session-meta scan truncated before metadata was found"
 )
+SESSION_META_INVALID_UTF8_ERROR = "session-meta record is not valid UTF-8"
 SESSION_META_OUTPUT_ROW_TOO_LARGE_ERROR = "session-meta output row too large"
 ROLLOUT_SUMMARY_OUTPUT_TOO_LARGE_ERROR = "rollout summary output too large"
 REMOTE_FETCH_ROLLOUT_BEGIN = "__REMOTE_CODEX_PROBE_FETCH_ROLLOUT_BEGIN__"
@@ -208,7 +216,21 @@ HOSTS: dict[str, dict[str, str]] = {
 @dataclasses.dataclass(frozen=True)
 class SessionMetaScan:
     rows: list[dict[str, str]]
-    truncated: bool
+    truncated: bool = False
+    truncation_reason: str | None = None
+    truncation_metadata: dict[str, str | int] = dataclasses.field(
+        default_factory=dict
+    )
+
+    def __post_init__(self) -> None:
+        if self.truncation_reason is not None and not self.truncated:
+            object.__setattr__(self, "truncated", True)
+        elif self.truncated and self.truncation_reason is None:
+            object.__setattr__(
+                self,
+                "truncation_reason",
+                SESSION_META_LIMIT_TRUNCATED_REASON,
+            )
 
 
 @dataclasses.dataclass(frozen=True)
@@ -222,6 +244,7 @@ class RolloutChunk:
     last_timestamp: str
     oversized_record: bool
     lines: tuple[str, ...]
+    decode_error_count: int = 0
 
 
 @dataclasses.dataclass(frozen=True)
@@ -1545,17 +1568,24 @@ def _session_meta_allows_append(
 def _timestamp_from_jsonl_line(line: str) -> str:
     try:
         obj = json.loads(line)
-    except json.JSONDecodeError:
+    except (ValueError, RecursionError):
+        return ""
+    if not isinstance(obj, dict):
         return ""
     timestamp = obj.get("timestamp")
     return str(timestamp) if isinstance(timestamp, str) else ""
 
 
-def _raw_line_parts(raw_line: Any) -> tuple[bytes, str]:
+def _raw_line_parts(raw_line: Any) -> tuple[bytes, str, bool]:
     if isinstance(raw_line, str):
-        return raw_line.encode("utf-8", "surrogatepass"), raw_line
+        return raw_line.encode("utf-8", "surrogatepass"), raw_line, False
     raw_bytes = bytes(raw_line)
-    return raw_bytes, raw_bytes.decode("utf-8", "replace")
+    try:
+        return raw_bytes, raw_bytes.decode("utf-8"), False
+    except UnicodeDecodeError:
+        # Let the JSON summarizer count the physical record as malformed
+        # without emitting replacement-altered evidence.
+        return raw_bytes, "", True
 
 
 def _raw_line_endswith_newline(raw_line: Any) -> bool:
@@ -1607,10 +1637,12 @@ def _iter_rollout_chunks(
     first_timestamp = ""
     last_timestamp = ""
     oversized_record = False
+    decode_error_count = 0
 
     def flush() -> RolloutChunk | None:
         nonlocal chunk_index, lines, current_bytes, byte_start, record_start
         nonlocal first_timestamp, last_timestamp, oversized_record
+        nonlocal decode_error_count
         if not lines:
             return None
         chunk = RolloutChunk(
@@ -1623,6 +1655,7 @@ def _iter_rollout_chunks(
             last_timestamp=last_timestamp,
             oversized_record=oversized_record,
             lines=tuple(lines),
+            decode_error_count=decode_error_count,
         )
         chunk_index += 1
         lines = []
@@ -1632,6 +1665,7 @@ def _iter_rollout_chunks(
         first_timestamp = ""
         last_timestamp = ""
         oversized_record = False
+        decode_error_count = 0
         return chunk
 
     read_limit = chunk_bytes + 1
@@ -1652,7 +1686,7 @@ def _iter_rollout_chunks(
             if chunk is not None:
                 yield chunk
             return
-        raw_bytes, line = _raw_line_parts(raw_line)
+        raw_bytes, line, line_decode_failed = _raw_line_parts(raw_line)
         line_start = offset
         record_no += 1
         at_source_end = source_bytes is not None and (
@@ -1670,6 +1704,14 @@ def _iter_rollout_chunks(
                     yield chunk
 
             total_bytes = len(raw_bytes)
+            record_decode_failed = False
+            decoder = None
+            if not isinstance(raw_line, str):
+                decoder = codecs.getincrementaldecoder("utf-8")("strict")
+                try:
+                    decoder.decode(raw_bytes, final=False)
+                except UnicodeDecodeError:
+                    record_decode_failed = True
             while line_truncated:
                 remaining = (
                     None
@@ -1684,7 +1726,12 @@ def _iter_rollout_chunks(
                 segment = handle.readline(current_read_limit)
                 if not segment:
                     break
-                segment_bytes, _ = _raw_line_parts(segment)
+                segment_bytes, _, _ = _raw_line_parts(segment)
+                if decoder is not None and not record_decode_failed:
+                    try:
+                        decoder.decode(segment_bytes, final=False)
+                    except UnicodeDecodeError:
+                        record_decode_failed = True
                 total_bytes += len(segment_bytes)
                 at_source_end = source_bytes is not None and (
                     line_start + total_bytes >= source_bytes
@@ -1694,6 +1741,12 @@ def _iter_rollout_chunks(
                     and len(segment) == current_read_limit
                     and not _raw_line_endswith_newline(segment)
                 )
+
+            if decoder is not None and not record_decode_failed:
+                try:
+                    decoder.decode(b"", final=True)
+                except UnicodeDecodeError:
+                    record_decode_failed = True
 
             offset += total_bytes
             yield RolloutChunk(
@@ -1706,13 +1759,17 @@ def _iter_rollout_chunks(
                 last_timestamp="",
                 oversized_record=True,
                 lines=("",),
+                decode_error_count=int(record_decode_failed),
             )
             chunk_index += 1
             continue
 
         offset += len(raw_bytes)
 
-        if lines and current_bytes + len(raw_bytes) > chunk_bytes:
+        if lines and (
+            current_bytes + len(raw_bytes) > chunk_bytes
+            or len(lines) >= MAX_ROLLOUT_CHUNK_RECORDS
+        ):
             chunk = flush()
             if chunk is not None:
                 yield chunk
@@ -1728,6 +1785,7 @@ def _iter_rollout_chunks(
             last_timestamp = timestamp
         oversized_record = oversized_record or len(raw_bytes) > chunk_bytes
         lines.append(line)
+        decode_error_count += int(line_decode_failed)
         current_bytes += len(raw_bytes)
 
 
@@ -1736,6 +1794,7 @@ def _fetch_ranges_for_byte_range(
     byte_start: int,
     byte_end: int,
     max_bytes: int,
+    plan_entries_used: int = 0,
 ) -> list[dict[str, int]]:
     if byte_start < 0:
         raise ValueError("byte_start must be non-negative")
@@ -1743,11 +1802,14 @@ def _fetch_ranges_for_byte_range(
         raise ValueError("byte_end must be greater than byte_start")
     if max_bytes < 1:
         raise ValueError("max_bytes must be positive")
+    if plan_entries_used < 0:
+        raise ValueError("plan_entries_used must be non-negative")
     range_count = (byte_end - byte_start + max_bytes - 1) // max_bytes
-    if range_count > MAX_FETCH_RANGE_PLAN_ENTRIES:
+    total_range_count = plan_entries_used + range_count
+    if total_range_count > MAX_FETCH_RANGE_PLAN_ENTRIES:
         raise ValueError(
             "fetch range plan too large: "
-            f"{range_count} ranges > {MAX_FETCH_RANGE_PLAN_ENTRIES}"
+            f"{total_range_count} ranges > {MAX_FETCH_RANGE_PLAN_ENTRIES}"
         )
     ranges: list[dict[str, int]] = []
     for range_index in range(range_count):
@@ -1955,9 +2017,11 @@ def _remote_python_script(payload: dict[str, object]) -> str:
     encoded = json.dumps(payload, separators=(",", ":"), sort_keys=True)
     return f"""
 import base64
+import codecs
 import collections
 import errno
 import hashlib
+import io
 import json
 import os
 import pathlib
@@ -1973,6 +2037,7 @@ MAX_FETCH_ROLLOUT_BYTES = int(CONFIG.get("max_fetch_rollout_bytes", 0))
 MAX_FETCH_ROLLOUT_CHUNK_BYTES = int(CONFIG.get("max_fetch_rollout_chunk_bytes", 0))
 MIN_ROLLOUT_CHUNK_BYTES = int(CONFIG.get("min_rollout_chunk_bytes", 0))
 MAX_ROLLOUT_CHUNK_BYTES = int(CONFIG.get("max_rollout_chunk_bytes", 0))
+MAX_ROLLOUT_CHUNK_RECORDS = {MAX_ROLLOUT_CHUNK_RECORDS}
 MAX_CHUNKED_ROLLOUT_SUMMARY_OUTPUT_BYTES = int(CONFIG.get("max_chunked_summary_output_bytes", 0))
 MAX_FETCH_RANGE_PLAN_ENTRIES = int(CONFIG.get("max_fetch_range_plan_entries", 0))
 EXPECTED_SOURCE_IDENTITY_TOKEN = str(CONFIG.get("expected_source_identity", ""))
@@ -1982,6 +2047,7 @@ AUTHORIZED_SOURCE_BYTES = None if AUTHORIZED_SOURCE_BYTES_RAW is None else int(A
 OUTPUT_HOST = str(CONFIG.get("output_host", ""))
 SESSION_META_SCAN_BYTES = int(CONFIG.get("session_meta_scan_bytes", 0))
 SESSION_META_PREFIX_PROOF_BYTES = SESSION_META_SCAN_BYTES
+MAX_SESSION_META_ACTIVE_CANDIDATES = {MAX_SESSION_META_ACTIVE_CANDIDATES}
 SESSION_META_READ_CHUNK_BYTES = {SESSION_META_READ_CHUNK_BYTES}
 SESSION_META_SERIALIZED_ROW_BYTES = {MAX_REMOTE_SESSION_META_SERIALIZED_ROW_BYTES}
 SESSION_META_OUTPUT_ROW_TOO_LARGE_ERROR = {SESSION_META_OUTPUT_ROW_TOO_LARGE_ERROR!r}
@@ -2020,7 +2086,9 @@ SUMMARY_SIGNAL_MARKERS = {SUMMARY_SIGNAL_MARKERS!r}
 SESSION_META_BEGIN = {REMOTE_SESSION_META_BEGIN!r}
 SESSION_META_END = {REMOTE_SESSION_META_END!r}
 SESSION_META_LIMIT_TRUNCATED_REASON = {SESSION_META_LIMIT_TRUNCATED_REASON!r}
+SESSION_META_CANDIDATE_LIMIT_TRUNCATED_REASON = {SESSION_META_CANDIDATE_LIMIT_TRUNCATED_REASON!r}
 SESSION_META_SCAN_TRUNCATED_ERROR = {SESSION_META_SCAN_TRUNCATED_ERROR!r}
+SESSION_META_INVALID_UTF8_ERROR = {SESSION_META_INVALID_UTF8_ERROR!r}
 FETCH_ROLLOUT_BEGIN = {REMOTE_FETCH_ROLLOUT_BEGIN!r}
 FETCH_ROLLOUT_END = {REMOTE_FETCH_ROLLOUT_END!r}
 FETCH_ROLLOUT_CHUNK_BEGIN = {REMOTE_FETCH_ROLLOUT_CHUNK_BEGIN!r}
@@ -2884,7 +2952,9 @@ def session_meta_allows_append(rel):
 def timestamp_from_jsonl_line(line):
     try:
         obj = json.loads(line)
-    except json.JSONDecodeError:
+    except (ValueError, RecursionError):
+        return ""
+    if not isinstance(obj, dict):
         return ""
     value = obj.get("timestamp")
     return str(value) if isinstance(value, str) else ""
@@ -2892,9 +2962,14 @@ def timestamp_from_jsonl_line(line):
 
 def raw_line_parts(raw_line):
     if isinstance(raw_line, str):
-        return raw_line.encode("utf-8", "surrogatepass"), raw_line
+        return raw_line.encode("utf-8", "surrogatepass"), raw_line, False
     raw_bytes = bytes(raw_line)
-    return raw_bytes, raw_bytes.decode("utf-8", "replace")
+    try:
+        return raw_bytes, raw_bytes.decode("utf-8"), False
+    except UnicodeDecodeError:
+        # Let the JSON summarizer count the physical record as malformed
+        # without emitting replacement-altered evidence.
+        return raw_bytes, "", True
 
 
 def raw_line_endswith_newline(raw_line):
@@ -2936,10 +3011,12 @@ def iter_rollout_chunks(handle, chunk_bytes, source_bytes=None):
     first_timestamp = ""
     last_timestamp = ""
     oversized_record = False
+    decode_error_count = 0
 
     def flush():
         nonlocal chunk_index, lines, current_bytes, byte_start, record_start
         nonlocal first_timestamp, last_timestamp, oversized_record
+        nonlocal decode_error_count
         if not lines:
             return None
         chunk = {{
@@ -2952,6 +3029,7 @@ def iter_rollout_chunks(handle, chunk_bytes, source_bytes=None):
             "last_timestamp": last_timestamp,
             "oversized_record": oversized_record,
             "lines": tuple(lines),
+            "decode_error_count": decode_error_count,
         }}
         chunk_index += 1
         lines = []
@@ -2961,6 +3039,7 @@ def iter_rollout_chunks(handle, chunk_bytes, source_bytes=None):
         first_timestamp = ""
         last_timestamp = ""
         oversized_record = False
+        decode_error_count = 0
         return chunk
 
     read_limit = chunk_bytes + 1
@@ -2979,7 +3058,7 @@ def iter_rollout_chunks(handle, chunk_bytes, source_bytes=None):
             if chunk is not None:
                 yield chunk
             return
-        raw_bytes, line = raw_line_parts(raw_line)
+        raw_bytes, line, line_decode_failed = raw_line_parts(raw_line)
         line_start = offset
         record_no += 1
         at_source_end = source_bytes is not None and line_start + len(raw_bytes) >= source_bytes
@@ -2995,6 +3074,14 @@ def iter_rollout_chunks(handle, chunk_bytes, source_bytes=None):
                     yield chunk
 
             total_bytes = len(raw_bytes)
+            record_decode_failed = False
+            decoder = None
+            if not isinstance(raw_line, str):
+                decoder = codecs.getincrementaldecoder("utf-8")("strict")
+                try:
+                    decoder.decode(raw_bytes, final=False)
+                except UnicodeDecodeError:
+                    record_decode_failed = True
             while line_truncated:
                 remaining = None if source_bytes is None else source_bytes - (line_start + total_bytes)
                 if remaining is not None and remaining <= 0:
@@ -3003,7 +3090,12 @@ def iter_rollout_chunks(handle, chunk_bytes, source_bytes=None):
                 segment = handle.readline(current_read_limit)
                 if not segment:
                     break
-                segment_bytes, _ = raw_line_parts(segment)
+                segment_bytes, _, _ = raw_line_parts(segment)
+                if decoder is not None and not record_decode_failed:
+                    try:
+                        decoder.decode(segment_bytes, final=False)
+                    except UnicodeDecodeError:
+                        record_decode_failed = True
                 total_bytes += len(segment_bytes)
                 at_source_end = source_bytes is not None and line_start + total_bytes >= source_bytes
                 line_truncated = (
@@ -3011,6 +3103,12 @@ def iter_rollout_chunks(handle, chunk_bytes, source_bytes=None):
                     and len(segment) == current_read_limit
                     and not raw_line_endswith_newline(segment)
                 )
+
+            if decoder is not None and not record_decode_failed:
+                try:
+                    decoder.decode(b"", final=True)
+                except UnicodeDecodeError:
+                    record_decode_failed = True
 
             offset += total_bytes
             yield {{
@@ -3023,13 +3121,17 @@ def iter_rollout_chunks(handle, chunk_bytes, source_bytes=None):
                 "last_timestamp": "",
                 "oversized_record": True,
                 "lines": ("",),
+                "decode_error_count": int(record_decode_failed),
             }}
             chunk_index += 1
             continue
 
         offset += len(raw_bytes)
 
-        if lines and current_bytes + len(raw_bytes) > chunk_bytes:
+        if lines and (
+            current_bytes + len(raw_bytes) > chunk_bytes
+            or len(lines) >= MAX_ROLLOUT_CHUNK_RECORDS
+        ):
             chunk = flush()
             if chunk is not None:
                 yield chunk
@@ -3045,21 +3147,25 @@ def iter_rollout_chunks(handle, chunk_bytes, source_bytes=None):
             last_timestamp = timestamp
         oversized_record = oversized_record or len(raw_bytes) > chunk_bytes
         lines.append(line)
+        decode_error_count += int(line_decode_failed)
         current_bytes += len(raw_bytes)
 
 
-def fetch_ranges_for_byte_range(byte_start, byte_end, max_bytes):
+def fetch_ranges_for_byte_range(byte_start, byte_end, max_bytes, plan_entries_used=0):
     if byte_start < 0:
         raise ValueError("byte_start must be non-negative")
     if byte_end <= byte_start:
         raise ValueError("byte_end must be greater than byte_start")
     if max_bytes < 1:
         raise ValueError("max_bytes must be positive")
+    if plan_entries_used < 0:
+        raise ValueError("plan_entries_used must be non-negative")
     range_count = (byte_end - byte_start + max_bytes - 1) // max_bytes
-    if range_count > MAX_FETCH_RANGE_PLAN_ENTRIES:
+    total_range_count = plan_entries_used + range_count
+    if total_range_count > MAX_FETCH_RANGE_PLAN_ENTRIES:
         raise ValueError(
             "fetch range plan too large: "
-            + str(range_count)
+            + str(total_range_count)
             + " ranges > "
             + str(MAX_FETCH_RANGE_PLAN_ENTRIES)
         )
@@ -3216,12 +3322,20 @@ def parse_bounded_session_meta_prefix(prefix, source_size, start_offset=0):
         raw_bytes = prefix[cursor:line_end]
         cursor = line_end
         try:
-            obj = json.loads(raw_bytes.decode("utf-8", "replace"))
-        except json.JSONDecodeError:
+            decoded = raw_bytes.decode("utf-8")
+        except UnicodeDecodeError:
+            raise ValueError(SESSION_META_INVALID_UTF8_ERROR) from None
+        try:
+            obj = json.loads(decoded)
+        except (ValueError, RecursionError):
+            continue
+        if not isinstance(obj, dict):
             continue
         if obj.get("type") != "session_meta":
             continue
         payload = obj.get("payload", {{}})
+        if not isinstance(payload, dict):
+            continue
         session_id = str(payload.get("id", ""))
         cwd = str(payload.get("cwd", ""))
         has_unread_bytes = source_size > start_offset + cursor
@@ -3250,56 +3364,77 @@ def read_bounded_session_meta(handle, max_scan_bytes):
     )
 
 
-def bounded_text_lines(handle, max_scan_bytes):
+def bounded_text_lines(handle, max_scan_bytes, source_size=None):
+    if source_size is None:
+        if not isinstance(handle, io.BytesIO):
+            raise ValueError("rollout summary source size is required")
+        source_size = len(handle.getbuffer())
+    if not isinstance(source_size, int) or isinstance(source_size, bool) or source_size < 0:
+        raise ValueError("rollout summary source size is invalid")
+    try:
+        start_offset = handle.tell()
+    except (AttributeError, OSError, TypeError, ValueError) as error:
+        raise ValueError("rollout summary start offset is unavailable") from error
+    if (
+        not isinstance(start_offset, int)
+        or isinstance(start_offset, bool)
+        or start_offset < 0
+        or start_offset > source_size
+    ):
+        raise ValueError("rollout summary start offset is invalid")
+    if start_offset != 0:
+        raise ValueError("rollout summary reader must start at byte 0")
     scanned = 0
     buffer = bytearray()
     dropping_oversized_line = False
     chunk_bytes = 64 * 1024
 
-    def line_ended(part):
-        return part.endswith(b"\\n") or part.endswith(b"\\r")
+    scan_limit = (
+        min(max_scan_bytes, source_size)
+        if max_scan_bytes
+        else source_size
+    )
 
-    while True:
-        if max_scan_bytes and scanned >= max_scan_bytes:
-            if dropping_oversized_line:
-                yield "\\n"
-            elif buffer:
-                yield bytes(buffer).decode("utf-8", "replace")
-            return
-        remaining = max_scan_bytes - scanned if max_scan_bytes else 0
-        read_size = min(chunk_bytes, remaining) if remaining else chunk_bytes
+    while scanned < scan_limit:
+        read_size = min(chunk_bytes, scan_limit - scanned)
         chunk = handle.read(read_size)
         if not chunk:
-            if dropping_oversized_line:
-                yield "\\n"
-            elif buffer:
-                yield bytes(buffer).decode("utf-8", "replace")
-            return
+            break
         if isinstance(chunk, str):
             raw_bytes = chunk.encode("utf-8", "surrogatepass")
         else:
             raw_bytes = bytes(chunk)
         scanned += len(raw_bytes)
-        for part in raw_bytes.splitlines(keepends=True):
+        offset = 0
+        while offset < len(raw_bytes):
+            line_end = raw_bytes.find(b"\\n", offset)
+            part_end = len(raw_bytes) if line_end < 0 else line_end + 1
+            part = raw_bytes[offset:part_end]
             if dropping_oversized_line:
-                if line_ended(part):
+                if line_end >= 0:
                     yield "\\n"
                     dropping_oversized_line = False
-                continue
-            if len(buffer) + len(part) > SUMMARY_LINE_BYTES:
+            elif len(buffer) + len(part) > SUMMARY_LINE_BYTES:
                 buffer.clear()
                 dropping_oversized_line = True
-                if line_ended(part):
+                if line_end >= 0:
                     yield "\\n"
                     dropping_oversized_line = False
-                continue
-            buffer.extend(part)
-            if line_ended(part):
-                yield bytes(buffer).decode("utf-8", "replace")
-                buffer.clear()
+            else:
+                buffer.extend(part)
+                if line_end >= 0:
+                    yield bytes(buffer).decode("utf-8", "replace")
+                    buffer.clear()
+            offset = part_end
+
+    if scanned == source_size:
+        if dropping_oversized_line:
+            yield "\\n"
+        elif buffer:
+            yield bytes(buffer).decode("utf-8", "replace")
 
 
-def summarize_records(lines, line_offset=0):
+def summarize_records(lines, line_offset=0, scan_metadata=None):
     keywords = SUMMARY_SEARCH_KEYWORDS
     matched = []
     matched_seen = set()
@@ -3310,17 +3445,25 @@ def summarize_records(lines, line_offset=0):
     last_assistant_record = None
     last_user_record = None
     last_task_complete_record = None
+    json_error_count = 0
 
     for line_no, line in enumerate(lines, line_offset + 1):
         try:
             obj = json.loads(line)
-        except json.JSONDecodeError:
+        except (ValueError, RecursionError):
+            json_error_count += 1
+            continue
+        if not isinstance(obj, dict):
+            json_error_count += 1
+            continue
+        payload = obj.get("payload", {{}})
+        if not isinstance(payload, dict):
+            json_error_count += 1
             continue
         timestamp = str(obj.get("timestamp", ""))
         record = None
         record_type = str(obj.get("type", ""))
         if record_type == "session_meta" and session_meta_record is None:
-            payload = obj.get("payload", {{}})
             record = summary_record(
                 "session_meta",
                 "session_id=" + str(payload.get("id", ""))
@@ -3332,7 +3475,6 @@ def summarize_records(lines, line_offset=0):
             )
             session_meta_record = record
         elif record_type == "response_item":
-            payload = obj.get("payload", {{}})
             payload_type = str(payload.get("type", ""))
             if payload_type == "message":
                 kind, text = message_summary_from_payload(payload)
@@ -3347,7 +3489,6 @@ def summarize_records(lines, line_offset=0):
                 if isinstance(output, str) and output.strip():
                     record = summary_record("function_call_output", output, line_no=line_no, timestamp=timestamp)
         elif record_type == "event_msg":
-            payload = obj.get("payload", {{}})
             payload_type = str(payload.get("type", ""))
             if payload_type == "task_complete":
                 text = payload.get("last_agent_message")
@@ -3404,6 +3545,8 @@ def summarize_records(lines, line_offset=0):
     append(last_assistant_record)
     if last_assistant_record is None:
         append(last_task_complete_record)
+    if scan_metadata is not None:
+        scan_metadata["json_error_count"] = json_error_count
     return output
 
 
@@ -3420,7 +3563,7 @@ def chunk_common_fields(chunk):
     }}
 
 
-def chunk_reason_codes(chunk, records):
+def chunk_reason_codes(chunk, records, json_error_count):
     evidence_records = [
         record
         for record in records
@@ -3429,6 +3572,10 @@ def chunk_reason_codes(chunk, records):
     codes = []
     if chunk["oversized_record"]:
         codes.append("oversized_record")
+    if int(chunk.get("decode_error_count", 0)):
+        codes.append("utf8_decode_error")
+    if json_error_count:
+        codes.append("json_parse_error")
     if not evidence_records:
         codes.append("no_structured_evidence")
     if not any(record.get("kind") == "user_message" for record in evidence_records):
@@ -3440,11 +3587,19 @@ def chunk_reason_codes(chunk, records):
     return codes
 
 
-def chunk_meta_record(chunk, records, source_identity, chunk_bytes):
-    reason_codes = chunk_reason_codes(chunk, records)
+def chunk_meta_record(
+    chunk,
+    records,
+    source_identity,
+    chunk_bytes,
+    json_error_count,
+    fetch_range_plan_entries_used=0,
+):
+    reason_codes = chunk_reason_codes(chunk, records, json_error_count)
     redacted_or_signal_only_records = sum(1 for record in records if summary_record_has_signal(record))
     raw_fetch_recommended = (
         bool(chunk["oversized_record"])
+        or "json_parse_error" in reason_codes
         or "no_structured_evidence" in reason_codes
         or redacted_or_signal_only_records > 0
     )
@@ -3459,7 +3614,10 @@ def chunk_meta_record(chunk, records, source_identity, chunk_bytes):
         "full_reconstruction_allowed": automatic_allowed or AUTHORIZED_SOURCE_BYTES == source_identity["size"],
         "authorized_source_bytes": AUTHORIZED_SOURCE_BYTES,
         "chunk_bytes": chunk_bytes,
+        "max_chunk_records": MAX_ROLLOUT_CHUNK_RECORDS,
         "coverage_status": "partial" if raw_fetch_recommended else "complete",
+        "decode_error_count": int(chunk.get("decode_error_count", 0)),
+        "json_error_count": json_error_count,
         "reason_codes": reason_codes,
         "records_emitted": len(records),
         "redacted_or_signal_only_records": redacted_or_signal_only_records,
@@ -3473,6 +3631,7 @@ def chunk_meta_record(chunk, records, source_identity, chunk_bytes):
             chunk["byte_start"],
             chunk["byte_end"],
             MAX_FETCH_ROLLOUT_CHUNK_BYTES,
+            fetch_range_plan_entries_used,
         )
         meta["fetch_ranges"] = fetch_ranges
         meta["fetch_range_count"] = len(fetch_ranges)
@@ -3499,6 +3658,7 @@ def rollout_summary_meta_record(source_identity, source_sha256):
             or AUTHORIZED_SOURCE_BYTES == source_identity["size"]
         ),
         "min_chunk_bytes": MIN_ROLLOUT_CHUNK_BYTES,
+        "max_chunk_records": MAX_ROLLOUT_CHUNK_RECORDS,
         "chunk_summary_output_limit_bytes": MAX_CHUNKED_ROLLOUT_SUMMARY_OUTPUT_BYTES,
         "fetch_range_plan_limit": MAX_FETCH_RANGE_PLAN_ENTRIES,
     }})
@@ -3558,6 +3718,10 @@ def summarize_rollout_chunks():
         print(json.dumps({{"ok": False, "error": "chunk bytes out of range"}}, separators=(",", ":"), sort_keys=True))
         print(CHUNKED_ROLLOUT_SUMMARY_END)
         return
+    if MAX_ROLLOUT_CHUNK_RECORDS < 1:
+        print(json.dumps({{"ok": False, "error": "chunk record limit out of range"}}, separators=(",", ":"), sort_keys=True))
+        print(CHUNKED_ROLLOUT_SUMMARY_END)
+        return
     if MAX_CHUNKED_ROLLOUT_SUMMARY_OUTPUT_BYTES < 1:
         print(json.dumps({{"ok": False, "error": "chunked summary output limit out of range"}}, separators=(",", ":"), sort_keys=True))
         print(CHUNKED_ROLLOUT_SUMMARY_END)
@@ -3582,6 +3746,7 @@ def summarize_rollout_chunks():
     try:
         serialized_records = []
         serialized_bytes = 0
+        total_fetch_range_entries = 0
         with open_rollout_text(rel, expected_identity) as handle:
             validate_source_read_budget(expected_identity)
             hashing_reader = HashingRolloutReader(handle)
@@ -3591,10 +3756,37 @@ def summarize_rollout_chunks():
                 source_bytes=expected_identity["size"],
             )
             for chunk in chunks:
-                records = summarize_records(chunk["lines"], line_offset=int(chunk["record_start"]) - 1)
+                scan_metadata = {{"json_error_count": 0}}
+                records = [] if chunk["oversized_record"] else summarize_records(
+                    chunk["lines"],
+                    line_offset=int(chunk["record_start"]) - 1,
+                    scan_metadata=scan_metadata,
+                )
+                json_error_count = max(
+                    int(scan_metadata["json_error_count"]),
+                    int(chunk.get("decode_error_count", 0)),
+                )
                 common = chunk_common_fields(chunk)
+                chunk_meta = chunk_meta_record(
+                    chunk,
+                    records,
+                    expected_identity,
+                    CHUNK_BYTES,
+                    json_error_count,
+                    total_fetch_range_entries,
+                )
+                total_fetch_range_entries += int(
+                    chunk_meta.get("fetch_range_count", 1)
+                )
+                if total_fetch_range_entries > MAX_FETCH_RANGE_PLAN_ENTRIES:
+                    raise ValueError(
+                        "fetch range plan too large: "
+                        + str(total_fetch_range_entries)
+                        + " ranges > "
+                        + str(MAX_FETCH_RANGE_PLAN_ENTRIES)
+                    )
                 line, line_bytes = serialized_summary_line(
-                    chunk_meta_record(chunk, records, expected_identity, CHUNK_BYTES),
+                    chunk_meta,
                     rel,
                 )
                 if serialized_bytes + line_bytes > MAX_CHUNKED_ROLLOUT_SUMMARY_OUTPUT_BYTES:
@@ -3674,6 +3866,7 @@ def summarize_rollout():
     last_assistant_record = None
     last_user_record = None
     last_task_complete_record = None
+    json_error_count = 0
 
     try:
         handle = open_rollout_text(rel)
@@ -3694,16 +3887,26 @@ def summarize_rollout():
                 "rollout unreadable" if isinstance(error, OSError) else str(error)
             )
             return
-        for line_no, line in enumerate(bounded_text_lines(handle, SUMMARY_SCAN_BYTES), 1):
+        for line_no, line in enumerate(
+            bounded_text_lines(handle, SUMMARY_SCAN_BYTES, source_identity["size"]),
+            1,
+        ):
             try:
                 obj = json.loads(line)
-            except json.JSONDecodeError:
+            except (ValueError, RecursionError):
+                json_error_count += 1
+                continue
+            if not isinstance(obj, dict):
+                json_error_count += 1
+                continue
+            payload = obj.get("payload", {{}})
+            if not isinstance(payload, dict):
+                json_error_count += 1
                 continue
             timestamp = str(obj.get("timestamp", ""))
             record = None
             record_type = str(obj.get("type", ""))
             if record_type == "session_meta" and session_meta_record is None:
-                payload = obj.get("payload", {{}})
                 record = summary_record(
                     "session_meta",
                     "session_id=" + str(payload.get("id", ""))
@@ -3715,7 +3918,6 @@ def summarize_rollout():
                 )
                 session_meta_record = record
             elif record_type == "response_item":
-                payload = obj.get("payload", {{}})
                 payload_type = str(payload.get("type", ""))
                 if payload_type == "message":
                     kind, text = message_summary_from_payload(payload)
@@ -3730,7 +3932,6 @@ def summarize_rollout():
                     if isinstance(output, str) and output.strip():
                         record = summary_record("function_call_output", output, line_no=line_no, timestamp=timestamp)
             elif record_type == "event_msg":
-                payload = obj.get("payload", {{}})
                 payload_type = str(payload.get("type", ""))
                 if payload_type == "task_complete":
                     text = payload.get("last_agent_message")
@@ -3789,12 +3990,14 @@ def summarize_rollout():
     append_serialized(
         {{
             "kind": "scan_meta",
+            "json_error_count": json_error_count,
             "line": 0,
             "scan_bytes": SUMMARY_SCAN_BYTES,
             "scan_truncated": bool(SUMMARY_SCAN_BYTES and source_identity["size"] > SUMMARY_SCAN_BYTES),
             "source_bytes": source_identity["size"],
             "text": "scan_truncated=" + str(bool(SUMMARY_SCAN_BYTES and source_identity["size"] > SUMMARY_SCAN_BYTES)).lower()
                 + " scan_bytes=" + str(SUMMARY_SCAN_BYTES)
+                + " json_error_count=" + str(json_error_count)
                 + " source_bytes=" + str(source_identity["size"]),
             "timestamp": "",
         }}
@@ -3862,7 +4065,7 @@ def iter_session_meta():
     except (OSError, ValueError):
         session_directory_unreadable()
 
-    prefix_proof_candidate_limit = LIMIT + 1
+    prefix_proof_candidate_limit = MAX_SESSION_META_ACTIVE_CANDIDATES
     prefix_proof_candidate_captures = 0
 
     def consume_active_candidate_budget():
@@ -3933,7 +4136,7 @@ def iter_session_meta():
                 seen_rollout_paths.add(rel_key)
                 allow_append = session_meta_allows_append(rel)
                 if allow_append and not consume_active_candidate_budget():
-                    if emit_session_meta_item({{"kind": "truncation", "reason": SESSION_META_LIMIT_TRUNCATED_REASON, "date": date_text, "limit": LIMIT}}):
+                    if emit_session_meta_item({{"kind": "truncation", "reason": SESSION_META_CANDIDATE_LIMIT_TRUNCATED_REASON, "date": date_text, "candidate_limit": MAX_SESSION_META_ACTIVE_CANDIDATES}}):
                         print(SESSION_META_END)
                     return True
                 try:
@@ -4213,12 +4416,12 @@ def _scan_session_meta_records(
     try:
         root_fd = _open_pinned_codex_root(codex_root)
     except FileNotFoundError:
-        return SessionMetaScan(rows=[], truncated=False)
+        return SessionMetaScan(rows=[])
     except (OSError, ValueError) as exc:
         raise SessionMetaRolloutError("session directory unreadable") from exc
     rows: list[dict[str, str]] = []
     seen_rollout_paths: set[str] = set()
-    prefix_proof_candidate_limit = limit + 1
+    prefix_proof_candidate_limit = MAX_SESSION_META_ACTIVE_CANDIDATES
     prefix_proof_candidate_captures = 0
 
     def consume_active_candidate_budget() -> bool:
@@ -4299,7 +4502,16 @@ def _scan_session_meta_records(
                 seen_rollout_paths.add(rollout_relative_key)
                 allow_append = _session_meta_allows_append(rollout_relative_path)
                 if allow_append and not consume_active_candidate_budget():
-                    return SessionMetaScan(rows=rows, truncated=True)
+                    return SessionMetaScan(
+                        rows=rows,
+                        truncation_reason=(
+                            SESSION_META_CANDIDATE_LIMIT_TRUNCATED_REASON
+                        ),
+                        truncation_metadata={
+                            "date": date_value.strftime(DATE_FORMAT),
+                            "candidate_limit": MAX_SESSION_META_ACTIVE_CANDIDATES,
+                        },
+                    )
                 try:
                     handle = _open_pinned_rollout_text_from_parent_fd(
                         directory_fd,
@@ -4402,7 +4614,14 @@ def _scan_session_meta_records(
                         )
                     continue
                 if limit and len(rows) >= limit:
-                    return SessionMetaScan(rows=rows, truncated=True)
+                    return SessionMetaScan(
+                        rows=rows,
+                        truncation_reason=SESSION_META_LIMIT_TRUNCATED_REASON,
+                        truncation_metadata={
+                            "date": date_value.strftime(DATE_FORMAT),
+                            "limit": limit,
+                        },
+                    )
                 output_row = _validated_session_meta_output_row(
                     date=date_value.strftime(DATE_FORMAT),
                     session_id=session_id,
@@ -4437,7 +4656,7 @@ def _scan_session_meta_records(
                 return truncated
     finally:
         os.close(root_fd)
-    return SessionMetaScan(rows=rows, truncated=False)
+    return SessionMetaScan(rows=rows)
 
 
 def _iter_session_meta_records(
@@ -4734,10 +4953,20 @@ def _session_meta_row_from_item(item: dict[str, Any], *, host: str) -> dict[str,
     }
 
 
-def _is_session_meta_truncation_item(item: dict[str, Any]) -> bool:
+def _is_session_meta_limit_truncation_item(item: dict[str, Any]) -> bool:
     return (
         item.get("kind") == "truncation"
         and item.get("reason") == SESSION_META_LIMIT_TRUNCATED_REASON
+    )
+
+
+def _is_session_meta_candidate_limit_truncation_item(
+    item: dict[str, Any],
+) -> bool:
+    return (
+        item.get("kind") == "truncation"
+        and item.get("reason")
+        == SESSION_META_CANDIDATE_LIMIT_TRUNCATED_REASON
     )
 
 
@@ -4756,6 +4985,20 @@ def _session_meta_limit_error(host: str, limit: int) -> int:
     print(f"host={host}", file=sys.stderr)
     print(
         f"error=session-meta result exceeded --limit={limit}; narrow the date/host scope or raise --limit up to {MAX_SESSION_META_LIMIT}",
+        file=sys.stderr,
+    )
+    return 1
+
+
+def _session_meta_candidate_limit_error(
+    host: str,
+    candidate_limit: int,
+) -> int:
+    print(f"host={host}", file=sys.stderr)
+    print(
+        "error=session-meta active candidate safety cap reached "
+        f"(candidate_limit={candidate_limit}); narrow the date/host scope "
+        "before drawing a coverage conclusion",
         file=sys.stderr,
     )
     return 1
@@ -4825,7 +5068,20 @@ def cmd_session_meta(args: argparse.Namespace) -> int:
                 print(f"host={alias}", file=sys.stderr)
                 print(f"error={error}", file=sys.stderr)
                 return 1
-            if scan.truncated:
+            if (
+                scan.truncation_reason
+                == SESSION_META_CANDIDATE_LIMIT_TRUNCATED_REASON
+            ):
+                return _session_meta_candidate_limit_error(
+                    alias,
+                    int(
+                        scan.truncation_metadata.get(
+                            "candidate_limit",
+                            MAX_SESSION_META_ACTIVE_CANDIDATES,
+                        )
+                    ),
+                )
+            if scan.truncation_reason == SESSION_META_LIMIT_TRUNCATED_REASON:
                 return _session_meta_limit_error(alias, args.limit)
             host_rows = scan.rows
         else:
@@ -4872,8 +5128,22 @@ def cmd_session_meta(args: argparse.Namespace) -> int:
                     print(f"host={alias}", file=sys.stderr)
                     print(f"error={error}", file=sys.stderr)
                     return 1
-                if _is_session_meta_truncation_item(item):
+                if _is_session_meta_limit_truncation_item(item):
                     return _session_meta_limit_error(alias, args.limit)
+                if _is_session_meta_candidate_limit_truncation_item(item):
+                    candidate_limit = item.get("candidate_limit")
+                    if not isinstance(candidate_limit, int) or candidate_limit < 1:
+                        print(f"host={alias}", file=sys.stderr)
+                        print(
+                            "error=remote helper returned invalid session-meta "
+                            "candidate-limit metadata",
+                            file=sys.stderr,
+                        )
+                        return 1
+                    return _session_meta_candidate_limit_error(
+                        alias,
+                        candidate_limit,
+                    )
                 session_meta_error = _session_meta_error_from_item(item)
                 if session_meta_error is not None:
                     print(f"host={alias}", file=sys.stderr)
@@ -5401,12 +5671,20 @@ def _parse_bounded_session_meta_prefix(
         raw_bytes = prefix[cursor:line_end]
         cursor = line_end
         try:
-            obj = json.loads(raw_bytes.decode("utf-8", "replace"))
-        except json.JSONDecodeError:
+            decoded = raw_bytes.decode("utf-8")
+        except UnicodeDecodeError:
+            raise ValueError(SESSION_META_INVALID_UTF8_ERROR) from None
+        try:
+            obj = json.loads(decoded)
+        except (ValueError, RecursionError):
+            continue
+        if not isinstance(obj, dict):
             continue
         if obj.get("type") != "session_meta":
             continue
         payload = obj.get("payload", {})
+        if not isinstance(payload, dict):
+            continue
         session_id = str(payload.get("id", ""))
         cwd = str(payload.get("cwd", ""))
         has_unread_bytes = source_size > start_offset + cursor
@@ -5438,53 +5716,78 @@ def _read_bounded_session_meta(
     )
 
 
-def _bounded_text_lines(handle: Any, max_scan_bytes: int) -> Iterable[str]:
+def _bounded_text_lines(
+    handle: Any,
+    max_scan_bytes: int,
+    source_size: int | None = None,
+) -> Iterable[str]:
+    if source_size is None:
+        if not isinstance(handle, io.BytesIO):
+            raise ValueError("rollout summary source size is required")
+        source_size = len(handle.getbuffer())
+    if not isinstance(source_size, int) or isinstance(source_size, bool) or source_size < 0:
+        raise ValueError("rollout summary source size is invalid")
+    try:
+        start_offset = handle.tell()
+    except (AttributeError, OSError, TypeError, ValueError) as error:
+        raise ValueError("rollout summary start offset is unavailable") from error
+    if (
+        not isinstance(start_offset, int)
+        or isinstance(start_offset, bool)
+        or start_offset < 0
+        or start_offset > source_size
+    ):
+        raise ValueError("rollout summary start offset is invalid")
+    if start_offset != 0:
+        raise ValueError("rollout summary reader must start at byte 0")
     scanned = 0
     buffer = bytearray()
     dropping_oversized_line = False
     chunk_bytes = 64 * 1024
 
-    def line_ended(part: bytes) -> bool:
-        return part.endswith(b"\n") or part.endswith(b"\r")
+    scan_limit = (
+        min(max_scan_bytes, source_size)
+        if max_scan_bytes
+        else source_size
+    )
 
-    while True:
-        if max_scan_bytes and scanned >= max_scan_bytes:
-            if dropping_oversized_line:
-                yield "\n"
-            elif buffer:
-                yield bytes(buffer).decode("utf-8", "replace")
-            return
-        remaining = max_scan_bytes - scanned if max_scan_bytes else 0
-        read_size = min(chunk_bytes, remaining) if remaining else chunk_bytes
+    while scanned < scan_limit:
+        read_size = min(chunk_bytes, scan_limit - scanned)
         chunk = handle.read(read_size)
         if not chunk:
-            if dropping_oversized_line:
-                yield "\n"
-            elif buffer:
-                yield bytes(buffer).decode("utf-8", "replace")
-            return
+            break
         if isinstance(chunk, str):
             raw_bytes = chunk.encode("utf-8", "surrogatepass")
         else:
             raw_bytes = bytes(chunk)
         scanned += len(raw_bytes)
-        for part in raw_bytes.splitlines(keepends=True):
+        offset = 0
+        while offset < len(raw_bytes):
+            line_end = raw_bytes.find(b"\n", offset)
+            part_end = len(raw_bytes) if line_end < 0 else line_end + 1
+            part = raw_bytes[offset:part_end]
             if dropping_oversized_line:
-                if line_ended(part):
+                if line_end >= 0:
                     yield "\n"
                     dropping_oversized_line = False
-                continue
-            if len(buffer) + len(part) > MAX_ROLLOUT_SUMMARY_LINE_BYTES:
+            elif len(buffer) + len(part) > MAX_ROLLOUT_SUMMARY_LINE_BYTES:
                 buffer.clear()
                 dropping_oversized_line = True
-                if line_ended(part):
+                if line_end >= 0:
                     yield "\n"
                     dropping_oversized_line = False
-                continue
-            buffer.extend(part)
-            if line_ended(part):
-                yield bytes(buffer).decode("utf-8", "replace")
-                buffer.clear()
+            else:
+                buffer.extend(part)
+                if line_end >= 0:
+                    yield bytes(buffer).decode("utf-8", "replace")
+                    buffer.clear()
+            offset = part_end
+
+    if scanned == source_size:
+        if dropping_oversized_line:
+            yield "\n"
+        elif buffer:
+            yield bytes(buffer).decode("utf-8", "replace")
 
 
 def _summarize_rollout_records(
@@ -5495,6 +5798,7 @@ def _summarize_rollout_records(
     tail_records: int,
     max_text_chars: int,
     line_offset: int = 0,
+    scan_metadata: dict[str, int] | None = None,
 ) -> list[dict[str, Any]]:
     search_keywords = [value.casefold() for value in keywords if value]
     matched: list[dict[str, Any]] = []
@@ -5506,18 +5810,26 @@ def _summarize_rollout_records(
     last_assistant_record: dict[str, Any] | None = None
     last_user_record: dict[str, Any] | None = None
     last_task_complete_record: dict[str, Any] | None = None
+    json_error_count = 0
 
     for line_no, line in enumerate(lines, line_offset + 1):
         try:
             obj = json.loads(line)
-        except json.JSONDecodeError:
+        except (ValueError, RecursionError):
+            json_error_count += 1
+            continue
+        if not isinstance(obj, dict):
+            json_error_count += 1
+            continue
+        payload = obj.get("payload", {})
+        if not isinstance(payload, dict):
+            json_error_count += 1
             continue
         timestamp = str(obj.get("timestamp", ""))
         record: dict[str, Any] | None = None
         record_type = str(obj.get("type", ""))
 
         if record_type == "session_meta" and session_meta_record is None:
-            payload = obj.get("payload", {})
             session_meta_record = _build_summary_record(
                 kind="session_meta",
                 text=f"session_id={payload.get('id', '')} cwd_present={str(bool(payload.get('cwd', ''))).lower()}",
@@ -5530,7 +5842,6 @@ def _summarize_rollout_records(
             continue
 
         if record_type == "response_item":
-            payload = obj.get("payload", {})
             payload_type = str(payload.get("type", ""))
             if payload_type == "message":
                 kind, text = _message_summary(payload)
@@ -5559,7 +5870,6 @@ def _summarize_rollout_records(
                         search_keywords=search_keywords,
                     )
         elif record_type == "event_msg":
-            payload = obj.get("payload", {})
             payload_type = str(payload.get("type", ""))
             if payload_type == "task_complete":
                 text = payload.get("last_agent_message")
@@ -5632,18 +5942,26 @@ def _summarize_rollout_records(
     append(last_assistant_record)
     if last_assistant_record is None:
         append(last_task_complete_record)
+    if scan_metadata is not None:
+        scan_metadata["json_error_count"] = json_error_count
     return result
 
 
-def _rollout_summary_scan_meta(*, source_bytes: int, scan_bytes: int) -> dict[str, Any]:
+def _rollout_summary_scan_meta(
+    *,
+    source_bytes: int,
+    scan_bytes: int,
+    json_error_count: int = 0,
+) -> dict[str, Any]:
     scan_truncated = bool(scan_bytes and source_bytes > scan_bytes)
     return {
         "kind": "scan_meta",
+        "json_error_count": json_error_count,
         "line": 0,
         "scan_bytes": scan_bytes,
         "scan_truncated": scan_truncated,
         "source_bytes": source_bytes,
-        "text": f"scan_truncated={str(scan_truncated).lower()} scan_bytes={scan_bytes} source_bytes={source_bytes}",
+        "text": f"scan_truncated={str(scan_truncated).lower()} scan_bytes={scan_bytes} json_error_count={json_error_count} source_bytes={source_bytes}",
         "timestamp": "",
     }
 
@@ -5664,6 +5982,7 @@ def _chunk_common_fields(chunk: RolloutChunk) -> dict[str, Any]:
 def _chunk_reason_codes(
     chunk: RolloutChunk,
     records: list[dict[str, Any]],
+    json_error_count: int,
 ) -> list[str]:
     evidence_records = [
         record
@@ -5674,6 +5993,10 @@ def _chunk_reason_codes(
     codes: list[str] = []
     if chunk.oversized_record:
         codes.append("oversized_record")
+    if chunk.decode_error_count:
+        codes.append("utf8_decode_error")
+    if json_error_count:
+        codes.append("json_parse_error")
     if not evidence_records:
         codes.append("no_structured_evidence")
     if not any(record.get("kind") == "user_message" for record in evidence_records):
@@ -5695,13 +6018,16 @@ def _chunk_meta_record(
     source_identity: RolloutIdentity,
     chunk_bytes: int,
     authorized_source_bytes: int | None,
+    json_error_count: int = 0,
+    fetch_range_plan_entries_used: int = 0,
 ) -> dict[str, Any]:
-    reason_codes = _chunk_reason_codes(chunk, records)
+    reason_codes = _chunk_reason_codes(chunk, records, json_error_count)
     redacted_or_signal_only_records = sum(
         1 for record in records if _summary_record_has_signal(record)
     )
     raw_fetch_recommended = (
         chunk.oversized_record
+        or "json_parse_error" in reason_codes
         or "no_structured_evidence" in reason_codes
         or redacted_or_signal_only_records > 0
     )
@@ -5718,7 +6044,10 @@ def _chunk_meta_record(
         ),
         "authorized_source_bytes": authorized_source_bytes,
         "chunk_bytes": chunk_bytes,
+        "max_chunk_records": MAX_ROLLOUT_CHUNK_RECORDS,
         "coverage_status": "partial" if raw_fetch_recommended else "complete",
+        "decode_error_count": chunk.decode_error_count,
+        "json_error_count": json_error_count,
         "reason_codes": reason_codes,
         "records_emitted": len(records),
         "redacted_or_signal_only_records": redacted_or_signal_only_records,
@@ -5732,6 +6061,7 @@ def _chunk_meta_record(
             byte_start=chunk.byte_start,
             byte_end=chunk.byte_end,
             max_bytes=MAX_FETCH_ROLLOUT_CHUNK_BYTES,
+            plan_entries_used=fetch_range_plan_entries_used,
         )
         meta["fetch_ranges"] = fetch_ranges
         meta["fetch_range_count"] = len(fetch_ranges)
@@ -5775,6 +6105,7 @@ def _rollout_summary_meta_record(
                 or authorized_source_bytes == source_identity.size
             ),
             "min_chunk_bytes": MIN_ROLLOUT_CHUNK_BYTES,
+            "max_chunk_records": MAX_ROLLOUT_CHUNK_RECORDS,
             "chunk_summary_output_limit_bytes": (
                 MAX_CHUNKED_ROLLOUT_SUMMARY_OUTPUT_BYTES
             ),
@@ -5802,9 +6133,12 @@ def _chunked_rollout_summary_records(
             f"--chunk-bytes must stay between {MIN_ROLLOUT_CHUNK_BYTES} "
             f"and {MAX_ROLLOUT_CHUNK_BYTES}"
         )
+    if MAX_ROLLOUT_CHUNK_RECORDS < 1:
+        raise ValueError("chunk record limit must be positive")
     _validate_source_read_budget(expected_identity, authorized_source_bytes)
     output: list[dict[str, Any]] = []
     serialized_bytes = 0
+    total_fetch_range_entries = 0
     with _open_local_rollout_text(
         codex_root,
         rollout_relative_path,
@@ -5816,13 +6150,23 @@ def _chunked_rollout_summary_records(
             chunk_bytes=chunk_bytes,
             source_bytes=expected_identity.size,
         ):
-            records = _summarize_rollout_records(
-                lines=chunk.lines,
-                keywords=keywords,
-                limit=limit_per_chunk,
-                tail_records=tail_records,
-                max_text_chars=max_text_chars,
-                line_offset=chunk.record_start - 1,
+            scan_metadata: dict[str, int] = {"json_error_count": 0}
+            records = (
+                []
+                if chunk.oversized_record
+                else _summarize_rollout_records(
+                    lines=chunk.lines,
+                    keywords=keywords,
+                    limit=limit_per_chunk,
+                    tail_records=tail_records,
+                    max_text_chars=max_text_chars,
+                    line_offset=chunk.record_start - 1,
+                    scan_metadata=scan_metadata,
+                )
+            )
+            json_error_count = max(
+                scan_metadata["json_error_count"],
+                chunk.decode_error_count,
             )
             common = _chunk_common_fields(chunk)
             meta = _chunk_meta_record(
@@ -5831,7 +6175,16 @@ def _chunked_rollout_summary_records(
                 source_identity=expected_identity,
                 chunk_bytes=chunk_bytes,
                 authorized_source_bytes=authorized_source_bytes,
+                json_error_count=json_error_count,
+                fetch_range_plan_entries_used=total_fetch_range_entries,
             )
+            total_fetch_range_entries += int(meta.get("fetch_range_count", 1))
+            if total_fetch_range_entries > MAX_FETCH_RANGE_PLAN_ENTRIES:
+                raise ValueError(
+                    "fetch range plan too large: "
+                    f"{total_fetch_range_entries} ranges > "
+                    f"{MAX_FETCH_RANGE_PLAN_ENTRIES}"
+                )
             meta["host"] = host
             meta["rollout"] = rollout_relative_path.as_posix()
             serialized_bytes = _append_bounded_summary_record(
@@ -5901,14 +6254,20 @@ def cmd_rollout_summary(args: argparse.Namespace) -> int:
     try:
         if HOSTS[alias]["kind"] == "local":
             codex_root = _local_codex_root()
+            scan_metadata: dict[str, int] = {}
             with _open_local_rollout_text(codex_root, rollout_relative_path) as handle:
                 source_identity = _rollout_identity_from_stat(os.fstat(handle.fileno()))
                 records = _summarize_rollout_records(
-                    lines=_bounded_text_lines(handle, MAX_ROLLOUT_SUMMARY_SCAN_BYTES),
+                    lines=_bounded_text_lines(
+                        handle,
+                        MAX_ROLLOUT_SUMMARY_SCAN_BYTES,
+                        source_identity.size,
+                    ),
                     keywords=args.keyword,
                     limit=args.limit,
                     tail_records=args.tail_records,
                     max_text_chars=args.max_text_chars,
+                    scan_metadata=scan_metadata,
                 )
                 handle.assert_identity(source_identity, phase="after summary scan")
             records.insert(
@@ -5916,6 +6275,7 @@ def cmd_rollout_summary(args: argparse.Namespace) -> int:
                 _rollout_summary_scan_meta(
                     source_bytes=source_identity.size,
                     scan_bytes=MAX_ROLLOUT_SUMMARY_SCAN_BYTES,
+                    json_error_count=scan_metadata["json_error_count"],
                 ),
             )
         else:
