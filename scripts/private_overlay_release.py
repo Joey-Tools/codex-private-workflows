@@ -52,6 +52,16 @@ def _github_token() -> str:
     return token
 
 
+def _immutable_releases_read_token() -> str:
+    token = os.environ.get("IMMUTABLE_RELEASES_READ_TOKEN", "").strip()
+    if not token:
+        raise ReleaseError(
+            "IMMUTABLE_RELEASES_READ_TOKEN is required for immutable releases "
+            "Administration (read) capability checks"
+        )
+    return token
+
+
 def request_json(
     url: str,
     *,
@@ -81,6 +91,7 @@ def _require_immutable_releases_enabled(repo: str) -> None:
     try:
         settings = request_json(
             f"{API_ROOT}/repos/{repo}/immutable-releases",
+            token=_immutable_releases_read_token(),
             api_version=IMMUTABLE_RELEASES_API_VERSION,
         )
     except HTTPError as error:
@@ -857,6 +868,7 @@ def publish_release(repo: str, sha: str, dist: Path, *, source_event: str = "unk
     )
     if refreshed_draft != selected_draft:
         raise ReleaseError("release draft flag changed after upload")
+    _require_immutable_releases_enabled(repo)
     request_json(
         release_url,
         method="PATCH",

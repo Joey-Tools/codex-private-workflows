@@ -48,6 +48,17 @@ format used by the public base channel:
 - `personal-codex-<full-sha>.tar.gz`
 - `personal-codex-<full-sha>.sha256`
 
+Both release publishing paths require an `IMMUTABLE_RELEASES_READ_TOKEN`
+Actions secret. Configure this long-lived secret with a fine-grained personal
+access token that has repository **Administration (read)** permission for this
+private repository. A workflow that instead generates a short-lived GitHub App
+installation access token must grant the app the same permission and export the
+generated token as `IMMUTABLE_RELEASES_READ_TOKEN`; do not store an expiring
+installation token as the long-lived secret. The publisher uses this token only
+for immutable-release capability checks; ordinary Release reads and all Release
+mutations continue to use the workflow `GITHUB_TOKEN`. The secret is not required
+when the publisher only reuses an already complete immutable Release.
+
 The package builder defaults to the private overlay manifest in this repository:
 
 ```bash
