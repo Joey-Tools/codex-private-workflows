@@ -1184,6 +1184,176 @@ class SessionRetrospectiveTests(unittest.TestCase):
             ],
         )
 
+    def test_remote_host_context_probe_small_row_limit_does_not_bound_active_candidates(
+        self,
+    ) -> None:
+        self.assertEqual(
+            REMOTE_HOST_CONTEXT_PROBE.MAX_SESSION_META_ACTIVE_CANDIDATES,
+            REMOTE_HOST_CONTEXT_PROBE.MAX_SESSION_META_LIMIT + 1,
+        )
+        self.assertEqual(
+            REMOTE_HOST_CONTEXT_PROBE.MAX_SESSION_META_ACTIVE_CANDIDATES,
+            501,
+        )
+        for include_valid in (False, True):
+            with self.subTest(include_valid=include_valid), tempfile.TemporaryDirectory() as raw:
+                root = Path(raw) / ".codex"
+                session_dir = root / "sessions" / "2026" / "05" / "01"
+                for hour in (13, 12, 11):
+                    write_jsonl(
+                        session_dir
+                        / f"rollout-2026-05-01T{hour:02d}-00-00-no-meta.jsonl",
+                        [
+                            {
+                                "type": "response_item",
+                                "timestamp": f"2026-05-01T{hour:02d}:00:00Z",
+                                "payload": {"type": "message", "role": "user"},
+                            }
+                        ],
+                    )
+                if include_valid:
+                    write_jsonl(
+                        session_dir
+                        / "rollout-2026-05-01T10-00-00-usable.jsonl",
+                        [
+                            {
+                                "type": "session_meta",
+                                "timestamp": "2026-05-01T10:00:00Z",
+                                "payload": {
+                                    "id": "usable-session",
+                                    "cwd": "/redacted/repo",
+                                },
+                            }
+                        ],
+                    )
+
+                local_scan = REMOTE_HOST_CONTEXT_PROBE._scan_session_meta_records(
+                    codex_root=root,
+                    dates=[dt.date(2026, 5, 1)],
+                    limit=1,
+                    host="local",
+                )
+                script = REMOTE_HOST_CONTEXT_PROBE._remote_python_script(
+                    {
+                        "mode": "session-meta",
+                        "codex_root": str(root),
+                        "dates": ["2026/05/01"],
+                        "limit": 1,
+                        "session_meta_scan_bytes": (
+                            REMOTE_HOST_CONTEXT_PROBE.MAX_SESSION_META_SCAN_BYTES
+                        ),
+                    }
+                )
+                embedded = subprocess.run(
+                    [sys.executable, "-"],
+                    input=script,
+                    text=True,
+                    capture_output=True,
+                    check=False,
+                )
+
+            expected_session_ids = ["usable-session"] if include_valid else []
+            self.assertFalse(local_scan.truncated)
+            self.assertEqual(
+                [row["session_id"] for row in local_scan.rows],
+                expected_session_ids,
+            )
+            self.assertEqual(embedded.returncode, 0, embedded.stderr)
+            embedded_rows = [
+                json.loads(line)
+                for line in REMOTE_HOST_CONTEXT_PROBE._extract_framed_lines(
+                    embedded.stdout,
+                    begin_marker=(
+                        REMOTE_HOST_CONTEXT_PROBE.REMOTE_SESSION_META_BEGIN
+                    ),
+                    end_marker=REMOTE_HOST_CONTEXT_PROBE.REMOTE_SESSION_META_END,
+                    host="embedded",
+                    command="session-meta",
+                )
+            ]
+            self.assertEqual(
+                [row["session_id"] for row in embedded_rows],
+                expected_session_ids,
+            )
+
+    def test_remote_host_context_probe_candidate_cap_is_distinct_local_and_embedded(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw) / ".codex"
+            session_dir = root / "sessions" / "2026" / "05" / "01"
+            for hour in (13, 12, 11):
+                write_jsonl(
+                    session_dir
+                    / f"rollout-2026-05-01T{hour:02d}-00-00-no-meta.jsonl",
+                    [{"type": "response_item", "payload": {"type": "message"}}],
+                )
+
+            with mock.patch.object(
+                REMOTE_HOST_CONTEXT_PROBE,
+                "MAX_SESSION_META_ACTIVE_CANDIDATES",
+                2,
+            ):
+                local_scan = REMOTE_HOST_CONTEXT_PROBE._scan_session_meta_records(
+                    codex_root=root,
+                    dates=[dt.date(2026, 5, 1)],
+                    limit=1,
+                    host="local",
+                )
+                script = REMOTE_HOST_CONTEXT_PROBE._remote_python_script(
+                    {
+                        "mode": "session-meta",
+                        "codex_root": str(root),
+                        "dates": ["2026/05/01"],
+                        "limit": 1,
+                        "session_meta_scan_bytes": (
+                            REMOTE_HOST_CONTEXT_PROBE.MAX_SESSION_META_SCAN_BYTES
+                        ),
+                    }
+                )
+            embedded = subprocess.run(
+                [sys.executable, "-"],
+                input=script,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+        self.assertTrue(local_scan.truncated)
+        self.assertEqual(local_scan.rows, [])
+        self.assertEqual(
+            local_scan.truncation_reason,
+            REMOTE_HOST_CONTEXT_PROBE.SESSION_META_CANDIDATE_LIMIT_TRUNCATED_REASON,
+        )
+        self.assertEqual(
+            local_scan.truncation_metadata,
+            {"date": "2026/05/01", "candidate_limit": 2},
+        )
+        self.assertEqual(embedded.returncode, 0, embedded.stderr)
+        embedded_rows = [
+            json.loads(line)
+            for line in REMOTE_HOST_CONTEXT_PROBE._extract_framed_lines(
+                embedded.stdout,
+                begin_marker=REMOTE_HOST_CONTEXT_PROBE.REMOTE_SESSION_META_BEGIN,
+                end_marker=REMOTE_HOST_CONTEXT_PROBE.REMOTE_SESSION_META_END,
+                host="embedded",
+                command="session-meta",
+            )
+        ]
+        self.assertEqual(
+            embedded_rows,
+            [
+                {
+                    "candidate_limit": 2,
+                    "date": "2026/05/01",
+                    "kind": "truncation",
+                    "reason": (
+                        REMOTE_HOST_CONTEXT_PROBE.SESSION_META_CANDIDATE_LIMIT_TRUNCATED_REASON
+                    ),
+                }
+            ],
+        )
+
     def test_remote_probe_session_meta_rejects_local_limit_truncation(self) -> None:
         for probe in (REMOTE_PROBE, REMOTE_HOST_CONTEXT_PROBE):
             with self.subTest(probe=probe.__name__):
@@ -1288,6 +1458,102 @@ class SessionRetrospectiveTests(unittest.TestCase):
         self.assertEqual(result, 1)
         self.assertIn("host=miku-bot-dev", stderr.getvalue())
         self.assertIn("session-meta result exceeded --limit=1", stderr.getvalue())
+        self.assertEqual(stdout.getvalue(), "")
+
+    def test_remote_host_context_probe_classifies_local_candidate_limit(self) -> None:
+        scan = REMOTE_HOST_CONTEXT_PROBE.SessionMetaScan(
+            rows=[],
+            truncation_reason=(
+                REMOTE_HOST_CONTEXT_PROBE.SESSION_META_CANDIDATE_LIMIT_TRUNCATED_REASON
+            ),
+            truncation_metadata={"candidate_limit": 17},
+        )
+        stderr = io.StringIO()
+        stdout = io.StringIO()
+
+        with mock.patch.object(
+            REMOTE_HOST_CONTEXT_PROBE,
+            "_local_codex_root",
+            return_value=Path("/unused"),
+        ), mock.patch.object(
+            REMOTE_HOST_CONTEXT_PROBE,
+            "_scan_session_meta_records",
+            return_value=scan,
+        ), mock.patch.object(sys, "stderr", stderr), mock.patch.object(
+            sys,
+            "stdout",
+            stdout,
+        ):
+            result = REMOTE_HOST_CONTEXT_PROBE.cmd_session_meta(
+                types.SimpleNamespace(
+                    host=["local"],
+                    date=["2026/05/01"],
+                    from_date=None,
+                    to_date=None,
+                    limit=1,
+                )
+            )
+
+        self.assertEqual(result, 1)
+        self.assertIn("host=local", stderr.getvalue())
+        self.assertIn("candidate_limit=17", stderr.getvalue())
+        self.assertIn("active candidate safety cap reached", stderr.getvalue())
+        self.assertIn("narrow the date/host scope", stderr.getvalue())
+        self.assertNotIn("raise --limit", stderr.getvalue())
+        self.assertEqual(stdout.getvalue(), "")
+
+    def test_remote_host_context_probe_classifies_remote_candidate_limit_marker(
+        self,
+    ) -> None:
+        marker = json.dumps(
+            {
+                "kind": "truncation",
+                "reason": (
+                    REMOTE_HOST_CONTEXT_PROBE.SESSION_META_CANDIDATE_LIMIT_TRUNCATED_REASON
+                ),
+                "date": "2026/05/01",
+                "candidate_limit": (
+                    REMOTE_HOST_CONTEXT_PROBE.MAX_SESSION_META_ACTIVE_CANDIDATES
+                ),
+            }
+        )
+        remote_output = (
+            f"{REMOTE_HOST_CONTEXT_PROBE.REMOTE_SESSION_META_BEGIN}\n"
+            f"{marker}\n"
+            f"{REMOTE_HOST_CONTEXT_PROBE.REMOTE_SESSION_META_END}\n"
+        )
+        stderr = io.StringIO()
+        stdout = io.StringIO()
+
+        with mock.patch.object(
+            REMOTE_HOST_CONTEXT_PROBE,
+            session_meta_runner_name(REMOTE_HOST_CONTEXT_PROBE),
+            return_value=subprocess.CompletedProcess(
+                args=["ssh"],
+                returncode=0,
+                stdout=remote_output,
+                stderr="",
+            ),
+        ), mock.patch.object(sys, "stderr", stderr), mock.patch.object(
+            sys,
+            "stdout",
+            stdout,
+        ):
+            result = REMOTE_HOST_CONTEXT_PROBE.cmd_session_meta(
+                types.SimpleNamespace(
+                    host=["miku-bot-dev"],
+                    date=["2026/05/01"],
+                    from_date=None,
+                    to_date=None,
+                    limit=1,
+                )
+            )
+
+        self.assertEqual(result, 1)
+        self.assertIn("host=miku-bot-dev", stderr.getvalue())
+        self.assertIn("active candidate safety cap reached", stderr.getvalue())
+        self.assertIn("narrow the date/host scope", stderr.getvalue())
+        self.assertNotIn("raise --limit", stderr.getvalue())
         self.assertEqual(stdout.getvalue(), "")
 
     def test_remote_probe_session_meta_rejects_global_limit_truncation(self) -> None:
@@ -10958,8 +11224,25 @@ class SessionRetrospectiveTests(unittest.TestCase):
                 self.assertIn('os.fdopen(fd, "rb")', script)
                 if (
                     "source_size"
-                    not in inspect.signature(probe._bounded_text_lines).parameters
+                    in inspect.signature(probe._bounded_text_lines).parameters
                 ):
+                    self.assertIn('raw_bytes.find(b"\\n", offset)', script)
+                    self.assertIn(
+                        "min(max_scan_bytes, source_size)",
+                        script,
+                    )
+                    self.assertIn(
+                        "if scanned == source_size:",
+                        script,
+                    )
+                    self.assertIn("if start_offset != 0:", script)
+                    self.assertIn(
+                        'raise ValueError("rollout summary reader must start at byte 0")',
+                        script,
+                    )
+                    self.assertNotIn("raw_bytes.splitlines(keepends=True)", script)
+                    self.assertNotIn('part.endswith(b"\\r")', script)
+                else:
                     self.assertIn("raw_bytes.splitlines(keepends=True)", script)
                     self.assertIn(
                         "if max_scan_bytes and scanned >= max_scan_bytes:\n"

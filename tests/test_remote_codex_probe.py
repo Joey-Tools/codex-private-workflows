@@ -220,12 +220,14 @@ class RemoteHostContextDocumentationTests(unittest.TestCase):
         self.assertIn("`O_NOFOLLOW` and `O_NONBLOCK`", skill)
         self.assertIn("stat-to-open FIFO replacement", skill)
         self.assertIn("cap cuts through a record", skill)
-        self.assertIn("ordinary truncation", skill)
-        self.assertIn("narrow the date or host scope, or raise `--limit`", skill)
+        self.assertIn("`--limit` bounds result rows only", skill)
+        self.assertIn("independent fixed safety cap of 501", skill)
+        self.assertIn("`session_meta_candidate_limit_truncated`", skill)
+        self.assertIn("do not treat a higher `--limit` as the remedy", skill)
         self.assertIn("name-only discovery", skill)
         self.assertIn("fresh descriptor-relative no-follow stats", skill)
         self.assertIn("cached dirent inode", skill)
-        self.assertIn("at most `limit + 1` consumed candidates", skill)
+        self.assertIn("at most 501 consumed active candidates", skill)
         self.assertIn("Do no rollout-open or prefix-proof I/O", skill)
         self.assertIn("exact inventory identity", skill)
         self.assertIn("after the proof read", skill)
@@ -2498,7 +2500,7 @@ class RemoteCodexProbeChunkTests(unittest.TestCase):
                 self.assertEqual(session_ids, ["trusted-session"])
                 self.assertGreater(rollout.stat().st_size, len(original))
 
-    def test_active_prefix_proof_candidate_limit_bounds_capture_io(self) -> None:
+    def test_active_candidate_safety_cap_does_not_follow_row_limit(self) -> None:
         for scope in ("local", "embedded"):
             for scenario in ("valid", "no_meta"):
                 with self.subTest(
@@ -2596,8 +2598,8 @@ class RemoteCodexProbeChunkTests(unittest.TestCase):
                         result = run_scan()
 
                     expected_names = [
-                        Path(rollout_refs[2]).name,
-                        Path(rollout_refs[1]).name,
+                        Path(rollout_refs[index]).name
+                        for index in ((2, 1) if scenario == "valid" else (2, 1, 0))
                     ]
                     self.assertEqual(capture_names, expected_names)
                     self.assertTrue(pread_requests)
@@ -2606,14 +2608,25 @@ class RemoteCodexProbeChunkTests(unittest.TestCase):
                         MODULE.SESSION_META_READ_CHUNK_BYTES,
                     )
                     if scope == "local":
-                        self.assertTrue(result.truncated)
+                        self.assertEqual(result.truncated, scenario == "valid")
+                        self.assertEqual(
+                            result.truncation_reason,
+                            (
+                                MODULE.SESSION_META_LIMIT_TRUNCATED_REASON
+                                if scenario == "valid"
+                                else None
+                            ),
+                        )
                         session_ids = [row["session_id"] for row in result.rows]
                     else:
-                        self.assertEqual(result[-1]["kind"], "truncation")
-                        self.assertEqual(
-                            result[-1]["reason"],
-                            MODULE.SESSION_META_LIMIT_TRUNCATED_REASON,
-                        )
+                        if scenario == "valid":
+                            self.assertEqual(result[-1]["kind"], "truncation")
+                            self.assertEqual(
+                                result[-1]["reason"],
+                                MODULE.SESSION_META_LIMIT_TRUNCATED_REASON,
+                            )
+                        else:
+                            self.assertEqual(result, [])
                         session_ids = [
                             str(record["session_id"])
                             for record in result
@@ -2624,7 +2637,7 @@ class RemoteCodexProbeChunkTests(unittest.TestCase):
                         ["candidate-2"] if scenario == "valid" else [],
                     )
 
-    def test_mixed_valid_and_no_meta_candidates_use_ordinary_truncation(
+    def test_mixed_valid_and_no_meta_candidates_use_result_row_truncation(
         self,
     ) -> None:
         for scope in ("local", "embedded"):
@@ -4024,6 +4037,310 @@ class RemoteCodexProbeChunkTests(unittest.TestCase):
         )
         self.assertEqual(raised.exception.rollout, rollout)
         self.assertNotIn("external-sentinel", str(raised.exception))
+
+    def test_rollout_summary_drops_oversized_bare_cr_suffix_locally_and_embedded(
+        self,
+    ) -> None:
+        line_limit = 1024
+        bare_cr_suffix = json.dumps(
+            {
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_text",
+                            "text": "bare-cr-suffix-must-not-escape",
+                        }
+                    ],
+                },
+            },
+            separators=(",", ":"),
+        ).encode("utf-8")
+        following = json.dumps(
+            {
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_text",
+                            "text": "valid-record-after-oversized-line",
+                        }
+                    ],
+                },
+            },
+            separators=(",", ":"),
+        ).encode("utf-8")
+        payload = (
+            (b"x" * (64 * 1024))
+            + b"\r"
+            + bare_cr_suffix
+            + b"\n"
+            + following
+            + b"\n"
+        )
+
+        with mock.patch.object(
+            MODULE,
+            "MAX_ROLLOUT_SUMMARY_LINE_BYTES",
+            line_limit,
+        ):
+            local_lines = list(
+                MODULE._bounded_text_lines(
+                    io.BytesIO(payload),
+                    len(payload),
+                    len(payload),
+                )
+            )
+        embedded = embedded_probe_namespace(
+            {
+                "mode": "rollout-summary",
+                "rollout": "sessions/2026/05/26/rollout-bare-cr.jsonl",
+                "codex_root": "/tmp/.codex",
+                "summary_keywords": [],
+                "summary_limit": 10,
+                "summary_scan_bytes": len(payload),
+                "summary_line_bytes": line_limit,
+                "summary_tail_records": 0,
+                "summary_max_text_chars": 200,
+            }
+        )
+        embedded_lines = list(
+            embedded["bounded_text_lines"](
+                io.BytesIO(payload),
+                len(payload),
+                len(payload),
+            )
+        )
+
+        expected = ["\n", following.decode("utf-8") + "\n"]
+        self.assertEqual(local_lines, expected)
+        self.assertEqual(embedded_lines, expected)
+        for lines in (local_lines, embedded_lines):
+            serialized = "".join(lines)
+            self.assertNotIn("bare-cr-suffix-must-not-escape", serialized)
+            self.assertIn("valid-record-after-oversized-line", serialized)
+
+    def test_rollout_summary_line_boundaries_match_locally_and_embedded(
+        self,
+    ) -> None:
+        record = json.dumps(
+            {
+                "type": "session_meta",
+                "payload": {"id": "boundary-session", "cwd": "/repo"},
+            },
+            separators=(",", ":"),
+        ).encode("utf-8")
+        lf_record = record + b"\n"
+        crlf_record = record + b"\r\n"
+        capped_after_record = record + b"not-a-record\n"
+        capped_after_lf = lf_record + b"not-a-record\n"
+        cases = (
+            ("lf", lf_record, len(lf_record), [lf_record.decode("utf-8")]),
+            (
+                "crlf",
+                crlf_record,
+                len(crlf_record),
+                [crlf_record.decode("utf-8")],
+            ),
+            (
+                "complete_lf_at_cap",
+                capped_after_lf,
+                len(lf_record),
+                [lf_record.decode("utf-8")],
+            ),
+            (
+                "parseable_prefix_at_cap",
+                capped_after_record,
+                len(record),
+                [],
+            ),
+            (
+                "true_eof_without_lf",
+                record,
+                len(record),
+                [record.decode("utf-8")],
+            ),
+        )
+        embedded = embedded_probe_namespace(
+            {
+                "mode": "rollout-summary",
+                "rollout": "sessions/2026/05/26/rollout-boundaries.jsonl",
+                "codex_root": "/tmp/.codex",
+                "summary_keywords": [],
+                "summary_limit": 10,
+                "summary_scan_bytes": max(len(payload) for _, payload, _, _ in cases),
+                "summary_line_bytes": 4096,
+                "summary_tail_records": 0,
+                "summary_max_text_chars": 200,
+            }
+        )
+
+        for name, payload, scan_bytes, expected in cases:
+            with self.subTest(name=name):
+                local_lines = list(
+                    MODULE._bounded_text_lines(
+                        io.BytesIO(payload),
+                        scan_bytes,
+                        len(payload),
+                    )
+                )
+                embedded_lines = list(
+                    embedded["bounded_text_lines"](
+                        io.BytesIO(payload),
+                        scan_bytes,
+                        len(payload),
+                    )
+                )
+                self.assertEqual(local_lines, expected)
+                self.assertEqual(embedded_lines, expected)
+
+    def test_rollout_summary_size_fallback_is_bytesio_only_locally_and_embedded(
+        self,
+    ) -> None:
+        record = json.dumps(
+            {
+                "type": "session_meta",
+                "payload": {"id": "fallback-session", "cwd": "/repo"},
+            },
+            separators=(",", ":"),
+        ).encode("utf-8")
+        truncated_payload = record + b"\n"
+        embedded = embedded_probe_namespace(
+            {
+                "mode": "rollout-summary",
+                "rollout": "sessions/2026/05/26/rollout-fallback.jsonl",
+                "codex_root": "/tmp/.codex",
+                "summary_keywords": [],
+                "summary_limit": 10,
+                "summary_scan_bytes": len(truncated_payload),
+                "summary_line_bytes": 4096,
+                "summary_tail_records": 0,
+                "summary_max_text_chars": 200,
+            }
+        )
+        readers = (
+            ("local", MODULE._bounded_text_lines),
+            ("embedded", embedded["bounded_text_lines"]),
+        )
+
+        for implementation, reader in readers:
+            with self.subTest(implementation=implementation, snapshot="truncated"):
+                self.assertEqual(
+                    list(reader(io.BytesIO(truncated_payload), len(record))),
+                    [],
+                )
+            with self.subTest(implementation=implementation, snapshot="complete"):
+                self.assertEqual(
+                    list(reader(io.BytesIO(record), len(record))),
+                    [record.decode("utf-8")],
+                )
+            with self.subTest(implementation=implementation, handle="non-bytesio"):
+                handle = io.BufferedReader(io.BytesIO(truncated_payload))
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "rollout summary source size is required",
+                ):
+                    list(reader(handle, len(record)))
+
+    def test_rollout_summary_rejects_nonzero_cursor_locally_and_embedded(
+        self,
+    ) -> None:
+        prefix = b'{"ignored":true}\n'
+        record = json.dumps(
+            {
+                "type": "session_meta",
+                "payload": {"id": "nonzero-session", "cwd": "/repo"},
+            },
+            separators=(",", ":"),
+        ).encode("utf-8")
+        boundary_payload = prefix + record
+        mid_record_offset = record.index(b'"payload"')
+        embedded = embedded_probe_namespace(
+            {
+                "mode": "rollout-summary",
+                "rollout": "sessions/2026/05/26/rollout-nonzero.jsonl",
+                "codex_root": "/tmp/.codex",
+                "summary_keywords": [],
+                "summary_limit": 10,
+                "summary_scan_bytes": len(boundary_payload),
+                "summary_line_bytes": 4096,
+                "summary_tail_records": 0,
+                "summary_max_text_chars": 200,
+            }
+        )
+        readers = (
+            ("local", MODULE._bounded_text_lines),
+            ("embedded", embedded["bounded_text_lines"]),
+        )
+
+        for implementation, reader in readers:
+            for source_mode in ("explicit", "inferred"):
+                for offset_kind, payload, start_offset in (
+                    ("lf-boundary", boundary_payload, len(prefix)),
+                    ("mid-record", record, mid_record_offset),
+                ):
+                    with self.subTest(
+                        implementation=implementation,
+                        source_mode=source_mode,
+                        offset_kind=offset_kind,
+                    ):
+                        handle = io.BytesIO(payload)
+                        handle.seek(start_offset)
+                        args = [handle, len(payload)]
+                        if source_mode == "explicit":
+                            args.append(len(payload))
+                        with self.assertRaisesRegex(
+                            ValueError,
+                            "rollout summary reader must start at byte 0",
+                        ):
+                            list(reader(*args))
+
+    def test_rollout_summary_rejects_unavailable_or_invalid_start_offset_locally_and_embedded(
+        self,
+    ) -> None:
+        class OffsetlessReader:
+            def read(self, _size: int) -> bytes:
+                return b""
+
+        class InvalidOffsetReader(OffsetlessReader):
+            def tell(self) -> int:
+                return 2
+
+        embedded = embedded_probe_namespace(
+            {
+                "mode": "rollout-summary",
+                "rollout": "sessions/2026/05/26/rollout-offset.jsonl",
+                "codex_root": "/tmp/.codex",
+                "summary_keywords": [],
+                "summary_limit": 10,
+                "summary_scan_bytes": 1,
+                "summary_line_bytes": 4096,
+                "summary_tail_records": 0,
+                "summary_max_text_chars": 200,
+            }
+        )
+        readers = (
+            ("local", MODULE._bounded_text_lines),
+            ("embedded", embedded["bounded_text_lines"]),
+        )
+
+        for implementation, reader in readers:
+            with self.subTest(implementation=implementation, offset="unavailable"):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "rollout summary start offset is unavailable",
+                ):
+                    list(reader(OffsetlessReader(), 1, 1))
+            with self.subTest(implementation=implementation, offset="invalid"):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "rollout summary start offset is invalid",
+                ):
+                    list(reader(InvalidOffsetReader(), 1, 1))
 
     def test_private_output_rejects_parent_symlink_swap_after_resolution(self) -> None:
         with tempfile.TemporaryDirectory(dir="/tmp") as temp_dir:
@@ -6680,6 +6997,99 @@ class RemoteCodexProbeChunkTests(unittest.TestCase):
                 self.assertIn(
                     "identity changed after summary scan", error_output.getvalue()
                 )
+
+    def test_local_and_embedded_rollout_summary_match_json_error_count(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            codex_root = Path(temp_dir) / ".codex"
+            rollout_ref = (
+                "sessions/2026/05/26/"
+                "rollout-2026-05-26T10-00-00-malformed.jsonl"
+            )
+            rollout = codex_root / rollout_ref
+            rollout.parent.mkdir(parents=True, exist_ok=True)
+            prefix = json.dumps(
+                {
+                    "type": "response_item",
+                    "payload": {"type": "message", "role": "assistant"},
+                }
+            ).encode("utf-8")
+            suffix = json.dumps(
+                {
+                    "type": "response_item",
+                    "payload": {"type": "message", "role": "user"},
+                }
+            ).encode("utf-8")
+            rollout.write_bytes(prefix + b"\r" + suffix + b"\n")
+
+            local_stdout = io.StringIO()
+            with mock.patch.object(
+                MODULE,
+                "_local_codex_root",
+                return_value=codex_root,
+            ), redirect_stdout(local_stdout):
+                local_rc = MODULE.cmd_rollout_summary(
+                    argparse.Namespace(
+                        host="local",
+                        rollout=rollout_ref,
+                        keyword=[],
+                        limit=20,
+                        tail_records=0,
+                        max_text_chars=80,
+                    )
+                )
+
+            script = MODULE._remote_python_script(
+                {
+                    "mode": "rollout-summary",
+                    "rollout": rollout_ref,
+                    "codex_root": str(codex_root),
+                    "summary_keywords": [],
+                    "summary_limit": 20,
+                    "summary_scan_bytes": MODULE.MAX_ROLLOUT_SUMMARY_SCAN_BYTES,
+                    "summary_line_bytes": MODULE.MAX_ROLLOUT_SUMMARY_LINE_BYTES,
+                    "summary_tail_records": 0,
+                    "summary_max_text_chars": 80,
+                }
+            )
+            embedded = subprocess.run(
+                [sys.executable, "-"],
+                input=script,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+        self.assertEqual(local_rc, 0)
+        self.assertEqual(embedded.returncode, 0, embedded.stderr)
+        local_records = [
+            json.loads(line) for line in local_stdout.getvalue().splitlines()
+        ]
+        embedded_records = MODULE._extract_framed_rollout_summary_records(
+            embedded.stdout,
+            begin_marker=MODULE.REMOTE_ROLLOUT_SUMMARY_BEGIN,
+            end_marker=MODULE.REMOTE_ROLLOUT_SUMMARY_END,
+            host="embedded",
+            command="rollout-summary",
+        )
+        local_meta = next(
+            record for record in local_records if record.get("kind") == "scan_meta"
+        )
+        embedded_meta = next(
+            record
+            for record in embedded_records
+            if record.get("kind") == "scan_meta"
+        )
+        fields = (
+            "json_error_count",
+            "scan_bytes",
+            "scan_truncated",
+            "source_bytes",
+        )
+        self.assertEqual(
+            {field: local_meta[field] for field in fields},
+            {field: embedded_meta[field] for field in fields},
+        )
+        self.assertEqual(local_meta["json_error_count"], 1)
 
     def test_keyword_match_uses_full_signal_without_retaining_raw_text(self) -> None:
         distant_keyword = "distant needle"

@@ -10,6 +10,7 @@ import dataclasses
 import datetime as dt
 import errno
 import hashlib
+import io
 import json
 import os
 import pathlib
@@ -26,6 +27,7 @@ from typing import Any
 
 DATE_FORMAT = "%Y/%m/%d"
 MAX_SESSION_META_LIMIT = 500
+MAX_SESSION_META_ACTIVE_CANDIDATES = MAX_SESSION_META_LIMIT + 1
 MAX_SESSION_META_DATE_COUNT = 31
 MAX_FETCH_ROLLOUT_BYTES = 16 * 1024 * 1024
 MIN_ROLLOUT_CHUNK_BYTES = 64 * 1024
@@ -150,6 +152,9 @@ SUMMARY_SIGNAL_MARKERS = (
 REMOTE_SESSION_META_BEGIN = "__REMOTE_CODEX_PROBE_SESSION_META_BEGIN__"
 REMOTE_SESSION_META_END = "__REMOTE_CODEX_PROBE_SESSION_META_END__"
 SESSION_META_LIMIT_TRUNCATED_REASON = "session_meta_limit_truncated"
+SESSION_META_CANDIDATE_LIMIT_TRUNCATED_REASON = (
+    "session_meta_candidate_limit_truncated"
+)
 SESSION_META_SCAN_TRUNCATED_ERROR = (
     "session-meta scan truncated before metadata was found"
 )
@@ -208,7 +213,21 @@ HOSTS: dict[str, dict[str, str]] = {
 @dataclasses.dataclass(frozen=True)
 class SessionMetaScan:
     rows: list[dict[str, str]]
-    truncated: bool
+    truncated: bool = False
+    truncation_reason: str | None = None
+    truncation_metadata: dict[str, str | int] = dataclasses.field(
+        default_factory=dict
+    )
+
+    def __post_init__(self) -> None:
+        if self.truncation_reason is not None and not self.truncated:
+            object.__setattr__(self, "truncated", True)
+        elif self.truncated and self.truncation_reason is None:
+            object.__setattr__(
+                self,
+                "truncation_reason",
+                SESSION_META_LIMIT_TRUNCATED_REASON,
+            )
 
 
 @dataclasses.dataclass(frozen=True)
@@ -1958,6 +1977,7 @@ import base64
 import collections
 import errno
 import hashlib
+import io
 import json
 import os
 import pathlib
@@ -1982,6 +2002,7 @@ AUTHORIZED_SOURCE_BYTES = None if AUTHORIZED_SOURCE_BYTES_RAW is None else int(A
 OUTPUT_HOST = str(CONFIG.get("output_host", ""))
 SESSION_META_SCAN_BYTES = int(CONFIG.get("session_meta_scan_bytes", 0))
 SESSION_META_PREFIX_PROOF_BYTES = SESSION_META_SCAN_BYTES
+MAX_SESSION_META_ACTIVE_CANDIDATES = {MAX_SESSION_META_ACTIVE_CANDIDATES}
 SESSION_META_READ_CHUNK_BYTES = {SESSION_META_READ_CHUNK_BYTES}
 SESSION_META_SERIALIZED_ROW_BYTES = {MAX_REMOTE_SESSION_META_SERIALIZED_ROW_BYTES}
 SESSION_META_OUTPUT_ROW_TOO_LARGE_ERROR = {SESSION_META_OUTPUT_ROW_TOO_LARGE_ERROR!r}
@@ -2020,6 +2041,7 @@ SUMMARY_SIGNAL_MARKERS = {SUMMARY_SIGNAL_MARKERS!r}
 SESSION_META_BEGIN = {REMOTE_SESSION_META_BEGIN!r}
 SESSION_META_END = {REMOTE_SESSION_META_END!r}
 SESSION_META_LIMIT_TRUNCATED_REASON = {SESSION_META_LIMIT_TRUNCATED_REASON!r}
+SESSION_META_CANDIDATE_LIMIT_TRUNCATED_REASON = {SESSION_META_CANDIDATE_LIMIT_TRUNCATED_REASON!r}
 SESSION_META_SCAN_TRUNCATED_ERROR = {SESSION_META_SCAN_TRUNCATED_ERROR!r}
 FETCH_ROLLOUT_BEGIN = {REMOTE_FETCH_ROLLOUT_BEGIN!r}
 FETCH_ROLLOUT_END = {REMOTE_FETCH_ROLLOUT_END!r}
@@ -3250,53 +3272,74 @@ def read_bounded_session_meta(handle, max_scan_bytes):
     )
 
 
-def bounded_text_lines(handle, max_scan_bytes):
+def bounded_text_lines(handle, max_scan_bytes, source_size=None):
+    if source_size is None:
+        if not isinstance(handle, io.BytesIO):
+            raise ValueError("rollout summary source size is required")
+        source_size = len(handle.getbuffer())
+    if not isinstance(source_size, int) or isinstance(source_size, bool) or source_size < 0:
+        raise ValueError("rollout summary source size is invalid")
+    try:
+        start_offset = handle.tell()
+    except (AttributeError, OSError, TypeError, ValueError) as error:
+        raise ValueError("rollout summary start offset is unavailable") from error
+    if (
+        not isinstance(start_offset, int)
+        or isinstance(start_offset, bool)
+        or start_offset < 0
+        or start_offset > source_size
+    ):
+        raise ValueError("rollout summary start offset is invalid")
+    if start_offset != 0:
+        raise ValueError("rollout summary reader must start at byte 0")
     scanned = 0
     buffer = bytearray()
     dropping_oversized_line = False
     chunk_bytes = 64 * 1024
 
-    def line_ended(part):
-        return part.endswith(b"\\n") or part.endswith(b"\\r")
+    scan_limit = (
+        min(max_scan_bytes, source_size)
+        if max_scan_bytes
+        else source_size
+    )
 
-    while True:
-        if max_scan_bytes and scanned >= max_scan_bytes:
-            if dropping_oversized_line:
-                yield "\\n"
-            elif buffer:
-                yield bytes(buffer).decode("utf-8", "replace")
-            return
-        remaining = max_scan_bytes - scanned if max_scan_bytes else 0
-        read_size = min(chunk_bytes, remaining) if remaining else chunk_bytes
+    while scanned < scan_limit:
+        read_size = min(chunk_bytes, scan_limit - scanned)
         chunk = handle.read(read_size)
         if not chunk:
-            if dropping_oversized_line:
-                yield "\\n"
-            elif buffer:
-                yield bytes(buffer).decode("utf-8", "replace")
-            return
+            break
         if isinstance(chunk, str):
             raw_bytes = chunk.encode("utf-8", "surrogatepass")
         else:
             raw_bytes = bytes(chunk)
         scanned += len(raw_bytes)
-        for part in raw_bytes.splitlines(keepends=True):
+        offset = 0
+        while offset < len(raw_bytes):
+            line_end = raw_bytes.find(b"\\n", offset)
+            part_end = len(raw_bytes) if line_end < 0 else line_end + 1
+            part = raw_bytes[offset:part_end]
             if dropping_oversized_line:
-                if line_ended(part):
+                if line_end >= 0:
                     yield "\\n"
                     dropping_oversized_line = False
-                continue
-            if len(buffer) + len(part) > SUMMARY_LINE_BYTES:
+            elif len(buffer) + len(part) > SUMMARY_LINE_BYTES:
                 buffer.clear()
                 dropping_oversized_line = True
-                if line_ended(part):
+                if line_end >= 0:
                     yield "\\n"
                     dropping_oversized_line = False
-                continue
-            buffer.extend(part)
-            if line_ended(part):
-                yield bytes(buffer).decode("utf-8", "replace")
-                buffer.clear()
+            else:
+                buffer.extend(part)
+                if line_end >= 0:
+                    yield bytes(buffer).decode("utf-8", "replace")
+                    buffer.clear()
+            offset = part_end
+
+    if scanned == source_size:
+        if dropping_oversized_line:
+            yield "\\n"
+        elif buffer:
+            yield bytes(buffer).decode("utf-8", "replace")
 
 
 def summarize_records(lines, line_offset=0):
@@ -3674,6 +3717,7 @@ def summarize_rollout():
     last_assistant_record = None
     last_user_record = None
     last_task_complete_record = None
+    json_error_count = 0
 
     try:
         handle = open_rollout_text(rel)
@@ -3694,10 +3738,14 @@ def summarize_rollout():
                 "rollout unreadable" if isinstance(error, OSError) else str(error)
             )
             return
-        for line_no, line in enumerate(bounded_text_lines(handle, SUMMARY_SCAN_BYTES), 1):
+        for line_no, line in enumerate(
+            bounded_text_lines(handle, SUMMARY_SCAN_BYTES, source_identity["size"]),
+            1,
+        ):
             try:
                 obj = json.loads(line)
             except json.JSONDecodeError:
+                json_error_count += 1
                 continue
             timestamp = str(obj.get("timestamp", ""))
             record = None
@@ -3789,12 +3837,14 @@ def summarize_rollout():
     append_serialized(
         {{
             "kind": "scan_meta",
+            "json_error_count": json_error_count,
             "line": 0,
             "scan_bytes": SUMMARY_SCAN_BYTES,
             "scan_truncated": bool(SUMMARY_SCAN_BYTES and source_identity["size"] > SUMMARY_SCAN_BYTES),
             "source_bytes": source_identity["size"],
             "text": "scan_truncated=" + str(bool(SUMMARY_SCAN_BYTES and source_identity["size"] > SUMMARY_SCAN_BYTES)).lower()
                 + " scan_bytes=" + str(SUMMARY_SCAN_BYTES)
+                + " json_error_count=" + str(json_error_count)
                 + " source_bytes=" + str(source_identity["size"]),
             "timestamp": "",
         }}
@@ -3862,7 +3912,7 @@ def iter_session_meta():
     except (OSError, ValueError):
         session_directory_unreadable()
 
-    prefix_proof_candidate_limit = LIMIT + 1
+    prefix_proof_candidate_limit = MAX_SESSION_META_ACTIVE_CANDIDATES
     prefix_proof_candidate_captures = 0
 
     def consume_active_candidate_budget():
@@ -3933,7 +3983,7 @@ def iter_session_meta():
                 seen_rollout_paths.add(rel_key)
                 allow_append = session_meta_allows_append(rel)
                 if allow_append and not consume_active_candidate_budget():
-                    if emit_session_meta_item({{"kind": "truncation", "reason": SESSION_META_LIMIT_TRUNCATED_REASON, "date": date_text, "limit": LIMIT}}):
+                    if emit_session_meta_item({{"kind": "truncation", "reason": SESSION_META_CANDIDATE_LIMIT_TRUNCATED_REASON, "date": date_text, "candidate_limit": MAX_SESSION_META_ACTIVE_CANDIDATES}}):
                         print(SESSION_META_END)
                     return True
                 try:
@@ -4213,12 +4263,12 @@ def _scan_session_meta_records(
     try:
         root_fd = _open_pinned_codex_root(codex_root)
     except FileNotFoundError:
-        return SessionMetaScan(rows=[], truncated=False)
+        return SessionMetaScan(rows=[])
     except (OSError, ValueError) as exc:
         raise SessionMetaRolloutError("session directory unreadable") from exc
     rows: list[dict[str, str]] = []
     seen_rollout_paths: set[str] = set()
-    prefix_proof_candidate_limit = limit + 1
+    prefix_proof_candidate_limit = MAX_SESSION_META_ACTIVE_CANDIDATES
     prefix_proof_candidate_captures = 0
 
     def consume_active_candidate_budget() -> bool:
@@ -4299,7 +4349,16 @@ def _scan_session_meta_records(
                 seen_rollout_paths.add(rollout_relative_key)
                 allow_append = _session_meta_allows_append(rollout_relative_path)
                 if allow_append and not consume_active_candidate_budget():
-                    return SessionMetaScan(rows=rows, truncated=True)
+                    return SessionMetaScan(
+                        rows=rows,
+                        truncation_reason=(
+                            SESSION_META_CANDIDATE_LIMIT_TRUNCATED_REASON
+                        ),
+                        truncation_metadata={
+                            "date": date_value.strftime(DATE_FORMAT),
+                            "candidate_limit": MAX_SESSION_META_ACTIVE_CANDIDATES,
+                        },
+                    )
                 try:
                     handle = _open_pinned_rollout_text_from_parent_fd(
                         directory_fd,
@@ -4402,7 +4461,14 @@ def _scan_session_meta_records(
                         )
                     continue
                 if limit and len(rows) >= limit:
-                    return SessionMetaScan(rows=rows, truncated=True)
+                    return SessionMetaScan(
+                        rows=rows,
+                        truncation_reason=SESSION_META_LIMIT_TRUNCATED_REASON,
+                        truncation_metadata={
+                            "date": date_value.strftime(DATE_FORMAT),
+                            "limit": limit,
+                        },
+                    )
                 output_row = _validated_session_meta_output_row(
                     date=date_value.strftime(DATE_FORMAT),
                     session_id=session_id,
@@ -4437,7 +4503,7 @@ def _scan_session_meta_records(
                 return truncated
     finally:
         os.close(root_fd)
-    return SessionMetaScan(rows=rows, truncated=False)
+    return SessionMetaScan(rows=rows)
 
 
 def _iter_session_meta_records(
@@ -4734,10 +4800,20 @@ def _session_meta_row_from_item(item: dict[str, Any], *, host: str) -> dict[str,
     }
 
 
-def _is_session_meta_truncation_item(item: dict[str, Any]) -> bool:
+def _is_session_meta_limit_truncation_item(item: dict[str, Any]) -> bool:
     return (
         item.get("kind") == "truncation"
         and item.get("reason") == SESSION_META_LIMIT_TRUNCATED_REASON
+    )
+
+
+def _is_session_meta_candidate_limit_truncation_item(
+    item: dict[str, Any],
+) -> bool:
+    return (
+        item.get("kind") == "truncation"
+        and item.get("reason")
+        == SESSION_META_CANDIDATE_LIMIT_TRUNCATED_REASON
     )
 
 
@@ -4756,6 +4832,20 @@ def _session_meta_limit_error(host: str, limit: int) -> int:
     print(f"host={host}", file=sys.stderr)
     print(
         f"error=session-meta result exceeded --limit={limit}; narrow the date/host scope or raise --limit up to {MAX_SESSION_META_LIMIT}",
+        file=sys.stderr,
+    )
+    return 1
+
+
+def _session_meta_candidate_limit_error(
+    host: str,
+    candidate_limit: int,
+) -> int:
+    print(f"host={host}", file=sys.stderr)
+    print(
+        "error=session-meta active candidate safety cap reached "
+        f"(candidate_limit={candidate_limit}); narrow the date/host scope "
+        "before drawing a coverage conclusion",
         file=sys.stderr,
     )
     return 1
@@ -4825,7 +4915,20 @@ def cmd_session_meta(args: argparse.Namespace) -> int:
                 print(f"host={alias}", file=sys.stderr)
                 print(f"error={error}", file=sys.stderr)
                 return 1
-            if scan.truncated:
+            if (
+                scan.truncation_reason
+                == SESSION_META_CANDIDATE_LIMIT_TRUNCATED_REASON
+            ):
+                return _session_meta_candidate_limit_error(
+                    alias,
+                    int(
+                        scan.truncation_metadata.get(
+                            "candidate_limit",
+                            MAX_SESSION_META_ACTIVE_CANDIDATES,
+                        )
+                    ),
+                )
+            if scan.truncation_reason == SESSION_META_LIMIT_TRUNCATED_REASON:
                 return _session_meta_limit_error(alias, args.limit)
             host_rows = scan.rows
         else:
@@ -4872,8 +4975,22 @@ def cmd_session_meta(args: argparse.Namespace) -> int:
                     print(f"host={alias}", file=sys.stderr)
                     print(f"error={error}", file=sys.stderr)
                     return 1
-                if _is_session_meta_truncation_item(item):
+                if _is_session_meta_limit_truncation_item(item):
                     return _session_meta_limit_error(alias, args.limit)
+                if _is_session_meta_candidate_limit_truncation_item(item):
+                    candidate_limit = item.get("candidate_limit")
+                    if not isinstance(candidate_limit, int) or candidate_limit < 1:
+                        print(f"host={alias}", file=sys.stderr)
+                        print(
+                            "error=remote helper returned invalid session-meta "
+                            "candidate-limit metadata",
+                            file=sys.stderr,
+                        )
+                        return 1
+                    return _session_meta_candidate_limit_error(
+                        alias,
+                        candidate_limit,
+                    )
                 session_meta_error = _session_meta_error_from_item(item)
                 if session_meta_error is not None:
                     print(f"host={alias}", file=sys.stderr)
@@ -5438,53 +5555,78 @@ def _read_bounded_session_meta(
     )
 
 
-def _bounded_text_lines(handle: Any, max_scan_bytes: int) -> Iterable[str]:
+def _bounded_text_lines(
+    handle: Any,
+    max_scan_bytes: int,
+    source_size: int | None = None,
+) -> Iterable[str]:
+    if source_size is None:
+        if not isinstance(handle, io.BytesIO):
+            raise ValueError("rollout summary source size is required")
+        source_size = len(handle.getbuffer())
+    if not isinstance(source_size, int) or isinstance(source_size, bool) or source_size < 0:
+        raise ValueError("rollout summary source size is invalid")
+    try:
+        start_offset = handle.tell()
+    except (AttributeError, OSError, TypeError, ValueError) as error:
+        raise ValueError("rollout summary start offset is unavailable") from error
+    if (
+        not isinstance(start_offset, int)
+        or isinstance(start_offset, bool)
+        or start_offset < 0
+        or start_offset > source_size
+    ):
+        raise ValueError("rollout summary start offset is invalid")
+    if start_offset != 0:
+        raise ValueError("rollout summary reader must start at byte 0")
     scanned = 0
     buffer = bytearray()
     dropping_oversized_line = False
     chunk_bytes = 64 * 1024
 
-    def line_ended(part: bytes) -> bool:
-        return part.endswith(b"\n") or part.endswith(b"\r")
+    scan_limit = (
+        min(max_scan_bytes, source_size)
+        if max_scan_bytes
+        else source_size
+    )
 
-    while True:
-        if max_scan_bytes and scanned >= max_scan_bytes:
-            if dropping_oversized_line:
-                yield "\n"
-            elif buffer:
-                yield bytes(buffer).decode("utf-8", "replace")
-            return
-        remaining = max_scan_bytes - scanned if max_scan_bytes else 0
-        read_size = min(chunk_bytes, remaining) if remaining else chunk_bytes
+    while scanned < scan_limit:
+        read_size = min(chunk_bytes, scan_limit - scanned)
         chunk = handle.read(read_size)
         if not chunk:
-            if dropping_oversized_line:
-                yield "\n"
-            elif buffer:
-                yield bytes(buffer).decode("utf-8", "replace")
-            return
+            break
         if isinstance(chunk, str):
             raw_bytes = chunk.encode("utf-8", "surrogatepass")
         else:
             raw_bytes = bytes(chunk)
         scanned += len(raw_bytes)
-        for part in raw_bytes.splitlines(keepends=True):
+        offset = 0
+        while offset < len(raw_bytes):
+            line_end = raw_bytes.find(b"\n", offset)
+            part_end = len(raw_bytes) if line_end < 0 else line_end + 1
+            part = raw_bytes[offset:part_end]
             if dropping_oversized_line:
-                if line_ended(part):
+                if line_end >= 0:
                     yield "\n"
                     dropping_oversized_line = False
-                continue
-            if len(buffer) + len(part) > MAX_ROLLOUT_SUMMARY_LINE_BYTES:
+            elif len(buffer) + len(part) > MAX_ROLLOUT_SUMMARY_LINE_BYTES:
                 buffer.clear()
                 dropping_oversized_line = True
-                if line_ended(part):
+                if line_end >= 0:
                     yield "\n"
                     dropping_oversized_line = False
-                continue
-            buffer.extend(part)
-            if line_ended(part):
-                yield bytes(buffer).decode("utf-8", "replace")
-                buffer.clear()
+            else:
+                buffer.extend(part)
+                if line_end >= 0:
+                    yield bytes(buffer).decode("utf-8", "replace")
+                    buffer.clear()
+            offset = part_end
+
+    if scanned == source_size:
+        if dropping_oversized_line:
+            yield "\n"
+        elif buffer:
+            yield bytes(buffer).decode("utf-8", "replace")
 
 
 def _summarize_rollout_records(
@@ -5495,6 +5637,7 @@ def _summarize_rollout_records(
     tail_records: int,
     max_text_chars: int,
     line_offset: int = 0,
+    scan_metadata: dict[str, int] | None = None,
 ) -> list[dict[str, Any]]:
     search_keywords = [value.casefold() for value in keywords if value]
     matched: list[dict[str, Any]] = []
@@ -5506,11 +5649,13 @@ def _summarize_rollout_records(
     last_assistant_record: dict[str, Any] | None = None
     last_user_record: dict[str, Any] | None = None
     last_task_complete_record: dict[str, Any] | None = None
+    json_error_count = 0
 
     for line_no, line in enumerate(lines, line_offset + 1):
         try:
             obj = json.loads(line)
         except json.JSONDecodeError:
+            json_error_count += 1
             continue
         timestamp = str(obj.get("timestamp", ""))
         record: dict[str, Any] | None = None
@@ -5632,18 +5777,26 @@ def _summarize_rollout_records(
     append(last_assistant_record)
     if last_assistant_record is None:
         append(last_task_complete_record)
+    if scan_metadata is not None:
+        scan_metadata["json_error_count"] = json_error_count
     return result
 
 
-def _rollout_summary_scan_meta(*, source_bytes: int, scan_bytes: int) -> dict[str, Any]:
+def _rollout_summary_scan_meta(
+    *,
+    source_bytes: int,
+    scan_bytes: int,
+    json_error_count: int = 0,
+) -> dict[str, Any]:
     scan_truncated = bool(scan_bytes and source_bytes > scan_bytes)
     return {
         "kind": "scan_meta",
+        "json_error_count": json_error_count,
         "line": 0,
         "scan_bytes": scan_bytes,
         "scan_truncated": scan_truncated,
         "source_bytes": source_bytes,
-        "text": f"scan_truncated={str(scan_truncated).lower()} scan_bytes={scan_bytes} source_bytes={source_bytes}",
+        "text": f"scan_truncated={str(scan_truncated).lower()} scan_bytes={scan_bytes} json_error_count={json_error_count} source_bytes={source_bytes}",
         "timestamp": "",
     }
 
@@ -5901,14 +6054,20 @@ def cmd_rollout_summary(args: argparse.Namespace) -> int:
     try:
         if HOSTS[alias]["kind"] == "local":
             codex_root = _local_codex_root()
+            scan_metadata: dict[str, int] = {}
             with _open_local_rollout_text(codex_root, rollout_relative_path) as handle:
                 source_identity = _rollout_identity_from_stat(os.fstat(handle.fileno()))
                 records = _summarize_rollout_records(
-                    lines=_bounded_text_lines(handle, MAX_ROLLOUT_SUMMARY_SCAN_BYTES),
+                    lines=_bounded_text_lines(
+                        handle,
+                        MAX_ROLLOUT_SUMMARY_SCAN_BYTES,
+                        source_identity.size,
+                    ),
                     keywords=args.keyword,
                     limit=args.limit,
                     tail_records=args.tail_records,
                     max_text_chars=args.max_text_chars,
+                    scan_metadata=scan_metadata,
                 )
                 handle.assert_identity(source_identity, phase="after summary scan")
             records.insert(
@@ -5916,6 +6075,7 @@ def cmd_rollout_summary(args: argparse.Namespace) -> int:
                 _rollout_summary_scan_meta(
                     source_bytes=source_identity.size,
                     scan_bytes=MAX_ROLLOUT_SUMMARY_SCAN_BYTES,
+                    json_error_count=scan_metadata["json_error_count"],
                 ),
             )
         else:
