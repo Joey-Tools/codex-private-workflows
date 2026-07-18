@@ -561,6 +561,8 @@ def _open_pinned_regular_file_from_fd(
     RolloutPrefixProof | None,
     bytes | None,
 ]:
+    initial_append_anchor = allow_append and expected_identity is None
+    allow_inventory_append = allow_append and not initial_append_anchor
     if name in ("", ".", "..") or "/" in name:
         raise ValueError("rollout path has an invalid file name")
     try:
@@ -576,7 +578,7 @@ def _open_pinned_regular_file_from_fd(
         _assert_rollout_inventory_identity(
             observed_inventory_identity,
             inventory_identity,
-            allow_append=allow_append,
+            allow_append=allow_inventory_append,
             phase="after enumeration",
         )
     if stat.S_ISLNK(observed_stat.st_mode):
@@ -614,17 +616,22 @@ def _open_pinned_regular_file_from_fd(
             _assert_rollout_inventory_identity(
                 opened_inventory_identity,
                 observed_inventory_identity,
-                allow_append=allow_append,
+                allow_append=allow_inventory_append,
                 phase="during open",
             )
         opened = _rollout_identity_from_stat(opened_stat)
-        if expected_identity is None and allow_append:
+        if initial_append_anchor:
             current, snapshot_identity, prefix_proof, verified_snapshot = (
                 _capture_initial_append_only_rollout_checkpoint(
                     fd,
                     parent_fd,
                     name,
                     opened,
+                    inventory_identity=(
+                        inventory_identity
+                        if inventory_identity is not None
+                        else observed_inventory_identity
+                    ),
                     phase="during open",
                 )
             )
@@ -1097,39 +1104,60 @@ def _capture_initial_append_only_rollout_checkpoint(
     name: str,
     expected: RolloutIdentity,
     *,
+    inventory_identity: RolloutInventoryIdentity,
     phase: str,
 ) -> tuple[RolloutIdentity, RolloutIdentity, RolloutPrefixProof, bytes]:
-    descriptor_identity = _rollout_identity_from_stat(os.fstat(fd))
-    _assert_append_only_rollout_identity(
-        descriptor_identity,
-        expected,
+    descriptor_stat = os.fstat(fd)
+    descriptor_identity = _rollout_identity_from_stat(descriptor_stat)
+    _assert_rollout_inventory_identity(
+        _rollout_inventory_identity_from_stat(descriptor_stat),
+        inventory_identity,
+        allow_append=False,
         phase=phase,
     )
+    _assert_rollout_identity(descriptor_identity, expected, phase=phase)
     try:
-        current = _rollout_identity_from_stat(
-            os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
-        )
+        current_stat = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
     except (FileNotFoundError, ValueError) as error:
         raise ValueError(f"rollout identity changed {phase}") from error
-    _assert_append_only_rollout_identity(current, descriptor_identity, phase=phase)
+    _assert_rollout_inventory_identity(
+        _rollout_inventory_identity_from_stat(current_stat),
+        inventory_identity,
+        allow_append=False,
+        phase=phase,
+    )
+    current = _rollout_identity_from_stat(current_stat)
+    _assert_rollout_identity(current, expected, phase=phase)
     prefix_proof, _snapshot = _read_rollout_prefix_proof(
         fd,
-        min(descriptor_identity.size, MAX_SESSION_META_SCAN_BYTES),
+        min(expected.size, MAX_SESSION_META_SCAN_BYTES),
         phase=phase,
     )
-    descriptor_after = _rollout_identity_from_stat(os.fstat(fd))
-    _assert_append_only_rollout_identity(descriptor_after, current, phase=phase)
+    descriptor_after_stat = os.fstat(fd)
+    _assert_rollout_inventory_identity(
+        _rollout_inventory_identity_from_stat(descriptor_after_stat),
+        inventory_identity,
+        allow_append=False,
+        phase=phase,
+    )
+    descriptor_after = _rollout_identity_from_stat(descriptor_after_stat)
+    _assert_rollout_identity(descriptor_after, expected, phase=phase)
     try:
-        current_after = _rollout_identity_from_stat(
-            os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+        current_after_stat = os.stat(
+            name,
+            dir_fd=parent_fd,
+            follow_symlinks=False,
         )
     except (FileNotFoundError, ValueError) as error:
         raise ValueError(f"rollout identity changed {phase}") from error
-    _assert_append_only_rollout_identity(
-        current_after,
-        descriptor_after,
+    _assert_rollout_inventory_identity(
+        _rollout_inventory_identity_from_stat(current_after_stat),
+        inventory_identity,
+        allow_append=False,
         phase=phase,
     )
+    current_after = _rollout_identity_from_stat(current_after_stat)
+    _assert_rollout_identity(current_after, expected, phase=phase)
     return _assert_append_only_rollout_checkpoint(
         fd,
         parent_fd,
@@ -2075,6 +2103,8 @@ def open_pinned_regular_file_from_fd(
     inventory_identity=None,
     allow_append=False,
 ):
+    initial_append_anchor = allow_append and expected_identity is None
+    allow_inventory_append = allow_append and not initial_append_anchor
     if name in ("", ".", "..") or "/" in name:
         raise ValueError("rollout path has an invalid file name")
     try:
@@ -2090,7 +2120,7 @@ def open_pinned_regular_file_from_fd(
         assert_rollout_inventory_identity(
             observed_inventory_identity,
             inventory_identity,
-            allow_append,
+            allow_inventory_append,
             "after enumeration",
         )
     if stat.S_ISLNK(observed_stat.st_mode):
@@ -2128,17 +2158,22 @@ def open_pinned_regular_file_from_fd(
             assert_rollout_inventory_identity(
                 opened_inventory_identity,
                 observed_inventory_identity,
-                allow_append,
+                allow_inventory_append,
                 "during open",
             )
         opened = rollout_identity_from_stat(opened_stat)
-        if expected_identity is None and allow_append:
+        if initial_append_anchor:
             current, snapshot_identity, prefix_proof, verified_snapshot = (
                 capture_initial_append_only_rollout_checkpoint(
                     fd,
                     parent_fd,
                     name,
                     opened,
+                    (
+                        inventory_identity
+                        if inventory_identity is not None
+                        else observed_inventory_identity
+                    ),
                     "during open",
                 )
             )
@@ -2533,31 +2568,60 @@ def capture_initial_append_only_rollout_checkpoint(
     parent_fd,
     name,
     expected,
+    inventory_identity,
     phase,
 ):
-    descriptor_identity = rollout_identity_from_stat(os.fstat(fd))
-    assert_append_only_rollout_identity(descriptor_identity, expected, phase)
+    descriptor_stat = os.fstat(fd)
+    descriptor_identity = rollout_identity_from_stat(descriptor_stat)
+    assert_rollout_inventory_identity(
+        rollout_inventory_identity_from_stat(descriptor_stat),
+        inventory_identity,
+        False,
+        phase,
+    )
+    assert_rollout_identity(descriptor_identity, expected, phase)
     try:
-        current = rollout_identity_from_stat(
-            os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
-        )
+        current_stat = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
     except (FileNotFoundError, ValueError) as error:
         raise ValueError("rollout identity changed " + phase) from error
-    assert_append_only_rollout_identity(current, descriptor_identity, phase)
+    assert_rollout_inventory_identity(
+        rollout_inventory_identity_from_stat(current_stat),
+        inventory_identity,
+        False,
+        phase,
+    )
+    current = rollout_identity_from_stat(current_stat)
+    assert_rollout_identity(current, expected, phase)
     prefix_proof, _snapshot = read_rollout_prefix_proof(
         fd,
-        min(descriptor_identity["size"], SESSION_META_PREFIX_PROOF_BYTES),
+        min(expected["size"], SESSION_META_PREFIX_PROOF_BYTES),
         phase=phase,
     )
-    descriptor_after = rollout_identity_from_stat(os.fstat(fd))
-    assert_append_only_rollout_identity(descriptor_after, current, phase)
+    descriptor_after_stat = os.fstat(fd)
+    assert_rollout_inventory_identity(
+        rollout_inventory_identity_from_stat(descriptor_after_stat),
+        inventory_identity,
+        False,
+        phase,
+    )
+    descriptor_after = rollout_identity_from_stat(descriptor_after_stat)
+    assert_rollout_identity(descriptor_after, expected, phase)
     try:
-        current_after = rollout_identity_from_stat(
-            os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+        current_after_stat = os.stat(
+            name,
+            dir_fd=parent_fd,
+            follow_symlinks=False,
         )
     except (FileNotFoundError, ValueError) as error:
         raise ValueError("rollout identity changed " + phase) from error
-    assert_append_only_rollout_identity(current_after, descriptor_after, phase)
+    assert_rollout_inventory_identity(
+        rollout_inventory_identity_from_stat(current_after_stat),
+        inventory_identity,
+        False,
+        phase,
+    )
+    current_after = rollout_identity_from_stat(current_after_stat)
+    assert_rollout_identity(current_after, expected, phase)
     return assert_append_only_rollout_checkpoint(
         fd,
         parent_fd,
