@@ -10,7 +10,8 @@ import json
 import os
 from pathlib import Path
 import sys
-from typing import Any
+from typing import Any, Callable
+from urllib.error import HTTPError
 from urllib.parse import quote
 from urllib.request import Request, urlopen
 import re
@@ -29,6 +30,8 @@ PERSONAL_CODEX_ASSET_RE = re.compile(
 ASSET_DIGEST_RE = re.compile(r"sha256:[0-9a-f]{64}")
 MAX_RELEASE_ASSET_BYTES = 64 * 1024 * 1024
 RELEASE_ASSET_READ_CHUNK_BYTES = 1024 * 1024
+DEFAULT_GITHUB_API_VERSION = "2022-11-28"
+IMMUTABLE_RELEASES_API_VERSION = "2026-03-10"
 
 
 class ReleaseError(RuntimeError):
@@ -55,12 +58,13 @@ def request_json(
     method: str = "GET",
     payload: dict[str, Any] | None = None,
     token: str | None = None,
+    api_version: str = DEFAULT_GITHUB_API_VERSION,
 ) -> Any:
     data = None
     headers = {
         "Accept": "application/vnd.github+json",
         "Authorization": f"Bearer {token or _github_token()}",
-        "X-GitHub-Api-Version": "2022-11-28",
+        "X-GitHub-Api-Version": api_version,
     }
     if payload is not None:
         data = json.dumps(payload).encode("utf-8")
@@ -71,6 +75,20 @@ def request_json(
         if not body:
             return {}
         return json.loads(body.decode("utf-8"))
+
+
+def _require_immutable_releases_enabled(repo: str) -> None:
+    try:
+        settings = request_json(
+            f"{API_ROOT}/repos/{repo}/immutable-releases",
+            api_version=IMMUTABLE_RELEASES_API_VERSION,
+        )
+    except HTTPError as error:
+        raise ReleaseError(
+            f"immutable releases preflight failed for {repo}: HTTP {error.code}"
+        ) from error
+    if not isinstance(settings, dict) or settings.get("enabled") is not True:
+        raise ReleaseError(f"immutable releases are not enabled for repository {repo}")
 
 
 def parse_timestamp(raw: str) -> dt.datetime:
@@ -568,12 +586,13 @@ def _matching_release_candidates(
     return complete_candidates, incomplete_candidates, draft_candidates
 
 
-def create_or_find_release(
+def _create_or_find_release(
     repo: str,
     sha: str,
     asset_names: set[str],
     *,
     source_event: str = "unknown",
+    before_create: Callable[[], None],
 ) -> tuple[dict[str, Any], set[str], bool]:
     if asset_names != _expected_asset_names(sha):
         raise ReleaseError("release asset names do not match the target commit")
@@ -620,6 +639,7 @@ def create_or_find_release(
 
     timestamp = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%d-%H%M%S")
     tag = f"{RELEASE_TAG_PREFIX}{timestamp}-{sha[:7]}"
+    before_create()
     release = request_json(
         f"{API_ROOT}/repos/{repo}/releases",
         method="POST",
@@ -646,6 +666,22 @@ def create_or_find_release(
     if not isinstance(release.get("assets"), list):
         raise ReleaseError("release creation API returned no release asset array")
     return release, set(), False
+
+
+def create_or_find_release(
+    repo: str,
+    sha: str,
+    asset_names: set[str],
+    *,
+    source_event: str = "unknown",
+) -> tuple[dict[str, Any], set[str], bool]:
+    return _create_or_find_release(
+        repo,
+        sha,
+        asset_names,
+        source_event=source_event,
+        before_create=lambda: _require_immutable_releases_enabled(repo),
+    )
 
 
 def release_complete(repo: str, sha: str) -> bool:
@@ -709,11 +745,21 @@ def publish_release(repo: str, sha: str, dist: Path, *, source_event: str = "unk
         asset.name: _read_local_asset_content(asset) for asset in assets
     }
     expected_asset_names = set(expected_asset_content)
-    release, _uploaded_asset_names, done = create_or_find_release(
+    immutable_releases_verified = False
+
+    def ensure_immutable_releases_enabled() -> None:
+        nonlocal immutable_releases_verified
+        if immutable_releases_verified:
+            return
+        _require_immutable_releases_enabled(repo)
+        immutable_releases_verified = True
+
+    release, _uploaded_asset_names, done = _create_or_find_release(
         repo,
         sha,
         expected_asset_names,
         source_event=source_event,
+        before_create=ensure_immutable_releases_enabled,
     )
 
     tag_name = release.get("tag_name")
@@ -755,6 +801,7 @@ def publish_release(repo: str, sha: str, dist: Path, *, source_event: str = "unk
             f"recreation: {tag_name}"
         )
     repair_assets = _validated_repair_assets(release)
+    ensure_immutable_releases_enabled()
     for asset_id, stale_asset in repair_assets:
         asset_name = stale_asset.get("name", "unknown")
         request_json(

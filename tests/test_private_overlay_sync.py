@@ -6435,6 +6435,126 @@ class PrivateOverlayReleaseTests(unittest.TestCase):
             "assets": assets,
         }
 
+    def test_immutable_releases_preflight_uses_required_api_version(self) -> None:
+        requests = []
+
+        def fake_urlopen(request, timeout=30):
+            requests.append(request)
+            return io.BytesIO(
+                json.dumps({"enabled": True, "enforced_by_owner": False}).encode(
+                    "utf-8"
+                )
+            )
+
+        with (
+            mock.patch.object(
+                RELEASE_MODULE,
+                "urlopen",
+                side_effect=fake_urlopen,
+            ),
+            mock.patch.object(
+                RELEASE_MODULE,
+                "_github_token",
+                return_value="token",
+            ),
+        ):
+            RELEASE_MODULE._require_immutable_releases_enabled("owner/repo")
+
+        self.assertEqual(len(requests), 1)
+        request = requests[0]
+        headers = {name.lower(): value for name, value in request.header_items()}
+        self.assertEqual(request.get_method(), "GET")
+        self.assertEqual(
+            request.full_url,
+            "https://api.github.com/repos/owner/repo/immutable-releases",
+        )
+        self.assertEqual(
+            headers["x-github-api-version"],
+            "2026-03-10",
+        )
+        self.assertEqual(headers["accept"], "application/vnd.github+json")
+
+    def test_immutable_releases_preflight_fails_before_release_mutation(
+        self,
+    ) -> None:
+        cases = {
+            "disabled": b'{"enabled": false}',
+            "malformed": b"[]",
+            "not-found": None,
+        }
+        sha = "a" * 40
+        with tempfile.TemporaryDirectory(
+            prefix="private-overlay-release."
+        ) as temp_dir_raw:
+            dist = Path(temp_dir_raw)
+            (dist / f"personal-codex-{sha}.tar.gz").write_bytes(b"archive")
+            (dist / f"personal-codex-{sha}.sha256").write_bytes(b"checksum\n")
+            draft = self._release_candidate(sha, draft=True)
+
+            for candidate_name, candidates in {
+                "new-draft": [],
+                "existing-draft": [draft],
+            }.items():
+                for case_name, response_body in cases.items():
+                    with self.subTest(
+                        candidate=candidate_name,
+                        case=case_name,
+                    ):
+                        requests = []
+
+                        def fake_urlopen(request, timeout=30):
+                            requests.append(request)
+                            if response_body is None:
+                                raise RELEASE_MODULE.HTTPError(
+                                    request.full_url,
+                                    404,
+                                    "Not Found",
+                                    None,
+                                    None,
+                                )
+                            return io.BytesIO(response_body)
+
+                        with (
+                            mock.patch.object(
+                                RELEASE_MODULE,
+                                "iter_releases",
+                                return_value=iter(candidates),
+                            ),
+                            mock.patch.object(
+                                RELEASE_MODULE,
+                                "urlopen",
+                                side_effect=fake_urlopen,
+                            ),
+                            mock.patch.object(
+                                RELEASE_MODULE,
+                                "_github_token",
+                                return_value="token",
+                            ),
+                            contextlib.redirect_stdout(io.StringIO()),
+                            self.assertRaises(RELEASE_MODULE.ReleaseError),
+                        ):
+                            RELEASE_MODULE.publish_release(
+                                "owner/repo",
+                                sha,
+                                dist,
+                            )
+
+                        self.assertEqual(len(requests), 1)
+                        request = requests[0]
+                        headers = {
+                            header.lower(): value
+                            for header, value in request.header_items()
+                        }
+                        self.assertEqual(request.get_method(), "GET")
+                        self.assertEqual(
+                            request.full_url,
+                            "https://api.github.com/repos/owner/repo/immutable-releases",
+                        )
+                        self.assertEqual(
+                            headers["x-github-api-version"],
+                            "2026-03-10",
+                        )
+
     def test_release_complete_is_read_only_when_no_candidate_exists(self) -> None:
         with (
             mock.patch.object(
@@ -6794,8 +6914,26 @@ class PrivateOverlayReleaseTests(unittest.TestCase):
 
         created: list[dict[str, object]] = []
 
-        def create_release(url: str, *, method="GET", payload=None, token=None):
+        def create_release(
+            url: str,
+            *,
+            method="GET",
+            payload=None,
+            token=None,
+            api_version=RELEASE_MODULE.DEFAULT_GITHUB_API_VERSION,
+        ):
+            if url.endswith("/immutable-releases"):
+                self.assertEqual(method, "GET")
+                self.assertEqual(
+                    api_version,
+                    RELEASE_MODULE.IMMUTABLE_RELEASES_API_VERSION,
+                )
+                return {"enabled": True, "enforced_by_owner": False}
             self.assertEqual(method, "POST")
+            self.assertEqual(
+                api_version,
+                RELEASE_MODULE.DEFAULT_GITHUB_API_VERSION,
+            )
             response = dict(payload)
             response.update({"id": 20, "assets": []})
             created.append(response)
@@ -7435,10 +7573,25 @@ class PrivateOverlayReleaseTests(unittest.TestCase):
             published = False
 
             def fake_request_json(
-                url: str, *, method: str = "GET", payload=None, token=None
+                url: str,
+                *,
+                method: str = "GET",
+                payload=None,
+                token=None,
+                api_version=RELEASE_MODULE.DEFAULT_GITHUB_API_VERSION,
             ):
                 nonlocal published
-                requests.append({"url": url, "method": method, "payload": payload})
+                requests.append(
+                    {
+                        "url": url,
+                        "method": method,
+                        "payload": payload,
+                        "api_version": api_version,
+                    }
+                )
+                if url.endswith("/immutable-releases"):
+                    events.append("GET:immutable-releases")
+                    return {"enabled": True, "enforced_by_owner": False}
                 if method == "DELETE":
                     events.append(f"DELETE:{url.rsplit('/', 1)[-1]}")
                 else:
@@ -7510,11 +7663,12 @@ class PrivateOverlayReleaseTests(unittest.TestCase):
 
         self.assertEqual(
             [request["method"] for request in requests],
-            ["DELETE", "DELETE", "GET", "PATCH", "GET"],
+            ["GET", "DELETE", "DELETE", "GET", "PATCH", "GET"],
         )
         self.assertEqual(
             events,
             [
+                "GET:immutable-releases",
                 "DELETE:11",
                 "DELETE:12",
                 f"POST:{archive_name}",
@@ -7540,11 +7694,15 @@ class PrivateOverlayReleaseTests(unittest.TestCase):
             ],
         )
         self.assertEqual(
-            requests[3]["payload"],
+            requests[4]["payload"],
             {
                 "body": f"Private Codex overlay release for {sha}.\n\nsource_event=workflow_dispatch",
                 "draft": False,
             },
+        )
+        self.assertEqual(
+            requests[0]["api_version"],
+            RELEASE_MODULE.IMMUTABLE_RELEASES_API_VERSION,
         )
 
     def test_publish_existing_draft_rejects_flag_drift_before_patch(self) -> None:
@@ -7581,6 +7739,10 @@ class PrivateOverlayReleaseTests(unittest.TestCase):
                     RELEASE_MODULE,
                     "iter_releases",
                     return_value=iter([draft]),
+                ),
+                mock.patch.object(
+                    RELEASE_MODULE,
+                    "_require_immutable_releases_enabled",
                 ),
                 mock.patch.object(
                     RELEASE_MODULE,
@@ -7648,6 +7810,10 @@ class PrivateOverlayReleaseTests(unittest.TestCase):
                     RELEASE_MODULE,
                     "iter_releases",
                     return_value=iter([draft]),
+                ),
+                mock.patch.object(
+                    RELEASE_MODULE,
+                    "_require_immutable_releases_enabled",
                 ),
                 mock.patch.object(
                     RELEASE_MODULE,
@@ -7742,9 +7908,12 @@ class PrivateOverlayReleaseTests(unittest.TestCase):
                         method: str = "GET",
                         payload=None,
                         token=None,
+                        api_version=RELEASE_MODULE.DEFAULT_GITHUB_API_VERSION,
                     ):
                         nonlocal get_count
                         requests.append(method)
+                        if url.endswith("/immutable-releases"):
+                            return {"enabled": True, "enforced_by_owner": False}
                         if method == "GET":
                             get_count += 1
                             return draft if get_count == 1 else published
@@ -7786,7 +7955,7 @@ class PrivateOverlayReleaseTests(unittest.TestCase):
 
                     self.assertEqual(
                         requests,
-                        ["DELETE", "DELETE", "GET", "PATCH", "GET"],
+                        ["GET", "DELETE", "DELETE", "GET", "PATCH", "GET"],
                     )
                     self.assertEqual(urlopen.call_count, 2)
 
@@ -7942,8 +8111,16 @@ class PrivateOverlayReleaseTests(unittest.TestCase):
                 uploads.append(request.full_url)
                 return FakeResponse(request.full_url.rpartition("?name=")[2])
 
-            with mock.patch.object(
-                RELEASE_MODULE, "iter_releases", return_value=iter([release])
+            with (
+                mock.patch.object(
+                    RELEASE_MODULE,
+                    "iter_releases",
+                    return_value=iter([release]),
+                ),
+                mock.patch.object(
+                    RELEASE_MODULE,
+                    "_require_immutable_releases_enabled",
+                ),
             ):
                 with mock.patch.object(
                     RELEASE_MODULE, "request_json", fake_request_json
@@ -8080,6 +8257,10 @@ class PrivateOverlayReleaseTests(unittest.TestCase):
                         ),
                         mock.patch.object(
                             RELEASE_MODULE,
+                            "_require_immutable_releases_enabled",
+                        ) as immutable_releases_preflight,
+                        mock.patch.object(
+                            RELEASE_MODULE,
                             "request_json",
                         ) as request_json,
                         mock.patch.object(
@@ -8092,6 +8273,7 @@ class PrivateOverlayReleaseTests(unittest.TestCase):
 
                     request_json.assert_not_called()
                     urlopen.assert_not_called()
+                    immutable_releases_preflight.assert_not_called()
 
     def test_upload_response_must_match_expected_uploaded_asset(self) -> None:
         with tempfile.TemporaryDirectory(
@@ -8123,6 +8305,10 @@ class PrivateOverlayReleaseTests(unittest.TestCase):
                             RELEASE_MODULE,
                             "iter_releases",
                             return_value=iter([release]),
+                        ),
+                        mock.patch.object(
+                            RELEASE_MODULE,
+                            "_require_immutable_releases_enabled",
                         ),
                         mock.patch.object(
                             RELEASE_MODULE,
@@ -8209,6 +8395,10 @@ class PrivateOverlayReleaseTests(unittest.TestCase):
                     RELEASE_MODULE,
                     "iter_releases",
                     return_value=iter([release]),
+                ),
+                mock.patch.object(
+                    RELEASE_MODULE,
+                    "_require_immutable_releases_enabled",
                 ),
                 mock.patch.object(
                     RELEASE_MODULE,
@@ -8305,6 +8495,10 @@ class PrivateOverlayReleaseTests(unittest.TestCase):
                             RELEASE_MODULE,
                             "iter_releases",
                             return_value=iter([release]),
+                        ),
+                        mock.patch.object(
+                            RELEASE_MODULE,
+                            "_require_immutable_releases_enabled",
                         ),
                         mock.patch.object(
                             RELEASE_MODULE,
