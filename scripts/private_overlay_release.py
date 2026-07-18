@@ -24,7 +24,7 @@ RELEASE_TAG_RE = re.compile(
     r"personal-codex-[0-9]{8}-[0-9]{6}-(?P<sha_prefix>[0-9a-f]{7,40})"
 )
 PERSONAL_CODEX_ASSET_RE = re.compile(
-    r"personal-codex-[0-9a-f]{40}\.(?:tar\.gz|sha256)"
+    r"personal-codex-(?P<sha>[0-9a-f]{40})\.(?:tar\.gz|sha256)"
 )
 ASSET_DIGEST_RE = re.compile(r"sha256:[0-9a-f]{64}")
 MAX_RELEASE_ASSET_BYTES = 64 * 1024 * 1024
@@ -159,6 +159,17 @@ def _release_tag_matches_sha(tag_name: object, sha: str) -> bool:
         return False
     match = RELEASE_TAG_RE.fullmatch(tag_name)
     return match is not None and sha.startswith(match.group("sha_prefix"))
+
+
+def _target_commitish_matches_sha(
+    target_commitish: object,
+    sha: str,
+    *,
+    allow_symbolic: bool,
+) -> bool:
+    if isinstance(target_commitish, str) and SHA_RE.fullmatch(target_commitish):
+        return target_commitish == sha
+    return allow_symbolic
 
 
 def _expected_asset_names(sha: str) -> set[str]:
@@ -308,23 +319,42 @@ def _validated_repair_assets(
     return validated
 
 
-def _release_has_complete_assets(release: dict[str, Any]) -> bool:
-    sha = release.get("target_commitish")
-    if not isinstance(sha, str) or not SHA_RE.fullmatch(sha):
-        return False
+def _release_has_complete_assets(release: dict[str, Any], sha: str) -> bool:
     if not _release_tag_matches_sha(release.get("tag_name"), sha):
         return False
     return _has_exact_uploaded_assets(release, _expected_asset_names(sha))
 
 
-def _release_has_remote_integrity(release: dict[str, Any]) -> bool:
-    sha = release.get("target_commitish")
+def _complete_release_asset_sha(release: dict[str, Any]) -> str | None:
+    matching_assets = _personal_codex_release_assets(release)
+    matching_shas = {
+        match.group("sha")
+        for asset in matching_assets
+        if isinstance(asset.get("name"), str)
+        and (match := PERSONAL_CODEX_ASSET_RE.fullmatch(asset["name"])) is not None
+    }
+    if len(matching_shas) != 1:
+        return None
+    sha = next(iter(matching_shas))
+    return sha if _release_has_complete_assets(release, sha) else None
+
+
+def _release_has_remote_integrity(
+    release: dict[str, Any],
+    sha: str | None = None,
+) -> bool:
+    sha = sha or _complete_release_asset_sha(release)
     tag_name = release.get("tag_name")
     if (
         not isinstance(sha, str)
         or SHA_RE.fullmatch(sha) is None
         or not isinstance(tag_name, str)
         or not _release_tag_matches_sha(tag_name, sha)
+        or not _target_commitish_matches_sha(
+            release.get("target_commitish"),
+            sha,
+            allow_symbolic=release.get("immutable") is True,
+        )
     ):
         return False
     try:
@@ -489,9 +519,11 @@ def _matching_release_candidates(
         if not isinstance(candidate, dict):
             raise ReleaseError("releases API returned a non-object entry")
         tag_name = candidate.get("tag_name", "")
-        if candidate.get("target_commitish") != sha:
-            continue
         if not isinstance(tag_name, str) or not tag_name.startswith(RELEASE_TAG_PREFIX):
+            continue
+        target_commitish = candidate.get("target_commitish")
+        has_complete_assets = _release_has_complete_assets(candidate, sha)
+        if target_commitish != sha and not has_complete_assets:
             continue
         draft, prerelease = _personal_release_publication_flags(candidate, tag_name)
         if draft and prerelease:
@@ -503,6 +535,15 @@ def _matching_release_candidates(
         if not _release_tag_matches_sha(tag_name, sha):
             raise ReleaseError(
                 f"matching release has an invalid tag for {sha}: {tag_name}"
+            )
+        if has_complete_assets and not _target_commitish_matches_sha(
+            target_commitish,
+            sha,
+            allow_symbolic=not draft and candidate.get("immutable") is True,
+        ):
+            raise ReleaseError(
+                f"matching complete release target commitish does not match {sha}: "
+                f"{target_commitish!r}"
             )
         release_id = _positive_release_id(candidate, tag_name)
         if release_id in seen_release_ids:
@@ -519,7 +560,7 @@ def _matching_release_candidates(
             )
         if draft:
             draft_candidates.append(candidate)
-        elif _release_has_complete_assets(candidate):
+        elif has_complete_assets:
             complete_candidates.append(candidate)
         else:
             incomplete_candidates.append(candidate)
@@ -615,7 +656,7 @@ def release_complete(repo: str, sha: str) -> bool:
         bool(complete_candidates)
         and not incomplete_candidates
         and all(
-            _release_has_remote_integrity(candidate)
+            _release_has_remote_integrity(candidate, sha)
             for candidate in complete_candidates
         )
     )
@@ -623,7 +664,7 @@ def release_complete(repo: str, sha: str) -> bool:
 
 def _validated_release_snapshot(
     release: object,
-    expected_identity: tuple[int, str, str],
+    expected_identity: tuple[int, str, object],
     expected_asset_names: set[str],
     expected_asset_content: dict[str, LocalAssetContent],
     *,
@@ -678,8 +719,11 @@ def publish_release(repo: str, sha: str, dist: Path, *, source_event: str = "unk
     tag_name = release.get("tag_name")
     if not isinstance(tag_name, str):
         raise ReleaseError("selected release has an invalid tag name")
-    if release.get("target_commitish") != sha or not _release_tag_matches_sha(
-        tag_name, sha
+    target_commitish = release.get("target_commitish")
+    if not _release_tag_matches_sha(tag_name, sha) or not _target_commitish_matches_sha(
+        target_commitish,
+        sha,
+        allow_symbolic=done and release.get("immutable") is True,
     ):
         raise ReleaseError("selected release has a mismatched identity")
     selected_draft, prerelease = _personal_release_publication_flags(
@@ -691,7 +735,7 @@ def publish_release(repo: str, sha: str, dist: Path, *, source_event: str = "unk
     release_id = _positive_release_id(release, tag_name)
     if not isinstance(release.get("assets"), list):
         raise ReleaseError("selected release has no release asset array")
-    release_identity = (release_id, tag_name, sha)
+    release_identity = (release_id, tag_name, target_commitish)
     if done:
         _validated_release_snapshot(
             release,

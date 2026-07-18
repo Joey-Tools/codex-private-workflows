@@ -6567,6 +6567,129 @@ class PrivateOverlayReleaseTests(unittest.TestCase):
             )
         self.assertTrue(done)
 
+    def test_immutable_complete_release_accepts_symbolic_target_commitish(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory(
+            prefix="private-overlay-release."
+        ) as temp_dir_raw:
+            dist = Path(temp_dir_raw)
+            sha = "a" * 40
+            (dist / f"personal-codex-{sha}.tar.gz").write_bytes(b"archive")
+            (dist / f"personal-codex-{sha}.sha256").write_bytes(b"checksum\n")
+            base_release = self._release_candidate(sha)
+            missing_target = dict(base_release)
+            missing_target.pop("target_commitish")
+            cases = {
+                "branch": dict(base_release, target_commitish="master"),
+                "missing": missing_target,
+                "non-sha": dict(base_release, target_commitish="not-a-full-sha"),
+            }
+
+            for name, release in cases.items():
+                with self.subTest(case=name):
+                    with mock.patch.object(
+                        RELEASE_MODULE,
+                        "iter_releases",
+                        return_value=iter([release]),
+                    ):
+                        self.assertTrue(
+                            RELEASE_MODULE.release_complete("owner/repo", sha)
+                        )
+
+                    with (
+                        mock.patch.object(
+                            RELEASE_MODULE,
+                            "iter_releases",
+                            return_value=iter([release]),
+                        ),
+                        mock.patch.object(
+                            RELEASE_MODULE,
+                            "request_json",
+                        ) as request_json,
+                    ):
+                        selected, _uploaded_names, done = (
+                            RELEASE_MODULE.create_or_find_release(
+                                "owner/repo",
+                                sha,
+                                RELEASE_MODULE._expected_asset_names(sha),
+                            )
+                        )
+
+                    self.assertIs(selected, release)
+                    self.assertTrue(done)
+                    request_json.assert_not_called()
+
+                    with (
+                        mock.patch.object(
+                            RELEASE_MODULE,
+                            "iter_releases",
+                            return_value=iter([release]),
+                        ),
+                        mock.patch.object(
+                            RELEASE_MODULE,
+                            "request_json",
+                        ) as request_json,
+                        mock.patch.object(
+                            RELEASE_MODULE,
+                            "urlopen",
+                        ) as urlopen,
+                        mock.patch.object(
+                            RELEASE_MODULE,
+                            "_github_token",
+                        ) as github_token,
+                        contextlib.redirect_stdout(io.StringIO()),
+                    ):
+                        RELEASE_MODULE.publish_release("owner/repo", sha, dist)
+
+                    request_json.assert_not_called()
+                    urlopen.assert_not_called()
+                    github_token.assert_not_called()
+
+    def test_complete_release_rejects_different_full_target_before_create(
+        self,
+    ) -> None:
+        sha = "a" * 40
+        release = self._release_candidate(sha)
+        release["target_commitish"] = "b" * 40
+        expected_names = RELEASE_MODULE._expected_asset_names(sha)
+
+        with (
+            mock.patch.object(
+                RELEASE_MODULE,
+                "iter_releases",
+                return_value=iter([release]),
+            ),
+            mock.patch.object(
+                RELEASE_MODULE,
+                "request_json",
+            ) as request_json,
+            self.assertRaisesRegex(
+                RELEASE_MODULE.ReleaseError,
+                "target commitish does not match",
+            ),
+        ):
+            RELEASE_MODULE.create_or_find_release(
+                "owner/repo",
+                sha,
+                expected_names,
+            )
+
+        request_json.assert_not_called()
+
+        with (
+            mock.patch.object(
+                RELEASE_MODULE,
+                "iter_releases",
+                return_value=iter([release]),
+            ),
+            self.assertRaisesRegex(
+                RELEASE_MODULE.ReleaseError,
+                "target commitish does not match",
+            ),
+        ):
+            RELEASE_MODULE.release_complete("owner/repo", sha)
+
     def test_multiple_drafts_are_ambiguous_only_for_publish_selection(self) -> None:
         sha = "a" * 40
         drafts = [
