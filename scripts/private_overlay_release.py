@@ -705,9 +705,10 @@ def publish_release(repo: str, sha: str, dist: Path, *, source_event: str = "unk
         print(f"Release already exists: {tag_name}")
         return
 
-    if not selected_draft and release.get("immutable") is True:
+    if not selected_draft:
         raise ReleaseError(
-            f"immutable published release cannot be repaired: {tag_name}"
+            "incomplete published release requires operator resolution or "
+            f"recreation: {tag_name}"
         )
     repair_assets = _validated_repair_assets(release)
     for asset_id, stale_asset in repair_assets:
@@ -765,25 +766,22 @@ def publish_release(repo: str, sha: str, dist: Path, *, source_event: str = "unk
     )
     if refreshed_draft != selected_draft:
         raise ReleaseError("release draft flag changed after upload")
-    if selected_draft:
-        request_json(
-            release_url,
-            method="PATCH",
-            payload={"body": _release_body(sha, source_event), "draft": False},
-        )
-        published = request_json(release_url)
-        _validated_release_snapshot(
-            published,
-            release_identity,
-            expected_asset_names,
-            expected_asset_content,
-            phase="after publish",
-            require_published=True,
-            require_immutable=True,
-        )
-        print(f"Published {tag_name}")
-    else:
-        print(f"Repaired {tag_name}")
+    request_json(
+        release_url,
+        method="PATCH",
+        payload={"body": _release_body(sha, source_event), "draft": False},
+    )
+    published = request_json(release_url)
+    _validated_release_snapshot(
+        published,
+        release_identity,
+        expected_asset_names,
+        expected_asset_content,
+        phase="after publish",
+        require_published=True,
+        require_immutable=True,
+    )
+    print(f"Published {tag_name}")
 
 
 def _write_github_output(run: bool, reason: str) -> None:

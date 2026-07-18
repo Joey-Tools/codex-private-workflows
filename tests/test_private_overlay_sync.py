@@ -651,6 +651,38 @@ class PrivateOverlaySyncTests(unittest.TestCase):
             target.read_text(encoding="utf-8"), "Use this when Joey asks.\n"
         )
 
+    def test_validator_sync_rule_replaces_legacy_mutable_release_identity(
+        self,
+    ) -> None:
+        rule = next(
+            rule
+            for rule in SYNC_MODULE.SYNC_RULES
+            if rule.source == Path("scripts/validate_sync_manifest_changes.py")
+        )
+        source = self.source_root / rule.repo / rule.source
+        source.parent.mkdir(parents=True)
+        source.write_text(
+            'default="personal_codex/public-sync-manifest.json"\n'
+            f"{SYNC_MODULE.PUBLIC_LEGACY_MUTABLE_RELEASE_BLOCK}\n",
+            encoding="utf-8",
+        )
+
+        SYNC_MODULE.sync_sources(self.repo_root, self.source_root, (rule,))
+
+        target_payload = (self.repo_root / rule.target).read_text(encoding="utf-8")
+        self.assertIn(
+            'default="personal_codex/private-sync-manifest.json"',
+            target_payload,
+        )
+        self.assertIn(
+            SYNC_MODULE.PRIVATE_LEGACY_MUTABLE_RELEASE_BLOCK,
+            target_payload,
+        )
+        self.assertNotIn(
+            SYNC_MODULE.PUBLIC_LEGACY_MUTABLE_RELEASE_BLOCK,
+            target_payload,
+        )
+
     def test_sync_removes_retired_review_skill_targets(self) -> None:
         for relative in SYNC_MODULE.RETIRED_TARGETS:
             target = self.repo_root / relative
@@ -6183,11 +6215,40 @@ class PrivateOverlaySyncTests(unittest.TestCase):
         workflow = (
             REPO_ROOT / ".github" / "workflows" / "scheduled-sync-release.yml"
         ).read_text(encoding="utf-8")
+        cooldown_guard = "steps.cooldown.outputs.run == 'true'"
         release_guard = (
             "steps.current-release.outputs.complete == 'false' && "
             "steps.changes.outputs.changed != 'true'"
         )
 
+        self.assertIn(
+            'if [ "${{ steps.current-release.outputs.complete }}" = "false" ]; then\n'
+            '            echo "run=false" >> "$GITHUB_OUTPUT"\n'
+            '            echo "reason=current release is incomplete; skipping source sync and publishing current SHA" >> "$GITHUB_OUTPUT"\n'
+            "            exit 0\n"
+            "          fi",
+            workflow,
+        )
+        for step_name in (
+            "Check out codex-toolbox",
+            "Check out codex-debug-triage",
+            "Check out codex-review-workflows",
+            "Check out codex-workflow-hygiene",
+            "Check out codex-project-journal",
+            "Check out codex-waited-delivery",
+            "Sync private overlay sources",
+            "Detect sync changes",
+        ):
+            with self.subTest(cooldown_step=step_name):
+                self.assertRegex(
+                    workflow,
+                    rf"- name: {re.escape(step_name)}\n\s+if: {re.escape(cooldown_guard)}\n",
+                )
+        self.assertRegex(
+            workflow,
+            r"- name: Open synced overlay pull request\n"
+            r"\s+if: steps\.changes\.outputs\.changed == 'true'\n",
+        )
         for step_name in (
             "Validate release history before repair",
             "Revalidate release checkout",
@@ -6214,6 +6275,26 @@ class PrivateOverlaySyncTests(unittest.TestCase):
             workflow.index("- name: Revalidate release checkout"),
         )
         self.assertLess(
+            workflow.index("- name: Check current release"),
+            workflow.index("- name: Check cooldown"),
+        )
+        self.assertLess(
+            workflow.index("- name: Check cooldown"),
+            workflow.index("- name: Sync private overlay sources"),
+        )
+        self.assertLess(
+            workflow.index("- name: Sync private overlay sources"),
+            workflow.index("- name: Detect sync changes"),
+        )
+        self.assertLess(
+            workflow.index("- name: Detect sync changes"),
+            workflow.index("- name: Open synced overlay pull request"),
+        )
+        self.assertLess(
+            workflow.index("- name: Open synced overlay pull request"),
+            workflow.index("- name: Revalidate release checkout"),
+        )
+        self.assertLess(
             workflow.index("- name: Revalidate release checkout"),
             workflow.index("- name: Build release package"),
         )
@@ -6223,7 +6304,7 @@ class PrivateOverlaySyncTests(unittest.TestCase):
         )
         self.assertNotIn("steps.commit.outputs.sha", workflow)
 
-    def test_scheduled_workflow_repairs_published_current_release_assets_before_strict_validation(
+    def test_scheduled_workflow_repairs_draft_current_release_assets_before_strict_validation(
         self,
     ) -> None:
         workflow = (
@@ -6244,7 +6325,7 @@ class PrivateOverlaySyncTests(unittest.TestCase):
             "id": 10,
             "tag_name": f"personal-codex-20260522-100000-{sha[:7]}",
             "target_commitish": sha,
-            "draft": False,
+            "draft": True,
             "prerelease": False,
             "assets": [],
         }
@@ -7075,7 +7156,7 @@ class PrivateOverlayReleaseTests(unittest.TestCase):
             "id": 10,
             "tag_name": f"personal-codex-20260522-100000-{sha[:7]}",
             "target_commitish": sha,
-            "draft": False,
+            "draft": True,
             "prerelease": False,
             "assets": [
                 {"id": 11, "name": archive_name, "state": "uploaded"},
@@ -7135,7 +7216,7 @@ class PrivateOverlayReleaseTests(unittest.TestCase):
                     "id": 10,
                     "tag_name": f"personal-codex-20260522-100000-{sha[:7]}",
                     "target_commitish": sha,
-                    "draft": False,
+                    "draft": True,
                     "prerelease": False,
                     "assets": assets,
                 }
@@ -7586,7 +7667,9 @@ class PrivateOverlayReleaseTests(unittest.TestCase):
                     )
                     self.assertEqual(urlopen.call_count, 2)
 
-    def test_incomplete_published_release_repairs_successfully(self) -> None:
+    def test_incomplete_published_release_requires_operator_resolution(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory(
             prefix="private-overlay-release."
         ) as temp_dir_raw:
@@ -7596,7 +7679,7 @@ class PrivateOverlayReleaseTests(unittest.TestCase):
             checksum_name = f"personal-codex-{sha}.sha256"
             (dist / archive_name).write_bytes(b"archive")
             (dist / checksum_name).write_text("checksum\n", encoding="utf-8")
-            release = self._release_candidate(
+            base_release = self._release_candidate(
                 sha,
                 assets=[
                     {
@@ -7606,55 +7689,46 @@ class PrivateOverlayReleaseTests(unittest.TestCase):
                     }
                 ],
             )
-            release["immutable"] = False
-            final_release = self._release_candidate(sha)
-            requests: list[str] = []
-            uploads: list[str] = []
+            missing_immutable = dict(base_release)
+            missing_immutable.pop("immutable")
+            cases = {
+                "immutable": base_release,
+                "mutable": dict(base_release, immutable=False),
+                "missing": missing_immutable,
+                "non-boolean": dict(base_release, immutable="false"),
+            }
 
-            def fake_request_json(
-                url: str, *, method: str = "GET", payload=None, token=None
-            ):
-                requests.append(method)
-                if method == "GET":
-                    return final_release
-                return {}
+            for name, release in cases.items():
+                with self.subTest(case=name):
+                    with (
+                        mock.patch.object(
+                            RELEASE_MODULE,
+                            "iter_releases",
+                            return_value=iter([release]),
+                        ),
+                        mock.patch.object(
+                            RELEASE_MODULE,
+                            "request_json",
+                        ) as request_json,
+                        mock.patch.object(
+                            RELEASE_MODULE,
+                            "urlopen",
+                        ) as urlopen,
+                        mock.patch.object(
+                            RELEASE_MODULE,
+                            "_github_token",
+                        ) as github_token,
+                        contextlib.redirect_stdout(io.StringIO()),
+                        self.assertRaisesRegex(
+                            RELEASE_MODULE.ReleaseError,
+                            "requires operator resolution or recreation",
+                        ),
+                    ):
+                        RELEASE_MODULE.publish_release("owner/repo", sha, dist)
 
-            def fake_urlopen(request, timeout=30):
-                asset_name = request.full_url.rpartition("?name=")[2]
-                uploads.append(asset_name)
-                return io.BytesIO(
-                    json.dumps(
-                        {"name": asset_name, "state": "uploaded"}
-                    ).encode("utf-8")
-                )
-
-            with (
-                mock.patch.object(
-                    RELEASE_MODULE,
-                    "iter_releases",
-                    return_value=iter([release]),
-                ),
-                mock.patch.object(
-                    RELEASE_MODULE,
-                    "request_json",
-                    side_effect=fake_request_json,
-                ),
-                mock.patch.object(
-                    RELEASE_MODULE,
-                    "urlopen",
-                    side_effect=fake_urlopen,
-                ),
-                mock.patch.object(
-                    RELEASE_MODULE,
-                    "_github_token",
-                    return_value="token",
-                ),
-                contextlib.redirect_stdout(io.StringIO()),
-            ):
-                RELEASE_MODULE.publish_release("owner/repo", sha, dist)
-
-        self.assertEqual(requests, ["DELETE", "GET"])
-        self.assertEqual(uploads, [archive_name, checksum_name])
+                    request_json.assert_not_called()
+                    urlopen.assert_not_called()
+                    github_token.assert_not_called()
 
     def test_publish_deletes_incomplete_assets_before_reupload(self) -> None:
         with tempfile.TemporaryDirectory(
@@ -7910,7 +7984,7 @@ class PrivateOverlayReleaseTests(unittest.TestCase):
                 "id": 10,
                 "tag_name": f"personal-codex-20260522-100000-{sha[:7]}",
                 "target_commitish": sha,
-                "draft": False,
+                "draft": True,
                 "prerelease": False,
                 "assets": [],
             }
@@ -7967,7 +8041,7 @@ class PrivateOverlayReleaseTests(unittest.TestCase):
                 "id": 10,
                 "tag_name": f"personal-codex-20260522-100000-{sha[:7]}",
                 "target_commitish": sha,
-                "draft": False,
+                "draft": True,
                 "prerelease": False,
                 "assets": [
                     {"id": 11, "name": archive_name, "state": "uploaded"},
@@ -7985,7 +8059,7 @@ class PrivateOverlayReleaseTests(unittest.TestCase):
                         "id": 10,
                         "tag_name": release["tag_name"],
                         "target_commitish": sha,
-                        "draft": False,
+                        "draft": True,
                         "prerelease": False,
                         "assets": [
                             {"id": 21, "name": archive_name, "state": "uploaded"},
@@ -8052,7 +8126,7 @@ class PrivateOverlayReleaseTests(unittest.TestCase):
                 "id": 10,
                 "tag_name": tag_name,
                 "target_commitish": sha,
-                "draft": False,
+                "draft": True,
                 "prerelease": False,
                 "assets": [
                     {"id": 11, "name": archive_name, "state": "uploaded"},
@@ -8063,7 +8137,7 @@ class PrivateOverlayReleaseTests(unittest.TestCase):
                 "id": 10,
                 "tag_name": tag_name,
                 "target_commitish": sha,
-                "draft": False,
+                "draft": True,
                 "prerelease": False,
                 "assets": [
                     {"id": 21, "name": archive_name, "state": "uploaded"},
