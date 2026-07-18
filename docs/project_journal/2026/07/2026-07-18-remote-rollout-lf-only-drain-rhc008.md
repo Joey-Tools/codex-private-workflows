@@ -18,6 +18,7 @@ superseded_by:
 - Kept an oversized record draining through bare CR and JSON-like suffix bytes until the next LF, preventing the suffix from becoming separate parseable evidence.
 - Bound each reader to the descriptor-derived source size and require a validated byte-zero starting offset before reading. A scan cap that cuts through a record drops the incomplete buffer, while a stable true EOF still preserves a complete final JSON record without LF.
 - Kept staged private-overlay integration compatible with the older two-argument retrospective reader: only a byte-zero `io.BytesIO` may omit `source_size` and infer the full snapshot through `getbuffer()`; other readers fail closed. Production local and remote callers still pass descriptor-derived source sizes explicitly.
+- Kept the generated private summary metadata aligned with the synchronized root integration contract by reporting `json_error_count`, including bare-CR records that reach true EOF as malformed JSONL input.
 
 ## Current State
 
@@ -25,7 +26,7 @@ superseded_by:
 - A complete LF-terminated record that ends exactly at the scan cap remains available, but a parseable JSON prefix without LF is discarded when the source snapshot has unread bytes.
 - Explicit and inferred source-size paths both require the reader to start at byte zero. Missing, invalid, or valid nonzero offsets fail closed before any record bytes are read.
 - Normal LF, CRLF, and stable true-EOF-without-LF inputs retain their prior summary behavior.
-- Root integration coverage detects the reader signature during the public-overlay transition. The new API enforces fail-closed character-count caps and LF-only generated code, while the unsynchronized retrospective mirror retains its existing two-argument assertions until the canonical skill is synced.
+- Root integration coverage now exercises both the synchronized public retrospective reader and the private remote-host reader for fail-closed byte caps, LF-only generated code, and malformed-record counts.
 
 ## Next Steps
 
@@ -33,12 +34,12 @@ superseded_by:
 
 ## Evidence
 
-- `python3 -m unittest tests/test_remote_codex_probe.py -q`: 100 tests passed in 4.350 seconds.
+- `tests.test_remote_codex_probe`: 100/100 tests passed in 3.704 seconds.
 - The local/embedded regressions cover oversized 64 KiB cross-chunk bare-CR drain, LF/CRLF/cap/EOF boundary behavior, safe byte-zero `BytesIO` snapshot-size inference, explicit and inferred rejection at a valid nonzero LF boundary and mid-record suffix, and unavailable or invalid offset rejection.
-- Three focused root integration tests passed for bounded input, multibyte byte-count caps, and generated LF-only/source-size code across the staged old/new probe APIs.
-- Full private suite with process-local Git signing disabled: 658 tests passed in 69.004 seconds. A log-only supervisor enforced a 180-second deadline and 16 MiB retained-output ceiling; the final log used 31,612 bytes.
+- The retrospective integration module passed 409/409 tests in 50.189 seconds, including generated LF-only/source-size and `json_error_count` coverage across both synchronized probes.
+- Full private suite with process-local Git signing disabled: 1247/1247 tests passed in 182.793 seconds under a 600-second hard timeout and externally bounded log sink.
 - `ruff check --no-cache personal_codex/skills/remote-host-context/scripts/remote_codex_probe.py tests/test_remote_codex_probe.py` passed with Ruff 0.13.2.
 - `tests/test_session_retrospective.py` passed Ruff with its pre-existing `F541` baseline ignored; `HEAD` already contains that unrelated finding.
 - `python3 -m py_compile personal_codex/skills/remote-host-context/scripts/remote_codex_probe.py tests/test_remote_codex_probe.py tests/test_session_retrospective.py` passed with bytecode redirected to a task-scoped `/tmp` cache because the canonical worktree is outside the sandbox write root.
 - Isolated `quick_validate.py` validation passed for `personal_codex/skills/remote-host-context` through `uv run --no-project --with PyYAML==6.0.3`.
-- Project-journal validation and `git diff --check` passed for the affected files.
+- Project-journal validation and `git diff --check` passed for the affected files; Ruff introduced no findings over the unchanged baseline `F541`.

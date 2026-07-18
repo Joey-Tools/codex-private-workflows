@@ -27,6 +27,7 @@ from typing import Any
 
 DATE_FORMAT = "%Y/%m/%d"
 MAX_SESSION_META_LIMIT = 500
+MAX_SESSION_META_ACTIVE_CANDIDATES = MAX_SESSION_META_LIMIT + 1
 MAX_SESSION_META_DATE_COUNT = 31
 MAX_FETCH_ROLLOUT_BYTES = 16 * 1024 * 1024
 MIN_ROLLOUT_CHUNK_BYTES = 64 * 1024
@@ -151,6 +152,9 @@ SUMMARY_SIGNAL_MARKERS = (
 REMOTE_SESSION_META_BEGIN = "__REMOTE_CODEX_PROBE_SESSION_META_BEGIN__"
 REMOTE_SESSION_META_END = "__REMOTE_CODEX_PROBE_SESSION_META_END__"
 SESSION_META_LIMIT_TRUNCATED_REASON = "session_meta_limit_truncated"
+SESSION_META_CANDIDATE_LIMIT_TRUNCATED_REASON = (
+    "session_meta_candidate_limit_truncated"
+)
 SESSION_META_SCAN_TRUNCATED_ERROR = (
     "session-meta scan truncated before metadata was found"
 )
@@ -209,7 +213,21 @@ HOSTS: dict[str, dict[str, str]] = {
 @dataclasses.dataclass(frozen=True)
 class SessionMetaScan:
     rows: list[dict[str, str]]
-    truncated: bool
+    truncated: bool = False
+    truncation_reason: str | None = None
+    truncation_metadata: dict[str, str | int] = dataclasses.field(
+        default_factory=dict
+    )
+
+    def __post_init__(self) -> None:
+        if self.truncation_reason is not None and not self.truncated:
+            object.__setattr__(self, "truncated", True)
+        elif self.truncated and self.truncation_reason is None:
+            object.__setattr__(
+                self,
+                "truncation_reason",
+                SESSION_META_LIMIT_TRUNCATED_REASON,
+            )
 
 
 @dataclasses.dataclass(frozen=True)
@@ -1984,6 +2002,7 @@ AUTHORIZED_SOURCE_BYTES = None if AUTHORIZED_SOURCE_BYTES_RAW is None else int(A
 OUTPUT_HOST = str(CONFIG.get("output_host", ""))
 SESSION_META_SCAN_BYTES = int(CONFIG.get("session_meta_scan_bytes", 0))
 SESSION_META_PREFIX_PROOF_BYTES = SESSION_META_SCAN_BYTES
+MAX_SESSION_META_ACTIVE_CANDIDATES = {MAX_SESSION_META_ACTIVE_CANDIDATES}
 SESSION_META_READ_CHUNK_BYTES = {SESSION_META_READ_CHUNK_BYTES}
 SESSION_META_SERIALIZED_ROW_BYTES = {MAX_REMOTE_SESSION_META_SERIALIZED_ROW_BYTES}
 SESSION_META_OUTPUT_ROW_TOO_LARGE_ERROR = {SESSION_META_OUTPUT_ROW_TOO_LARGE_ERROR!r}
@@ -2022,6 +2041,7 @@ SUMMARY_SIGNAL_MARKERS = {SUMMARY_SIGNAL_MARKERS!r}
 SESSION_META_BEGIN = {REMOTE_SESSION_META_BEGIN!r}
 SESSION_META_END = {REMOTE_SESSION_META_END!r}
 SESSION_META_LIMIT_TRUNCATED_REASON = {SESSION_META_LIMIT_TRUNCATED_REASON!r}
+SESSION_META_CANDIDATE_LIMIT_TRUNCATED_REASON = {SESSION_META_CANDIDATE_LIMIT_TRUNCATED_REASON!r}
 SESSION_META_SCAN_TRUNCATED_ERROR = {SESSION_META_SCAN_TRUNCATED_ERROR!r}
 FETCH_ROLLOUT_BEGIN = {REMOTE_FETCH_ROLLOUT_BEGIN!r}
 FETCH_ROLLOUT_END = {REMOTE_FETCH_ROLLOUT_END!r}
@@ -3697,6 +3717,7 @@ def summarize_rollout():
     last_assistant_record = None
     last_user_record = None
     last_task_complete_record = None
+    json_error_count = 0
 
     try:
         handle = open_rollout_text(rel)
@@ -3724,6 +3745,7 @@ def summarize_rollout():
             try:
                 obj = json.loads(line)
             except json.JSONDecodeError:
+                json_error_count += 1
                 continue
             timestamp = str(obj.get("timestamp", ""))
             record = None
@@ -3815,12 +3837,14 @@ def summarize_rollout():
     append_serialized(
         {{
             "kind": "scan_meta",
+            "json_error_count": json_error_count,
             "line": 0,
             "scan_bytes": SUMMARY_SCAN_BYTES,
             "scan_truncated": bool(SUMMARY_SCAN_BYTES and source_identity["size"] > SUMMARY_SCAN_BYTES),
             "source_bytes": source_identity["size"],
             "text": "scan_truncated=" + str(bool(SUMMARY_SCAN_BYTES and source_identity["size"] > SUMMARY_SCAN_BYTES)).lower()
                 + " scan_bytes=" + str(SUMMARY_SCAN_BYTES)
+                + " json_error_count=" + str(json_error_count)
                 + " source_bytes=" + str(source_identity["size"]),
             "timestamp": "",
         }}
@@ -3888,7 +3912,7 @@ def iter_session_meta():
     except (OSError, ValueError):
         session_directory_unreadable()
 
-    prefix_proof_candidate_limit = LIMIT + 1
+    prefix_proof_candidate_limit = MAX_SESSION_META_ACTIVE_CANDIDATES
     prefix_proof_candidate_captures = 0
 
     def consume_active_candidate_budget():
@@ -3959,7 +3983,7 @@ def iter_session_meta():
                 seen_rollout_paths.add(rel_key)
                 allow_append = session_meta_allows_append(rel)
                 if allow_append and not consume_active_candidate_budget():
-                    if emit_session_meta_item({{"kind": "truncation", "reason": SESSION_META_LIMIT_TRUNCATED_REASON, "date": date_text, "limit": LIMIT}}):
+                    if emit_session_meta_item({{"kind": "truncation", "reason": SESSION_META_CANDIDATE_LIMIT_TRUNCATED_REASON, "date": date_text, "candidate_limit": MAX_SESSION_META_ACTIVE_CANDIDATES}}):
                         print(SESSION_META_END)
                     return True
                 try:
@@ -4239,12 +4263,12 @@ def _scan_session_meta_records(
     try:
         root_fd = _open_pinned_codex_root(codex_root)
     except FileNotFoundError:
-        return SessionMetaScan(rows=[], truncated=False)
+        return SessionMetaScan(rows=[])
     except (OSError, ValueError) as exc:
         raise SessionMetaRolloutError("session directory unreadable") from exc
     rows: list[dict[str, str]] = []
     seen_rollout_paths: set[str] = set()
-    prefix_proof_candidate_limit = limit + 1
+    prefix_proof_candidate_limit = MAX_SESSION_META_ACTIVE_CANDIDATES
     prefix_proof_candidate_captures = 0
 
     def consume_active_candidate_budget() -> bool:
@@ -4325,7 +4349,16 @@ def _scan_session_meta_records(
                 seen_rollout_paths.add(rollout_relative_key)
                 allow_append = _session_meta_allows_append(rollout_relative_path)
                 if allow_append and not consume_active_candidate_budget():
-                    return SessionMetaScan(rows=rows, truncated=True)
+                    return SessionMetaScan(
+                        rows=rows,
+                        truncation_reason=(
+                            SESSION_META_CANDIDATE_LIMIT_TRUNCATED_REASON
+                        ),
+                        truncation_metadata={
+                            "date": date_value.strftime(DATE_FORMAT),
+                            "candidate_limit": MAX_SESSION_META_ACTIVE_CANDIDATES,
+                        },
+                    )
                 try:
                     handle = _open_pinned_rollout_text_from_parent_fd(
                         directory_fd,
@@ -4428,7 +4461,14 @@ def _scan_session_meta_records(
                         )
                     continue
                 if limit and len(rows) >= limit:
-                    return SessionMetaScan(rows=rows, truncated=True)
+                    return SessionMetaScan(
+                        rows=rows,
+                        truncation_reason=SESSION_META_LIMIT_TRUNCATED_REASON,
+                        truncation_metadata={
+                            "date": date_value.strftime(DATE_FORMAT),
+                            "limit": limit,
+                        },
+                    )
                 output_row = _validated_session_meta_output_row(
                     date=date_value.strftime(DATE_FORMAT),
                     session_id=session_id,
@@ -4463,7 +4503,7 @@ def _scan_session_meta_records(
                 return truncated
     finally:
         os.close(root_fd)
-    return SessionMetaScan(rows=rows, truncated=False)
+    return SessionMetaScan(rows=rows)
 
 
 def _iter_session_meta_records(
@@ -4760,10 +4800,20 @@ def _session_meta_row_from_item(item: dict[str, Any], *, host: str) -> dict[str,
     }
 
 
-def _is_session_meta_truncation_item(item: dict[str, Any]) -> bool:
+def _is_session_meta_limit_truncation_item(item: dict[str, Any]) -> bool:
     return (
         item.get("kind") == "truncation"
         and item.get("reason") == SESSION_META_LIMIT_TRUNCATED_REASON
+    )
+
+
+def _is_session_meta_candidate_limit_truncation_item(
+    item: dict[str, Any],
+) -> bool:
+    return (
+        item.get("kind") == "truncation"
+        and item.get("reason")
+        == SESSION_META_CANDIDATE_LIMIT_TRUNCATED_REASON
     )
 
 
@@ -4782,6 +4832,20 @@ def _session_meta_limit_error(host: str, limit: int) -> int:
     print(f"host={host}", file=sys.stderr)
     print(
         f"error=session-meta result exceeded --limit={limit}; narrow the date/host scope or raise --limit up to {MAX_SESSION_META_LIMIT}",
+        file=sys.stderr,
+    )
+    return 1
+
+
+def _session_meta_candidate_limit_error(
+    host: str,
+    candidate_limit: int,
+) -> int:
+    print(f"host={host}", file=sys.stderr)
+    print(
+        "error=session-meta active candidate safety cap reached "
+        f"(candidate_limit={candidate_limit}); narrow the date/host scope "
+        "before drawing a coverage conclusion",
         file=sys.stderr,
     )
     return 1
@@ -4851,7 +4915,20 @@ def cmd_session_meta(args: argparse.Namespace) -> int:
                 print(f"host={alias}", file=sys.stderr)
                 print(f"error={error}", file=sys.stderr)
                 return 1
-            if scan.truncated:
+            if (
+                scan.truncation_reason
+                == SESSION_META_CANDIDATE_LIMIT_TRUNCATED_REASON
+            ):
+                return _session_meta_candidate_limit_error(
+                    alias,
+                    int(
+                        scan.truncation_metadata.get(
+                            "candidate_limit",
+                            MAX_SESSION_META_ACTIVE_CANDIDATES,
+                        )
+                    ),
+                )
+            if scan.truncation_reason == SESSION_META_LIMIT_TRUNCATED_REASON:
                 return _session_meta_limit_error(alias, args.limit)
             host_rows = scan.rows
         else:
@@ -4898,8 +4975,22 @@ def cmd_session_meta(args: argparse.Namespace) -> int:
                     print(f"host={alias}", file=sys.stderr)
                     print(f"error={error}", file=sys.stderr)
                     return 1
-                if _is_session_meta_truncation_item(item):
+                if _is_session_meta_limit_truncation_item(item):
                     return _session_meta_limit_error(alias, args.limit)
+                if _is_session_meta_candidate_limit_truncation_item(item):
+                    candidate_limit = item.get("candidate_limit")
+                    if not isinstance(candidate_limit, int) or candidate_limit < 1:
+                        print(f"host={alias}", file=sys.stderr)
+                        print(
+                            "error=remote helper returned invalid session-meta "
+                            "candidate-limit metadata",
+                            file=sys.stderr,
+                        )
+                        return 1
+                    return _session_meta_candidate_limit_error(
+                        alias,
+                        candidate_limit,
+                    )
                 session_meta_error = _session_meta_error_from_item(item)
                 if session_meta_error is not None:
                     print(f"host={alias}", file=sys.stderr)

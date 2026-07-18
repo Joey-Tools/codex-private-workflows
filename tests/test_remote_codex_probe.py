@@ -220,12 +220,14 @@ class RemoteHostContextDocumentationTests(unittest.TestCase):
         self.assertIn("`O_NOFOLLOW` and `O_NONBLOCK`", skill)
         self.assertIn("stat-to-open FIFO replacement", skill)
         self.assertIn("cap cuts through a record", skill)
-        self.assertIn("ordinary truncation", skill)
-        self.assertIn("narrow the date or host scope, or raise `--limit`", skill)
+        self.assertIn("`--limit` bounds result rows only", skill)
+        self.assertIn("independent fixed safety cap of 501", skill)
+        self.assertIn("`session_meta_candidate_limit_truncated`", skill)
+        self.assertIn("do not treat a higher `--limit` as the remedy", skill)
         self.assertIn("name-only discovery", skill)
         self.assertIn("fresh descriptor-relative no-follow stats", skill)
         self.assertIn("cached dirent inode", skill)
-        self.assertIn("at most `limit + 1` consumed candidates", skill)
+        self.assertIn("at most 501 consumed active candidates", skill)
         self.assertIn("Do no rollout-open or prefix-proof I/O", skill)
         self.assertIn("exact inventory identity", skill)
         self.assertIn("after the proof read", skill)
@@ -2498,7 +2500,7 @@ class RemoteCodexProbeChunkTests(unittest.TestCase):
                 self.assertEqual(session_ids, ["trusted-session"])
                 self.assertGreater(rollout.stat().st_size, len(original))
 
-    def test_active_prefix_proof_candidate_limit_bounds_capture_io(self) -> None:
+    def test_active_candidate_safety_cap_does_not_follow_row_limit(self) -> None:
         for scope in ("local", "embedded"):
             for scenario in ("valid", "no_meta"):
                 with self.subTest(
@@ -2596,8 +2598,8 @@ class RemoteCodexProbeChunkTests(unittest.TestCase):
                         result = run_scan()
 
                     expected_names = [
-                        Path(rollout_refs[2]).name,
-                        Path(rollout_refs[1]).name,
+                        Path(rollout_refs[index]).name
+                        for index in ((2, 1) if scenario == "valid" else (2, 1, 0))
                     ]
                     self.assertEqual(capture_names, expected_names)
                     self.assertTrue(pread_requests)
@@ -2606,14 +2608,25 @@ class RemoteCodexProbeChunkTests(unittest.TestCase):
                         MODULE.SESSION_META_READ_CHUNK_BYTES,
                     )
                     if scope == "local":
-                        self.assertTrue(result.truncated)
+                        self.assertEqual(result.truncated, scenario == "valid")
+                        self.assertEqual(
+                            result.truncation_reason,
+                            (
+                                MODULE.SESSION_META_LIMIT_TRUNCATED_REASON
+                                if scenario == "valid"
+                                else None
+                            ),
+                        )
                         session_ids = [row["session_id"] for row in result.rows]
                     else:
-                        self.assertEqual(result[-1]["kind"], "truncation")
-                        self.assertEqual(
-                            result[-1]["reason"],
-                            MODULE.SESSION_META_LIMIT_TRUNCATED_REASON,
-                        )
+                        if scenario == "valid":
+                            self.assertEqual(result[-1]["kind"], "truncation")
+                            self.assertEqual(
+                                result[-1]["reason"],
+                                MODULE.SESSION_META_LIMIT_TRUNCATED_REASON,
+                            )
+                        else:
+                            self.assertEqual(result, [])
                         session_ids = [
                             str(record["session_id"])
                             for record in result
@@ -2624,7 +2637,7 @@ class RemoteCodexProbeChunkTests(unittest.TestCase):
                         ["candidate-2"] if scenario == "valid" else [],
                     )
 
-    def test_mixed_valid_and_no_meta_candidates_use_ordinary_truncation(
+    def test_mixed_valid_and_no_meta_candidates_use_result_row_truncation(
         self,
     ) -> None:
         for scope in ("local", "embedded"):
