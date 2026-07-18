@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import base64
 import binascii
+import codecs
 import collections
 import dataclasses
 import datetime as dt
@@ -242,6 +243,7 @@ class RolloutChunk:
     last_timestamp: str
     oversized_record: bool
     lines: tuple[str, ...]
+    decode_error_count: int = 0
 
 
 @dataclasses.dataclass(frozen=True)
@@ -1571,16 +1573,16 @@ def _timestamp_from_jsonl_line(line: str) -> str:
     return str(timestamp) if isinstance(timestamp, str) else ""
 
 
-def _raw_line_parts(raw_line: Any) -> tuple[bytes, str]:
+def _raw_line_parts(raw_line: Any) -> tuple[bytes, str, bool]:
     if isinstance(raw_line, str):
-        return raw_line.encode("utf-8", "surrogatepass"), raw_line
+        return raw_line.encode("utf-8", "surrogatepass"), raw_line, False
     raw_bytes = bytes(raw_line)
     try:
-        return raw_bytes, raw_bytes.decode("utf-8")
+        return raw_bytes, raw_bytes.decode("utf-8"), False
     except UnicodeDecodeError:
         # Let the JSON summarizer count the physical record as malformed
         # without emitting replacement-altered evidence.
-        return raw_bytes, ""
+        return raw_bytes, "", True
 
 
 def _raw_line_endswith_newline(raw_line: Any) -> bool:
@@ -1632,10 +1634,12 @@ def _iter_rollout_chunks(
     first_timestamp = ""
     last_timestamp = ""
     oversized_record = False
+    decode_error_count = 0
 
     def flush() -> RolloutChunk | None:
         nonlocal chunk_index, lines, current_bytes, byte_start, record_start
         nonlocal first_timestamp, last_timestamp, oversized_record
+        nonlocal decode_error_count
         if not lines:
             return None
         chunk = RolloutChunk(
@@ -1648,6 +1652,7 @@ def _iter_rollout_chunks(
             last_timestamp=last_timestamp,
             oversized_record=oversized_record,
             lines=tuple(lines),
+            decode_error_count=decode_error_count,
         )
         chunk_index += 1
         lines = []
@@ -1657,6 +1662,7 @@ def _iter_rollout_chunks(
         first_timestamp = ""
         last_timestamp = ""
         oversized_record = False
+        decode_error_count = 0
         return chunk
 
     read_limit = chunk_bytes + 1
@@ -1677,7 +1683,7 @@ def _iter_rollout_chunks(
             if chunk is not None:
                 yield chunk
             return
-        raw_bytes, line = _raw_line_parts(raw_line)
+        raw_bytes, line, line_decode_failed = _raw_line_parts(raw_line)
         line_start = offset
         record_no += 1
         at_source_end = source_bytes is not None and (
@@ -1695,6 +1701,14 @@ def _iter_rollout_chunks(
                     yield chunk
 
             total_bytes = len(raw_bytes)
+            record_decode_failed = False
+            decoder = None
+            if not isinstance(raw_line, str):
+                decoder = codecs.getincrementaldecoder("utf-8")("strict")
+                try:
+                    decoder.decode(raw_bytes, final=False)
+                except UnicodeDecodeError:
+                    record_decode_failed = True
             while line_truncated:
                 remaining = (
                     None
@@ -1709,7 +1723,12 @@ def _iter_rollout_chunks(
                 segment = handle.readline(current_read_limit)
                 if not segment:
                     break
-                segment_bytes, _ = _raw_line_parts(segment)
+                segment_bytes, _, _ = _raw_line_parts(segment)
+                if decoder is not None and not record_decode_failed:
+                    try:
+                        decoder.decode(segment_bytes, final=False)
+                    except UnicodeDecodeError:
+                        record_decode_failed = True
                 total_bytes += len(segment_bytes)
                 at_source_end = source_bytes is not None and (
                     line_start + total_bytes >= source_bytes
@@ -1719,6 +1738,12 @@ def _iter_rollout_chunks(
                     and len(segment) == current_read_limit
                     and not _raw_line_endswith_newline(segment)
                 )
+
+            if decoder is not None and not record_decode_failed:
+                try:
+                    decoder.decode(b"", final=True)
+                except UnicodeDecodeError:
+                    record_decode_failed = True
 
             offset += total_bytes
             yield RolloutChunk(
@@ -1731,6 +1756,7 @@ def _iter_rollout_chunks(
                 last_timestamp="",
                 oversized_record=True,
                 lines=("",),
+                decode_error_count=int(record_decode_failed),
             )
             chunk_index += 1
             continue
@@ -1756,6 +1782,7 @@ def _iter_rollout_chunks(
             last_timestamp = timestamp
         oversized_record = oversized_record or len(raw_bytes) > chunk_bytes
         lines.append(line)
+        decode_error_count += int(line_decode_failed)
         current_bytes += len(raw_bytes)
 
 
@@ -1987,6 +2014,7 @@ def _remote_python_script(payload: dict[str, object]) -> str:
     encoded = json.dumps(payload, separators=(",", ":"), sort_keys=True)
     return f"""
 import base64
+import codecs
 import collections
 import errno
 import hashlib
@@ -2928,14 +2956,14 @@ def timestamp_from_jsonl_line(line):
 
 def raw_line_parts(raw_line):
     if isinstance(raw_line, str):
-        return raw_line.encode("utf-8", "surrogatepass"), raw_line
+        return raw_line.encode("utf-8", "surrogatepass"), raw_line, False
     raw_bytes = bytes(raw_line)
     try:
-        return raw_bytes, raw_bytes.decode("utf-8")
+        return raw_bytes, raw_bytes.decode("utf-8"), False
     except UnicodeDecodeError:
         # Let the JSON summarizer count the physical record as malformed
         # without emitting replacement-altered evidence.
-        return raw_bytes, ""
+        return raw_bytes, "", True
 
 
 def raw_line_endswith_newline(raw_line):
@@ -2977,10 +3005,12 @@ def iter_rollout_chunks(handle, chunk_bytes, source_bytes=None):
     first_timestamp = ""
     last_timestamp = ""
     oversized_record = False
+    decode_error_count = 0
 
     def flush():
         nonlocal chunk_index, lines, current_bytes, byte_start, record_start
         nonlocal first_timestamp, last_timestamp, oversized_record
+        nonlocal decode_error_count
         if not lines:
             return None
         chunk = {{
@@ -2993,6 +3023,7 @@ def iter_rollout_chunks(handle, chunk_bytes, source_bytes=None):
             "last_timestamp": last_timestamp,
             "oversized_record": oversized_record,
             "lines": tuple(lines),
+            "decode_error_count": decode_error_count,
         }}
         chunk_index += 1
         lines = []
@@ -3002,6 +3033,7 @@ def iter_rollout_chunks(handle, chunk_bytes, source_bytes=None):
         first_timestamp = ""
         last_timestamp = ""
         oversized_record = False
+        decode_error_count = 0
         return chunk
 
     read_limit = chunk_bytes + 1
@@ -3020,7 +3052,7 @@ def iter_rollout_chunks(handle, chunk_bytes, source_bytes=None):
             if chunk is not None:
                 yield chunk
             return
-        raw_bytes, line = raw_line_parts(raw_line)
+        raw_bytes, line, line_decode_failed = raw_line_parts(raw_line)
         line_start = offset
         record_no += 1
         at_source_end = source_bytes is not None and line_start + len(raw_bytes) >= source_bytes
@@ -3036,6 +3068,14 @@ def iter_rollout_chunks(handle, chunk_bytes, source_bytes=None):
                     yield chunk
 
             total_bytes = len(raw_bytes)
+            record_decode_failed = False
+            decoder = None
+            if not isinstance(raw_line, str):
+                decoder = codecs.getincrementaldecoder("utf-8")("strict")
+                try:
+                    decoder.decode(raw_bytes, final=False)
+                except UnicodeDecodeError:
+                    record_decode_failed = True
             while line_truncated:
                 remaining = None if source_bytes is None else source_bytes - (line_start + total_bytes)
                 if remaining is not None and remaining <= 0:
@@ -3044,7 +3084,12 @@ def iter_rollout_chunks(handle, chunk_bytes, source_bytes=None):
                 segment = handle.readline(current_read_limit)
                 if not segment:
                     break
-                segment_bytes, _ = raw_line_parts(segment)
+                segment_bytes, _, _ = raw_line_parts(segment)
+                if decoder is not None and not record_decode_failed:
+                    try:
+                        decoder.decode(segment_bytes, final=False)
+                    except UnicodeDecodeError:
+                        record_decode_failed = True
                 total_bytes += len(segment_bytes)
                 at_source_end = source_bytes is not None and line_start + total_bytes >= source_bytes
                 line_truncated = (
@@ -3052,6 +3097,12 @@ def iter_rollout_chunks(handle, chunk_bytes, source_bytes=None):
                     and len(segment) == current_read_limit
                     and not raw_line_endswith_newline(segment)
                 )
+
+            if decoder is not None and not record_decode_failed:
+                try:
+                    decoder.decode(b"", final=True)
+                except UnicodeDecodeError:
+                    record_decode_failed = True
 
             offset += total_bytes
             yield {{
@@ -3064,6 +3115,7 @@ def iter_rollout_chunks(handle, chunk_bytes, source_bytes=None):
                 "last_timestamp": "",
                 "oversized_record": True,
                 "lines": ("",),
+                "decode_error_count": int(record_decode_failed),
             }}
             chunk_index += 1
             continue
@@ -3089,6 +3141,7 @@ def iter_rollout_chunks(handle, chunk_bytes, source_bytes=None):
             last_timestamp = timestamp
         oversized_record = oversized_record or len(raw_bytes) > chunk_bytes
         lines.append(line)
+        decode_error_count += int(line_decode_failed)
         current_bytes += len(raw_bytes)
 
 
@@ -3501,6 +3554,8 @@ def chunk_reason_codes(chunk, records, json_error_count):
     codes = []
     if chunk["oversized_record"]:
         codes.append("oversized_record")
+    if int(chunk.get("decode_error_count", 0)):
+        codes.append("utf8_decode_error")
     if json_error_count:
         codes.append("json_parse_error")
     if not evidence_records:
@@ -3543,6 +3598,7 @@ def chunk_meta_record(
         "chunk_bytes": chunk_bytes,
         "max_chunk_records": MAX_ROLLOUT_CHUNK_RECORDS,
         "coverage_status": "partial" if raw_fetch_recommended else "complete",
+        "decode_error_count": int(chunk.get("decode_error_count", 0)),
         "json_error_count": json_error_count,
         "reason_codes": reason_codes,
         "records_emitted": len(records),
@@ -3688,13 +3744,17 @@ def summarize_rollout_chunks():
                     line_offset=int(chunk["record_start"]) - 1,
                     scan_metadata=scan_metadata,
                 )
+                json_error_count = max(
+                    int(scan_metadata["json_error_count"]),
+                    int(chunk.get("decode_error_count", 0)),
+                )
                 common = chunk_common_fields(chunk)
                 chunk_meta = chunk_meta_record(
                     chunk,
                     records,
                     expected_identity,
                     CHUNK_BYTES,
-                    int(scan_metadata["json_error_count"]),
+                    json_error_count,
                     total_fetch_range_entries,
                 )
                 total_fetch_range_entries += int(
@@ -5899,6 +5959,8 @@ def _chunk_reason_codes(
     codes: list[str] = []
     if chunk.oversized_record:
         codes.append("oversized_record")
+    if chunk.decode_error_count:
+        codes.append("utf8_decode_error")
     if json_error_count:
         codes.append("json_parse_error")
     if not evidence_records:
@@ -5950,6 +6012,7 @@ def _chunk_meta_record(
         "chunk_bytes": chunk_bytes,
         "max_chunk_records": MAX_ROLLOUT_CHUNK_RECORDS,
         "coverage_status": "partial" if raw_fetch_recommended else "complete",
+        "decode_error_count": chunk.decode_error_count,
         "json_error_count": json_error_count,
         "reason_codes": reason_codes,
         "records_emitted": len(records),
@@ -6067,6 +6130,10 @@ def _chunked_rollout_summary_records(
                     scan_metadata=scan_metadata,
                 )
             )
+            json_error_count = max(
+                scan_metadata["json_error_count"],
+                chunk.decode_error_count,
+            )
             common = _chunk_common_fields(chunk)
             meta = _chunk_meta_record(
                 chunk=chunk,
@@ -6074,7 +6141,7 @@ def _chunked_rollout_summary_records(
                 source_identity=expected_identity,
                 chunk_bytes=chunk_bytes,
                 authorized_source_bytes=authorized_source_bytes,
-                json_error_count=scan_metadata["json_error_count"],
+                json_error_count=json_error_count,
                 fetch_range_plan_entries_used=total_fetch_range_entries,
             )
             total_fetch_range_entries += int(meta.get("fetch_range_count", 1))

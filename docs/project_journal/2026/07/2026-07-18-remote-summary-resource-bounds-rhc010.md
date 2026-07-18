@@ -22,6 +22,7 @@ superseded_by:
 
 - Each in-memory chunk retains at most 4,096 physical records while preserving exact byte and record coordinates.
 - `chunk_meta.json_error_count` and `json_parse_error` expose malformed or invalid-UTF-8 input without discarding valid evidence from the same chunk or emitting replacement-altered evidence.
+- `chunk_meta.decode_error_count` preserves invalid-UTF-8 coverage for oversized records while an incremental decoder avoids false positives at multibyte read boundaries.
 - Local and embedded summaries fail closed before emitting a plan whose cumulative explicit ranges and implicit whole-chunk entries exceed 4,096.
 
 ## Next Steps

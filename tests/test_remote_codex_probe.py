@@ -6067,9 +6067,11 @@ class RemoteCodexProbeChunkTests(unittest.TestCase):
             chunk_meta = next(
                 record for record in records if record["kind"] == "chunk_meta"
             )
+            self.assertEqual(chunk_meta["decode_error_count"], 0)
             self.assertEqual(chunk_meta["json_error_count"], 1)
             self.assertEqual(chunk_meta["coverage_status"], "partial")
             self.assertTrue(chunk_meta["raw_fetch_recommended"])
+            self.assertNotIn("utf8_decode_error", chunk_meta["reason_codes"])
             self.assertIn("json_parse_error", chunk_meta["reason_codes"])
             self.assertNotIn("no_structured_evidence", chunk_meta["reason_codes"])
             self.assertEqual(chunk_meta["records_emitted"], 2)
@@ -6196,9 +6198,11 @@ class RemoteCodexProbeChunkTests(unittest.TestCase):
             chunk_meta = next(
                 record for record in records if record["kind"] == "chunk_meta"
             )
+            self.assertEqual(chunk_meta["decode_error_count"], 1)
             self.assertEqual(chunk_meta["json_error_count"], 1)
             self.assertEqual(chunk_meta["coverage_status"], "partial")
             self.assertTrue(chunk_meta["raw_fetch_recommended"])
+            self.assertIn("utf8_decode_error", chunk_meta["reason_codes"])
             self.assertIn("json_parse_error", chunk_meta["reason_codes"])
             self.assertNotIn("no_structured_evidence", chunk_meta["reason_codes"])
             self.assertEqual(chunk_meta["records_emitted"], 2)
@@ -6460,6 +6464,18 @@ class RemoteCodexProbeChunkTests(unittest.TestCase):
                     )
                 ],
             )
+            rollout_path = codex_root / rollout
+            rollout_path.write_bytes(
+                rollout_path.read_bytes()
+                + b'{"type":"response_item","payload":"'
+                + b"y" * 240
+                + b'\xff"}\n'
+                + b'"'
+                + b"a" * 59
+                + "é".encode()
+                + b"b" * 100
+                + b'"\n'
+            )
             identity = rollout_identity(codex_root, rollout)
             with (
                 mock.patch.object(MODULE, "_local_codex_root", return_value=codex_root),
@@ -6518,12 +6534,12 @@ class RemoteCodexProbeChunkTests(unittest.TestCase):
 
         self.assertEqual(rc, 0)
         records = [json.loads(line) for line in buffer.getvalue().splitlines()]
-        local_oversized = next(
+        local_oversized = [
             record
             for record in records
             if record["kind"] == "chunk_meta"
             and "oversized_record" in record["reason_codes"]
-        )
+        ]
         self.assertEqual(embedded_result.returncode, 0, embedded_result.stderr)
         embedded_records = [
             json.loads(line)
@@ -6536,32 +6552,42 @@ class RemoteCodexProbeChunkTests(unittest.TestCase):
             )
             if "\"kind\"" in line
         ]
-        embedded_oversized = next(
+        embedded_oversized = [
             record
             for record in embedded_records
             if record["kind"] == "chunk_meta"
             and "oversized_record" in record["reason_codes"]
-        )
-        for oversized in (local_oversized, embedded_oversized):
-            self.assertTrue(oversized["raw_fetch_recommended"])
-            self.assertEqual(oversized["json_error_count"], 0)
-            self.assertNotIn("json_parse_error", oversized["reason_codes"])
-            self.assertGreater(oversized["fetch_range_count"], 1)
-            self.assertEqual(
-                oversized["fetch_ranges"][0]["byte_start"],
-                oversized["byte_start"],
-            )
-            self.assertEqual(
-                oversized["fetch_ranges"][-1]["byte_end"],
-                oversized["byte_end"],
-            )
-            self.assertTrue(
-                all(
-                    item["byte_end"] - item["byte_start"]
-                    <= oversized["fetch_chunk_bytes"]
-                    for item in oversized["fetch_ranges"]
+        ]
+        for oversized_records in (local_oversized, embedded_oversized):
+            self.assertEqual(len(oversized_records), 3)
+            valid_record, invalid_record, split_utf8_record = oversized_records
+            for record in (valid_record, split_utf8_record):
+                self.assertEqual(record["decode_error_count"], 0)
+                self.assertEqual(record["json_error_count"], 0)
+                self.assertNotIn("utf8_decode_error", record["reason_codes"])
+                self.assertNotIn("json_parse_error", record["reason_codes"])
+            self.assertEqual(invalid_record["decode_error_count"], 1)
+            self.assertEqual(invalid_record["json_error_count"], 1)
+            self.assertIn("utf8_decode_error", invalid_record["reason_codes"])
+            self.assertIn("json_parse_error", invalid_record["reason_codes"])
+            for oversized in oversized_records:
+                self.assertTrue(oversized["raw_fetch_recommended"])
+                self.assertGreater(oversized["fetch_range_count"], 1)
+                self.assertEqual(
+                    oversized["fetch_ranges"][0]["byte_start"],
+                    oversized["byte_start"],
                 )
-            )
+                self.assertEqual(
+                    oversized["fetch_ranges"][-1]["byte_end"],
+                    oversized["byte_end"],
+                )
+                self.assertTrue(
+                    all(
+                        item["byte_end"] - item["byte_start"]
+                        <= oversized["fetch_chunk_bytes"]
+                        for item in oversized["fetch_ranges"]
+                    )
+                )
 
     def test_fetch_range_plan_rejects_huge_count_before_allocation(self) -> None:
         with mock.patch.object(MODULE, "MAX_FETCH_RANGE_PLAN_ENTRIES", 4):
