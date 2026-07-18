@@ -82,6 +82,48 @@ COMMON_JOEY_TEXT_REPLACEMENTS = (
 )
 
 
+PUBLIC_LEGACY_MUTABLE_RELEASE_BLOCK = '''_LEGACY_MUTABLE_RELEASES = {
+    "Joey-Tools/codex-toolbox": _LegacyMutableRelease(
+        release_id=325822894,
+        tag_name="personal-codex-20260520-100331-8de1857",
+        sha="8de18571811128cef148d13f1d474718d7cfae17",
+        archive_id=425088267,
+        archive_size=16353,
+        archive_digest=(
+            "sha256:05df0bf973e3c67aedd03838c5116471"
+            "314e7ce6c24d3435b0f8b7765624c9be"
+        ),
+        checksum_id=425088288,
+        checksum_size=129,
+        checksum_digest=(
+            "sha256:c3ed6fe4d5df9178f471c80dd9e0bb56"
+            "340b4e8c32731974ff4747e3797d4805"
+        ),
+    ),
+}'''
+
+
+PRIVATE_LEGACY_MUTABLE_RELEASE_BLOCK = '''_LEGACY_MUTABLE_RELEASES = {
+    "Joey-Tools/codex-private-workflows": _LegacyMutableRelease(
+        release_id=325865586,
+        tag_name="personal-codex-20260520-104847-4e5ca3f",
+        sha="4e5ca3f1a377c5dfb572f35fc2bab8f38e885685",
+        archive_id=425126036,
+        archive_size=214354,
+        archive_digest=(
+            "sha256:ed831eac668a0ecd330ce5c168a50477"
+            "927dd4eb8ed68b10b0f1fd90cf5399ef"
+        ),
+        checksum_id=425126043,
+        checksum_size=129,
+        checksum_digest=(
+            "sha256:5b67e065429e3ca6f58186ab97488032"
+            "c405edc0940da69f95875dbf2a50bed4"
+        ),
+    ),
+}'''
+
+
 def _rule(
     repo: str,
     source: str,
@@ -122,6 +164,41 @@ SYNC_RULES = (
                 'DEFAULT_MANIFEST = Path("personal_codex/private-sync-manifest.json")',
             ),
         ),
+    ),
+    _rule(
+        "codex-toolbox",
+        "scripts/validate_sync_manifest_changes.py",
+        "scripts/validate_sync_manifest_changes.py",
+        (
+            Replacement(
+                'default="personal_codex/public-sync-manifest.json"',
+                'default="personal_codex/private-sync-manifest.json"',
+            ),
+            Replacement(
+                PUBLIC_LEGACY_MUTABLE_RELEASE_BLOCK,
+                PRIVATE_LEGACY_MUTABLE_RELEASE_BLOCK,
+            ),
+        ),
+    ),
+    _rule(
+        "codex-toolbox",
+        "tests/test_sync_manifest_changes.py",
+        "tests/test_sync_manifest_changes.py",
+    ),
+    _rule(
+        "codex-toolbox",
+        "tests/test_package_builder_safety.py",
+        "tests/test_package_builder_safety.py",
+    ),
+    _rule(
+        "codex-toolbox",
+        "tests/test_release_manifest_baseline.py",
+        "tests/test_release_manifest_baseline.py",
+    ),
+    _rule(
+        "codex-toolbox",
+        "tests/test_personal_sync_reconciliation_safety.py",
+        "tests/test_personal_sync_reconciliation_safety.py",
     ),
     _rule(
         "codex-review-workflows",
@@ -452,6 +529,8 @@ CANONICAL_REVIEW_REQUIRED_FILES = tuple(
         "tests/test_cli.py",
         "tests/test_common.py",
         "tests/test_contracts.py",
+        "tests/fixtures/ci/canonical.yml",
+        "tests/fixtures/ci/private.yml",
         "tests/test_providers.py",
         "tests/test_state.py",
         "tests/test_synthetic_tokens.py",
