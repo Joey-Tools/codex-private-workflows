@@ -160,6 +160,7 @@ SESSION_META_CANDIDATE_LIMIT_TRUNCATED_REASON = (
 SESSION_META_SCAN_TRUNCATED_ERROR = (
     "session-meta scan truncated before metadata was found"
 )
+SESSION_META_INVALID_UTF8_ERROR = "session-meta record is not valid UTF-8"
 SESSION_META_OUTPUT_ROW_TOO_LARGE_ERROR = "session-meta output row too large"
 ROLLOUT_SUMMARY_OUTPUT_TOO_LARGE_ERROR = "rollout summary output too large"
 REMOTE_FETCH_ROLLOUT_BEGIN = "__REMOTE_CODEX_PROBE_FETCH_ROLLOUT_BEGIN__"
@@ -1567,7 +1568,9 @@ def _session_meta_allows_append(
 def _timestamp_from_jsonl_line(line: str) -> str:
     try:
         obj = json.loads(line)
-    except json.JSONDecodeError:
+    except (ValueError, RecursionError):
+        return ""
+    if not isinstance(obj, dict):
         return ""
     timestamp = obj.get("timestamp")
     return str(timestamp) if isinstance(timestamp, str) else ""
@@ -2085,6 +2088,7 @@ SESSION_META_END = {REMOTE_SESSION_META_END!r}
 SESSION_META_LIMIT_TRUNCATED_REASON = {SESSION_META_LIMIT_TRUNCATED_REASON!r}
 SESSION_META_CANDIDATE_LIMIT_TRUNCATED_REASON = {SESSION_META_CANDIDATE_LIMIT_TRUNCATED_REASON!r}
 SESSION_META_SCAN_TRUNCATED_ERROR = {SESSION_META_SCAN_TRUNCATED_ERROR!r}
+SESSION_META_INVALID_UTF8_ERROR = {SESSION_META_INVALID_UTF8_ERROR!r}
 FETCH_ROLLOUT_BEGIN = {REMOTE_FETCH_ROLLOUT_BEGIN!r}
 FETCH_ROLLOUT_END = {REMOTE_FETCH_ROLLOUT_END!r}
 FETCH_ROLLOUT_CHUNK_BEGIN = {REMOTE_FETCH_ROLLOUT_CHUNK_BEGIN!r}
@@ -2948,7 +2952,9 @@ def session_meta_allows_append(rel):
 def timestamp_from_jsonl_line(line):
     try:
         obj = json.loads(line)
-    except json.JSONDecodeError:
+    except (ValueError, RecursionError):
+        return ""
+    if not isinstance(obj, dict):
         return ""
     value = obj.get("timestamp")
     return str(value) if isinstance(value, str) else ""
@@ -3316,12 +3322,20 @@ def parse_bounded_session_meta_prefix(prefix, source_size, start_offset=0):
         raw_bytes = prefix[cursor:line_end]
         cursor = line_end
         try:
-            obj = json.loads(raw_bytes.decode("utf-8", "replace"))
-        except json.JSONDecodeError:
+            decoded = raw_bytes.decode("utf-8")
+        except UnicodeDecodeError:
+            raise ValueError(SESSION_META_INVALID_UTF8_ERROR) from None
+        try:
+            obj = json.loads(decoded)
+        except (ValueError, RecursionError):
+            continue
+        if not isinstance(obj, dict):
             continue
         if obj.get("type") != "session_meta":
             continue
         payload = obj.get("payload", {{}})
+        if not isinstance(payload, dict):
+            continue
         session_id = str(payload.get("id", ""))
         cwd = str(payload.get("cwd", ""))
         has_unread_bytes = source_size > start_offset + cursor
@@ -3436,14 +3450,20 @@ def summarize_records(lines, line_offset=0, scan_metadata=None):
     for line_no, line in enumerate(lines, line_offset + 1):
         try:
             obj = json.loads(line)
-        except json.JSONDecodeError:
+        except (ValueError, RecursionError):
+            json_error_count += 1
+            continue
+        if not isinstance(obj, dict):
+            json_error_count += 1
+            continue
+        payload = obj.get("payload", {{}})
+        if not isinstance(payload, dict):
             json_error_count += 1
             continue
         timestamp = str(obj.get("timestamp", ""))
         record = None
         record_type = str(obj.get("type", ""))
         if record_type == "session_meta" and session_meta_record is None:
-            payload = obj.get("payload", {{}})
             record = summary_record(
                 "session_meta",
                 "session_id=" + str(payload.get("id", ""))
@@ -3455,7 +3475,6 @@ def summarize_records(lines, line_offset=0, scan_metadata=None):
             )
             session_meta_record = record
         elif record_type == "response_item":
-            payload = obj.get("payload", {{}})
             payload_type = str(payload.get("type", ""))
             if payload_type == "message":
                 kind, text = message_summary_from_payload(payload)
@@ -3470,7 +3489,6 @@ def summarize_records(lines, line_offset=0, scan_metadata=None):
                 if isinstance(output, str) and output.strip():
                     record = summary_record("function_call_output", output, line_no=line_no, timestamp=timestamp)
         elif record_type == "event_msg":
-            payload = obj.get("payload", {{}})
             payload_type = str(payload.get("type", ""))
             if payload_type == "task_complete":
                 text = payload.get("last_agent_message")
@@ -3875,14 +3893,20 @@ def summarize_rollout():
         ):
             try:
                 obj = json.loads(line)
-            except json.JSONDecodeError:
+            except (ValueError, RecursionError):
+                json_error_count += 1
+                continue
+            if not isinstance(obj, dict):
+                json_error_count += 1
+                continue
+            payload = obj.get("payload", {{}})
+            if not isinstance(payload, dict):
                 json_error_count += 1
                 continue
             timestamp = str(obj.get("timestamp", ""))
             record = None
             record_type = str(obj.get("type", ""))
             if record_type == "session_meta" and session_meta_record is None:
-                payload = obj.get("payload", {{}})
                 record = summary_record(
                     "session_meta",
                     "session_id=" + str(payload.get("id", ""))
@@ -3894,7 +3918,6 @@ def summarize_rollout():
                 )
                 session_meta_record = record
             elif record_type == "response_item":
-                payload = obj.get("payload", {{}})
                 payload_type = str(payload.get("type", ""))
                 if payload_type == "message":
                     kind, text = message_summary_from_payload(payload)
@@ -3909,7 +3932,6 @@ def summarize_rollout():
                     if isinstance(output, str) and output.strip():
                         record = summary_record("function_call_output", output, line_no=line_no, timestamp=timestamp)
             elif record_type == "event_msg":
-                payload = obj.get("payload", {{}})
                 payload_type = str(payload.get("type", ""))
                 if payload_type == "task_complete":
                     text = payload.get("last_agent_message")
@@ -5649,12 +5671,20 @@ def _parse_bounded_session_meta_prefix(
         raw_bytes = prefix[cursor:line_end]
         cursor = line_end
         try:
-            obj = json.loads(raw_bytes.decode("utf-8", "replace"))
-        except json.JSONDecodeError:
+            decoded = raw_bytes.decode("utf-8")
+        except UnicodeDecodeError:
+            raise ValueError(SESSION_META_INVALID_UTF8_ERROR) from None
+        try:
+            obj = json.loads(decoded)
+        except (ValueError, RecursionError):
+            continue
+        if not isinstance(obj, dict):
             continue
         if obj.get("type") != "session_meta":
             continue
         payload = obj.get("payload", {})
+        if not isinstance(payload, dict):
+            continue
         session_id = str(payload.get("id", ""))
         cwd = str(payload.get("cwd", ""))
         has_unread_bytes = source_size > start_offset + cursor
@@ -5785,7 +5815,14 @@ def _summarize_rollout_records(
     for line_no, line in enumerate(lines, line_offset + 1):
         try:
             obj = json.loads(line)
-        except json.JSONDecodeError:
+        except (ValueError, RecursionError):
+            json_error_count += 1
+            continue
+        if not isinstance(obj, dict):
+            json_error_count += 1
+            continue
+        payload = obj.get("payload", {})
+        if not isinstance(payload, dict):
             json_error_count += 1
             continue
         timestamp = str(obj.get("timestamp", ""))
@@ -5793,7 +5830,6 @@ def _summarize_rollout_records(
         record_type = str(obj.get("type", ""))
 
         if record_type == "session_meta" and session_meta_record is None:
-            payload = obj.get("payload", {})
             session_meta_record = _build_summary_record(
                 kind="session_meta",
                 text=f"session_id={payload.get('id', '')} cwd_present={str(bool(payload.get('cwd', ''))).lower()}",
@@ -5806,7 +5842,6 @@ def _summarize_rollout_records(
             continue
 
         if record_type == "response_item":
-            payload = obj.get("payload", {})
             payload_type = str(payload.get("type", ""))
             if payload_type == "message":
                 kind, text = _message_summary(payload)
@@ -5835,7 +5870,6 @@ def _summarize_rollout_records(
                         search_keywords=search_keywords,
                     )
         elif record_type == "event_msg":
-            payload = obj.get("payload", {})
             payload_type = str(payload.get("type", ""))
             if payload_type == "task_complete":
                 text = payload.get("last_agent_message")

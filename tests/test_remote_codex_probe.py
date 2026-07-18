@@ -79,6 +79,16 @@ def identity_kwargs(identity: MODULE.RolloutIdentity) -> dict[str, object]:
     }
 
 
+def pathological_json_lines() -> list[str]:
+    integer_digit_limit = sys.get_int_max_str_digits()
+    oversized_integer_digits = max(5000, integer_digit_limit + 1)
+    nesting_depth = 10_000
+    return [
+        "9" * oversized_integer_digits,
+        "[" * nesting_depth + "0" + "]" * nesting_depth,
+    ]
+
+
 def embedded_probe_namespace(payload: dict[str, object]) -> dict[str, object]:
     script = MODULE._remote_python_script(payload)
     definitions = script.split('\nif CONFIG["mode"] ==', 1)[0]
@@ -223,6 +233,11 @@ class RemoteHostContextDocumentationTests(unittest.TestCase):
         self.assertIn("`--limit` bounds result rows only", skill)
         self.assertIn("independent fixed safety cap of 501", skill)
         self.assertIn("`session_meta_candidate_limit_truncated`", skill)
+        self.assertIn("strict UTF-8", skill)
+        self.assertIn("non-object JSON", skill)
+        self.assertIn("non-object payload schemas", skill)
+        self.assertIn("oversized integer literals", skill)
+        self.assertIn("excessively nested JSON", skill)
         self.assertIn("do not treat a higher `--limit` as the remedy", skill)
         self.assertIn("name-only discovery", skill)
         self.assertIn("fresh descriptor-relative no-follow stats", skill)
@@ -3996,6 +4011,129 @@ class RemoteCodexProbeChunkTests(unittest.TestCase):
         self.assertEqual(embedded_items[0]["session_id"], "crlf-session")
         self.assertEqual(embedded_items[0]["rollout"], rollout)
 
+    def test_session_meta_rejects_invalid_utf8_locally_and_embedded(self) -> None:
+        for invalid_field in ("id", "cwd"):
+            with self.subTest(field=invalid_field), tempfile.TemporaryDirectory() as temp_dir:
+                codex_root = Path(temp_dir) / ".codex"
+                rollout = (
+                    "sessions/2026/05/26/"
+                    f"rollout-2026-05-26T10-00-00-invalid-{invalid_field}.jsonl"
+                )
+                rollout_path = codex_root / rollout
+                rollout_path.parent.mkdir(parents=True)
+                record = {
+                    "type": "session_meta",
+                    "payload": {"id": "VALID_ID", "cwd": "VALID_CWD"},
+                }
+                marker = f"VALID_{invalid_field.upper()}".encode("ascii")
+                raw_line = json.dumps(record, separators=(",", ":")).encode("utf-8")
+                raw_line = raw_line.replace(marker, b"\xff", 1) + b"\n"
+                rollout_path.write_bytes(raw_line)
+
+                embedded = embedded_probe_namespace(
+                    {
+                        "mode": "session-meta",
+                        "dates": ["2026/05/26"],
+                        "limit": 10,
+                        "codex_root": str(codex_root),
+                        "session_meta_scan_bytes": MODULE.MAX_SESSION_META_SCAN_BYTES,
+                    }
+                )
+                for parser in (
+                    MODULE._parse_bounded_session_meta_prefix,
+                    embedded["parse_bounded_session_meta_prefix"],
+                ):
+                    with self.assertRaisesRegex(
+                        ValueError,
+                        f"^{MODULE.SESSION_META_INVALID_UTF8_ERROR}$",
+                    ):
+                        parser(raw_line, source_size=len(raw_line))
+
+                with self.assertRaises(MODULE.SessionMetaRolloutError) as raised:
+                    MODULE._scan_session_meta_records(
+                        codex_root=codex_root,
+                        dates=[MODULE.dt.date(2026, 5, 26)],
+                        limit=10,
+                        host="local",
+                    )
+                embedded_records = embedded_session_meta_records(embedded)
+
+            self.assertEqual(
+                raised.exception.error,
+                MODULE.SESSION_META_INVALID_UTF8_ERROR,
+            )
+            self.assertEqual(raised.exception.rollout, rollout)
+            self.assertEqual(
+                embedded_records,
+                [
+                    {
+                        "kind": "error",
+                        "error": MODULE.SESSION_META_INVALID_UTF8_ERROR,
+                        "rollout": rollout,
+                    }
+                ],
+            )
+            self.assertNotIn(rollout, str(raised.exception))
+
+    def test_timestamp_and_session_meta_skip_non_object_schemas_locally_and_embedded(
+        self,
+    ) -> None:
+        embedded = embedded_probe_namespace({"codex_root": "/unused"})
+        pathological_lines = pathological_json_lines()
+        with self.assertRaises(ValueError) as oversized_integer_error:
+            json.loads(pathological_lines[0])
+        self.assertNotIsInstance(
+            oversized_integer_error.exception,
+            json.JSONDecodeError,
+        )
+        with self.assertRaises(RecursionError):
+            json.loads(pathological_lines[1])
+        timestamp_cases = (
+            ("scalar", "0"),
+            ("array", "[]"),
+            ("null", "null"),
+            ("oversized_integer", pathological_lines[0]),
+            ("deep_nesting", pathological_lines[1]),
+        )
+        for case, line in timestamp_cases:
+            with self.subTest(case=case):
+                self.assertEqual(MODULE._timestamp_from_jsonl_line(line), "")
+                self.assertEqual(embedded["timestamp_from_jsonl_line"](line), "")
+
+        valid = json.dumps(
+            {
+                "type": "session_meta",
+                "payload": {"id": "later-valid", "cwd": "/repo"},
+            },
+            separators=(",", ":"),
+        ).encode("utf-8")
+        prefix = b"".join(
+            line.encode("utf-8") + b"\n"
+            for line in [
+                "0",
+                "[]",
+                "null",
+                *pathological_lines,
+                '{"type":"session_meta","payload":[]}',
+            ]
+        ) + valid + b"\n"
+        expected = ("later-valid", "/repo", False)
+
+        self.assertEqual(
+            MODULE._parse_bounded_session_meta_prefix(
+                prefix,
+                source_size=len(prefix),
+            ),
+            expected,
+        )
+        self.assertEqual(
+            embedded["parse_bounded_session_meta_prefix"](
+                prefix,
+                source_size=len(prefix),
+            ),
+            expected,
+        )
+
     def test_session_meta_rejects_current_entry_replacement_after_read(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             codex_root = Path(temp_dir) / ".codex"
@@ -6077,6 +6215,134 @@ class RemoteCodexProbeChunkTests(unittest.TestCase):
             self.assertEqual(chunk_meta["records_emitted"], 2)
             self.assertEqual(chunk_meta["fetch_range_count"], 1)
 
+    def test_chunked_summary_counts_non_object_schemas_and_keeps_later_evidence(
+        self,
+    ) -> None:
+        user_timestamp = "2026-05-26T10:01:00Z"
+        assistant_timestamp = "2026-05-26T10:02:00Z"
+        user_line = json.dumps(
+            {
+                "timestamp": user_timestamp,
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "Inspect this."}],
+                },
+            },
+            separators=(",", ":"),
+        )
+        assistant_line = json.dumps(
+            {
+                "timestamp": assistant_timestamp,
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "Completed."}],
+                },
+            },
+            separators=(",", ":"),
+        )
+        malformed_schemas = [
+            "0",
+            "[]",
+            "null",
+            *pathological_json_lines(),
+            '{"type":"response_item","payload":[]}',
+        ]
+        with tempfile.TemporaryDirectory() as temp_dir:
+            codex_root = Path(temp_dir) / ".codex"
+            rollout = write_rollout(
+                codex_root,
+                [*malformed_schemas, user_line, assistant_line],
+            )
+            identity = rollout_identity(codex_root, rollout)
+            with mock.patch.object(MODULE, "MIN_ROLLOUT_CHUNK_BYTES", 1):
+                local_records = MODULE._chunked_rollout_summary_records(
+                    codex_root=codex_root,
+                    rollout_relative_path=MODULE._resolve_rollout_relative_path(
+                        rollout
+                    ),
+                    chunk_bytes=identity.size,
+                    keywords=[],
+                    limit_per_chunk=20,
+                    tail_records=4,
+                    max_text_chars=200,
+                    host="local",
+                    expected_identity=identity,
+                    authorized_source_bytes=None,
+                )
+            script = MODULE._remote_python_script(
+                {
+                    "mode": "chunked-rollout-summary",
+                    "rollout": rollout,
+                    "codex_root": str(codex_root),
+                    "summary_keywords": [],
+                    "summary_limit": 20,
+                    "summary_tail_records": 4,
+                    "summary_max_text_chars": 200,
+                    "chunk_bytes": identity.size,
+                    "max_fetch_rollout_bytes": MODULE.MAX_FETCH_ROLLOUT_BYTES,
+                    "max_fetch_rollout_chunk_bytes": (
+                        MODULE.MAX_FETCH_ROLLOUT_CHUNK_BYTES
+                    ),
+                    "min_rollout_chunk_bytes": 1,
+                    "max_rollout_chunk_bytes": identity.size,
+                    "max_chunked_summary_output_bytes": (
+                        MODULE.MAX_CHUNKED_ROLLOUT_SUMMARY_OUTPUT_BYTES
+                    ),
+                    "max_fetch_range_plan_entries": (
+                        MODULE.MAX_FETCH_RANGE_PLAN_ENTRIES
+                    ),
+                    "expected_source_bytes": identity.size,
+                    "expected_source_identity": MODULE._rollout_identity_token(
+                        identity
+                    ),
+                    "authorized_source_bytes": None,
+                    "output_host": "embedded",
+                }
+            )
+            result = subprocess.run(
+                [sys.executable, "-"],
+                input=script,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        embedded_records = [
+            json.loads(line)
+            for line in MODULE._extract_framed_lines(
+                result.stdout,
+                begin_marker=MODULE.REMOTE_CHUNKED_ROLLOUT_SUMMARY_BEGIN,
+                end_marker=MODULE.REMOTE_CHUNKED_ROLLOUT_SUMMARY_END,
+                host="embedded",
+                command="chunked-rollout-summary",
+            )
+            if '"kind"' in line
+        ]
+        for records in (local_records, embedded_records):
+            chunk_meta = next(
+                record for record in records if record["kind"] == "chunk_meta"
+            )
+            self.assertEqual(chunk_meta["json_error_count"], len(malformed_schemas))
+            self.assertEqual(chunk_meta["first_timestamp"], user_timestamp)
+            self.assertEqual(chunk_meta["last_timestamp"], assistant_timestamp)
+            self.assertEqual(chunk_meta["coverage_status"], "partial")
+            self.assertTrue(chunk_meta["raw_fetch_recommended"])
+            self.assertIn("json_parse_error", chunk_meta["reason_codes"])
+            self.assertEqual(chunk_meta["records_emitted"], 2)
+            self.assertEqual(
+                [
+                    record["kind"]
+                    for record in records
+                    if record["kind"] in {"user_message", "assistant_message"}
+                ],
+                ["user_message", "assistant_message"],
+            )
+
     def test_chunked_summary_invalid_utf8_requires_raw_fetch_local_and_embedded(
         self,
     ) -> None:
@@ -7616,6 +7882,124 @@ class RemoteCodexProbeChunkTests(unittest.TestCase):
                 self.assertIn(
                     "identity changed after summary scan", error_output.getvalue()
                 )
+
+    def test_rollout_summary_counts_non_object_schemas_and_keeps_later_evidence(
+        self,
+    ) -> None:
+        user_timestamp = "2026-05-26T10:01:00Z"
+        assistant_timestamp = "2026-05-26T10:02:00Z"
+        malformed_schemas = [
+            "0",
+            "[]",
+            "null",
+            *pathological_json_lines(),
+            '{"type":"event_msg","payload":[]}',
+        ]
+        valid_lines = [
+            json.dumps(
+                {
+                    "timestamp": user_timestamp,
+                    "type": "response_item",
+                    "payload": {
+                        "type": "message",
+                        "role": "user",
+                        "content": [
+                            {"type": "input_text", "text": "Inspect this."}
+                        ],
+                    },
+                },
+                separators=(",", ":"),
+            ),
+            json.dumps(
+                {
+                    "timestamp": assistant_timestamp,
+                    "type": "response_item",
+                    "payload": {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [
+                            {"type": "output_text", "text": "Completed."}
+                        ],
+                    },
+                },
+                separators=(",", ":"),
+            ),
+        ]
+        with tempfile.TemporaryDirectory() as temp_dir:
+            codex_root = Path(temp_dir) / ".codex"
+            rollout = write_rollout(
+                codex_root,
+                [*malformed_schemas, *valid_lines],
+            )
+            local_stdout = io.StringIO()
+            local_stderr = io.StringIO()
+            with (
+                mock.patch.object(MODULE, "_local_codex_root", return_value=codex_root),
+                redirect_stdout(local_stdout),
+                redirect_stderr(local_stderr),
+            ):
+                local_rc = MODULE.cmd_rollout_summary(
+                    argparse.Namespace(
+                        host="local",
+                        rollout=rollout,
+                        keyword=[],
+                        limit=20,
+                        tail_records=4,
+                        max_text_chars=200,
+                    )
+                )
+
+            script = MODULE._remote_python_script(
+                {
+                    "mode": "rollout-summary",
+                    "rollout": rollout,
+                    "codex_root": str(codex_root),
+                    "summary_keywords": [],
+                    "summary_limit": 20,
+                    "summary_scan_bytes": MODULE.MAX_ROLLOUT_SUMMARY_SCAN_BYTES,
+                    "summary_line_bytes": MODULE.MAX_ROLLOUT_SUMMARY_LINE_BYTES,
+                    "summary_tail_records": 4,
+                    "summary_max_text_chars": 200,
+                }
+            )
+            embedded = subprocess.run(
+                [sys.executable, "-"],
+                input=script,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+        self.assertEqual(local_rc, 0, local_stderr.getvalue())
+        self.assertEqual(embedded.returncode, 0, embedded.stderr)
+        local_records = [
+            json.loads(line) for line in local_stdout.getvalue().splitlines()
+        ]
+        embedded_records = MODULE._extract_framed_rollout_summary_records(
+            embedded.stdout,
+            begin_marker=MODULE.REMOTE_ROLLOUT_SUMMARY_BEGIN,
+            end_marker=MODULE.REMOTE_ROLLOUT_SUMMARY_END,
+            host="embedded",
+            command="rollout-summary",
+        )
+        for records in (local_records, embedded_records):
+            scan_meta = next(
+                record for record in records if record["kind"] == "scan_meta"
+            )
+            self.assertEqual(scan_meta["json_error_count"], len(malformed_schemas))
+            evidence = [
+                record
+                for record in records
+                if record["kind"] in {"user_message", "assistant_message"}
+            ]
+            self.assertEqual(
+                [record["kind"] for record in evidence],
+                ["user_message", "assistant_message"],
+            )
+            self.assertEqual(
+                [record["timestamp"] for record in evidence],
+                [user_timestamp, assistant_timestamp],
+            )
 
     def test_local_and_embedded_rollout_summary_match_json_error_count(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
