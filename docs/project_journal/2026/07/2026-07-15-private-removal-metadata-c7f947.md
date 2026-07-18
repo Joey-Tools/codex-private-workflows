@@ -136,15 +136,15 @@ superseded_by:
 - Private shared reconciliation and manifest-validation modules — 379 tests passed in 153.687 seconds after synchronization.
 - Changed shared Python files — `ruff check`, Python compilation, and `git diff --check` passed.
 - Focused read-only security review of the byte-identical optional-claim diff — no findings.
-- Repository suite — 1204 tests completed successfully in 191.856 seconds using Python 3.13.0 after immutable-history enforcement, private publisher fail-closed repair handling, and bounded directory-tree identity/copy handling. The test process used a process-local `commit.gpgsign=false` override so temporary fixture repositories did not inherit the host's signing policy; no Git configuration was changed.
+- Repository suite — 1205 tests completed successfully in 219.211 seconds using Python 3.13.0 after immutable-history enforcement, exact legacy `target_commitish` binding, private publisher fail-closed repair handling, and bounded directory-tree identity/copy handling. The test process used a process-local `commit.gpgsign=false` override so temporary fixture repositories did not inherit the host's signing policy; no Git configuration was changed.
 - Reconciliation safety module — 302 tests passed, including existing-ledger tombstone preservation for update and uninstall plus first-bootstrap legacy cleanup.
 - Package builder safety module — 70 tests passed as part of the repository suite.
 - Private package module — 45 tests passed.
 - Private overlay sync module — 158 tests passed, including published incomplete-Release zero-mutation rejection, draft repair, scheduled-workflow gating, and the required public-to-private legacy-pin transformation.
 - Workspace-capability and strict JSON regression selection — focused runtime, private-verification, managed-state, WAL-pointer, and GitHub pagination tests passed, including checksum/archive binding plus dist/ancestor replacement coverage.
 - Manifest change validation module — 81 tests passed as part of the repository suite.
-- Shared Release baseline validation module — 60 tests passed, including immutable metadata typing, exact legacy mutable identity drift, HEAD-bound incomplete-Release repair isolation, package-root path budgets, older-history tree mismatch detection, and rejection of extra uploaded other-SHA assets.
-- Complete Release trust boundary — 218 shared Release-baseline and private-overlay tests passed in 19.770 seconds after canonical source synchronization.
+- Shared Release baseline validation module — 61 tests passed, including immutable metadata typing, exact legacy mutable identity and `target_commitish` drift, HEAD-bound incomplete-Release repair isolation, package-root path budgets, older-history tree mismatch detection, and rejection of extra uploaded other-SHA assets.
+- Complete Release trust boundary — 219 shared Release-baseline and private-overlay tests passed across the final focused runs after canonical source synchronization.
 - Authenticated historical Release validation — all 99 published archive/checksum pairs matched the complete normalized trees of their corresponding Git commits, with baseline `6fc13d198972be143f41b535e9b4dc9d46ed7739`.
 - Python 3.9 Release-history and manifest-serialization selection — 48 tests passed.
 - Canonical review workflow suite — 708 tests passed, with 10 skipped.
