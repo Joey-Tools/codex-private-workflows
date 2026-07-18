@@ -1579,9 +1579,10 @@ class SessionRetrospectiveTests(unittest.TestCase):
                 reader_args = [io.BytesIO(payload), len(first.encode("utf-8"))]
                 # Keep this root integration test forward-compatible while the
                 # public retrospective overlay stages its explicit source-size API.
-                if "source_size" in inspect.signature(
-                    probe._bounded_text_lines
-                ).parameters:
+                if (
+                    "source_size"
+                    in inspect.signature(probe._bounded_text_lines).parameters
+                ):
                     reader_args.append(len(payload))
                 records = probe._summarize_rollout_records(
                     lines=probe._bounded_text_lines(*reader_args),
@@ -1600,9 +1601,10 @@ class SessionRetrospectiveTests(unittest.TestCase):
 
         for probe in (REMOTE_PROBE, REMOTE_HOST_CONTEXT_PROBE):
             with self.subTest(probe=probe.__name__):
-                supports_source_size = "source_size" in inspect.signature(
-                    probe._bounded_text_lines
-                ).parameters
+                supports_source_size = (
+                    "source_size"
+                    in inspect.signature(probe._bounded_text_lines).parameters
+                )
                 character_cap_args = [io.BytesIO(payload), len(first)]
                 byte_cap_args = [
                     io.BytesIO(payload),
@@ -1715,6 +1717,10 @@ class SessionRetrospectiveTests(unittest.TestCase):
                     self.assertEqual(
                         scan_meta["scan_truncated"],
                         case == "scan-cap-before-lf",
+                    )
+                    self.assertEqual(
+                        scan_meta["json_error_count"],
+                        1 if case == "bare-cr-is-data" else 0,
                     )
                     self.assertEqual(
                         [
@@ -10748,9 +10754,10 @@ class SessionRetrospectiveTests(unittest.TestCase):
                 else:
                     self.assertIn("return ROOT.resolve(strict=True)", script)
                 self.assertIn('os.fdopen(fd, "rb")', script)
-                if "source_size" not in inspect.signature(
-                    probe._bounded_text_lines
-                ).parameters:
+                if (
+                    "source_size"
+                    not in inspect.signature(probe._bounded_text_lines).parameters
+                ):
                     self.assertIn("raw_bytes.splitlines(keepends=True)", script)
                     self.assertIn(
                         "if max_scan_bytes and scanned >= max_scan_bytes:\n"
