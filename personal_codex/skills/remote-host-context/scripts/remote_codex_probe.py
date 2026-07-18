@@ -33,6 +33,7 @@ MAX_FETCH_ROLLOUT_BYTES = 16 * 1024 * 1024
 MIN_ROLLOUT_CHUNK_BYTES = 64 * 1024
 DEFAULT_ROLLOUT_CHUNK_BYTES = 1024 * 1024
 MAX_ROLLOUT_CHUNK_BYTES = 2 * 1024 * 1024
+MAX_ROLLOUT_CHUNK_RECORDS = 4096
 MAX_FETCH_ROLLOUT_CHUNK_BYTES = 2 * 1024 * 1024
 MAX_CHUNKED_ROLLOUT_SUMMARY_OUTPUT_BYTES = 4 * 1024 * 1024
 # Reserve 1 KiB of the serialized summary budget per in-memory range entry.
@@ -1731,7 +1732,10 @@ def _iter_rollout_chunks(
 
         offset += len(raw_bytes)
 
-        if lines and current_bytes + len(raw_bytes) > chunk_bytes:
+        if lines and (
+            current_bytes + len(raw_bytes) > chunk_bytes
+            or len(lines) >= MAX_ROLLOUT_CHUNK_RECORDS
+        ):
             chunk = flush()
             if chunk is not None:
                 yield chunk
@@ -1755,6 +1759,7 @@ def _fetch_ranges_for_byte_range(
     byte_start: int,
     byte_end: int,
     max_bytes: int,
+    plan_entries_used: int = 0,
 ) -> list[dict[str, int]]:
     if byte_start < 0:
         raise ValueError("byte_start must be non-negative")
@@ -1762,11 +1767,14 @@ def _fetch_ranges_for_byte_range(
         raise ValueError("byte_end must be greater than byte_start")
     if max_bytes < 1:
         raise ValueError("max_bytes must be positive")
+    if plan_entries_used < 0:
+        raise ValueError("plan_entries_used must be non-negative")
     range_count = (byte_end - byte_start + max_bytes - 1) // max_bytes
-    if range_count > MAX_FETCH_RANGE_PLAN_ENTRIES:
+    total_range_count = plan_entries_used + range_count
+    if total_range_count > MAX_FETCH_RANGE_PLAN_ENTRIES:
         raise ValueError(
             "fetch range plan too large: "
-            f"{range_count} ranges > {MAX_FETCH_RANGE_PLAN_ENTRIES}"
+            f"{total_range_count} ranges > {MAX_FETCH_RANGE_PLAN_ENTRIES}"
         )
     ranges: list[dict[str, int]] = []
     for range_index in range(range_count):
@@ -1993,6 +2001,7 @@ MAX_FETCH_ROLLOUT_BYTES = int(CONFIG.get("max_fetch_rollout_bytes", 0))
 MAX_FETCH_ROLLOUT_CHUNK_BYTES = int(CONFIG.get("max_fetch_rollout_chunk_bytes", 0))
 MIN_ROLLOUT_CHUNK_BYTES = int(CONFIG.get("min_rollout_chunk_bytes", 0))
 MAX_ROLLOUT_CHUNK_BYTES = int(CONFIG.get("max_rollout_chunk_bytes", 0))
+MAX_ROLLOUT_CHUNK_RECORDS = {MAX_ROLLOUT_CHUNK_RECORDS}
 MAX_CHUNKED_ROLLOUT_SUMMARY_OUTPUT_BYTES = int(CONFIG.get("max_chunked_summary_output_bytes", 0))
 MAX_FETCH_RANGE_PLAN_ENTRIES = int(CONFIG.get("max_fetch_range_plan_entries", 0))
 EXPECTED_SOURCE_IDENTITY_TOKEN = str(CONFIG.get("expected_source_identity", ""))
@@ -3051,7 +3060,10 @@ def iter_rollout_chunks(handle, chunk_bytes, source_bytes=None):
 
         offset += len(raw_bytes)
 
-        if lines and current_bytes + len(raw_bytes) > chunk_bytes:
+        if lines and (
+            current_bytes + len(raw_bytes) > chunk_bytes
+            or len(lines) >= MAX_ROLLOUT_CHUNK_RECORDS
+        ):
             chunk = flush()
             if chunk is not None:
                 yield chunk
@@ -3070,18 +3082,21 @@ def iter_rollout_chunks(handle, chunk_bytes, source_bytes=None):
         current_bytes += len(raw_bytes)
 
 
-def fetch_ranges_for_byte_range(byte_start, byte_end, max_bytes):
+def fetch_ranges_for_byte_range(byte_start, byte_end, max_bytes, plan_entries_used=0):
     if byte_start < 0:
         raise ValueError("byte_start must be non-negative")
     if byte_end <= byte_start:
         raise ValueError("byte_end must be greater than byte_start")
     if max_bytes < 1:
         raise ValueError("max_bytes must be positive")
+    if plan_entries_used < 0:
+        raise ValueError("plan_entries_used must be non-negative")
     range_count = (byte_end - byte_start + max_bytes - 1) // max_bytes
-    if range_count > MAX_FETCH_RANGE_PLAN_ENTRIES:
+    total_range_count = plan_entries_used + range_count
+    if total_range_count > MAX_FETCH_RANGE_PLAN_ENTRIES:
         raise ValueError(
             "fetch range plan too large: "
-            + str(range_count)
+            + str(total_range_count)
             + " ranges > "
             + str(MAX_FETCH_RANGE_PLAN_ENTRIES)
         )
@@ -3342,7 +3357,7 @@ def bounded_text_lines(handle, max_scan_bytes, source_size=None):
             yield bytes(buffer).decode("utf-8", "replace")
 
 
-def summarize_records(lines, line_offset=0):
+def summarize_records(lines, line_offset=0, scan_metadata=None):
     keywords = SUMMARY_SEARCH_KEYWORDS
     matched = []
     matched_seen = set()
@@ -3353,11 +3368,13 @@ def summarize_records(lines, line_offset=0):
     last_assistant_record = None
     last_user_record = None
     last_task_complete_record = None
+    json_error_count = 0
 
     for line_no, line in enumerate(lines, line_offset + 1):
         try:
             obj = json.loads(line)
         except json.JSONDecodeError:
+            json_error_count += 1
             continue
         timestamp = str(obj.get("timestamp", ""))
         record = None
@@ -3447,6 +3464,8 @@ def summarize_records(lines, line_offset=0):
     append(last_assistant_record)
     if last_assistant_record is None:
         append(last_task_complete_record)
+    if scan_metadata is not None:
+        scan_metadata["json_error_count"] = json_error_count
     return output
 
 
@@ -3463,7 +3482,7 @@ def chunk_common_fields(chunk):
     }}
 
 
-def chunk_reason_codes(chunk, records):
+def chunk_reason_codes(chunk, records, json_error_count):
     evidence_records = [
         record
         for record in records
@@ -3472,6 +3491,8 @@ def chunk_reason_codes(chunk, records):
     codes = []
     if chunk["oversized_record"]:
         codes.append("oversized_record")
+    if json_error_count:
+        codes.append("json_parse_error")
     if not evidence_records:
         codes.append("no_structured_evidence")
     if not any(record.get("kind") == "user_message" for record in evidence_records):
@@ -3483,11 +3504,19 @@ def chunk_reason_codes(chunk, records):
     return codes
 
 
-def chunk_meta_record(chunk, records, source_identity, chunk_bytes):
-    reason_codes = chunk_reason_codes(chunk, records)
+def chunk_meta_record(
+    chunk,
+    records,
+    source_identity,
+    chunk_bytes,
+    json_error_count,
+    fetch_range_plan_entries_used=0,
+):
+    reason_codes = chunk_reason_codes(chunk, records, json_error_count)
     redacted_or_signal_only_records = sum(1 for record in records if summary_record_has_signal(record))
     raw_fetch_recommended = (
         bool(chunk["oversized_record"])
+        or "json_parse_error" in reason_codes
         or "no_structured_evidence" in reason_codes
         or redacted_or_signal_only_records > 0
     )
@@ -3502,7 +3531,9 @@ def chunk_meta_record(chunk, records, source_identity, chunk_bytes):
         "full_reconstruction_allowed": automatic_allowed or AUTHORIZED_SOURCE_BYTES == source_identity["size"],
         "authorized_source_bytes": AUTHORIZED_SOURCE_BYTES,
         "chunk_bytes": chunk_bytes,
+        "max_chunk_records": MAX_ROLLOUT_CHUNK_RECORDS,
         "coverage_status": "partial" if raw_fetch_recommended else "complete",
+        "json_error_count": json_error_count,
         "reason_codes": reason_codes,
         "records_emitted": len(records),
         "redacted_or_signal_only_records": redacted_or_signal_only_records,
@@ -3516,6 +3547,7 @@ def chunk_meta_record(chunk, records, source_identity, chunk_bytes):
             chunk["byte_start"],
             chunk["byte_end"],
             MAX_FETCH_ROLLOUT_CHUNK_BYTES,
+            fetch_range_plan_entries_used,
         )
         meta["fetch_ranges"] = fetch_ranges
         meta["fetch_range_count"] = len(fetch_ranges)
@@ -3542,6 +3574,7 @@ def rollout_summary_meta_record(source_identity, source_sha256):
             or AUTHORIZED_SOURCE_BYTES == source_identity["size"]
         ),
         "min_chunk_bytes": MIN_ROLLOUT_CHUNK_BYTES,
+        "max_chunk_records": MAX_ROLLOUT_CHUNK_RECORDS,
         "chunk_summary_output_limit_bytes": MAX_CHUNKED_ROLLOUT_SUMMARY_OUTPUT_BYTES,
         "fetch_range_plan_limit": MAX_FETCH_RANGE_PLAN_ENTRIES,
     }})
@@ -3601,6 +3634,10 @@ def summarize_rollout_chunks():
         print(json.dumps({{"ok": False, "error": "chunk bytes out of range"}}, separators=(",", ":"), sort_keys=True))
         print(CHUNKED_ROLLOUT_SUMMARY_END)
         return
+    if MAX_ROLLOUT_CHUNK_RECORDS < 1:
+        print(json.dumps({{"ok": False, "error": "chunk record limit out of range"}}, separators=(",", ":"), sort_keys=True))
+        print(CHUNKED_ROLLOUT_SUMMARY_END)
+        return
     if MAX_CHUNKED_ROLLOUT_SUMMARY_OUTPUT_BYTES < 1:
         print(json.dumps({{"ok": False, "error": "chunked summary output limit out of range"}}, separators=(",", ":"), sort_keys=True))
         print(CHUNKED_ROLLOUT_SUMMARY_END)
@@ -3625,6 +3662,7 @@ def summarize_rollout_chunks():
     try:
         serialized_records = []
         serialized_bytes = 0
+        total_fetch_range_entries = 0
         with open_rollout_text(rel, expected_identity) as handle:
             validate_source_read_budget(expected_identity)
             hashing_reader = HashingRolloutReader(handle)
@@ -3634,10 +3672,33 @@ def summarize_rollout_chunks():
                 source_bytes=expected_identity["size"],
             )
             for chunk in chunks:
-                records = summarize_records(chunk["lines"], line_offset=int(chunk["record_start"]) - 1)
+                scan_metadata = {{"json_error_count": 0}}
+                records = [] if chunk["oversized_record"] else summarize_records(
+                    chunk["lines"],
+                    line_offset=int(chunk["record_start"]) - 1,
+                    scan_metadata=scan_metadata,
+                )
                 common = chunk_common_fields(chunk)
+                chunk_meta = chunk_meta_record(
+                    chunk,
+                    records,
+                    expected_identity,
+                    CHUNK_BYTES,
+                    int(scan_metadata["json_error_count"]),
+                    total_fetch_range_entries,
+                )
+                total_fetch_range_entries += int(
+                    chunk_meta.get("fetch_range_count", 1)
+                )
+                if total_fetch_range_entries > MAX_FETCH_RANGE_PLAN_ENTRIES:
+                    raise ValueError(
+                        "fetch range plan too large: "
+                        + str(total_fetch_range_entries)
+                        + " ranges > "
+                        + str(MAX_FETCH_RANGE_PLAN_ENTRIES)
+                    )
                 line, line_bytes = serialized_summary_line(
-                    chunk_meta_record(chunk, records, expected_identity, CHUNK_BYTES),
+                    chunk_meta,
                     rel,
                 )
                 if serialized_bytes + line_bytes > MAX_CHUNKED_ROLLOUT_SUMMARY_OUTPUT_BYTES:
@@ -5817,6 +5878,7 @@ def _chunk_common_fields(chunk: RolloutChunk) -> dict[str, Any]:
 def _chunk_reason_codes(
     chunk: RolloutChunk,
     records: list[dict[str, Any]],
+    json_error_count: int,
 ) -> list[str]:
     evidence_records = [
         record
@@ -5827,6 +5889,8 @@ def _chunk_reason_codes(
     codes: list[str] = []
     if chunk.oversized_record:
         codes.append("oversized_record")
+    if json_error_count:
+        codes.append("json_parse_error")
     if not evidence_records:
         codes.append("no_structured_evidence")
     if not any(record.get("kind") == "user_message" for record in evidence_records):
@@ -5848,13 +5912,16 @@ def _chunk_meta_record(
     source_identity: RolloutIdentity,
     chunk_bytes: int,
     authorized_source_bytes: int | None,
+    json_error_count: int = 0,
+    fetch_range_plan_entries_used: int = 0,
 ) -> dict[str, Any]:
-    reason_codes = _chunk_reason_codes(chunk, records)
+    reason_codes = _chunk_reason_codes(chunk, records, json_error_count)
     redacted_or_signal_only_records = sum(
         1 for record in records if _summary_record_has_signal(record)
     )
     raw_fetch_recommended = (
         chunk.oversized_record
+        or "json_parse_error" in reason_codes
         or "no_structured_evidence" in reason_codes
         or redacted_or_signal_only_records > 0
     )
@@ -5871,7 +5938,9 @@ def _chunk_meta_record(
         ),
         "authorized_source_bytes": authorized_source_bytes,
         "chunk_bytes": chunk_bytes,
+        "max_chunk_records": MAX_ROLLOUT_CHUNK_RECORDS,
         "coverage_status": "partial" if raw_fetch_recommended else "complete",
+        "json_error_count": json_error_count,
         "reason_codes": reason_codes,
         "records_emitted": len(records),
         "redacted_or_signal_only_records": redacted_or_signal_only_records,
@@ -5885,6 +5954,7 @@ def _chunk_meta_record(
             byte_start=chunk.byte_start,
             byte_end=chunk.byte_end,
             max_bytes=MAX_FETCH_ROLLOUT_CHUNK_BYTES,
+            plan_entries_used=fetch_range_plan_entries_used,
         )
         meta["fetch_ranges"] = fetch_ranges
         meta["fetch_range_count"] = len(fetch_ranges)
@@ -5928,6 +5998,7 @@ def _rollout_summary_meta_record(
                 or authorized_source_bytes == source_identity.size
             ),
             "min_chunk_bytes": MIN_ROLLOUT_CHUNK_BYTES,
+            "max_chunk_records": MAX_ROLLOUT_CHUNK_RECORDS,
             "chunk_summary_output_limit_bytes": (
                 MAX_CHUNKED_ROLLOUT_SUMMARY_OUTPUT_BYTES
             ),
@@ -5955,9 +6026,12 @@ def _chunked_rollout_summary_records(
             f"--chunk-bytes must stay between {MIN_ROLLOUT_CHUNK_BYTES} "
             f"and {MAX_ROLLOUT_CHUNK_BYTES}"
         )
+    if MAX_ROLLOUT_CHUNK_RECORDS < 1:
+        raise ValueError("chunk record limit must be positive")
     _validate_source_read_budget(expected_identity, authorized_source_bytes)
     output: list[dict[str, Any]] = []
     serialized_bytes = 0
+    total_fetch_range_entries = 0
     with _open_local_rollout_text(
         codex_root,
         rollout_relative_path,
@@ -5969,13 +6043,19 @@ def _chunked_rollout_summary_records(
             chunk_bytes=chunk_bytes,
             source_bytes=expected_identity.size,
         ):
-            records = _summarize_rollout_records(
-                lines=chunk.lines,
-                keywords=keywords,
-                limit=limit_per_chunk,
-                tail_records=tail_records,
-                max_text_chars=max_text_chars,
-                line_offset=chunk.record_start - 1,
+            scan_metadata: dict[str, int] = {"json_error_count": 0}
+            records = (
+                []
+                if chunk.oversized_record
+                else _summarize_rollout_records(
+                    lines=chunk.lines,
+                    keywords=keywords,
+                    limit=limit_per_chunk,
+                    tail_records=tail_records,
+                    max_text_chars=max_text_chars,
+                    line_offset=chunk.record_start - 1,
+                    scan_metadata=scan_metadata,
+                )
             )
             common = _chunk_common_fields(chunk)
             meta = _chunk_meta_record(
@@ -5984,7 +6064,16 @@ def _chunked_rollout_summary_records(
                 source_identity=expected_identity,
                 chunk_bytes=chunk_bytes,
                 authorized_source_bytes=authorized_source_bytes,
+                json_error_count=scan_metadata["json_error_count"],
+                fetch_range_plan_entries_used=total_fetch_range_entries,
             )
+            total_fetch_range_entries += int(meta.get("fetch_range_count", 1))
+            if total_fetch_range_entries > MAX_FETCH_RANGE_PLAN_ENTRIES:
+                raise ValueError(
+                    "fetch range plan too large: "
+                    f"{total_fetch_range_entries} ranges > "
+                    f"{MAX_FETCH_RANGE_PLAN_ENTRIES}"
+                )
             meta["host"] = host
             meta["rollout"] = rollout_relative_path.as_posix()
             serialized_bytes = _append_bounded_summary_record(
