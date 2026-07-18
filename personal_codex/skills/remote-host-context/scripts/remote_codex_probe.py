@@ -10,6 +10,7 @@ import dataclasses
 import datetime as dt
 import errno
 import hashlib
+import io
 import json
 import os
 import pathlib
@@ -1958,6 +1959,7 @@ import base64
 import collections
 import errno
 import hashlib
+import io
 import json
 import os
 import pathlib
@@ -3250,53 +3252,55 @@ def read_bounded_session_meta(handle, max_scan_bytes):
     )
 
 
-def bounded_text_lines(handle, max_scan_bytes):
+def bounded_text_lines(handle, max_scan_bytes, source_size=None):
+    if source_size is None:
+        if not isinstance(handle, io.BytesIO):
+            raise ValueError("rollout summary source size is required")
+        source_size = len(handle.getbuffer())
     scanned = 0
     buffer = bytearray()
     dropping_oversized_line = False
     chunk_bytes = 64 * 1024
 
-    def line_ended(part):
-        return part.endswith(b"\\n") or part.endswith(b"\\r")
+    scan_limit = min(max_scan_bytes, source_size) if max_scan_bytes else source_size
 
-    while True:
-        if max_scan_bytes and scanned >= max_scan_bytes:
-            if dropping_oversized_line:
-                yield "\\n"
-            elif buffer:
-                yield bytes(buffer).decode("utf-8", "replace")
-            return
-        remaining = max_scan_bytes - scanned if max_scan_bytes else 0
-        read_size = min(chunk_bytes, remaining) if remaining else chunk_bytes
+    while scanned < scan_limit:
+        read_size = min(chunk_bytes, scan_limit - scanned)
         chunk = handle.read(read_size)
         if not chunk:
-            if dropping_oversized_line:
-                yield "\\n"
-            elif buffer:
-                yield bytes(buffer).decode("utf-8", "replace")
-            return
+            break
         if isinstance(chunk, str):
             raw_bytes = chunk.encode("utf-8", "surrogatepass")
         else:
             raw_bytes = bytes(chunk)
         scanned += len(raw_bytes)
-        for part in raw_bytes.splitlines(keepends=True):
+        offset = 0
+        while offset < len(raw_bytes):
+            line_end = raw_bytes.find(b"\\n", offset)
+            part_end = len(raw_bytes) if line_end < 0 else line_end + 1
+            part = raw_bytes[offset:part_end]
             if dropping_oversized_line:
-                if line_ended(part):
+                if line_end >= 0:
                     yield "\\n"
                     dropping_oversized_line = False
-                continue
-            if len(buffer) + len(part) > SUMMARY_LINE_BYTES:
+            elif len(buffer) + len(part) > SUMMARY_LINE_BYTES:
                 buffer.clear()
                 dropping_oversized_line = True
-                if line_ended(part):
+                if line_end >= 0:
                     yield "\\n"
                     dropping_oversized_line = False
-                continue
-            buffer.extend(part)
-            if line_ended(part):
-                yield bytes(buffer).decode("utf-8", "replace")
-                buffer.clear()
+            else:
+                buffer.extend(part)
+                if line_end >= 0:
+                    yield bytes(buffer).decode("utf-8", "replace")
+                    buffer.clear()
+            offset = part_end
+
+    if scanned == source_size:
+        if dropping_oversized_line:
+            yield "\\n"
+        elif buffer:
+            yield bytes(buffer).decode("utf-8", "replace")
 
 
 def summarize_records(lines, line_offset=0):
@@ -3694,7 +3698,10 @@ def summarize_rollout():
                 "rollout unreadable" if isinstance(error, OSError) else str(error)
             )
             return
-        for line_no, line in enumerate(bounded_text_lines(handle, SUMMARY_SCAN_BYTES), 1):
+        for line_no, line in enumerate(
+            bounded_text_lines(handle, SUMMARY_SCAN_BYTES, source_identity["size"]),
+            1,
+        ):
             try:
                 obj = json.loads(line)
             except json.JSONDecodeError:
@@ -5438,53 +5445,59 @@ def _read_bounded_session_meta(
     )
 
 
-def _bounded_text_lines(handle: Any, max_scan_bytes: int) -> Iterable[str]:
+def _bounded_text_lines(
+    handle: Any,
+    max_scan_bytes: int,
+    source_size: int | None = None,
+) -> Iterable[str]:
+    if source_size is None:
+        if not isinstance(handle, io.BytesIO):
+            raise ValueError("rollout summary source size is required")
+        source_size = len(handle.getbuffer())
     scanned = 0
     buffer = bytearray()
     dropping_oversized_line = False
     chunk_bytes = 64 * 1024
 
-    def line_ended(part: bytes) -> bool:
-        return part.endswith(b"\n") or part.endswith(b"\r")
+    scan_limit = min(max_scan_bytes, source_size) if max_scan_bytes else source_size
 
-    while True:
-        if max_scan_bytes and scanned >= max_scan_bytes:
-            if dropping_oversized_line:
-                yield "\n"
-            elif buffer:
-                yield bytes(buffer).decode("utf-8", "replace")
-            return
-        remaining = max_scan_bytes - scanned if max_scan_bytes else 0
-        read_size = min(chunk_bytes, remaining) if remaining else chunk_bytes
+    while scanned < scan_limit:
+        read_size = min(chunk_bytes, scan_limit - scanned)
         chunk = handle.read(read_size)
         if not chunk:
-            if dropping_oversized_line:
-                yield "\n"
-            elif buffer:
-                yield bytes(buffer).decode("utf-8", "replace")
-            return
+            break
         if isinstance(chunk, str):
             raw_bytes = chunk.encode("utf-8", "surrogatepass")
         else:
             raw_bytes = bytes(chunk)
         scanned += len(raw_bytes)
-        for part in raw_bytes.splitlines(keepends=True):
+        offset = 0
+        while offset < len(raw_bytes):
+            line_end = raw_bytes.find(b"\n", offset)
+            part_end = len(raw_bytes) if line_end < 0 else line_end + 1
+            part = raw_bytes[offset:part_end]
             if dropping_oversized_line:
-                if line_ended(part):
+                if line_end >= 0:
                     yield "\n"
                     dropping_oversized_line = False
-                continue
-            if len(buffer) + len(part) > MAX_ROLLOUT_SUMMARY_LINE_BYTES:
+            elif len(buffer) + len(part) > MAX_ROLLOUT_SUMMARY_LINE_BYTES:
                 buffer.clear()
                 dropping_oversized_line = True
-                if line_ended(part):
+                if line_end >= 0:
                     yield "\n"
                     dropping_oversized_line = False
-                continue
-            buffer.extend(part)
-            if line_ended(part):
-                yield bytes(buffer).decode("utf-8", "replace")
-                buffer.clear()
+            else:
+                buffer.extend(part)
+                if line_end >= 0:
+                    yield bytes(buffer).decode("utf-8", "replace")
+                    buffer.clear()
+            offset = part_end
+
+    if scanned == source_size:
+        if dropping_oversized_line:
+            yield "\n"
+        elif buffer:
+            yield bytes(buffer).decode("utf-8", "replace")
 
 
 def _summarize_rollout_records(
@@ -5904,7 +5917,11 @@ def cmd_rollout_summary(args: argparse.Namespace) -> int:
             with _open_local_rollout_text(codex_root, rollout_relative_path) as handle:
                 source_identity = _rollout_identity_from_stat(os.fstat(handle.fileno()))
                 records = _summarize_rollout_records(
-                    lines=_bounded_text_lines(handle, MAX_ROLLOUT_SUMMARY_SCAN_BYTES),
+                    lines=_bounded_text_lines(
+                        handle,
+                        MAX_ROLLOUT_SUMMARY_SCAN_BYTES,
+                        source_identity.size,
+                    ),
                     keywords=args.keyword,
                     limit=args.limit,
                     tail_records=args.tail_records,

@@ -4025,6 +4025,214 @@ class RemoteCodexProbeChunkTests(unittest.TestCase):
         self.assertEqual(raised.exception.rollout, rollout)
         self.assertNotIn("external-sentinel", str(raised.exception))
 
+    def test_rollout_summary_drops_oversized_bare_cr_suffix_locally_and_embedded(
+        self,
+    ) -> None:
+        line_limit = 1024
+        bare_cr_suffix = json.dumps(
+            {
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_text",
+                            "text": "bare-cr-suffix-must-not-escape",
+                        }
+                    ],
+                },
+            },
+            separators=(",", ":"),
+        ).encode("utf-8")
+        following = json.dumps(
+            {
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_text",
+                            "text": "valid-record-after-oversized-line",
+                        }
+                    ],
+                },
+            },
+            separators=(",", ":"),
+        ).encode("utf-8")
+        payload = (
+            (b"x" * (64 * 1024))
+            + b"\r"
+            + bare_cr_suffix
+            + b"\n"
+            + following
+            + b"\n"
+        )
+
+        with mock.patch.object(
+            MODULE,
+            "MAX_ROLLOUT_SUMMARY_LINE_BYTES",
+            line_limit,
+        ):
+            local_lines = list(
+                MODULE._bounded_text_lines(
+                    io.BytesIO(payload),
+                    len(payload),
+                    len(payload),
+                )
+            )
+        embedded = embedded_probe_namespace(
+            {
+                "mode": "rollout-summary",
+                "rollout": "sessions/2026/05/26/rollout-bare-cr.jsonl",
+                "codex_root": "/tmp/.codex",
+                "summary_keywords": [],
+                "summary_limit": 10,
+                "summary_scan_bytes": len(payload),
+                "summary_line_bytes": line_limit,
+                "summary_tail_records": 0,
+                "summary_max_text_chars": 200,
+            }
+        )
+        embedded_lines = list(
+            embedded["bounded_text_lines"](
+                io.BytesIO(payload),
+                len(payload),
+                len(payload),
+            )
+        )
+
+        expected = ["\n", following.decode("utf-8") + "\n"]
+        self.assertEqual(local_lines, expected)
+        self.assertEqual(embedded_lines, expected)
+        for lines in (local_lines, embedded_lines):
+            serialized = "".join(lines)
+            self.assertNotIn("bare-cr-suffix-must-not-escape", serialized)
+            self.assertIn("valid-record-after-oversized-line", serialized)
+
+    def test_rollout_summary_line_boundaries_match_locally_and_embedded(
+        self,
+    ) -> None:
+        record = json.dumps(
+            {
+                "type": "session_meta",
+                "payload": {"id": "boundary-session", "cwd": "/repo"},
+            },
+            separators=(",", ":"),
+        ).encode("utf-8")
+        lf_record = record + b"\n"
+        crlf_record = record + b"\r\n"
+        capped_after_record = record + b"not-a-record\n"
+        capped_after_lf = lf_record + b"not-a-record\n"
+        cases = (
+            ("lf", lf_record, len(lf_record), [lf_record.decode("utf-8")]),
+            (
+                "crlf",
+                crlf_record,
+                len(crlf_record),
+                [crlf_record.decode("utf-8")],
+            ),
+            (
+                "complete_lf_at_cap",
+                capped_after_lf,
+                len(lf_record),
+                [lf_record.decode("utf-8")],
+            ),
+            (
+                "parseable_prefix_at_cap",
+                capped_after_record,
+                len(record),
+                [],
+            ),
+            (
+                "true_eof_without_lf",
+                record,
+                len(record),
+                [record.decode("utf-8")],
+            ),
+        )
+        embedded = embedded_probe_namespace(
+            {
+                "mode": "rollout-summary",
+                "rollout": "sessions/2026/05/26/rollout-boundaries.jsonl",
+                "codex_root": "/tmp/.codex",
+                "summary_keywords": [],
+                "summary_limit": 10,
+                "summary_scan_bytes": max(len(payload) for _, payload, _, _ in cases),
+                "summary_line_bytes": 4096,
+                "summary_tail_records": 0,
+                "summary_max_text_chars": 200,
+            }
+        )
+
+        for name, payload, scan_bytes, expected in cases:
+            with self.subTest(name=name):
+                local_lines = list(
+                    MODULE._bounded_text_lines(
+                        io.BytesIO(payload),
+                        scan_bytes,
+                        len(payload),
+                    )
+                )
+                embedded_lines = list(
+                    embedded["bounded_text_lines"](
+                        io.BytesIO(payload),
+                        scan_bytes,
+                        len(payload),
+                    )
+                )
+                self.assertEqual(local_lines, expected)
+                self.assertEqual(embedded_lines, expected)
+
+    def test_rollout_summary_size_fallback_is_bytesio_only_locally_and_embedded(
+        self,
+    ) -> None:
+        record = json.dumps(
+            {
+                "type": "session_meta",
+                "payload": {"id": "fallback-session", "cwd": "/repo"},
+            },
+            separators=(",", ":"),
+        ).encode("utf-8")
+        truncated_payload = record + b"\n"
+        embedded = embedded_probe_namespace(
+            {
+                "mode": "rollout-summary",
+                "rollout": "sessions/2026/05/26/rollout-fallback.jsonl",
+                "codex_root": "/tmp/.codex",
+                "summary_keywords": [],
+                "summary_limit": 10,
+                "summary_scan_bytes": len(truncated_payload),
+                "summary_line_bytes": 4096,
+                "summary_tail_records": 0,
+                "summary_max_text_chars": 200,
+            }
+        )
+        readers = (
+            ("local", MODULE._bounded_text_lines),
+            ("embedded", embedded["bounded_text_lines"]),
+        )
+
+        for implementation, reader in readers:
+            with self.subTest(implementation=implementation, snapshot="truncated"):
+                self.assertEqual(
+                    list(reader(io.BytesIO(truncated_payload), len(record))),
+                    [],
+                )
+            with self.subTest(implementation=implementation, snapshot="complete"):
+                self.assertEqual(
+                    list(reader(io.BytesIO(record), len(record))),
+                    [record.decode("utf-8")],
+                )
+            with self.subTest(implementation=implementation, handle="non-bytesio"):
+                handle = io.BufferedReader(io.BytesIO(truncated_payload))
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "rollout summary source size is required",
+                ):
+                    list(reader(handle, len(record)))
+
     def test_private_output_rejects_parent_symlink_swap_after_resolution(self) -> None:
         with tempfile.TemporaryDirectory(dir="/tmp") as temp_dir:
             root = Path(temp_dir).resolve()
