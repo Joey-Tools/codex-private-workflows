@@ -25,11 +25,12 @@ jobs:
   release:
     name: Build private overlay release
     if: github.event_name != 'push' || github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
-    runs-on: ubuntu-slim
+    runs-on: ubuntu-latest
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
         with:
+          fetch-depth: 0
           persist-credentials: false
 
       - name: Set up Python
@@ -42,13 +43,25 @@ jobs:
           python3 -m py_compile \
             scripts/codex_personal_sync.py \
             scripts/build_personal_codex_package.py \
+            scripts/validate_sync_manifest_changes.py \
             scripts/private_overlay_release.py \
             scripts/sync_private_overlay_sources.py \
+            tests/test_package_builder_safety.py \
+            tests/test_personal_sync_reconciliation_safety.py \
             tests/test_private_overlay_package.py \
-            tests/test_private_overlay_sync.py
+            tests/test_private_overlay_sync.py \
+            tests/test_release_manifest_baseline.py \
+            tests/test_sync_manifest_changes.py
 
       - name: Run tests
         run: python3 -m unittest discover -s tests
+
+      - name: Validate sync manifest changes
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          python3 scripts/validate_sync_manifest_changes.py \
+            --release-repo "$GITHUB_REPOSITORY"
 
       - name: Verify canonical review workflow
         run: |
@@ -66,6 +79,7 @@ jobs:
         run: |
           python3 scripts/build_personal_codex_package.py \
             --sha "$GITHUB_SHA" \
+            --require-clean-sources \
             --output-dir dist
 
       - name: Verify release package
@@ -78,7 +92,7 @@ jobs:
     name: Publish private overlay release
     if: github.event_name != 'pull_request' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
     needs: release
-    runs-on: ubuntu-slim
+    runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
@@ -96,6 +110,7 @@ jobs:
         run: |
           python3 scripts/build_personal_codex_package.py \
             --sha "$GITHUB_SHA" \
+            --require-clean-sources \
             --output-dir dist
 
       - name: Verify release package

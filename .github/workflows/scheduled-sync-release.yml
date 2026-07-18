@@ -24,7 +24,7 @@ jobs:
   sync-release:
     name: Sync and publish private overlay release
     if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
-    runs-on: ubuntu-slim
+    runs-on: ubuntu-latest
     timeout-minutes: 15
     env:
       FORCE_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.force && 'true' || 'false' }}
@@ -32,12 +32,16 @@ jobs:
       - name: Check out private overlay
         uses: actions/checkout@v4
         with:
+          fetch-depth: 0
           persist-credentials: false
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.x"
+
+      - name: Isolate Python bytecode cache
+        run: echo "PYTHONPYCACHEPREFIX=$RUNNER_TEMP/python-cache" >> "$GITHUB_ENV"
 
       - name: Check current release
         id: current-release
@@ -126,7 +130,7 @@ jobs:
         if: steps.cooldown.outputs.run == 'true'
         id: changes
         run: |
-          status="$(git status --porcelain -- scripts personal_codex .agents)"
+          status="$(git status --porcelain -- scripts tests personal_codex .agents)"
           if [ -z "$status" ]; then
             echo "changed=false" >> "$GITHUB_OUTPUT"
             echo "No private overlay source changes detected."
@@ -141,14 +145,36 @@ jobs:
           python3 -m py_compile \
             scripts/codex_personal_sync.py \
             scripts/build_personal_codex_package.py \
+            scripts/validate_sync_manifest_changes.py \
             scripts/private_overlay_release.py \
             scripts/sync_private_overlay_sources.py \
+            tests/test_package_builder_safety.py \
+            tests/test_personal_sync_reconciliation_safety.py \
             tests/test_private_overlay_package.py \
-            tests/test_private_overlay_sync.py
+            tests/test_private_overlay_sync.py \
+            tests/test_release_manifest_baseline.py \
+            tests/test_sync_manifest_changes.py
 
       - name: Run tests
         if: steps.changes.outputs.changed == 'true' || steps.current-release.outputs.complete == 'false'
         run: python3 -m unittest discover -s tests
+
+      - name: Validate sync manifest changes
+        if: steps.changes.outputs.changed == 'true'
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          python3 scripts/validate_sync_manifest_changes.py \
+            --release-repo "$GITHUB_REPOSITORY"
+
+      - name: Validate release history before repair
+        if: steps.current-release.outputs.complete == 'false' && steps.changes.outputs.changed != 'true'
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          python3 scripts/validate_sync_manifest_changes.py \
+            --release-repo "$GITHUB_REPOSITORY" \
+            --repair-incomplete-head-release
 
       - name: Verify canonical review workflow
         if: steps.changes.outputs.changed == 'true' || steps.current-release.outputs.complete == 'false'
@@ -199,7 +225,7 @@ jobs:
             git fetch --no-tags origin "$remote_ref"
           fi
 
-          git add scripts personal_codex .agents
+          git add scripts tests personal_codex .agents
 
           remote_has_current_base=false
           if [ -n "$remote_sha" ] && git merge-base --is-ancestor "$GITHUB_SHA" FETCH_HEAD; then
@@ -226,7 +252,7 @@ jobs:
           - Replaces the previous scheduled direct-push path, which is blocked by branch rules.
 
           ## Validation
-          - python3 -m py_compile scripts/codex_personal_sync.py scripts/build_personal_codex_package.py scripts/private_overlay_release.py scripts/sync_private_overlay_sources.py tests/test_private_overlay_package.py tests/test_private_overlay_sync.py
+          - python3 -m py_compile scripts/codex_personal_sync.py scripts/build_personal_codex_package.py scripts/validate_sync_manifest_changes.py scripts/private_overlay_release.py scripts/sync_private_overlay_sources.py tests/test_package_builder_safety.py tests/test_personal_sync_reconciliation_safety.py tests/test_private_overlay_package.py tests/test_private_overlay_sync.py tests/test_release_manifest_baseline.py tests/test_sync_manifest_changes.py
           - python3 -m unittest discover -s tests
           - python3 -m unittest discover -s personal_codex/skills/review-orchestration-playbook/tests -p 'test_*.py'
           - python3 -m unittest discover -s personal_codex/skills/waited-delivery/tests -p 'test_*.py'
@@ -274,17 +300,34 @@ jobs:
           echo "url=$pr_url" >> "$GITHUB_OUTPUT"
           echo "Opened or updated $pr_url and enabled auto-merge for $head_sha."
 
+      - name: Revalidate release checkout
+        if: steps.current-release.outputs.complete == 'false' && steps.changes.outputs.changed != 'true'
+        env:
+          RELEASE_SHA: ${{ github.sha }}
+        run: |
+          actual_sha="$(git rev-parse HEAD)"
+          if [[ "$actual_sha" != "$RELEASE_SHA" ]]; then
+            echo "Release checkout moved: expected $RELEASE_SHA, got $actual_sha" >&2
+            exit 1
+          fi
+          if [[ -n "$(git status --porcelain=v1 --untracked-files=all)" ]]; then
+            echo "Release checkout changed after validation; refusing to publish." >&2
+            git status --short
+            exit 1
+          fi
+
       - name: Build release package
-        if: steps.current-release.outputs.complete == 'false'
+        if: steps.current-release.outputs.complete == 'false' && steps.changes.outputs.changed != 'true'
         env:
           RELEASE_SHA: ${{ github.sha }}
         run: |
           python3 scripts/build_personal_codex_package.py \
             --sha "$RELEASE_SHA" \
+            --require-clean-sources \
             --output-dir dist
 
       - name: Verify release package
-        if: steps.current-release.outputs.complete == 'false'
+        if: steps.current-release.outputs.complete == 'false' && steps.changes.outputs.changed != 'true'
         env:
           RELEASE_SHA: ${{ github.sha }}
         run: |
@@ -293,7 +336,7 @@ jobs:
             --dist dist
 
       - name: Publish GitHub release
-        if: steps.current-release.outputs.complete == 'false'
+        if: steps.current-release.outputs.complete == 'false' && steps.changes.outputs.changed != 'true'
         env:
           GITHUB_TOKEN: ${{ github.token }}
           RELEASE_SHA: ${{ github.sha }}
@@ -303,3 +346,11 @@ jobs:
             --sha "$RELEASE_SHA" \
             --dist dist \
             --source-event "$GITHUB_EVENT_NAME"
+
+      - name: Validate repaired release history
+        if: steps.current-release.outputs.complete == 'false' && steps.changes.outputs.changed != 'true'
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          python3 scripts/validate_sync_manifest_changes.py \
+            --release-repo "$GITHUB_REPOSITORY"

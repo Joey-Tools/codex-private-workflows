@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import hmac
 import importlib.util
 import io
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -18,6 +20,7 @@ from unittest import mock
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SYNC_SCRIPT = REPO_ROOT / "scripts" / "codex_personal_sync.py"
 PACKAGE_SCRIPT = REPO_ROOT / "scripts" / "build_personal_codex_package.py"
+MANIFEST_VALIDATOR = REPO_ROOT / "scripts" / "validate_sync_manifest_changes.py"
 SPEC = importlib.util.spec_from_file_location("codex_personal_sync", SYNC_SCRIPT)
 MODULE = importlib.util.module_from_spec(SPEC)
 assert SPEC is not None
@@ -47,8 +50,18 @@ def write_public_base_fixture(root: Path) -> None:
         "#!/usr/bin/env python3\n",
         encoding="utf-8",
     )
+    skill_root = (
+        root
+        / "personal_codex"
+        / "skills"
+        / "submodule-linked-worktrees"
+    )
+    skill_root.mkdir(parents=True)
+    (skill_root / "SKILL.md").write_text(
+        "---\nname: submodule-linked-worktrees\n---\n",
+        encoding="utf-8",
+    )
     manifest_root = root / "personal_codex"
-    manifest_root.mkdir(parents=True)
     (manifest_root / "sync-manifest.json").write_text(
         """
 {
@@ -59,6 +72,11 @@ def write_public_base_fixture(root: Path) -> None:
       "source": "scripts/codex_personal_sync.py",
       "target": "bin/codex-personal-sync",
       "kind": "file"
+    },
+    {
+      "source": "personal_codex/skills/submodule-linked-worktrees",
+      "target": "skills/submodule-linked-worktrees",
+      "kind": "skill"
     }
   ],
   "reference_only": []
@@ -81,9 +99,33 @@ class PrivateOverlayPackageTests(unittest.TestCase):
     def setUp(self) -> None:
         self.tmpdir = tempfile.TemporaryDirectory(prefix="codex-private-overlay.")
         self.root = Path(self.tmpdir.name)
+        self.archive_workspace_context = MODULE.bind_archive_workspace(self.root)
+        self.archive_workspace = self.archive_workspace_context.__enter__()
 
     def tearDown(self) -> None:
+        self.archive_workspace_context.__exit__(None, None, None)
         self.tmpdir.cleanup()
+
+    def safe_extract_archive(self, archive_path: Path, destination: Path) -> Path:
+        return MODULE.safe_extract_archive(
+            archive_path,
+            destination,
+            workspace=self.archive_workspace,
+        )
+
+    def download_and_extract_release(
+        self,
+        repo: str,
+        destination: Path,
+        *,
+        sha: str | None = None,
+    ) -> MODULE.DownloadedRelease:
+        return MODULE.download_and_extract_release(
+            repo,
+            destination,
+            workspace=self.archive_workspace,
+            sha=sha,
+        )
 
     def run_quietly(self, callback, *args, **kwargs):
         with contextlib.redirect_stdout(io.StringIO()):
@@ -109,7 +151,17 @@ class PrivateOverlayPackageTests(unittest.TestCase):
         ]
         if manifest is not None:
             args.extend(["--manifest", manifest])
-        subprocess.run(args, check=True, text=True, capture_output=True)
+        completed = subprocess.run(
+            args,
+            check=False,
+            text=True,
+            capture_output=True,
+        )
+        self.assertEqual(
+            completed.returncode,
+            0,
+            completed.stderr or completed.stdout,
+        )
         return dist_dir / f"personal-codex-{sha}.tar.gz"
 
     def test_private_manifest_packages_overlay_targets(self) -> None:
@@ -125,7 +177,7 @@ class PrivateOverlayPackageTests(unittest.TestCase):
             )
             archive_path = self.build_private_package()
         extract_root = self.root / "extract"
-        release_root = MODULE.safe_extract_archive(archive_path, extract_root)
+        release_root = self.safe_extract_archive(archive_path, extract_root)
         entries = MODULE.validate_release_tree(release_root)
         targets = {entry.target.as_posix(): entry for entry in entries}
         manifest = json.loads(
@@ -145,6 +197,43 @@ class PrivateOverlayPackageTests(unittest.TestCase):
         self.assertIn("skills/remote-host-context", targets)
         self.assertIn("skills/apple-notes-work-report", targets)
         self.assertNotIn("bin/codex-personal-sync", targets)
+        self.assertEqual(
+            manifest["removed_links"],
+            [
+                {
+                    "id": "2026-07-02-retire-copilot-review-playbook",
+                    "source": "personal_codex/skills/copilot-review-playbook",
+                    "target": "skills/copilot-review-playbook",
+                    "kind": "directory",
+                    "replacement_target": "skills/review-orchestration-playbook",
+                    "legacy": True,
+                },
+                {
+                    "id": "2026-07-02-retire-external-review-playbook",
+                    "source": "personal_codex/skills/external-review-playbook",
+                    "target": "skills/external-review-playbook",
+                    "kind": "skill",
+                    "replacement_target": "skills/review-orchestration-playbook",
+                    "legacy": True,
+                },
+                {
+                    "id": "2026-07-02-retire-pr-readiness-review-workflow",
+                    "source": "personal_codex/skills/pr-readiness-review-workflow",
+                    "target": "skills/pr-readiness-review-workflow",
+                    "kind": "skill",
+                    "replacement_target": "skills/review-orchestration-playbook",
+                    "legacy": True,
+                },
+                {
+                    "id": "2026-07-15-move-submodule-linked-worktrees-to-public",
+                    "source": "personal_codex/skills/submodule-linked-worktrees",
+                    "target": "skills/submodule-linked-worktrees",
+                    "kind": "skill",
+                    "replacement_target": "skills/submodule-linked-worktrees",
+                    "legacy": True,
+                }
+            ],
+        )
         generated_catalog = (
             release_root
             / "personal_codex"
@@ -175,9 +264,27 @@ class PrivateOverlayPackageTests(unittest.TestCase):
                 any("private-overrides" in name for name in archive.getnames())
             )
 
+    def test_manifest_validator_defaults_to_private_manifest(self) -> None:
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(MANIFEST_VALIDATOR),
+                "--repo-root",
+                str(REPO_ROOT),
+                "--base-ref",
+                "HEAD",
+            ],
+            check=False,
+            text=True,
+            capture_output=True,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("sync manifest change validation ok", result.stdout)
+
     def test_default_manifest_packages_private_overlay(self) -> None:
         archive_path = self.build_private_package(manifest=None)
-        release_root = MODULE.safe_extract_archive(archive_path, self.root / "extract")
+        release_root = self.safe_extract_archive(archive_path, self.root / "extract")
         entries = MODULE.validate_release_tree(release_root)
 
         self.assertTrue(all(entry.owner == "private" for entry in entries))
@@ -190,16 +297,23 @@ class PrivateOverlayPackageTests(unittest.TestCase):
 
     def test_package_excludes_private_override_source(self) -> None:
         repo_root = self.root / "repo"
-        generated_catalog = (
+        review_skill = (
             repo_root
             / "personal_codex"
             / "skills"
             / "review-orchestration-playbook"
+        )
+        generated_catalog = (
+            review_skill
             / "scripts"
             / "review_runtime"
             / "synthetic-token-catalog.json"
         )
         generated_catalog.parent.mkdir(parents=True)
+        (review_skill / "SKILL.md").write_text(
+            "---\nname: review-orchestration-playbook\n---\n",
+            encoding="utf-8",
+        )
         expected = b'{"pool":"private"}\n'
         generated_catalog.write_bytes(expected)
         override_catalog = (
@@ -504,11 +618,833 @@ class PrivateOverlayPackageTests(unittest.TestCase):
         )
         self.assertFalse(any(name.endswith(".DS_Store") for name in names))
 
+    def test_verify_checksum_enforces_input_size_limits(self) -> None:
+        archive = self.root / f"personal-codex-{PRIVATE_SHA}.tar.gz"
+        checksum = self.root / f"personal-codex-{PRIVATE_SHA}.sha256"
+        archive.write_bytes(b"archive")
+        digest = hashlib.sha256(b"archive").hexdigest()
+        checksum.write_text(f"{digest}  {archive.name}\n", encoding="utf-8")
+
+        with (
+            self.subTest(limit="checksum"),
+            mock.patch.object(MODULE, "MAX_ARCHIVE_CHECKSUM_BYTES", 1),
+        ):
+            with self.assertRaisesRegex(MODULE.SyncError, "checksum file exceeds"):
+                MODULE.verify_checksum(archive, checksum)
+
+        with (
+            self.subTest(limit="compressed"),
+            mock.patch.object(MODULE, "MAX_ARCHIVE_COMPRESSED_BYTES", 1),
+        ):
+            with self.assertRaisesRegex(MODULE.SyncError, "compressed archive exceeds"):
+                MODULE.verify_checksum(archive, checksum)
+
+    def test_verify_checksum_rejects_symlink_and_fifo_inputs(self) -> None:
+        for role in ("archive", "checksum"):
+            for kind in ("symlink", "fifo"):
+                with self.subTest(role=role, kind=kind):
+                    case_root = self.root / f"unsafe-{role}-{kind}"
+                    case_root.mkdir()
+                    archive = case_root / f"personal-codex-{PRIVATE_SHA}.tar.gz"
+                    checksum = case_root / f"personal-codex-{PRIVATE_SHA}.sha256"
+                    archive_payload = b"archive"
+                    archive.write_bytes(archive_payload)
+                    digest = hashlib.sha256(archive_payload).hexdigest()
+                    checksum.write_text(
+                        f"{digest}  {archive.name}\n",
+                        encoding="utf-8",
+                    )
+                    unsafe_path = archive if role == "archive" else checksum
+                    unsafe_path.unlink()
+                    if kind == "symlink":
+                        backing = case_root / f"{role}-backing"
+                        if role == "archive":
+                            backing.write_bytes(archive_payload)
+                        else:
+                            backing.write_text(
+                                f"{digest}  {archive.name}\n",
+                                encoding="utf-8",
+                            )
+                        unsafe_path.symlink_to(backing)
+                    else:
+                        os.mkfifo(unsafe_path)
+
+                    with self.assertRaisesRegex(
+                        MODULE.SyncError,
+                        "unsafe|non-regular",
+                    ):
+                        MODULE.verify_checksum(archive, checksum)
+
+    def test_verify_checksum_rejects_same_inode_archive_rewrite(self) -> None:
+        archive = self.root / f"personal-codex-{PRIVATE_SHA}.tar.gz"
+        checksum = self.root / f"personal-codex-{PRIVATE_SHA}.sha256"
+        archive_payload = b"archive"
+        archive.write_bytes(archive_payload)
+        digest = hashlib.sha256(archive_payload).hexdigest()
+        checksum.write_text(f"{digest}  {archive.name}\n", encoding="utf-8")
+        archive_metadata = archive.stat()
+        archive_identity = (
+            archive_metadata.st_dev,
+            archive_metadata.st_ino,
+            archive_metadata.st_size,
+        )
+        real_read = os.read
+        rewritten = False
+
+        def rewrite_after_archive_read(file_descriptor, size):
+            nonlocal rewritten
+            metadata = os.fstat(file_descriptor)
+            is_archive = (metadata.st_dev, metadata.st_ino) == archive_identity[:2]
+            payload = real_read(file_descriptor, min(size, 1) if is_archive else size)
+            if is_archive and payload and not rewritten:
+                rewritten = True
+                writer_fd = os.open(archive, os.O_RDWR)
+                try:
+                    # Rewrite a byte that the bounded first read has not copied yet.
+                    os.lseek(writer_fd, 1, os.SEEK_SET)
+                    os.write(writer_fd, b"X")
+                    os.fsync(writer_fd)
+                finally:
+                    os.close(writer_fd)
+            return payload
+
+        with mock.patch.object(MODULE.os, "read", rewrite_after_archive_read):
+            with self.assertRaisesRegex(
+                MODULE.SyncError,
+                "compressed archive changed while reading|checksum mismatch",
+            ):
+                MODULE.verify_checksum(archive, checksum)
+
+        self.assertTrue(rewritten)
+        final_metadata = archive.stat()
+        self.assertEqual(
+            (final_metadata.st_dev, final_metadata.st_ino, final_metadata.st_size),
+            archive_identity,
+        )
+
+    def test_download_extracts_verified_snapshot_after_archive_path_replacement(
+        self,
+    ) -> None:
+        destination = self.root / "download"
+        destination.mkdir()
+        assets = MODULE.ReleaseAssets(
+            tag_name="personal-codex-20260520-120000-2222222",
+            sha=PRIVATE_SHA,
+            archive_name=f"personal-codex-{PRIVATE_SHA}.tar.gz",
+            checksum_name=f"personal-codex-{PRIVATE_SHA}.sha256",
+            archive_id=1,
+            archive_size=1,
+            checksum_id=2,
+            checksum_size=1,
+        )
+        archive_path = destination / assets.archive_name
+        archive_path.write_bytes(self.build_private_package().read_bytes())
+        checksum_path = destination / assets.checksum_name
+        digest = hashlib.sha256(archive_path.read_bytes()).hexdigest()
+        checksum_path.write_text(
+            f"{digest}  {archive_path.name}\n",
+            encoding="utf-8",
+        )
+        malicious_archive = self.root / "replacement.tar.gz"
+        malicious_archive.write_bytes(b"replacement")
+        retained_archive = self.root / "verified.tar.gz"
+        real_extract = MODULE._safe_extract_archive_snapshot
+
+        def replace_archive_path(snapshot, extract_root, *, workspace):
+            archive_path.rename(retained_archive)
+            malicious_archive.rename(archive_path)
+            return real_extract(
+                snapshot,
+                extract_root,
+                workspace=workspace,
+            )
+
+        with (
+            mock.patch.object(MODULE, "find_latest_release", return_value={}),
+            mock.patch.object(MODULE, "select_release_assets", return_value=assets),
+            mock.patch.object(MODULE, "download_release_assets"),
+            mock.patch.object(
+                MODULE,
+                "_safe_extract_archive_snapshot",
+                side_effect=replace_archive_path,
+            ),
+        ):
+            release = self.download_and_extract_release("owner/repo", destination)
+
+        self.assertTrue(
+            (release.release_root / "personal_codex" / "sync-manifest.json").is_file()
+        )
+        self.assertIsNotNone(release.release_expectation)
+        release_metadata = release.release_root.stat()
+        self.assertEqual(
+            release.release_expectation[1],
+            (release_metadata.st_dev, release_metadata.st_ino),
+        )
+        self.assertRegex(release.release_expectation[0][2], r"^[0-9a-f]{64}$")
+        self.assertEqual(archive_path.read_bytes(), b"replacement")
+        self.assertTrue(retained_archive.is_file())
+
+    def test_expected_release_file_rejects_release_root_name_replacement(
+        self,
+    ) -> None:
+        release_root = self.root / "expected-release"
+        retained_release = self.root / "retained-expected-release"
+        runner_path = MODULE.PurePosixPath("scripts/codex_personal_sync.py")
+        write_public_base_fixture(release_root)
+        original_runner = (release_root / Path(*runner_path.parts)).read_bytes()
+        release_expectation = MODULE._source_release_identity(release_root, None)
+
+        self.assertEqual(
+            MODULE.read_expected_release_file(
+                release_root,
+                runner_path,
+                release_expectation,
+            ),
+            original_runner,
+        )
+
+        release_root.rename(retained_release)
+        write_public_base_fixture(release_root)
+        (release_root / Path(*runner_path.parts)).write_text(
+            "#!/usr/bin/env python3\n# substitute\n",
+            encoding="utf-8",
+        )
+
+        with self.assertRaisesRegex(
+            MODULE.SyncError,
+            "release source changed after its captured identity",
+        ):
+            MODULE.read_expected_release_file(
+                release_root,
+                runner_path,
+                release_expectation,
+            )
+
+    def test_expected_release_file_rejects_descendant_replace_restore(
+        self,
+    ) -> None:
+        release_root = self.root / "expected-descendant-release"
+        substitute_root = self.root / "substitute-descendant-release"
+        retained_scripts = self.root / "retained-expected-scripts"
+        runner_path = MODULE.PurePosixPath("scripts/codex_personal_sync.py")
+        write_public_base_fixture(release_root)
+        write_public_base_fixture(substitute_root)
+        (substitute_root / Path(*runner_path.parts)).write_text(
+            "#!/usr/bin/env python3\n# install-private substitute\n",
+            encoding="utf-8",
+        )
+        release_expectation = MODULE._source_release_identity(release_root, None)
+        original_runner = (release_root / Path(*runner_path.parts)).read_bytes()
+        real_capture = (
+            MODULE._release_tree_identity_and_captured_files_from_directory_fd
+        )
+
+        def capture_substitute_then_restore(*args, **kwargs):
+            original_scripts = release_root / "scripts"
+            substitute_scripts = substitute_root / "scripts"
+            original_scripts.rename(retained_scripts)
+            substitute_scripts.rename(original_scripts)
+            try:
+                return real_capture(*args, **kwargs)
+            finally:
+                original_scripts.rename(substitute_scripts)
+                retained_scripts.rename(original_scripts)
+
+        with (
+            mock.patch.object(
+                MODULE,
+                "_release_tree_identity_and_captured_files_from_directory_fd",
+                side_effect=capture_substitute_then_restore,
+            ),
+            self.assertRaisesRegex(
+                MODULE.SyncError,
+                "release source changed after its captured identity",
+            ),
+        ):
+            MODULE.read_expected_release_file(
+                release_root,
+                runner_path,
+                release_expectation,
+            )
+
+        self.assertEqual(
+            (release_root / Path(*runner_path.parts)).read_bytes(),
+            original_runner,
+        )
+
+    def test_safe_extract_rejects_exact_duplicate_before_writing(self) -> None:
+        archive_path = self.root / "duplicate.tar.gz"
+        member_name = "personal-codex/payload.txt"
+        with tarfile.open(archive_path, "w:gz") as archive:
+            for _index in range(2):
+                data = b"same"
+                member = tarfile.TarInfo(member_name)
+                member.size = len(data)
+                archive.addfile(member, io.BytesIO(data))
+
+        destination = self.root / "duplicate-extract"
+        with self.assertRaisesRegex(MODULE.SyncError, "duplicate archive member path"):
+            self.safe_extract_archive(archive_path, destination)
+
+        self.assertFalse(destination.exists())
+
+    def test_safe_extract_enforces_member_resource_limits_before_writing(self) -> None:
+        cases = (
+            ("members", 2, (b"a", b"b")),
+            ("member-bytes", 1, (b"long",)),
+            ("total-bytes", 2, (b"abc", b"def")),
+        )
+        for name, member_count, payloads in cases:
+            with self.subTest(limit=name):
+                archive_path = self.root / f"limit-{name}.tar.gz"
+                with tarfile.open(archive_path, "w:gz") as archive:
+                    for index in range(member_count):
+                        payload = payloads[index]
+                        member = tarfile.TarInfo(f"root/file-{index}.txt")
+                        member.size = len(payload)
+                        archive.addfile(member, io.BytesIO(payload))
+                destination = self.root / f"limit-{name}-extract"
+                if name == "members":
+                    patches = (mock.patch.object(MODULE, "MAX_ARCHIVE_MEMBERS", 1),)
+                    expected = "member limit"
+                elif name == "member-bytes":
+                    patches = (
+                        mock.patch.object(MODULE, "MAX_ARCHIVE_MEMBER_BYTES", 3),
+                    )
+                    expected = "member exceeds expanded byte limit"
+                else:
+                    patches = (
+                        mock.patch.object(MODULE, "MAX_ARCHIVE_MEMBER_BYTES", 10),
+                        mock.patch.object(MODULE, "MAX_ARCHIVE_EXPANDED_BYTES", 5),
+                    )
+                    expected = "total expanded byte limit"
+                with contextlib.ExitStack() as stack:
+                    for patcher in patches:
+                        stack.enter_context(patcher)
+                    with self.assertRaisesRegex(MODULE.SyncError, expected):
+                        self.safe_extract_archive(archive_path, destination)
+                self.assertFalse(destination.exists())
+
+    def test_safe_extract_counts_pax_metadata_against_expanded_limit(self) -> None:
+        archive_path = self.root / "pax-metadata-limit.tar.gz"
+        with tarfile.open(
+            archive_path,
+            "w:gz",
+            format=tarfile.PAX_FORMAT,
+        ) as archive:
+            payload = b"x"
+            member = tarfile.TarInfo("root/file.txt")
+            member.size = len(payload)
+            member.pax_headers = {"comment": "x" * 4096}
+            archive.addfile(member, io.BytesIO(payload))
+        destination = self.root / "pax-metadata-limit-extract"
+
+        with mock.patch.object(MODULE, "MAX_ARCHIVE_EXPANDED_BYTES", 1024):
+            with self.assertRaisesRegex(
+                MODULE.SyncError,
+                "total expanded byte limit",
+            ):
+                self.safe_extract_archive(archive_path, destination)
+
+        self.assertFalse(destination.exists())
+
+    def test_safe_extract_counts_trailing_gzip_payload_against_expanded_limit(
+        self,
+    ) -> None:
+        archive_path = self.build_private_package()
+        archive_payload = archive_path.read_bytes()
+        expanded_size = len(MODULE.gzip.decompress(archive_payload))
+        archive_path.write_bytes(
+            archive_payload + MODULE.gzip.compress(b"x" * 4096)
+        )
+        destination = self.root / "trailing-payload-extract"
+
+        with mock.patch.object(
+            MODULE,
+            "MAX_ARCHIVE_EXPANDED_BYTES",
+            expanded_size + 1024,
+        ):
+            with self.assertRaisesRegex(
+                MODULE.SyncError,
+                "total expanded byte limit",
+            ):
+                self.safe_extract_archive(archive_path, destination)
+
+        self.assertFalse(destination.exists())
+
+    def test_safe_extract_rejects_same_inode_same_size_content_rewrite(self) -> None:
+        archive_path = self.build_private_package()
+        destination = self.root / "content-race-extract"
+        real_identity = MODULE._release_tree_identity_from_directory_fd
+        identity_calls = 0
+        raced_path: Path | None = None
+        original_identity: tuple[int, int] | None = None
+        replacement_byte = b""
+
+        def rewrite_after_identity(
+            root_fd,
+            display_root,
+            *,
+            require_sanitized_modes=False,
+        ):
+            nonlocal identity_calls, raced_path, original_identity, replacement_byte
+            identity = real_identity(
+                root_fd,
+                display_root,
+                require_sanitized_modes=require_sanitized_modes,
+            )
+            identity_calls += 1
+            if identity_calls == 1:
+                raced_path = display_root / "personal_codex" / "AGENTS.md"
+                before = raced_path.stat()
+                original_identity = before.st_ino, before.st_size
+                file_descriptor = os.open(raced_path, os.O_RDWR)
+                try:
+                    original_byte = os.read(file_descriptor, 1)
+                    replacement_byte = b"X" if original_byte != b"X" else b"Y"
+                    os.lseek(file_descriptor, 0, os.SEEK_SET)
+                    os.write(file_descriptor, replacement_byte)
+                    os.fsync(file_descriptor)
+                finally:
+                    os.close(file_descriptor)
+                after = raced_path.stat()
+                self.assertEqual((after.st_ino, after.st_size), original_identity)
+            return identity
+
+        with mock.patch.object(
+            MODULE,
+            "_release_tree_identity_from_directory_fd",
+            side_effect=rewrite_after_identity,
+        ):
+            with self.assertRaisesRegex(MODULE.SyncError, "file changed during validation"):
+                self.safe_extract_archive(archive_path, destination)
+
+        self.assertEqual(identity_calls, 1)
+        self.assertIsNotNone(raced_path)
+        self.assertEqual(raced_path.read_bytes()[:1], replacement_byte)
+
+    def test_safe_extract_rejects_normalized_member_aliases(self) -> None:
+        for name, member_name in (
+            ("empty", "personal-codex//payload.txt"),
+            ("current", "personal-codex/./payload.txt"),
+        ):
+            with self.subTest(name=name):
+                archive_path = self.root / f"unsafe-{name}.tar.gz"
+                with tarfile.open(archive_path, "w:gz") as archive:
+                    data = b"bad"
+                    member = tarfile.TarInfo(member_name)
+                    member.size = len(data)
+                    archive.addfile(member, io.BytesIO(data))
+
+                destination = self.root / f"unsafe-{name}-extract"
+                with self.assertRaisesRegex(
+                    MODULE.SyncError,
+                    "unsafe archive member path",
+                ):
+                    self.safe_extract_archive(archive_path, destination)
+                self.assertFalse(destination.exists())
+
+    def test_safe_extract_rejects_pax_path_with_embedded_nul_before_writing(
+        self,
+    ) -> None:
+        archive_path = self.root / "nul-path.tar.gz"
+        with tarfile.open(
+            archive_path,
+            "w:gz",
+            format=tarfile.PAX_FORMAT,
+        ) as archive:
+            payload = b"payload"
+            member = tarfile.TarInfo("placeholder.txt")
+            member.pax_headers = {"path": "personal-codex/nul\0payload.txt"}
+            member.size = len(payload)
+            archive.addfile(member, io.BytesIO(payload))
+        destination = self.root / "nul-path-extract"
+
+        with self.assertRaisesRegex(
+            MODULE.SyncError,
+            "unsafe archive member path: embedded NUL",
+        ):
+            self.safe_extract_archive(archive_path, destination)
+
+        self.assertFalse(destination.exists())
+
+    def test_safe_extract_rejects_member_path_limits_before_writing(self) -> None:
+        wide_component = "\N{LATIN SMALL LETTER E WITH ACUTE}" * 120
+        cases = (
+            (
+                "path-bytes",
+                "root/" + "/".join([wide_component] * 18),
+                "path exceeds UTF-8 byte limit",
+            ),
+            (
+                "component-bytes",
+                "root/" + "\N{CJK UNIFIED IDEOGRAPH-754C}" * 86,
+                "component exceeds UTF-8 byte limit",
+            ),
+            (
+                "depth",
+                "/".join(["root", *(["d"] * MODULE.MAX_ARCHIVE_MEMBER_PATH_DEPTH)]),
+                "path exceeds depth limit",
+            ),
+        )
+        for name, member_name, expected in cases:
+            with self.subTest(limit=name):
+                archive_path = self.root / f"path-limit-{name}.tar.gz"
+                with tarfile.open(
+                    archive_path,
+                    "w:gz",
+                    format=tarfile.PAX_FORMAT,
+                ) as archive:
+                    payload = b"payload"
+                    member = tarfile.TarInfo(member_name)
+                    member.size = len(payload)
+                    archive.addfile(member, io.BytesIO(payload))
+                destination = self.root / f"path-limit-{name}-extract"
+                with contextlib.ExitStack() as stack:
+                    if name == "depth":
+                        stack.enter_context(
+                            mock.patch.object(
+                                MODULE,
+                                "PurePosixPath",
+                                side_effect=AssertionError(
+                                    "path object created before depth validation"
+                                ),
+                            )
+                        )
+                    with self.assertRaisesRegex(MODULE.SyncError, expected):
+                        self.safe_extract_archive(archive_path, destination)
+                self.assertFalse(destination.exists())
+
+    def test_archive_member_path_limits_accept_boundaries_and_shared_prefixes(
+        self,
+    ) -> None:
+        boundary_component = "\N{CJK UNIFIED IDEOGRAPH-754C}" * 85
+        boundary_name = f"root/{boundary_component}"
+        boundary_member = tarfile.TarInfo(boundary_name)
+        with (
+            mock.patch.object(
+                MODULE,
+                "MAX_ARCHIVE_MEMBER_PATH_BYTES",
+                len(boundary_name.encode("utf-8")),
+            ),
+            mock.patch.object(
+                MODULE,
+                "MAX_ARCHIVE_MEMBER_COMPONENT_BYTES",
+                len(boundary_component.encode("utf-8")),
+            ),
+            mock.patch.object(
+                MODULE,
+                "MAX_ARCHIVE_MEMBER_PATH_DEPTH",
+                len(boundary_name.split("/")),
+            ),
+        ):
+            MODULE._validate_tar_member(boundary_member)
+            MODULE._validate_archive_member_paths([boundary_member])
+
+        shared_prefix_members = []
+        for index in range(512):
+            member = tarfile.TarInfo(
+                f"personal-codex/shared/prefix/file-{index:04d}.txt"
+            )
+            MODULE._validate_tar_member(member)
+            shared_prefix_members.append(member)
+        MODULE._validate_archive_member_paths(shared_prefix_members)
+        self.assertEqual(len(shared_prefix_members), 512)
+
+    def test_archive_member_paths_bound_implicit_directories(self) -> None:
+        members = [
+            tarfile.TarInfo("root/personal_codex/sync-manifest.json"),
+            tarfile.TarInfo("root/a/b/c/file.txt"),
+        ]
+
+        with mock.patch.object(MODULE, "MAX_ARCHIVE_MEMBERS", 7):
+            MODULE._validate_archive_member_paths(members)
+        with (
+            mock.patch.object(MODULE, "MAX_ARCHIVE_MEMBERS", 6),
+            self.assertRaisesRegex(MODULE.SyncError, "path entry limit"),
+        ):
+            MODULE._validate_archive_member_paths(members)
+
+    def test_safe_extract_rejects_implicit_directory_limit_before_writing(
+        self,
+    ) -> None:
+        archive_path = self.root / "implicit-directory-limit.tar.gz"
+        with tarfile.open(archive_path, "w:gz") as archive:
+            for member_name in (
+                "root/personal_codex/sync-manifest.json",
+                "root/a/b/c/file.txt",
+            ):
+                payload = b"x"
+                member = tarfile.TarInfo(member_name)
+                member.size = len(payload)
+                archive.addfile(member, io.BytesIO(payload))
+        destination = self.root / "implicit-directory-limit-extract"
+
+        with (
+            mock.patch.object(MODULE, "MAX_ARCHIVE_MEMBERS", 6),
+            mock.patch.object(
+                MODULE,
+                "_create_archive_destination",
+                side_effect=AssertionError("destination must not be created"),
+            ) as create_destination,
+            self.assertRaisesRegex(MODULE.SyncError, "path entry limit"),
+        ):
+            self.safe_extract_archive(archive_path, destination)
+
+        create_destination.assert_not_called()
+        self.assertFalse(destination.exists())
+
+    def test_validate_tar_member_allows_one_directory_trailing_slash(self) -> None:
+        member = tarfile.TarInfo("personal-codex/")
+        member.type = tarfile.DIRTYPE
+
+        MODULE._validate_tar_member(member)
+
+        self.assertEqual(member.name, "personal-codex")
+
+    def test_safe_extract_rejects_portable_path_conflicts_before_writing(
+        self,
+    ) -> None:
+        cases = {
+            "case-file": (
+                "personal-codex/Foo.txt",
+                "personal-codex/foo.txt",
+            ),
+            "unicode-file": (
+                "personal-codex/caf\N{LATIN SMALL LETTER E WITH ACUTE}.txt",
+                "personal-codex/cafe\N{COMBINING ACUTE ACCENT}.txt",
+            ),
+            "case-directory": (
+                "personal-codex/Foo/one.txt",
+                "personal-codex/foo/two.txt",
+            ),
+            "unicode-directory": (
+                "personal-codex/caf\N{LATIN SMALL LETTER E WITH ACUTE}/one.txt",
+                "personal-codex/cafe\N{COMBINING ACUTE ACCENT}/two.txt",
+            ),
+            "file-directory": (
+                "personal-codex/Thing",
+                "personal-codex/thing/child.txt",
+            ),
+        }
+        for name, member_names in cases.items():
+            with self.subTest(case=name):
+                archive_path = self.root / f"portable-{name}.tar.gz"
+                with tarfile.open(archive_path, "w:gz") as archive:
+                    for member_name in member_names:
+                        data = b"payload"
+                        member = tarfile.TarInfo(member_name)
+                        member.size = len(data)
+                        archive.addfile(member, io.BytesIO(data))
+
+                destination = self.root / f"portable-{name}-extract"
+                with self.assertRaisesRegex(
+                    MODULE.SyncError,
+                    "portable archive member path conflict",
+                ):
+                    self.safe_extract_archive(archive_path, destination)
+
+                self.assertFalse(destination.exists())
+
+    def test_safe_extract_rejects_preexisting_symlink_destination(self) -> None:
+        archive_path = self.build_private_package()
+        outside = self.root / "outside-extract"
+        outside.mkdir()
+        destination = self.root / "preexisting-extract"
+        destination.symlink_to(outside, target_is_directory=True)
+
+        with self.assertRaisesRegex(
+            MODULE.SyncError,
+            "pre-existing archive destination",
+        ):
+            self.safe_extract_archive(archive_path, destination)
+
+        self.assertTrue(destination.is_symlink())
+        self.assertEqual(list(outside.iterdir()), [])
+
+    def test_safe_extract_rejects_symlink_destination_ancestor(self) -> None:
+        archive_path = self.build_private_package()
+        outside = self.root / "ancestor-outside"
+        nested_outside = outside / "nested"
+        nested_outside.mkdir(parents=True)
+        sentinel = outside / "sentinel.txt"
+        sentinel.write_text("keep\n", encoding="utf-8")
+        linked_ancestor = self.root / "linked-ancestor"
+        linked_ancestor.symlink_to(outside, target_is_directory=True)
+        destination = linked_ancestor / "nested" / "extract"
+
+        with self.assertRaisesRegex(
+            MODULE.SyncError,
+            "unsafe archive directory",
+        ):
+            self.safe_extract_archive(archive_path, destination)
+
+        self.assertEqual(sentinel.read_text(encoding="utf-8"), "keep\n")
+        self.assertEqual(list(nested_outside.iterdir()), [])
+        self.assertFalse(destination.exists())
+
+    def test_safe_extract_destination_swap_does_not_write_redirected_tree(self) -> None:
+        archive_path = self.build_private_package()
+        destination = self.root / "destination-swap-extract"
+        moved_destination = self.root / "destination-swap-bound"
+        redirected = self.root / "destination-swap-redirected"
+        redirected.mkdir()
+        sentinel = redirected / "sentinel.txt"
+        sentinel.write_text("keep\n", encoding="utf-8")
+        original_extract = MODULE._extract_archive_members
+
+        def swap_destination(archive, destination_fd, members):
+            destination.rename(moved_destination)
+            destination.symlink_to(redirected, target_is_directory=True)
+            return original_extract(archive, destination_fd, members)
+
+        with mock.patch.object(
+            MODULE,
+            "_extract_archive_members",
+            swap_destination,
+        ):
+            with self.assertRaisesRegex(MODULE.SyncError, "destination changed"):
+                self.safe_extract_archive(archive_path, destination)
+
+        self.assertEqual(sentinel.read_text(encoding="utf-8"), "keep\n")
+        self.assertEqual(list(redirected.iterdir()), [sentinel])
+        self.assertTrue(
+            (
+                moved_destination
+                / f"personal-codex-{PRIVATE_SHA}"
+                / "personal_codex"
+                / "sync-manifest.json"
+            ).is_file()
+        )
+
+    def test_safe_extract_parent_swap_does_not_create_in_redirected_parent(self) -> None:
+        archive_path = self.build_private_package()
+        parent = self.root / "parent-swap-parent"
+        parent.mkdir()
+        moved_parent = self.root / "parent-swap-bound"
+        redirected = self.root / "parent-swap-redirected"
+        redirected.mkdir()
+        sentinel = redirected / "sentinel.txt"
+        sentinel.write_text("keep\n", encoding="utf-8")
+        destination = parent / "extract"
+        original_create_directory = MODULE._create_archive_directory_at
+        swapped = False
+
+        def swap_parent(parent_fd, name):
+            nonlocal swapped
+            if not swapped:
+                swapped = True
+                parent.rename(moved_parent)
+                parent.symlink_to(redirected, target_is_directory=True)
+            return original_create_directory(parent_fd, name)
+
+        with mock.patch.object(
+            MODULE,
+            "_create_archive_directory_at",
+            swap_parent,
+        ):
+            with self.assertRaisesRegex(MODULE.SyncError, "parent changed"):
+                self.safe_extract_archive(archive_path, destination)
+
+        self.assertEqual(sentinel.read_text(encoding="utf-8"), "keep\n")
+        self.assertEqual(list(redirected.iterdir()), [sentinel])
+        self.assertTrue((moved_parent / "extract").is_dir())
+
+    def test_safe_extract_preserves_concurrent_expected_leaves(self) -> None:
+        archive_path = self.build_private_package()
+        original_rename = MODULE._rename_noreplace_at
+        for kind in ("regular", "symlink", "directory"):
+            with self.subTest(kind=kind):
+                destination = self.root / f"leaf-race-{kind}-extract"
+                outside = self.root / f"leaf-race-{kind}-outside.txt"
+                outside.write_text("outside\n", encoding="utf-8")
+                inserted = False
+
+                def insert_expected_leaf(
+                    source_parent_fd,
+                    source_name,
+                    destination_parent_fd,
+                    destination_name,
+                ):
+                    nonlocal inserted
+                    if destination_name == "sync-manifest.json" and not inserted:
+                        inserted = True
+                        if kind == "regular":
+                            flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+                            existing_fd = os.open(
+                                destination_name,
+                                flags,
+                                0o600,
+                                dir_fd=destination_parent_fd,
+                            )
+                            try:
+                                os.write(existing_fd, b"concurrent\n")
+                            finally:
+                                os.close(existing_fd)
+                        elif kind == "symlink":
+                            os.symlink(
+                                outside,
+                                destination_name,
+                                dir_fd=destination_parent_fd,
+                            )
+                        else:
+                            os.mkdir(destination_name, dir_fd=destination_parent_fd)
+                    return original_rename(
+                        source_parent_fd,
+                        source_name,
+                        destination_parent_fd,
+                        destination_name,
+                    )
+
+                with mock.patch.object(
+                    MODULE,
+                    "_rename_noreplace_at",
+                    insert_expected_leaf,
+                ):
+                    with self.assertRaisesRegex(MODULE.SyncError, "entry already exists"):
+                        self.safe_extract_archive(archive_path, destination)
+
+                existing = (
+                    destination
+                    / f"personal-codex-{PRIVATE_SHA}"
+                    / "personal_codex"
+                    / "sync-manifest.json"
+                )
+                self.assertTrue(inserted)
+                self.assertEqual(outside.read_text(encoding="utf-8"), "outside\n")
+                if kind == "regular":
+                    self.assertEqual(
+                        existing.read_text(encoding="utf-8"),
+                        "concurrent\n",
+                    )
+                elif kind == "symlink":
+                    self.assertTrue(existing.is_symlink())
+                    self.assertEqual(os.readlink(existing), str(outside))
+                else:
+                    self.assertTrue(existing.is_dir())
+                    self.assertEqual(list(existing.iterdir()), [])
+
+    def test_safe_extract_does_not_use_extractall(self) -> None:
+        archive_path = self.build_private_package()
+        destination = self.root / "descriptor-extract"
+        with mock.patch.object(
+            tarfile.TarFile,
+            "extractall",
+            side_effect=AssertionError("extractall must not be used"),
+        ) as extractall:
+            release_root = self.safe_extract_archive(archive_path, destination)
+
+        extractall.assert_not_called()
+        self.assertTrue(
+            (release_root / "personal_codex" / "sync-manifest.json").is_file()
+        )
+        self.assertEqual(destination.stat().st_mode & 0o777, 0o700)
+
     def test_private_overlay_installs_over_public_base_and_verifies(self) -> None:
         public_release = self.root / "public-release"
         home = self.root / "home" / ".codex"
         write_public_base_fixture(public_release)
-        private_release = MODULE.safe_extract_archive(
+        private_release = self.safe_extract_archive(
             self.build_private_package(),
             self.root / "private-extract",
         )
@@ -537,13 +1473,19 @@ class PrivateOverlayPackageTests(unittest.TestCase):
         public_release = self.root / "public-release"
         home = self.root / "home" / ".codex"
         write_public_base_fixture(public_release)
-        private_release = MODULE.safe_extract_archive(
+        private_release = self.safe_extract_archive(
             self.build_private_package(),
             self.root / "private-extract",
         )
         downloads: list[tuple[str, str | None]] = []
 
-        def fake_download(repo: str, destination: Path, *, sha: str | None = None):
+        def fake_download(
+            repo: str,
+            destination: Path,
+            *,
+            workspace,
+            sha: str | None = None,
+        ):
             downloads.append((repo, sha))
             if repo == "Joey-Tools/codex-private-workflows":
                 return MODULE.DownloadedRelease(
@@ -553,6 +1495,10 @@ class PrivateOverlayPackageTests(unittest.TestCase):
                         sha=PRIVATE_SHA,
                         archive_name=f"personal-codex-{PRIVATE_SHA}.tar.gz",
                         checksum_name=f"personal-codex-{PRIVATE_SHA}.sha256",
+                        archive_id=1,
+                        archive_size=1,
+                        checksum_id=2,
+                        checksum_size=1,
                     ),
                     release_root=private_release,
                 )
@@ -564,6 +1510,10 @@ class PrivateOverlayPackageTests(unittest.TestCase):
                         sha=PUBLIC_SHA,
                         archive_name=f"personal-codex-{PUBLIC_SHA}.tar.gz",
                         checksum_name=f"personal-codex-{PUBLIC_SHA}.sha256",
+                        archive_id=1,
+                        archive_size=1,
+                        checksum_id=2,
+                        checksum_size=1,
                     ),
                     release_root=public_release,
                 )
@@ -589,6 +1539,173 @@ class PrivateOverlayPackageTests(unittest.TestCase):
         self.assertTrue((home / "bin" / "codex-personal-sync").is_symlink())
         self.assertTrue((home / "AGENTS.md").is_symlink())
         self.run_quietly(MODULE.verify_overlay, home, "private")
+
+    def test_install_private_rejects_replaced_extracted_overlay_root(self) -> None:
+        overlay_root = self.root / "downloaded-private-release"
+        retained_overlay = self.root / "retained-downloaded-private-release"
+        home = self.root / "home" / ".codex"
+        overlay_root = self.safe_extract_archive(
+            self.build_private_package(),
+            overlay_root,
+        )
+        overlay_expectation = MODULE._source_release_identity(overlay_root, None)
+        overlay_root.rename(retained_overlay)
+        replacement_overlay = self.safe_extract_archive(
+            self.build_private_package(),
+            self.root / "replacement-private-extract",
+        )
+        replacement_overlay.rename(overlay_root)
+        manifest_path = overlay_root / "personal_codex" / "sync-manifest.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest["base_release"]["repo"] = "Attacker/substitute"
+        manifest_path.write_text(json.dumps(manifest) + "\n", encoding="utf-8")
+        assets = MODULE.ReleaseAssets(
+            tag_name="personal-codex-20260520-120000-2222222",
+            sha=PRIVATE_SHA,
+            archive_name=f"personal-codex-{PRIVATE_SHA}.tar.gz",
+            checksum_name=f"personal-codex-{PRIVATE_SHA}.sha256",
+            archive_id=1,
+            archive_size=1,
+            checksum_id=2,
+            checksum_size=1,
+        )
+        downloads: list[str] = []
+
+        def fake_download(repo, destination, *, workspace, sha=None):
+            downloads.append(repo)
+            return MODULE.DownloadedRelease(
+                repo=repo,
+                assets=assets,
+                release_root=overlay_root,
+                release_expectation=overlay_expectation,
+            )
+
+        with (
+            mock.patch.object(
+                MODULE,
+                "download_and_extract_release",
+                side_effect=fake_download,
+            ),
+            self.assertRaisesRegex(
+                MODULE.SyncError,
+                "release manifest changed after install preflight",
+            ),
+        ):
+            self.run_quietly(
+                MODULE.install_private_from_github,
+                "Joey-Tools/codex-private-workflows",
+                home,
+                base_repo="Joey-Tools/codex-toolbox",
+                owner="private",
+                dry_run=False,
+            )
+
+        self.assertEqual(downloads, ["Joey-Tools/codex-private-workflows"])
+        self.assertFalse((home / "personal-sync" / "current").exists())
+
+    def test_install_private_uses_validated_base_release_spec(self) -> None:
+        public_release = self.root / "public-release"
+        home = self.root / "home" / ".codex"
+        write_public_base_fixture(public_release)
+        private_release = self.safe_extract_archive(
+            self.build_private_package(),
+            self.root / "private-extract",
+        )
+        manifest_path = private_release / "personal_codex" / "sync-manifest.json"
+        original_manifest = manifest_path.read_bytes()
+        downloads: list[tuple[str, str | None]] = []
+        overlay_validated = False
+        real_validate = MODULE._validate_release_manifest_owner
+
+        def validate_then_replace_manifest(
+            release_root: Path,
+            expected_owner: str,
+            release_expectation: MODULE.ReleaseTreeExpectation | None = None,
+        ):
+            nonlocal overlay_validated
+            manifest = real_validate(
+                release_root,
+                expected_owner,
+                release_expectation,
+            )
+            if expected_owner == "private":
+                payload = json.loads(original_manifest.decode("utf-8"))
+                payload["base_release"] = {"repo": "Attacker/alternate-base"}
+                manifest_path.write_text(
+                    json.dumps(payload) + "\n",
+                    encoding="utf-8",
+                )
+                overlay_validated = True
+            return manifest
+
+        def fake_download(
+            repo: str,
+            destination: Path,
+            *,
+            workspace,
+            sha: str | None = None,
+        ):
+            downloads.append((repo, sha))
+            if repo == "Joey-Tools/codex-private-workflows":
+                return MODULE.DownloadedRelease(
+                    repo=repo,
+                    assets=MODULE.ReleaseAssets(
+                        tag_name="personal-codex-20260520-120000-2222222",
+                        sha=PRIVATE_SHA,
+                        archive_name=f"personal-codex-{PRIVATE_SHA}.tar.gz",
+                        checksum_name=f"personal-codex-{PRIVATE_SHA}.sha256",
+                        archive_id=1,
+                        archive_size=1,
+                        checksum_id=2,
+                        checksum_size=1,
+                    ),
+                    release_root=private_release,
+                )
+            if overlay_validated:
+                manifest_path.write_bytes(original_manifest)
+            if repo == "Joey-Tools/codex-toolbox":
+                return MODULE.DownloadedRelease(
+                    repo=repo,
+                    assets=MODULE.ReleaseAssets(
+                        tag_name="personal-codex-20260520-120000-1111111",
+                        sha=PUBLIC_SHA,
+                        archive_name=f"personal-codex-{PUBLIC_SHA}.tar.gz",
+                        checksum_name=f"personal-codex-{PUBLIC_SHA}.sha256",
+                        archive_id=1,
+                        archive_size=1,
+                        checksum_id=2,
+                        checksum_size=1,
+                    ),
+                    release_root=public_release,
+                )
+            raise AssertionError(f"unexpected repo: {repo}")
+
+        with (
+            mock.patch.object(MODULE, "download_and_extract_release", fake_download),
+            mock.patch.object(
+                MODULE,
+                "_validate_release_manifest_owner",
+                side_effect=validate_then_replace_manifest,
+            ),
+        ):
+            self.run_quietly(
+                MODULE.install_private_from_github,
+                "Joey-Tools/codex-private-workflows",
+                home,
+                base_repo="Fallback/base",
+                owner="private",
+                dry_run=False,
+            )
+
+        self.assertTrue(overlay_validated)
+        self.assertEqual(
+            downloads,
+            [
+                ("Joey-Tools/codex-private-workflows", None),
+                ("Joey-Tools/codex-toolbox", None),
+            ],
+        )
+        self.assertEqual(manifest_path.read_bytes(), original_manifest)
 
     def test_private_scheduler_invokes_private_install_entrypoint(self) -> None:
         home = self.root / "home" / ".codex"
