@@ -4,6 +4,7 @@ import datetime as dt
 import importlib.util
 import hashlib
 import io
+import inspect
 import json
 import os
 from pathlib import Path
@@ -1526,8 +1527,16 @@ class SessionRetrospectiveTests(unittest.TestCase):
 
         for probe in (REMOTE_PROBE, REMOTE_HOST_CONTEXT_PROBE):
             with self.subTest(probe=probe.__name__):
+                payload = (first + second).encode("utf-8")
+                reader_args = [io.BytesIO(payload), len(first.encode("utf-8"))]
+                # Keep this root integration test forward-compatible while the
+                # public retrospective overlay stages its explicit source-size API.
+                if "source_size" in inspect.signature(
+                    probe._bounded_text_lines
+                ).parameters:
+                    reader_args.append(len(payload))
                 records = probe._summarize_rollout_records(
-                    lines=probe._bounded_text_lines(io.BytesIO((first + second).encode("utf-8")), len(first.encode("utf-8"))),
+                    lines=probe._bounded_text_lines(*reader_args),
                     keywords=["missed"],
                     limit=10,
                     tail_records=0,
@@ -1543,12 +1552,27 @@ class SessionRetrospectiveTests(unittest.TestCase):
 
         for probe in (REMOTE_PROBE, REMOTE_HOST_CONTEXT_PROBE):
             with self.subTest(probe=probe.__name__):
+                supports_source_size = "source_size" in inspect.signature(
+                    probe._bounded_text_lines
+                ).parameters
+                character_cap_args = [io.BytesIO(payload), len(first)]
+                byte_cap_args = [
+                    io.BytesIO(payload),
+                    len(first.encode("utf-8")),
+                ]
+                if supports_source_size:
+                    character_cap_args.append(len(payload))
+                    byte_cap_args.append(len(payload))
                 self.assertEqual(
-                    list(probe._bounded_text_lines(io.BytesIO(payload), len(first))),
-                    [payload[: len(first)].decode("utf-8", "replace")],
+                    list(probe._bounded_text_lines(*character_cap_args)),
+                    (
+                        []
+                        if supports_source_size
+                        else [payload[: len(first)].decode("utf-8", "replace")]
+                    ),
                 )
                 self.assertEqual(
-                    list(probe._bounded_text_lines(io.BytesIO(payload), len(first.encode("utf-8")))),
+                    list(probe._bounded_text_lines(*byte_cap_args)),
                     [first],
                 )
 
@@ -10575,8 +10599,24 @@ class SessionRetrospectiveTests(unittest.TestCase):
                 else:
                     self.assertIn("return ROOT.resolve(strict=True)", script)
                 self.assertIn('os.fdopen(fd, "rb")', script)
-                self.assertIn("raw_bytes.splitlines(keepends=True)", script)
-                self.assertIn("if max_scan_bytes and scanned >= max_scan_bytes:\n            if dropping_oversized_line:", script)
+                if "source_size" in inspect.signature(
+                    probe._bounded_text_lines
+                ).parameters:
+                    self.assertIn('raw_bytes.find(b"\\n", offset)', script)
+                    self.assertIn(
+                        "scan_limit = min(max_scan_bytes, source_size) "
+                        "if max_scan_bytes else source_size",
+                        script,
+                    )
+                    self.assertNotIn("raw_bytes.splitlines(keepends=True)", script)
+                    self.assertNotIn('part.endswith(b"\\r")', script)
+                else:
+                    self.assertIn("raw_bytes.splitlines(keepends=True)", script)
+                    self.assertIn(
+                        "if max_scan_bytes and scanned >= max_scan_bytes:\n"
+                        "            if dropping_oversized_line:",
+                        script,
+                    )
                 self.assertIn("SUMMARY_LINE_BYTES", script)
                 self.assertNotIn("(2,)", script)
                 self.assertNotIn("(16,)", script)
