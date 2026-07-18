@@ -4233,6 +4233,108 @@ class RemoteCodexProbeChunkTests(unittest.TestCase):
                 ):
                     list(reader(handle, len(record)))
 
+    def test_rollout_summary_nonzero_cursor_uses_fixed_source_range_locally_and_embedded(
+        self,
+    ) -> None:
+        prefix = b'{"ignored":true}\n'
+        record = json.dumps(
+            {
+                "type": "session_meta",
+                "payload": {"id": "nonzero-session", "cwd": "/repo"},
+            },
+            separators=(",", ":"),
+        ).encode("utf-8")
+        eof_payload = prefix + record
+        capped_payload = prefix + record + b"unread-suffix\n"
+        embedded = embedded_probe_namespace(
+            {
+                "mode": "rollout-summary",
+                "rollout": "sessions/2026/05/26/rollout-nonzero.jsonl",
+                "codex_root": "/tmp/.codex",
+                "summary_keywords": [],
+                "summary_limit": 10,
+                "summary_scan_bytes": len(capped_payload),
+                "summary_line_bytes": 4096,
+                "summary_tail_records": 0,
+                "summary_max_text_chars": 200,
+            }
+        )
+        readers = (
+            ("local", MODULE._bounded_text_lines),
+            ("embedded", embedded["bounded_text_lines"]),
+        )
+
+        for implementation, reader in readers:
+            for source_mode in ("explicit", "inferred"):
+                with self.subTest(
+                    implementation=implementation,
+                    source_mode=source_mode,
+                    boundary="eof",
+                ):
+                    handle = io.BytesIO(eof_payload)
+                    handle.seek(len(prefix))
+                    args = [handle, len(record) + 64]
+                    if source_mode == "explicit":
+                        args.append(len(eof_payload))
+                    self.assertEqual(
+                        list(reader(*args)),
+                        [record.decode("utf-8")],
+                    )
+                with self.subTest(
+                    implementation=implementation,
+                    source_mode=source_mode,
+                    boundary="cap",
+                ):
+                    handle = io.BytesIO(capped_payload)
+                    handle.seek(len(prefix))
+                    args = [handle, len(record)]
+                    if source_mode == "explicit":
+                        args.append(len(capped_payload))
+                    self.assertEqual(list(reader(*args)), [])
+
+    def test_rollout_summary_rejects_unavailable_or_invalid_start_offset_locally_and_embedded(
+        self,
+    ) -> None:
+        class OffsetlessReader:
+            def read(self, _size: int) -> bytes:
+                return b""
+
+        class InvalidOffsetReader(OffsetlessReader):
+            def tell(self) -> int:
+                return 2
+
+        embedded = embedded_probe_namespace(
+            {
+                "mode": "rollout-summary",
+                "rollout": "sessions/2026/05/26/rollout-offset.jsonl",
+                "codex_root": "/tmp/.codex",
+                "summary_keywords": [],
+                "summary_limit": 10,
+                "summary_scan_bytes": 1,
+                "summary_line_bytes": 4096,
+                "summary_tail_records": 0,
+                "summary_max_text_chars": 200,
+            }
+        )
+        readers = (
+            ("local", MODULE._bounded_text_lines),
+            ("embedded", embedded["bounded_text_lines"]),
+        )
+
+        for implementation, reader in readers:
+            with self.subTest(implementation=implementation, offset="unavailable"):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "rollout summary start offset is unavailable",
+                ):
+                    list(reader(OffsetlessReader(), 1, 1))
+            with self.subTest(implementation=implementation, offset="invalid"):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "rollout summary start offset is invalid",
+                ):
+                    list(reader(InvalidOffsetReader(), 1, 1))
+
     def test_private_output_rejects_parent_symlink_swap_after_resolution(self) -> None:
         with tempfile.TemporaryDirectory(dir="/tmp") as temp_dir:
             root = Path(temp_dir).resolve()

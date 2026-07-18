@@ -10604,8 +10604,15 @@ class SessionRetrospectiveTests(unittest.TestCase):
                 ).parameters:
                     self.assertIn('raw_bytes.find(b"\\n", offset)', script)
                     self.assertIn(
-                        "scan_limit = min(max_scan_bytes, source_size) "
-                        "if max_scan_bytes else source_size",
+                        "remaining_source_bytes = source_size - start_offset",
+                        script,
+                    )
+                    self.assertIn(
+                        "min(max_scan_bytes, remaining_source_bytes)",
+                        script,
+                    )
+                    self.assertIn(
+                        "if start_offset + scanned == source_size:",
                         script,
                     )
                     self.assertNotIn("raw_bytes.splitlines(keepends=True)", script)
