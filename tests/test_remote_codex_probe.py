@@ -79,8 +79,13 @@ def identity_kwargs(identity: MODULE.RolloutIdentity) -> dict[str, object]:
     }
 
 
+def configured_int_max_str_digits() -> int:
+    getter = getattr(sys, "get_int_max_str_digits", None)
+    return int(getter()) if callable(getter) else 0
+
+
 def pathological_json_lines() -> list[str]:
-    integer_digit_limit = sys.get_int_max_str_digits()
+    integer_digit_limit = configured_int_max_str_digits()
     oversized_integer_digits = max(5000, integer_digit_limit + 1)
     nesting_depth = 10_000
     return [
@@ -4080,12 +4085,15 @@ class RemoteCodexProbeChunkTests(unittest.TestCase):
     ) -> None:
         embedded = embedded_probe_namespace({"codex_root": "/unused"})
         pathological_lines = pathological_json_lines()
-        with self.assertRaises(ValueError) as oversized_integer_error:
-            json.loads(pathological_lines[0])
-        self.assertNotIsInstance(
-            oversized_integer_error.exception,
-            json.JSONDecodeError,
-        )
+        if configured_int_max_str_digits() > 0:
+            with self.assertRaises(ValueError) as oversized_integer_error:
+                json.loads(pathological_lines[0])
+            self.assertNotIsInstance(
+                oversized_integer_error.exception,
+                json.JSONDecodeError,
+            )
+        else:
+            self.assertIsInstance(json.loads(pathological_lines[0]), int)
         with self.assertRaises(RecursionError):
             json.loads(pathological_lines[1])
         timestamp_cases = (
@@ -4133,6 +4141,19 @@ class RemoteCodexProbeChunkTests(unittest.TestCase):
             ),
             expected,
         )
+
+    def test_pathological_json_fixture_supports_missing_int_digit_api(self) -> None:
+        with mock.patch.object(
+            sys,
+            "get_int_max_str_digits",
+            None,
+            create=True,
+        ):
+            self.assertEqual(configured_int_max_str_digits(), 0)
+            pathological_lines = pathological_json_lines()
+
+        self.assertEqual(len(pathological_lines[0]), 5000)
+        self.assertEqual(len(pathological_lines[1]), 20_001)
 
     def test_session_meta_rejects_current_entry_replacement_after_read(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
