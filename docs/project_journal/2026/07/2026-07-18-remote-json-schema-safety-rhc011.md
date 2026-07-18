@@ -30,5 +30,5 @@ superseded_by:
 
 - Base: `master` at `5de92d062dbeaed436a741d464bdbe3ed7aecd5c`.
 - Branch: `codex/daily-skill-friction-20260718-codex-private-workflows-remote-json-schema-safety`.
-- Five focused local and embedded regressions passed for Python 3.10 integer-limit API compatibility, invalid bytes in session id and cwd fields, top-level scalar/array/null JSON, non-object payloads, oversized integer literals, excessive nesting, later valid evidence, timestamps, and chunk metadata.
-- The complete remote probe module passed 111/111 tests after the Python 3.10 compatibility follow-up, and the final full repository suite passed 1,258/1,258. Targeted Ruff, task-scoped `py_compile`, skill quick validation, journal validation, and `git diff --check` passed against the current worktree.
+- Six focused local and embedded regressions passed for Python 3.10 integer-limit API compatibility, runtime-portable deep-nesting classification, deterministic `RecursionError` handling, invalid UTF-8, non-object JSON and payloads, later valid evidence, timestamps, and chunk metadata.
+- The complete remote probe module passed 112/112 tests after the cross-runtime follow-up for hosted run `29647630773`, and the final full repository suite passed 1,259/1,259. Targeted Ruff, task-scoped `py_compile`, skill quick validation, journal validation, and `git diff --check` passed against the current worktree.

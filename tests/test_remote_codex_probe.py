@@ -4094,8 +4094,6 @@ class RemoteCodexProbeChunkTests(unittest.TestCase):
             )
         else:
             self.assertIsInstance(json.loads(pathological_lines[0]), int)
-        with self.assertRaises(RecursionError):
-            json.loads(pathological_lines[1])
         timestamp_cases = (
             ("scalar", "0"),
             ("array", "[]"),
@@ -4154,6 +4152,86 @@ class RemoteCodexProbeChunkTests(unittest.TestCase):
 
         self.assertEqual(len(pathological_lines[0]), 5000)
         self.assertEqual(len(pathological_lines[1]), 20_001)
+
+    def test_rollout_json_entrypoints_classify_mocked_recursion_errors(
+        self,
+    ) -> None:
+        recursing_json = mock.Mock()
+        recursing_json.loads.side_effect = RecursionError("mocked JSON recursion")
+        recursing_json.dumps.side_effect = json.dumps
+
+        local_scan_metadata: dict[str, int] = {}
+        with mock.patch.object(MODULE, "json", recursing_json):
+            self.assertEqual(MODULE._timestamp_from_jsonl_line("{}"), "")
+            self.assertEqual(
+                MODULE._parse_bounded_session_meta_prefix(
+                    b"{}\n",
+                    source_size=3,
+                ),
+                ("", "", False),
+            )
+            self.assertEqual(
+                MODULE._summarize_rollout_records(
+                    lines=["{}"],
+                    keywords=[],
+                    limit=20,
+                    tail_records=0,
+                    max_text_chars=80,
+                    scan_metadata=local_scan_metadata,
+                ),
+                [],
+            )
+        self.assertEqual(local_scan_metadata["json_error_count"], 1)
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            codex_root = Path(temp_dir) / ".codex"
+            rollout = write_rollout(codex_root, ["{}"])
+            embedded = embedded_probe_namespace(
+                {
+                    "mode": "rollout-summary",
+                    "rollout": rollout,
+                    "codex_root": str(codex_root),
+                    "summary_keywords": [],
+                    "summary_limit": 20,
+                    "summary_scan_bytes": MODULE.MAX_ROLLOUT_SUMMARY_SCAN_BYTES,
+                    "summary_line_bytes": MODULE.MAX_ROLLOUT_SUMMARY_LINE_BYTES,
+                    "summary_tail_records": 0,
+                    "summary_max_text_chars": 80,
+                }
+            )
+            embedded["json"] = recursing_json
+            self.assertEqual(embedded["timestamp_from_jsonl_line"]("{}"), "")
+            self.assertEqual(
+                embedded["parse_bounded_session_meta_prefix"](
+                    b"{}\n",
+                    source_size=3,
+                ),
+                ("", "", False),
+            )
+            embedded_scan_metadata: dict[str, int] = {}
+            self.assertEqual(
+                embedded["summarize_records"](
+                    ["{}"],
+                    scan_metadata=embedded_scan_metadata,
+                ),
+                [],
+            )
+            embedded_stdout = io.StringIO()
+            with redirect_stdout(embedded_stdout):
+                embedded["summarize_rollout"]()
+
+        self.assertEqual(embedded_scan_metadata["json_error_count"], 1)
+        embedded_records = MODULE._extract_framed_rollout_summary_records(
+            embedded_stdout.getvalue(),
+            begin_marker=MODULE.REMOTE_ROLLOUT_SUMMARY_BEGIN,
+            end_marker=MODULE.REMOTE_ROLLOUT_SUMMARY_END,
+            host="embedded",
+            command="rollout-summary",
+        )
+        embedded_scan_meta = next(
+            record for record in embedded_records if record["kind"] == "scan_meta"
+        )
+        self.assertEqual(embedded_scan_meta["json_error_count"], 1)
 
     def test_session_meta_rejects_current_entry_replacement_after_read(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
