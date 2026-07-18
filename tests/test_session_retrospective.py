@@ -254,6 +254,54 @@ def message(role: str, text: str, timestamp: str) -> dict:
     }
 
 
+def source_size_reader_cases() -> list[tuple[str, bytes, int, list[str], list[str]]]:
+    bare_cr_prefix = json.dumps(
+        message("assistant", "Bare CR prefix.", "2026-05-01T10:00:00Z")
+    ).encode("utf-8")
+    bare_cr_suffix = json.dumps(
+        message(
+            "user",
+            "You missed the bare-CR suffix.",
+            "2026-05-01T10:01:00Z",
+        )
+    ).encode("utf-8")
+    bare_cr_payload = bare_cr_prefix + b"\r" + bare_cr_suffix + b"\n"
+    unterminated_record = json.dumps(
+        message("user", "Review the reader boundary.", "2026-05-01T10:02:00Z")
+    ).encode("utf-8")
+    truncated_payload = (
+        unterminated_record
+        + b"\n"
+        + json.dumps(
+            message("assistant", "Unread suffix.", "2026-05-01T10:03:00Z")
+        ).encode("utf-8")
+        + b"\n"
+    )
+    return [
+        (
+            "bare-cr-is-data",
+            bare_cr_payload,
+            len(bare_cr_payload),
+            [bare_cr_payload.decode("utf-8")],
+            [],
+        ),
+        (
+            "scan-cap-before-lf",
+            truncated_payload,
+            len(unterminated_record),
+            [],
+            [],
+        ),
+        (
+            "true-eof-without-lf",
+            unterminated_record,
+            len(unterminated_record),
+            [unterminated_record.decode("utf-8")],
+            ["user_message"],
+        ),
+    ]
+
+
 def untimestamped_message(role: str, text: str) -> dict:
     return {
         "type": "response_item",
@@ -1575,6 +1623,107 @@ class SessionRetrospectiveTests(unittest.TestCase):
                     list(probe._bounded_text_lines(*byte_cap_args)),
                     [first],
                 )
+
+    def test_remote_probe_source_size_reader_enforces_lf_boundaries(self) -> None:
+        for probe in (REMOTE_PROBE, REMOTE_HOST_CONTEXT_PROBE):
+            if (
+                "source_size"
+                not in inspect.signature(probe._bounded_text_lines).parameters
+            ):
+                continue
+            for (
+                case,
+                payload,
+                scan_cap,
+                expected_lines,
+                _expected_kinds,
+            ) in source_size_reader_cases():
+                with self.subTest(probe=probe.__name__, case=case):
+                    if case == "scan-cap-before-lf":
+                        self.assertGreater(len(payload), scan_cap)
+                    self.assertEqual(
+                        list(
+                            probe._bounded_text_lines(
+                                io.BytesIO(payload),
+                                scan_cap,
+                                source_size=len(payload),
+                            )
+                        ),
+                        expected_lines,
+                    )
+
+    def test_remote_probe_generated_source_size_reader_enforces_lf_boundaries(
+        self,
+    ) -> None:
+        for probe in (REMOTE_PROBE, REMOTE_HOST_CONTEXT_PROBE):
+            if (
+                "source_size"
+                not in inspect.signature(probe._bounded_text_lines).parameters
+            ):
+                continue
+            for (
+                case,
+                payload,
+                scan_cap,
+                _expected_lines,
+                expected_kinds,
+            ) in source_size_reader_cases():
+                with self.subTest(probe=probe.__name__, case=case):
+                    if case == "scan-cap-before-lf":
+                        self.assertGreater(len(payload), scan_cap)
+                    with tempfile.TemporaryDirectory() as raw:
+                        root = Path(raw) / ".codex"
+                        rollout_ref = (
+                            "sessions/2026/05/01/"
+                            f"rollout-2026-05-01T10-00-00-{case}.jsonl"
+                        )
+                        rollout = root / rollout_ref
+                        rollout.parent.mkdir(parents=True, exist_ok=True)
+                        rollout.write_bytes(payload)
+                        script = probe._remote_python_script(
+                            {
+                                "mode": "rollout-summary",
+                                "codex_root": str(root),
+                                "rollout": rollout_ref,
+                                "summary_limit": 10,
+                                "summary_scan_bytes": scan_cap,
+                                "summary_tail_records": 0,
+                                "summary_max_text_chars": 80,
+                                "summary_keywords": [],
+                            }
+                        )
+
+                        result = subprocess.run(
+                            [sys.executable, "-"],
+                            input=script,
+                            text=True,
+                            capture_output=True,
+                            check=False,
+                        )
+
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    rows = [
+                        json.loads(line)
+                        for line in result.stdout.splitlines()
+                        if line.startswith("{")
+                    ]
+                    scan_meta = next(
+                        row for row in rows if row.get("kind") == "scan_meta"
+                    )
+                    self.assertEqual(scan_meta["source_bytes"], len(payload))
+                    self.assertEqual(scan_meta["scan_bytes"], scan_cap)
+                    self.assertEqual(
+                        scan_meta["scan_truncated"],
+                        case == "scan-cap-before-lf",
+                    )
+                    self.assertEqual(
+                        [
+                            row["kind"]
+                            for row in rows
+                            if "kind" in row and row["kind"] != "scan_meta"
+                        ],
+                        expected_kinds,
+                    )
 
     def test_remote_probe_rollout_summary_redacts_non_user_text(self) -> None:
         records = REMOTE_PROBE._summarize_rollout_records(
@@ -10599,18 +10748,9 @@ class SessionRetrospectiveTests(unittest.TestCase):
                 else:
                     self.assertIn("return ROOT.resolve(strict=True)", script)
                 self.assertIn('os.fdopen(fd, "rb")', script)
-                if "source_size" in inspect.signature(
+                if "source_size" not in inspect.signature(
                     probe._bounded_text_lines
                 ).parameters:
-                    self.assertIn('raw_bytes.find(b"\\n", offset)', script)
-                    self.assertIn(
-                        "scan_limit = min(max_scan_bytes, source_size) "
-                        "if max_scan_bytes else source_size",
-                        script,
-                    )
-                    self.assertNotIn("raw_bytes.splitlines(keepends=True)", script)
-                    self.assertNotIn('part.endswith(b"\\r")', script)
-                else:
                     self.assertIn("raw_bytes.splitlines(keepends=True)", script)
                     self.assertIn(
                         "if max_scan_bytes and scanned >= max_scan_bytes:\n"
