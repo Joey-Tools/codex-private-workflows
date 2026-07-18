@@ -5637,6 +5637,7 @@ def _summarize_rollout_records(
     tail_records: int,
     max_text_chars: int,
     line_offset: int = 0,
+    scan_metadata: dict[str, int] | None = None,
 ) -> list[dict[str, Any]]:
     search_keywords = [value.casefold() for value in keywords if value]
     matched: list[dict[str, Any]] = []
@@ -5648,11 +5649,13 @@ def _summarize_rollout_records(
     last_assistant_record: dict[str, Any] | None = None
     last_user_record: dict[str, Any] | None = None
     last_task_complete_record: dict[str, Any] | None = None
+    json_error_count = 0
 
     for line_no, line in enumerate(lines, line_offset + 1):
         try:
             obj = json.loads(line)
         except json.JSONDecodeError:
+            json_error_count += 1
             continue
         timestamp = str(obj.get("timestamp", ""))
         record: dict[str, Any] | None = None
@@ -5774,18 +5777,26 @@ def _summarize_rollout_records(
     append(last_assistant_record)
     if last_assistant_record is None:
         append(last_task_complete_record)
+    if scan_metadata is not None:
+        scan_metadata["json_error_count"] = json_error_count
     return result
 
 
-def _rollout_summary_scan_meta(*, source_bytes: int, scan_bytes: int) -> dict[str, Any]:
+def _rollout_summary_scan_meta(
+    *,
+    source_bytes: int,
+    scan_bytes: int,
+    json_error_count: int = 0,
+) -> dict[str, Any]:
     scan_truncated = bool(scan_bytes and source_bytes > scan_bytes)
     return {
         "kind": "scan_meta",
+        "json_error_count": json_error_count,
         "line": 0,
         "scan_bytes": scan_bytes,
         "scan_truncated": scan_truncated,
         "source_bytes": source_bytes,
-        "text": f"scan_truncated={str(scan_truncated).lower()} scan_bytes={scan_bytes} source_bytes={source_bytes}",
+        "text": f"scan_truncated={str(scan_truncated).lower()} scan_bytes={scan_bytes} json_error_count={json_error_count} source_bytes={source_bytes}",
         "timestamp": "",
     }
 
@@ -6043,6 +6054,7 @@ def cmd_rollout_summary(args: argparse.Namespace) -> int:
     try:
         if HOSTS[alias]["kind"] == "local":
             codex_root = _local_codex_root()
+            scan_metadata: dict[str, int] = {}
             with _open_local_rollout_text(codex_root, rollout_relative_path) as handle:
                 source_identity = _rollout_identity_from_stat(os.fstat(handle.fileno()))
                 records = _summarize_rollout_records(
@@ -6055,6 +6067,7 @@ def cmd_rollout_summary(args: argparse.Namespace) -> int:
                     limit=args.limit,
                     tail_records=args.tail_records,
                     max_text_chars=args.max_text_chars,
+                    scan_metadata=scan_metadata,
                 )
                 handle.assert_identity(source_identity, phase="after summary scan")
             records.insert(
@@ -6062,6 +6075,7 @@ def cmd_rollout_summary(args: argparse.Namespace) -> int:
                 _rollout_summary_scan_meta(
                     source_bytes=source_identity.size,
                     scan_bytes=MAX_ROLLOUT_SUMMARY_SCAN_BYTES,
+                    json_error_count=scan_metadata["json_error_count"],
                 ),
             )
         else:

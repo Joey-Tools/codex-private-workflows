@@ -6998,6 +6998,99 @@ class RemoteCodexProbeChunkTests(unittest.TestCase):
                     "identity changed after summary scan", error_output.getvalue()
                 )
 
+    def test_local_and_embedded_rollout_summary_match_json_error_count(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            codex_root = Path(temp_dir) / ".codex"
+            rollout_ref = (
+                "sessions/2026/05/26/"
+                "rollout-2026-05-26T10-00-00-malformed.jsonl"
+            )
+            rollout = codex_root / rollout_ref
+            rollout.parent.mkdir(parents=True, exist_ok=True)
+            prefix = json.dumps(
+                {
+                    "type": "response_item",
+                    "payload": {"type": "message", "role": "assistant"},
+                }
+            ).encode("utf-8")
+            suffix = json.dumps(
+                {
+                    "type": "response_item",
+                    "payload": {"type": "message", "role": "user"},
+                }
+            ).encode("utf-8")
+            rollout.write_bytes(prefix + b"\r" + suffix + b"\n")
+
+            local_stdout = io.StringIO()
+            with mock.patch.object(
+                MODULE,
+                "_local_codex_root",
+                return_value=codex_root,
+            ), redirect_stdout(local_stdout):
+                local_rc = MODULE.cmd_rollout_summary(
+                    argparse.Namespace(
+                        host="local",
+                        rollout=rollout_ref,
+                        keyword=[],
+                        limit=20,
+                        tail_records=0,
+                        max_text_chars=80,
+                    )
+                )
+
+            script = MODULE._remote_python_script(
+                {
+                    "mode": "rollout-summary",
+                    "rollout": rollout_ref,
+                    "codex_root": str(codex_root),
+                    "summary_keywords": [],
+                    "summary_limit": 20,
+                    "summary_scan_bytes": MODULE.MAX_ROLLOUT_SUMMARY_SCAN_BYTES,
+                    "summary_line_bytes": MODULE.MAX_ROLLOUT_SUMMARY_LINE_BYTES,
+                    "summary_tail_records": 0,
+                    "summary_max_text_chars": 80,
+                }
+            )
+            embedded = subprocess.run(
+                [sys.executable, "-"],
+                input=script,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+        self.assertEqual(local_rc, 0)
+        self.assertEqual(embedded.returncode, 0, embedded.stderr)
+        local_records = [
+            json.loads(line) for line in local_stdout.getvalue().splitlines()
+        ]
+        embedded_records = MODULE._extract_framed_rollout_summary_records(
+            embedded.stdout,
+            begin_marker=MODULE.REMOTE_ROLLOUT_SUMMARY_BEGIN,
+            end_marker=MODULE.REMOTE_ROLLOUT_SUMMARY_END,
+            host="embedded",
+            command="rollout-summary",
+        )
+        local_meta = next(
+            record for record in local_records if record.get("kind") == "scan_meta"
+        )
+        embedded_meta = next(
+            record
+            for record in embedded_records
+            if record.get("kind") == "scan_meta"
+        )
+        fields = (
+            "json_error_count",
+            "scan_bytes",
+            "scan_truncated",
+            "source_bytes",
+        )
+        self.assertEqual(
+            {field: local_meta[field] for field in fields},
+            {field: embedded_meta[field] for field in fields},
+        )
+        self.assertEqual(local_meta["json_error_count"], 1)
+
     def test_keyword_match_uses_full_signal_without_retaining_raw_text(self) -> None:
         distant_keyword = "distant needle"
         long_text = "prefix " + ("x" * 256) + "   distant\nneedle"

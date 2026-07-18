@@ -33,7 +33,7 @@ superseded_by:
 
 - `python3 -m py_compile` passed for the helper and shared retrospective tests.
 - Ten focused public/private, local/embedded, compatibility, marker-classification, and row-overflow tests passed.
-- The remote-host module passed 100/100 tests in 3.704s.
-- The retrospective integration module passed 409/409 tests in 50.189s.
-- The private repository root suite passed 1247/1247 tests in 182.793s.
+- The remote-host module passed 101/101 tests in 3.679s.
+- The retrospective integration module passed 409/409 tests in 46.617s.
+- The private repository root suite passed 1248/1248 tests in 164.733s.
 - Isolated skill validation, journal validation, `py_compile`, and `git diff --check` passed; Ruff introduced no findings over the unchanged baseline `F541`.

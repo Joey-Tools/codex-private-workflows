@@ -34,10 +34,10 @@ superseded_by:
 
 ## Evidence
 
-- `tests.test_remote_codex_probe`: 100/100 tests passed in 3.704 seconds.
+- `tests.test_remote_codex_probe`: 101/101 tests passed in 3.679 seconds.
 - The local/embedded regressions cover oversized 64 KiB cross-chunk bare-CR drain, LF/CRLF/cap/EOF boundary behavior, safe byte-zero `BytesIO` snapshot-size inference, explicit and inferred rejection at a valid nonzero LF boundary and mid-record suffix, and unavailable or invalid offset rejection.
-- The retrospective integration module passed 409/409 tests in 50.189 seconds, including generated LF-only/source-size and `json_error_count` coverage across both synchronized probes.
-- Full private suite with process-local Git signing disabled: 1247/1247 tests passed in 182.793 seconds under a 600-second hard timeout and externally bounded log sink.
+- The retrospective integration module passed 409/409 tests in 46.617 seconds, including generated LF-only/source-size and `json_error_count` coverage across both synchronized probes.
+- Full private suite with process-local Git signing disabled: 1248/1248 tests passed in 164.733 seconds under a 600-second hard timeout and externally bounded log sink.
 - `ruff check --no-cache personal_codex/skills/remote-host-context/scripts/remote_codex_probe.py tests/test_remote_codex_probe.py` passed with Ruff 0.13.2.
 - `tests/test_session_retrospective.py` passed Ruff with its pre-existing `F541` baseline ignored; `HEAD` already contains that unrelated finding.
 - `python3 -m py_compile personal_codex/skills/remote-host-context/scripts/remote_codex_probe.py tests/test_remote_codex_probe.py tests/test_session_retrospective.py` passed with bytecode redirected to a task-scoped `/tmp` cache because the canonical worktree is outside the sandbox write root.
