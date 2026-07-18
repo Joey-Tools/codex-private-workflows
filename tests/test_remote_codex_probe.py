@@ -477,6 +477,202 @@ class RemoteCodexProbeChunkTests(unittest.TestCase):
                     ["trusted-session"],
                 )
 
+    def test_active_replacement_between_inventory_and_consumption_is_rejected(
+        self,
+    ) -> None:
+        rollout_ref = (
+            "sessions/2026/05/26/"
+            "rollout-2026-05-26T10-00-00-inventory-replacement.jsonl"
+        )
+        for scope in ("local", "embedded"):
+            with self.subTest(scope=scope), tempfile.TemporaryDirectory() as temp_dir:
+                codex_root = Path(temp_dir) / ".codex"
+                rollout = codex_root / rollout_ref
+                write_session_meta_rollout(
+                    rollout,
+                    "trusted-session",
+                    "/trusted",
+                    "trusted follow-up",
+                )
+                replacement = rollout.with_suffix(".replacement")
+                write_session_meta_rollout(
+                    replacement,
+                    "replacement-session",
+                    "/replacement",
+                    "replacement follow-up",
+                )
+                replaced = False
+
+                def replace_before_consumption() -> None:
+                    nonlocal replaced
+                    if replaced:
+                        return
+                    replaced = True
+                    os.replace(replacement, rollout)
+
+                if scope == "local":
+                    real_open = MODULE._open_pinned_rollout_text_from_parent_fd
+
+                    def open_after_inventory(*args, **kwargs):
+                        replace_before_consumption()
+                        return real_open(*args, **kwargs)
+
+                    patcher = mock.patch.object(
+                        MODULE,
+                        "_open_pinned_rollout_text_from_parent_fd",
+                        side_effect=open_after_inventory,
+                    )
+
+                    def run_scan():
+                        return MODULE._scan_session_meta_records(
+                            codex_root=codex_root,
+                            dates=[MODULE.dt.date(2026, 5, 26)],
+                            limit=10,
+                            host="local",
+                        ).rows
+
+                else:
+                    namespace = embedded_probe_namespace(
+                        {
+                            "mode": "session-meta",
+                            "dates": ["2026/05/26"],
+                            "limit": 10,
+                            "codex_root": str(codex_root),
+                            "session_meta_scan_bytes": (
+                                MODULE.MAX_SESSION_META_SCAN_BYTES
+                            ),
+                        }
+                    )
+                    real_open = namespace["open_rollout_text"]
+
+                    def open_after_inventory(*args, **kwargs):
+                        replace_before_consumption()
+                        return real_open(*args, **kwargs)
+
+                    patcher = mock.patch.dict(
+                        namespace,
+                        {"open_rollout_text": open_after_inventory},
+                    )
+
+                    def run_scan():
+                        return embedded_session_meta_records(namespace)
+
+                with patcher:
+                    if scope == "local":
+                        with self.assertRaises(
+                            MODULE.SessionMetaRolloutError
+                        ) as raised:
+                            run_scan()
+                        error = raised.exception.error
+                        error_rollout = raised.exception.rollout
+                    else:
+                        rows = run_scan()
+                        self.assertEqual(len(rows), 1)
+                        error = str(rows[0]["error"])
+                        error_rollout = rows[0].get("rollout")
+
+                self.assertTrue(replaced)
+                self.assertEqual(error, "rollout identity changed after enumeration")
+                self.assertEqual(error_rollout, rollout_ref)
+
+    def test_archive_replacement_between_inventory_and_consumption_is_rejected(
+        self,
+    ) -> None:
+        rollout_ref = (
+            "archived_sessions/2026/05/26/"
+            "rollout-2026-05-26T10-00-00-inventory-replacement.jsonl"
+        )
+        for scope in ("local", "embedded"):
+            with self.subTest(scope=scope), tempfile.TemporaryDirectory() as temp_dir:
+                codex_root = Path(temp_dir) / ".codex"
+                rollout = codex_root / rollout_ref
+                write_session_meta_rollout(
+                    rollout,
+                    "trusted-session",
+                    "/trusted",
+                    "trusted follow-up",
+                )
+                replacement = rollout.with_suffix(".replacement")
+                write_session_meta_rollout(
+                    replacement,
+                    "replacement-session",
+                    "/replacement",
+                    "replacement follow-up",
+                )
+                replaced = False
+
+                def replace_before_consumption() -> None:
+                    nonlocal replaced
+                    if replaced:
+                        return
+                    replaced = True
+                    os.replace(replacement, rollout)
+
+                if scope == "local":
+                    real_open = MODULE._open_pinned_rollout_text_from_parent_fd
+
+                    def open_after_inventory(*args, **kwargs):
+                        replace_before_consumption()
+                        return real_open(*args, **kwargs)
+
+                    patcher = mock.patch.object(
+                        MODULE,
+                        "_open_pinned_rollout_text_from_parent_fd",
+                        side_effect=open_after_inventory,
+                    )
+
+                    def run_scan():
+                        return MODULE._scan_session_meta_records(
+                            codex_root=codex_root,
+                            dates=[MODULE.dt.date(2026, 5, 26)],
+                            limit=10,
+                            host="local",
+                        ).rows
+
+                else:
+                    namespace = embedded_probe_namespace(
+                        {
+                            "mode": "session-meta",
+                            "dates": ["2026/05/26"],
+                            "limit": 10,
+                            "codex_root": str(codex_root),
+                            "session_meta_scan_bytes": (
+                                MODULE.MAX_SESSION_META_SCAN_BYTES
+                            ),
+                        }
+                    )
+                    real_open = namespace["open_rollout_text"]
+
+                    def open_after_inventory(*args, **kwargs):
+                        replace_before_consumption()
+                        return real_open(*args, **kwargs)
+
+                    patcher = mock.patch.dict(
+                        namespace,
+                        {"open_rollout_text": open_after_inventory},
+                    )
+
+                    def run_scan():
+                        return embedded_session_meta_records(namespace)
+
+                with patcher:
+                    if scope == "local":
+                        with self.assertRaises(
+                            MODULE.SessionMetaRolloutError
+                        ) as raised:
+                            run_scan()
+                        error = raised.exception.error
+                        error_rollout = raised.exception.rollout
+                    else:
+                        rows = run_scan()
+                        self.assertEqual(len(rows), 1)
+                        error = str(rows[0]["error"])
+                        error_rollout = rows[0].get("rollout")
+
+                self.assertTrue(replaced)
+                self.assertEqual(error, "rollout identity changed after enumeration")
+                self.assertEqual(error_rollout, rollout_ref)
+
     def test_active_refresh_finds_first_session_meta_appended_after_parse(
         self,
     ) -> None:
@@ -1304,6 +1500,130 @@ class RemoteCodexProbeChunkTests(unittest.TestCase):
                     "rollout identity changed after session-meta scan",
                     error,
                 )
+
+    def test_active_initial_checkpoint_rejects_preproof_mutation(self) -> None:
+        for scope in ("local", "embedded"):
+            for mutation in ("truncate", "same_size_rewrite"):
+                with self.subTest(
+                    scope=scope,
+                    mutation=mutation,
+                ), tempfile.TemporaryDirectory() as temp_dir:
+                    codex_root = Path(temp_dir) / ".codex"
+                    rollout_ref = (
+                        "sessions/2026/05/26/"
+                        "rollout-2026-05-26T10-00-00-preproof-mutation.jsonl"
+                    )
+                    rollout = codex_root / rollout_ref
+                    write_session_meta_rollout(
+                        rollout,
+                        "trusted-session",
+                        "/trusted",
+                        "trusted follow-up",
+                    )
+                    original = rollout.read_bytes()
+                    original_stat = rollout.stat()
+                    mutated = False
+
+                    def mutate_before_initial_checkpoint() -> None:
+                        nonlocal mutated
+                        if mutated:
+                            return
+                        mutated = True
+                        if mutation == "truncate":
+                            with rollout.open("r+b") as handle:
+                                handle.truncate(max(1, len(original) // 2))
+                        else:
+                            with rollout.open("r+b") as handle:
+                                handle.write(b" " + original[1:])
+                            os.utime(
+                                rollout,
+                                ns=(
+                                    original_stat.st_atime_ns,
+                                    original_stat.st_mtime_ns + 1_000_000_000,
+                                ),
+                            )
+
+                    if scope == "local":
+                        real_capture = (
+                            MODULE._capture_initial_append_only_rollout_checkpoint
+                        )
+
+                        def capture_after_mutation(*args, **kwargs):
+                            mutate_before_initial_checkpoint()
+                            return real_capture(*args, **kwargs)
+
+                        patcher = mock.patch.object(
+                            MODULE,
+                            "_capture_initial_append_only_rollout_checkpoint",
+                            side_effect=capture_after_mutation,
+                        )
+
+                        def run_scan():
+                            return MODULE._scan_session_meta_records(
+                                codex_root=codex_root,
+                                dates=[MODULE.dt.date(2026, 5, 26)],
+                                limit=10,
+                                host="local",
+                            )
+
+                    else:
+                        namespace = embedded_probe_namespace(
+                            {
+                                "mode": "session-meta",
+                                "dates": ["2026/05/26"],
+                                "limit": 10,
+                                "codex_root": str(codex_root),
+                                "session_meta_scan_bytes": (
+                                    MODULE.MAX_SESSION_META_SCAN_BYTES
+                                ),
+                            }
+                        )
+                        real_capture = namespace[
+                            "capture_initial_append_only_rollout_checkpoint"
+                        ]
+
+                        def capture_after_mutation(*args, **kwargs):
+                            mutate_before_initial_checkpoint()
+                            return real_capture(*args, **kwargs)
+
+                        patcher = mock.patch.dict(
+                            namespace,
+                            {
+                                "capture_initial_append_only_rollout_checkpoint": (
+                                    capture_after_mutation
+                                )
+                            },
+                        )
+
+                        def run_scan():
+                            return embedded_session_meta_records(namespace)
+
+                    with patcher:
+                        if scope == "local":
+                            with self.assertRaises(
+                                MODULE.SessionMetaRolloutError
+                            ) as raised:
+                                run_scan()
+                            error = raised.exception.error
+                            error_rollout = raised.exception.rollout
+                        else:
+                            records = run_scan()
+                            self.assertEqual(len(records), 1)
+                            error = str(records[0]["error"])
+                            error_rollout = records[0].get("rollout")
+
+                    final_stat = rollout.stat()
+                    self.assertTrue(mutated)
+                    self.assertEqual(
+                        (final_stat.st_dev, final_stat.st_ino),
+                        (original_stat.st_dev, original_stat.st_ino),
+                    )
+                    if mutation == "truncate":
+                        self.assertLess(final_stat.st_size, original_stat.st_size)
+                    else:
+                        self.assertEqual(final_stat.st_size, original_stat.st_size)
+                    self.assertEqual(error, "rollout identity changed during open")
+                    self.assertEqual(error_rollout, rollout_ref)
 
     def test_active_prefix_proof_capture_stabilizes_growth(self) -> None:
         for scope in ("local", "embedded"):
