@@ -4233,7 +4233,7 @@ class RemoteCodexProbeChunkTests(unittest.TestCase):
                 ):
                     list(reader(handle, len(record)))
 
-    def test_rollout_summary_nonzero_cursor_uses_fixed_source_range_locally_and_embedded(
+    def test_rollout_summary_rejects_nonzero_cursor_locally_and_embedded(
         self,
     ) -> None:
         prefix = b'{"ignored":true}\n'
@@ -4244,8 +4244,8 @@ class RemoteCodexProbeChunkTests(unittest.TestCase):
             },
             separators=(",", ":"),
         ).encode("utf-8")
-        eof_payload = prefix + record
-        capped_payload = prefix + record + b"unread-suffix\n"
+        boundary_payload = prefix + record
+        mid_record_offset = record.index(b'"payload"')
         embedded = embedded_probe_namespace(
             {
                 "mode": "rollout-summary",
@@ -4253,7 +4253,7 @@ class RemoteCodexProbeChunkTests(unittest.TestCase):
                 "codex_root": "/tmp/.codex",
                 "summary_keywords": [],
                 "summary_limit": 10,
-                "summary_scan_bytes": len(capped_payload),
+                "summary_scan_bytes": len(boundary_payload),
                 "summary_line_bytes": 4096,
                 "summary_tail_records": 0,
                 "summary_max_text_chars": 200,
@@ -4266,31 +4266,25 @@ class RemoteCodexProbeChunkTests(unittest.TestCase):
 
         for implementation, reader in readers:
             for source_mode in ("explicit", "inferred"):
-                with self.subTest(
-                    implementation=implementation,
-                    source_mode=source_mode,
-                    boundary="eof",
+                for offset_kind, payload, start_offset in (
+                    ("lf-boundary", boundary_payload, len(prefix)),
+                    ("mid-record", record, mid_record_offset),
                 ):
-                    handle = io.BytesIO(eof_payload)
-                    handle.seek(len(prefix))
-                    args = [handle, len(record) + 64]
-                    if source_mode == "explicit":
-                        args.append(len(eof_payload))
-                    self.assertEqual(
-                        list(reader(*args)),
-                        [record.decode("utf-8")],
-                    )
-                with self.subTest(
-                    implementation=implementation,
-                    source_mode=source_mode,
-                    boundary="cap",
-                ):
-                    handle = io.BytesIO(capped_payload)
-                    handle.seek(len(prefix))
-                    args = [handle, len(record)]
-                    if source_mode == "explicit":
-                        args.append(len(capped_payload))
-                    self.assertEqual(list(reader(*args)), [])
+                    with self.subTest(
+                        implementation=implementation,
+                        source_mode=source_mode,
+                        offset_kind=offset_kind,
+                    ):
+                        handle = io.BytesIO(payload)
+                        handle.seek(start_offset)
+                        args = [handle, len(payload)]
+                        if source_mode == "explicit":
+                            args.append(len(payload))
+                        with self.assertRaisesRegex(
+                            ValueError,
+                            "rollout summary reader must start at byte 0",
+                        ):
+                            list(reader(*args))
 
     def test_rollout_summary_rejects_unavailable_or_invalid_start_offset_locally_and_embedded(
         self,

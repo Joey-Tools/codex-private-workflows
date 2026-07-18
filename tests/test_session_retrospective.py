@@ -10604,15 +10604,16 @@ class SessionRetrospectiveTests(unittest.TestCase):
                 ).parameters:
                     self.assertIn('raw_bytes.find(b"\\n", offset)', script)
                     self.assertIn(
-                        "remaining_source_bytes = source_size - start_offset",
+                        "min(max_scan_bytes, source_size)",
                         script,
                     )
                     self.assertIn(
-                        "min(max_scan_bytes, remaining_source_bytes)",
+                        "if scanned == source_size:",
                         script,
                     )
+                    self.assertIn("if start_offset != 0:", script)
                     self.assertIn(
-                        "if start_offset + scanned == source_size:",
+                        'raise ValueError("rollout summary reader must start at byte 0")',
                         script,
                     )
                     self.assertNotIn("raw_bytes.splitlines(keepends=True)", script)
