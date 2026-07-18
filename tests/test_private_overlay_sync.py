@@ -5366,6 +5366,17 @@ class PrivateOverlaySyncTests(unittest.TestCase):
             for rule in SYNC_MODULE.SYNC_RULES
             if rule.target == SYNC_MODULE.CANONICAL_REVIEW_TARGET
         )
+        self.assertEqual(rule.replacements, SYNC_MODULE.COMMON_JOEY_TEXT_REPLACEMENTS)
+        obsolete_layout_replacements = {
+            "REPO_ROOT = SKILL_ROOT.parents[1]",
+            "(REPO_ROOT / relative).exists()",
+            'with (REPO_ROOT / "agents/reviewer.toml").open("rb") as handle:',
+        }
+        self.assertTrue(
+            obsolete_layout_replacements.isdisjoint(
+                replacement.old for replacement in rule.replacements
+            )
+        )
         self.assertEqual(
             rule.regular_file_overlays,
             (
