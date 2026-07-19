@@ -122,6 +122,7 @@ jobs:
       - name: Publish GitHub release
         env:
           GITHUB_TOKEN: ${{ github.token }}
+          IMMUTABLE_RELEASES_READ_TOKEN: ${{ secrets.IMMUTABLE_RELEASES_READ_TOKEN }}
         run: |
           python3 scripts/private_overlay_release.py publish \
             --repo "$GITHUB_REPOSITORY" \

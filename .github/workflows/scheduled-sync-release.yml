@@ -339,6 +339,7 @@ jobs:
         if: steps.current-release.outputs.complete == 'false' && steps.changes.outputs.changed != 'true'
         env:
           GITHUB_TOKEN: ${{ github.token }}
+          IMMUTABLE_RELEASES_READ_TOKEN: ${{ secrets.IMMUTABLE_RELEASES_READ_TOKEN }}
           RELEASE_SHA: ${{ github.sha }}
         run: |
           python3 scripts/private_overlay_release.py publish \
