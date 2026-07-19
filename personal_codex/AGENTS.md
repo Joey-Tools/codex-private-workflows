@@ -57,7 +57,7 @@
 - For multi-line commit messages, use `git commit -F` or multiple `-m` flags instead of embedding literal `\n`.
 - Do not suggest history-rewriting Git commands such as `git rebase`, `git reset --hard`, or `git push --force` unless explicitly requested.
 - For commits I create, use `-S`; include a `Co-authored-by: Codex ... <codex@openai.com>` footer when policy requires it.
-- When a signing operation fails with `No pinentry`, stop trying alternate shell, TTY, agent, or command shapes; ask Joey to unlock the signing key, then retry the original narrow command once.
+- When a signing operation fails with `No pinentry`, stop trying alternate shell, TTY, agent, or command shapes. Run one narrow pinentry/TTY/agent-access preflight; if it shows a locked key, ask Joey to unlock it, otherwise report the specific configuration or sandbox blocker, then retry the original Git command at most once after resolution.
 - For PRs I create, if every commit in the PR was authored by Codex, prepend the PR body with the note block below. Keep the model version current as the default Codex model changes; `high` and `xhigh` reasoning labels can be treated as interchangeable unless the actual run materially differs.
 
   > [!NOTE]
