@@ -42,6 +42,7 @@
 - In sandboxed or approval-gated sessions, if `git rev-parse --git-dir` and `--git-common-dir` differ or point outside the cwd repo, treat it as a linked-worktree/shared-gitdir write path. Not only `git switch`, `git worktree add`, and `git submodule update --init`, but also `merge`, `stash`, `restore`, `cherry-pick`, branch/ref updates, and similar writes can fail on `.git/worktrees/.../*.lock`, `.git/index.lock`, `.git/sequencer`, or `.git/config`; preflight that split first and move to a writable source-repo context or narrow approval instead of repeating the same doomed git write.
 - For cleanup inside a repo's `.codex-tmp`, prefer `~/.codex/bin/codex-clean-tmp <subpath...>` or `~/.codex/bin/codex-clean-tmp --all` instead of raw `rm -rf`; treat that helper as protected infrastructure and do not modify it unless Joey explicitly asks.
 - For recurring scheduled/background chores, prefer Codex Automations paired with skills; use Rules to control sandbox escapes instead of treating `AGENTS.md` as a pseudo-hook system.
+- Before creating a dependency-wait automation, verify that all required terminal conditions can hold simultaneously and account for superseded or alternative completion paths plus external minimum versions; if the conditions conflict or remain undecided, do not encode a permanent AND wait.
 - For `lsof`, prefer the normalized `-nP` forms such as `lsof -nP -p <pid>` or `lsof -nP -iTCP` so diagnostics and recurring approvals do not drift across `-n` / `-nP` variants.
 - When creating substantial temporary artifacts (for example under `/tmp` or `.codex-tmp`), prefer task-scoped directories, clean them up before finishing when safe, and explicitly report any leftovers you intentionally keep.
 - If helper validation scripts fail because local dependencies are missing, do a lightweight fallback validation and state exactly what was checked.
@@ -56,6 +57,7 @@
 - For multi-line commit messages, use `git commit -F` or multiple `-m` flags instead of embedding literal `\n`.
 - Do not suggest history-rewriting Git commands such as `git rebase`, `git reset --hard`, or `git push --force` unless explicitly requested.
 - For commits I create, use `-S`; include a `Co-authored-by: Codex ... <codex@openai.com>` footer when policy requires it.
+- When a signing operation fails with `No pinentry`, stop trying alternate shell, TTY, agent, or command shapes; ask Joey to unlock the signing key, then retry the original narrow command once.
 - For PRs I create, if every commit in the PR was authored by Codex, prepend the PR body with the note block below. Keep the model version current as the default Codex model changes; `high` and `xhigh` reasoning labels can be treated as interchangeable unless the actual run materially differs.
 
   > [!NOTE]
