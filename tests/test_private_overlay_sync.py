@@ -762,6 +762,33 @@ class PrivateOverlaySyncTests(unittest.TestCase):
         (target / "SKILL.md").write_text("canonical\n", encoding="utf-8")
         SYNC_MODULE.sync_sources(self.repo_root, self.source_root, ())
 
+    def test_canonical_review_target_requires_refresh_lock_runtime_and_tests(
+        self,
+    ) -> None:
+        refresh_lock_required_files = (
+            Path("scripts/review_runtime/claude_refresh_lock.py"),
+            Path("tests/test_claude_refresh_lock.py"),
+        )
+        complete_required_files = set(
+            SYNC_MODULE.CANONICAL_REVIEW_REQUIRED_FILES
+        ) | set(refresh_lock_required_files)
+
+        for missing in refresh_lock_required_files:
+            with self.subTest(missing=missing):
+                target = self.repo_root / f"canonical-review-{missing.name}"
+                for relative in complete_required_files:
+                    if relative == missing:
+                        continue
+                    path = target / relative
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_text("canonical\n", encoding="utf-8")
+
+                with self.assertRaisesRegex(
+                    SYNC_MODULE.SyncError,
+                    re.escape(f"missing required file: {missing}"),
+                ):
+                    SYNC_MODULE._validate_canonical_review_target_contents(target)
+
     def test_sync_rejects_retired_review_reference_outside_canonical_target(
         self,
     ) -> None:
