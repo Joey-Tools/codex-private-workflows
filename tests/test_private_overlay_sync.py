@@ -789,6 +789,25 @@ class PrivateOverlaySyncTests(unittest.TestCase):
                 ):
                     SYNC_MODULE._validate_canonical_review_target_contents(target)
 
+    def test_canonical_secure_staging_requires_canonical_claude_lane_contract(
+        self,
+    ) -> None:
+        rule, target = self._create_canonical_regular_file_overlay_rule()
+        missing = Path("references/canonical-claude-lane.md")
+        source = self.source_root / rule.repo / rule.source
+        (source / missing).unlink()
+
+        with self.assertRaisesRegex(
+            SYNC_MODULE.SyncError,
+            re.escape(
+                "canonical review target missing required file at "
+                f"prepared public source: {missing}"
+            ),
+        ):
+            SYNC_MODULE.sync_sources(self.repo_root, self.source_root, (rule,))
+
+        self.assertTrue((target / "old-marker").is_file())
+
     def test_sync_rejects_retired_review_reference_outside_canonical_target(
         self,
     ) -> None:

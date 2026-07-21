@@ -498,6 +498,7 @@ CANONICAL_REVIEW_REQUIRED_FILES = tuple(
         "SKILL.md",
         "agents/openai.yaml",
         "references/cbth-agent-delivery.md",
+        "references/canonical-claude-lane.md",
         "references/helper-contract.md",
         "references/claude-runtime-trust.md",
         "references/egress-consent.md",
