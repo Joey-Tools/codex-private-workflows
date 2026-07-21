@@ -762,18 +762,37 @@ class PrivateOverlaySyncTests(unittest.TestCase):
         (target / "SKILL.md").write_text("canonical\n", encoding="utf-8")
         SYNC_MODULE.sync_sources(self.repo_root, self.source_root, ())
 
-    def test_canonical_review_target_requires_refresh_lock_runtime_and_tests(
+    def test_canonical_review_target_requires_policy_runtime_and_tests(
         self,
     ) -> None:
-        refresh_lock_required_files = (
+        policy_required_files = (
+            Path("references/base-only-retarget-state-machine.json"),
+            Path("references/canonical-claude-lane.md"),
+            Path("references/claude-2.1.212-stream-schema.json"),
+            Path("references/claude-stream-compatibility.json"),
+            Path("scripts/named_claude_preflight"),
+            Path("scripts/review_runtime/claude_stream_contract.py"),
+            Path("scripts/review_runtime/claude_version_policy.py"),
+            Path("scripts/review_runtime/fd_exec.py"),
+            Path("scripts/review_runtime/named_claude_preflight.py"),
             Path("scripts/review_runtime/claude_refresh_lock.py"),
+            Path("scripts/validate_claude_stream.py"),
+            Path("tests/fixtures/compat/codex-review-gate.yml"),
+            Path("tests/test_fd_exec.py"),
             Path("tests/test_claude_refresh_lock.py"),
+            Path("tests/test_named_claude_preflight.py"),
+            Path("tests/test_validate_claude_stream.py"),
+        )
+        self.assertTrue(
+            set(policy_required_files).issubset(
+                set(SYNC_MODULE.CANONICAL_REVIEW_REQUIRED_FILES)
+            )
         )
         complete_required_files = set(
             SYNC_MODULE.CANONICAL_REVIEW_REQUIRED_FILES
-        ) | set(refresh_lock_required_files)
+        ) | set(policy_required_files)
 
-        for missing in refresh_lock_required_files:
+        for missing in policy_required_files:
             with self.subTest(missing=missing):
                 target = self.repo_root / f"canonical-review-{missing.name}"
                 for relative in complete_required_files:
@@ -6185,6 +6204,44 @@ class PrivateOverlaySyncTests(unittest.TestCase):
         self.assertIn("supported `10000`–`3600000` millisecond range", agents)
         self.assertIn("`30000`–`60000` for ordinary or reviewer polling", agents)
         self.assertIn("longer single waits are valid", agents)
+
+    def test_agents_guidance_uses_canonical_named_review_policy(self) -> None:
+        agents = (REPO_ROOT / "personal_codex" / "AGENTS.md").read_text(
+            encoding="utf-8"
+        )
+
+        for anchor in (
+            "A named single review is exactly one clear/fresh-context Codex `reviewer` agent",
+            "repo-local playbook from the frozen review head",
+            "never prebuild or inject the full diff into its prompt",
+            "A named double review is that single-review agent plus an actual Anthropic Claude Code process",
+            "Named double adds actual Claude Code",
+            "The canonical Claude Code compatibility range is `>=2.1.211,<3.0.0`",
+            "Claude Code `2.1.212` is the audited stream-schema baseline, not a global pin",
+            "outside-workspace read exclusion as prompt/model scope",
+            "Native `allowRead` is not a global host-read whitelist",
+            "global `denyWrite` and critical-sensitive-root `denyRead`",
+            "do not attest the final merged sandbox or managed permission arrays",
+            "require `skills/review-orchestration-playbook/scripts/validate_claude_stream.py`",
+            "A named triple review is the named double review plus a complete terminal provider-authored GitHub Codex findings payload",
+            "every operating identity in `{hoteng, hoteng_cisco}` is unsupported",
+            'user.login == "chatgpt-codex-connector[bot]"',
+            "If GitHub Codex is unavailable because there is no PR or the integration/host/identity is unsupported, report `effective double`; never claim triple",
+            "PR readiness adds CI, conversation, and branch/base gates, but no retired extra Codex gates",
+            "never count a supplied-diff helper as a named lane",
+            "possible cache or tool-result artifacts",
+        ):
+            with self.subTest(anchor=anchor):
+                self.assertIn(anchor, agents)
+
+        for retired in (
+            "mandatory independent-codex-pr-review",
+            "required `independent-codex-pr-review`",
+            "$external-review-playbook",
+            "$copilot-review-playbook",
+        ):
+            with self.subTest(retired=retired):
+                self.assertNotIn(retired, agents)
 
     def test_scheduled_workflow_opens_pr_for_sync_changes(self) -> None:
         workflow = (
