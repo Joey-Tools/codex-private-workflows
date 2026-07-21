@@ -5,7 +5,7 @@ status: completed
 created: 2026-07-21
 updated: 2026-07-21
 branch: wip/filesystem-hardening-evidence
-pr:
+pr: https://github.com/Joey-Tools/codex-private-workflows/pull/127
 supersedes: []
 superseded_by:
 ---
