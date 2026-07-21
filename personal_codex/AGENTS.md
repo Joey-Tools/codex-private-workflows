@@ -6,6 +6,7 @@
 - Do not claim a test, build, lint run, or command was executed unless it was actually run.
 - If a final answer includes app directives such as `::git-stage`, `::git-commit`, `::git-push`, or `::git-create-pr`, include at least one short natural-language summary first; directive-only final answers are not allowed.
 - For non-trivial logic changes, prefer adding or updating tests.
+- When implementing or reviewing filesystem race, tamper, or replacement hardening, define the protected property—object identity, content stability, or access policy—and justify every compared signal. Do not treat every `stat` delta as mutation; pair a benign metadata transition, such as child-entry churn or File Provider materialization, with a true replacement or content-change test, and keep unreadable or failed revalidation distinct from missing or mismatched.
 - Before proposing destructive commands or irreversible operations, explain the risk and name a safer alternative when one exists.
 - Do not default into basic syntax or beginner-tutorial explanations unless the user asks for them.
 - For shell script edits, run `bash -n` and `shellcheck` when available before commit; if `shellcheck` is unavailable, state that and report the fallback validation you actually ran.
