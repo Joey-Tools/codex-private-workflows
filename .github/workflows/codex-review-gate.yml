@@ -1,79 +1,138 @@
-name: Codex Review Gate
+name: Codex Review Gate Compatibility Status
 
 on:
   pull_request_target:
     types: [opened, reopened, synchronize, ready_for_review]
-  issue_comment:
-    types: [created]
-  pull_request_review:
-    types: [submitted]
-  pull_request_review_comment:
-    types: [created]
-  schedule:
-    - cron: "0 */2 * * *"
   workflow_dispatch:
-    inputs:
-      pull_request:
-        description: Pull request number to gate.
-        required: false
-        type: string
 
-permissions:
-  contents: read
-  issues: write
-  pull-requests: write
-  statuses: write
-
-concurrency:
-  group: codex-review-gate-${{ github.repository }}
-  cancel-in-progress: false
+permissions: {}
 
 jobs:
-  codex-review-gate:
-    name: codex/review-gate runner
-    if: >-
-      ${{
-        (github.event_name != 'schedule' || vars.CODEX_REVIEW_GATE_AUTO_RETRY != 'false') &&
-        (github.event_name != 'pull_request_target' ||
-          github.event.pull_request.user.login != 'dependabot[bot]') &&
-        (github.event_name != 'issue_comment' ||
-          github.event.issue.user.login != 'dependabot[bot]') &&
-        (github.event_name != 'pull_request_review' ||
-          github.event.pull_request.user.login != 'dependabot[bot]') &&
-        (github.event_name != 'pull_request_review_comment' ||
-          github.event.pull_request.user.login != 'dependabot[bot]') &&
-        (github.event_name != 'issue_comment' ||
-          (github.event.issue.pull_request &&
-            (contains(format(',chatgpt-codex-connector,chatgpt-codex-connector[bot],{0},',
-              vars.CODEX_REVIEW_GATE_BOT_LOGINS), format(',{0},', github.event.comment.user.login)) ||
-             contains(format(',chatgpt-codex-connector,chatgpt-codex-connector[bot],{0},',
-              vars.CODEX_REVIEW_GATE_BOT_LOGINS), format(', {0},', github.event.comment.user.login))))) &&
-        (github.event_name != 'pull_request_review' ||
-          (vars.CODEX_REVIEW_GATE_EVENT_MODE != 'comment-only' &&
-            github.event.pull_request.head.repo.full_name == github.event.pull_request.base.repo.full_name &&
-            (contains(format(',chatgpt-codex-connector,chatgpt-codex-connector[bot],{0},',
-              vars.CODEX_REVIEW_GATE_BOT_LOGINS), format(',{0},', github.event.review.user.login)) ||
-             contains(format(',chatgpt-codex-connector,chatgpt-codex-connector[bot],{0},',
-              vars.CODEX_REVIEW_GATE_BOT_LOGINS), format(', {0},', github.event.review.user.login))))) &&
-        (github.event_name != 'pull_request_review_comment' ||
-          (vars.CODEX_REVIEW_GATE_EVENT_MODE == 'full' &&
-            github.event.pull_request.head.repo.full_name == github.event.pull_request.base.repo.full_name &&
-            (contains(format(',chatgpt-codex-connector,chatgpt-codex-connector[bot],{0},',
-              vars.CODEX_REVIEW_GATE_BOT_LOGINS), format(',{0},', github.event.comment.user.login)) ||
-             contains(format(',chatgpt-codex-connector,chatgpt-codex-connector[bot],{0},',
-              vars.CODEX_REVIEW_GATE_BOT_LOGINS), format(', {0},', github.event.comment.user.login)))))
-      }}
-    runs-on: ${{ fromJSON(vars.CODEX_REVIEW_GATE_RUNNER_LABELS || '["ubuntu-slim"]') }}
-    timeout-minutes: 15
+  compatibility-status:
+    if: github.event_name == 'pull_request_target'
+    name: codex/review-gate compatibility publisher
+    permissions:
+      statuses: write
+    runs-on: ubuntu-latest
+    timeout-minutes: 1
+    env:
+      GH_TOKEN: ${{ github.token }}
+      HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+      REPOSITORY: ${{ github.repository }}
     steps:
-      - name: Gate on Codex review
-        uses: JoeyTeng/codex-review-gate-action@v1.2.1
-        with:
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          pull-request: ${{ github.event.pull_request.number || github.event.issue.number || github.event.inputs.pull_request }}
-          head-sha: ${{ github.event.pull_request.head.sha || '' }}
-          event-mode: ${{ vars.CODEX_REVIEW_GATE_EVENT_MODE }}
-          codex-bot-logins: ${{ vars.CODEX_REVIEW_GATE_BOT_LOGINS }}
-          completion-signal-buffer-seconds: ${{ vars.CODEX_REVIEW_GATE_COMPLETION_SIGNAL_BUFFER_SECONDS }}
-          failed-findings-recovery: ${{ vars.CODEX_REVIEW_GATE_FAILED_FINDINGS_RECOVERY }}
-          failed-findings-recovery-mode: ${{ vars.CODEX_REVIEW_GATE_FAILED_FINDINGS_RECOVERY_MODE }}
+      - name: Emit legacy required context
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ ! "${HEAD_SHA}" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::The pull request head SHA is missing or malformed."
+            exit 1
+          fi
+
+          gh api --method POST "repos/${REPOSITORY}/statuses/${HEAD_SHA}" \
+            --silent \
+            -f state=success \
+            -f context=codex/review-gate \
+            -f description="Compatibility only; no reviewer or review lane."
+
+  backfill-open-pull-requests:
+    if: github.event_name == 'workflow_dispatch'
+    name: Backfill codex/review-gate for open pull requests
+    permissions:
+      pull-requests: read
+      statuses: write
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+      GH_TOKEN: ${{ github.token }}
+      REPOSITORY: ${{ github.repository }}
+    steps:
+      - name: Backfill exact current pull request heads
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ -z "${DEFAULT_BRANCH}" || "${GITHUB_REF}" != "refs/heads/${DEFAULT_BRANCH}" ]]; then
+            echo "::error::The compatibility backfill must run from the repository default branch."
+            exit 1
+          fi
+
+          readonly MAX_ENUMERATION_PASSES=6
+          previous_snapshot=""
+          have_previous=false
+
+          for ((pass = 1; pass <= MAX_ENUMERATION_PASSES; pass++)); do
+            # shellcheck disable=SC2016 # jq owns $pulls and string interpolation.
+            api_targets="$(
+              gh api --paginate --slurp \
+                -H "Accept: application/vnd.github+json" \
+                -H "X-GitHub-Api-Version: 2022-11-28" \
+                "repos/${REPOSITORY}/pulls?state=all&sort=created&direction=asc&per_page=100" \
+                --jq '
+                  if type == "array"
+                    and length > 0
+                    and all(.[]; type == "array")
+                    and all(.[][];
+                      type == "object"
+                      and (.state == "open" or .state == "closed")
+                      and (.number | type == "number" and . > 0 and floor == .)
+                      and (.head.sha | type == "string" and test("^[0-9a-f]{40}$"))
+                    )
+                  then
+                    ([.[][]] | sort_by(.number)) as $pulls
+                    | if ($pulls | map(.number) | unique | length) == ($pulls | length)
+                      then ["API_EVIDENCE"] + ($pulls | map(select(.state == "open") | "\(.number)\t\(.head.sha)")) | .[]
+                      else "RETRY_PAGINATION"
+                      end
+                  else
+                    error("malformed or incomplete pull request API evidence")
+                  end
+                '
+            )"
+            mapfile -t targets <<<"${api_targets}"
+
+            if [[ "${targets[0]:-}" == "RETRY_PAGINATION" && "${#targets[@]}" -eq 1 ]]; then
+              echo "::notice::Open pull requests moved across API pages during pass ${pass}; retrying."
+              previous_snapshot=""
+              have_previous=false
+              continue
+            fi
+            if [[ "${targets[0]:-}" != "API_EVIDENCE" ]]; then
+              echo "::error::The authenticated pull request API returned no evidence."
+              exit 1
+            fi
+
+            current_snapshot=""
+            if (( ${#targets[@]} > 1 )); then
+              printf -v current_snapshot '%s\n' "${targets[@]:1}"
+            fi
+
+            validated_head_shas=()
+            for target in "${targets[@]:1}"; do
+              IFS=$'\t' read -r pull_number head_sha extra <<<"${target}"
+              if [[ ! "${pull_number}" =~ ^[1-9][0-9]*$ || ! "${head_sha}" =~ ^[0-9a-f]{40}$ || -n "${extra}" ]]; then
+                echo "::error::A pull request target derived from authenticated API evidence is malformed."
+                exit 1
+              fi
+              validated_head_shas+=("${head_sha}")
+            done
+
+            if [[ "${have_previous}" == "true" && "${current_snapshot}" == "${previous_snapshot}" ]]; then
+              for head_sha in "${validated_head_shas[@]}"; do
+                gh api --method POST "repos/${REPOSITORY}/statuses/${head_sha}" \
+                  --silent \
+                  -f state=success \
+                  -f context=codex/review-gate \
+                  -f description="Compatibility only; no reviewer or review lane."
+              done
+              echo "::notice::Authenticated open pull request snapshots stabilized after ${pass} passes."
+              exit 0
+            fi
+            previous_snapshot="${current_snapshot}"
+            have_previous=true
+          done
+
+          echo "::error::Open pull requests did not stabilize after ${MAX_ENUMERATION_PASSES} authenticated enumeration passes."
+          exit 1

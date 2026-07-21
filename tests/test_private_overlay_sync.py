@@ -6243,6 +6243,46 @@ class PrivateOverlaySyncTests(unittest.TestCase):
             with self.subTest(retired=retired):
                 self.assertNotIn(retired, agents)
 
+    def test_codex_review_gate_is_compatibility_status_only(self) -> None:
+        workflow_path = (
+            REPO_ROOT / ".github" / "workflows" / "codex-review-gate.yml"
+        )
+        canonical_fixture = (
+            REPO_ROOT
+            / "personal_codex"
+            / "skills"
+            / "review-orchestration-playbook"
+            / "tests"
+            / "fixtures"
+            / "compat"
+            / "codex-review-gate.yml"
+        )
+        self.assertEqual(workflow_path.read_bytes(), canonical_fixture.read_bytes())
+
+        workflow = workflow_path.read_text(encoding="utf-8")
+        for anchor in (
+            "name: Codex Review Gate Compatibility Status",
+            "name: codex/review-gate compatibility publisher",
+            "context=codex/review-gate",
+            "Compatibility only; no reviewer or review lane.",
+            "permissions: {}",
+            "workflow_dispatch:",
+        ):
+            with self.subTest(anchor=anchor):
+                self.assertIn(anchor, workflow)
+
+        for retired in (
+            "JoeyTeng/codex-review-gate-action",
+            "Gate on Codex review",
+            "issue_comment:",
+            "pull_request_review:",
+            "schedule:",
+            "CODEX_REVIEW_GATE_EVENT_MODE",
+            "@codex review",
+        ):
+            with self.subTest(retired=retired):
+                self.assertNotIn(retired, workflow)
+
     def test_scheduled_workflow_opens_pr_for_sync_changes(self) -> None:
         workflow = (
             REPO_ROOT / ".github" / "workflows" / "scheduled-sync-release.yml"
