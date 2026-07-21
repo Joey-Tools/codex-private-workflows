@@ -20,7 +20,7 @@ superseded_by:
 
 - Filesystem hardening now starts by naming the protected property: object identity, content stability, or access policy.
 - Every compared signal must be justified against that property instead of treating all `stat` fields as equivalent mutation evidence.
-- Tests must pair an allowed metadata-only transition with a rejected true replacement or content change.
+- Tests must pair an allowed metadata-only transition with a rejected true change to the selected property: object replacement, content mutation, or an access-policy change.
 - Read or revalidation failures remain distinct from missing or mismatched data so error handling cannot silently trigger a misleading fallback.
 
 ## Next Steps
