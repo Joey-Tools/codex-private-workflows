@@ -1679,6 +1679,17 @@ def _reject_nonfinite_json_constant(value: str) -> None:
     raise ValueError(f"non-finite JSON constant: {value}")
 
 
+def _reject_duplicate_json_keys(
+    pairs: list[tuple[str, Any]],
+) -> dict[str, Any]:
+    parsed: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in parsed:
+            raise ValueError("duplicate JSON key")
+        parsed[key] = value
+    return parsed
+
+
 def _terminal_tail_record_disposition(
     record_bytes: bytes,
     *,
@@ -1699,6 +1710,7 @@ def _terminal_tail_record_disposition(
         record = json.loads(
             text,
             parse_constant=_reject_nonfinite_json_constant,
+            object_pairs_hook=_reject_duplicate_json_keys,
         )
     except (ValueError, RecursionError) as error:
         raise ValueError("terminal-tail encountered malformed JSONL") from error
@@ -3590,6 +3602,15 @@ def reject_nonfinite_json_constant(value):
     raise ValueError("non-finite JSON constant: " + str(value))
 
 
+def reject_duplicate_json_keys(pairs):
+    parsed = dict()
+    for key, value in pairs:
+        if key in parsed:
+            raise ValueError("duplicate JSON key")
+        parsed[key] = value
+    return parsed
+
+
 def terminal_tail_record_disposition(record_bytes, max_record_bytes):
     if not record_bytes:
         raise ValueError("terminal-tail encountered an empty JSONL record")
@@ -3608,6 +3629,7 @@ def terminal_tail_record_disposition(record_bytes, max_record_bytes):
         record = json.loads(
             text,
             parse_constant=reject_nonfinite_json_constant,
+            object_pairs_hook=reject_duplicate_json_keys,
         )
     except (ValueError, RecursionError) as error:
         raise ValueError("terminal-tail encountered malformed JSONL") from error
@@ -5805,41 +5827,60 @@ def _extract_framed_terminal_tail_payload(
 
     if not text.endswith("\n") or "\r" in text:
         raise invalid_frame()
-    framed_lines = text[:-1].split("\n")
+    frame_body = text[:-1]
+    begin_prefix = REMOTE_TERMINAL_TAIL_BEGIN + "\n"
+    if not frame_body.startswith(begin_prefix):
+        raise invalid_frame()
+    header_line, header_separator, remainder = frame_body[
+        len(begin_prefix) :
+    ].partition("\n")
     if (
-        len(framed_lines) < 3
-        or framed_lines[0] != REMOTE_TERMINAL_TAIL_BEGIN
-        or framed_lines[-1] != REMOTE_TERMINAL_TAIL_END
-        or framed_lines.count(REMOTE_TERMINAL_TAIL_BEGIN) != 1
-        or framed_lines.count(REMOTE_TERMINAL_TAIL_END) != 1
+        not header_separator
+        or header_line in (
+            REMOTE_TERMINAL_TAIL_BEGIN,
+            REMOTE_TERMINAL_TAIL_END,
+        )
     ):
         raise invalid_frame()
-    payload_lines = framed_lines[1:-1]
-    if not payload_lines:
-        raise ValueError(
-            f"remote terminal-tail output on host {host} was missing payload header"
-        )
+    payload_line: str | None
+    if remainder == REMOTE_TERMINAL_TAIL_END:
+        payload_line = None
+    else:
+        payload_line, payload_separator, final_line = remainder.partition("\n")
+        if not payload_separator:
+            raise invalid_frame()
+        if final_line != REMOTE_TERMINAL_TAIL_END:
+            extra_line, extra_separator, extra_end = final_line.partition("\n")
+            if (
+                extra_separator
+                and extra_end == REMOTE_TERMINAL_TAIL_END
+                and extra_line
+                not in (
+                    REMOTE_TERMINAL_TAIL_BEGIN,
+                    REMOTE_TERMINAL_TAIL_END,
+                )
+            ):
+                raise ValueError(
+                    f"remote terminal-tail output on host {host} had invalid "
+                    "payload framing"
+                )
+            raise invalid_frame()
+        if payload_line in (
+            REMOTE_TERMINAL_TAIL_BEGIN,
+            REMOTE_TERMINAL_TAIL_END,
+        ):
+            raise invalid_frame()
 
     def reject_nonfinite_constant(_value: str) -> NoReturn:
         raise ValueError("non-finite JSON constant")
 
-    def reject_duplicate_keys(
-        pairs: list[tuple[str, Any]],
-    ) -> dict[str, Any]:
-        parsed: dict[str, Any] = {}
-        for key, value in pairs:
-            if key in parsed:
-                raise ValueError("duplicate JSON key")
-            parsed[key] = value
-        return parsed
-
     try:
         header = json.loads(
-            payload_lines[0],
+            header_line,
             parse_constant=reject_nonfinite_constant,
-            object_pairs_hook=reject_duplicate_keys,
+            object_pairs_hook=_reject_duplicate_json_keys,
         )
-    except (json.JSONDecodeError, TypeError, ValueError):
+    except (json.JSONDecodeError, TypeError, ValueError, RecursionError):
         raise ValueError(
             f"remote terminal-tail output on host {host} had an invalid payload header"
         ) from None
@@ -5847,10 +5888,17 @@ def _extract_framed_terminal_tail_payload(
         raise ValueError(
             f"remote terminal-tail output on host {host} had an invalid payload header"
         )
-    if (
-        json.dumps(header, separators=(",", ":"), sort_keys=True)
-        != payload_lines[0]
-    ):
+    try:
+        canonical_header = json.dumps(
+            header,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+    except (TypeError, ValueError, RecursionError):
+        raise ValueError(
+            f"remote terminal-tail output on host {host} had an invalid payload header"
+        ) from None
+    if canonical_header != header_line:
         raise ValueError(
             f"remote terminal-tail output on host {host} had a non-canonical "
             "payload header"
@@ -5860,7 +5908,7 @@ def _extract_framed_terminal_tail_payload(
         if (
             set(header) != {"ok", "error"}
             or type(header.get("error")) is not str
-            or len(payload_lines) != 1
+            or payload_line is not None
         ):
             raise ValueError(
                 f"remote terminal-tail output on host {host} had an invalid error header"
@@ -6106,23 +6154,23 @@ def _extract_framed_terminal_tail_payload(
             f"remote terminal-tail output on host {host} exceeded the result limit"
         )
     if status == "complete" and expected_bytes > 0:
-        if len(payload_lines) != 2:
+        if payload_line is None:
             raise ValueError(
                 f"remote terminal-tail output on host {host} had invalid payload framing"
             )
         try:
-            data = base64.b64decode(payload_lines[1], validate=True)
+            data = base64.b64decode(payload_line, validate=True)
         except (binascii.Error, ValueError) as error:
             raise ValueError(
                 f"remote terminal-tail output on host {host} contained invalid base64"
             ) from error
-        if base64.b64encode(data).decode("ascii") != payload_lines[1]:
+        if base64.b64encode(data).decode("ascii") != payload_line:
             raise ValueError(
                 f"remote terminal-tail output on host {host} contained "
                 "non-canonical base64"
             )
     else:
-        if len(payload_lines) != 1 or expected_bytes != 0:
+        if payload_line is not None or expected_bytes != 0:
             raise ValueError(
                 f"remote terminal-tail output on host {host} had invalid payload framing"
             )
