@@ -5847,6 +5847,14 @@ def _extract_framed_terminal_tail_payload(
         raise ValueError(
             f"remote terminal-tail output on host {host} had an invalid payload header"
         )
+    if (
+        json.dumps(header, separators=(",", ":"), sort_keys=True)
+        != payload_lines[0]
+    ):
+        raise ValueError(
+            f"remote terminal-tail output on host {host} had a non-canonical "
+            "payload header"
+        )
 
     if header.get("ok") is False:
         if (
@@ -5899,7 +5907,11 @@ def _extract_framed_terminal_tail_payload(
 
     def integer_field(name: str, *, minimum: int = 0) -> int:
         value = header[name]
-        if type(value) is not int or value < minimum:
+        if (
+            type(value) is not int
+            or value < minimum
+            or value > sys.maxsize
+        ):
             raise ValueError(
                 f"remote terminal-tail output on host {host} had invalid {name}"
             )
@@ -5973,13 +5985,33 @@ def _extract_framed_terminal_tail_payload(
         if (
             anchor_offset < scan_start
             or anchor_offset
-            < max(0, source_bytes - DEFAULT_TERMINAL_TAIL_WINDOW_BYTES)
+            < max(0, source_bytes - 1 - 64 * 1024)
             or anchor_length < MIN_TERMINAL_TAIL_ANCHOR_BYTES
             or anchor_length > MAX_TERMINAL_TAIL_ANCHOR_BYTES
             or anchor_offset + anchor_length > source_bytes - 1
         ):
             raise ValueError(
                 f"remote terminal-tail output on host {host} had invalid anchor metadata"
+            )
+        maximum_anchor_length = min(
+            MAX_TERMINAL_TAIL_ANCHOR_BYTES,
+            min(DEFAULT_TERMINAL_TAIL_WINDOW_BYTES, source_bytes) - 1,
+        )
+        allowed_anchor_lengths = {
+            length
+            for length in (128, 96, 64, 48, 32)
+            if MIN_TERMINAL_TAIL_ANCHOR_BYTES
+            <= length
+            <= maximum_anchor_length
+        }
+        if (
+            maximum_anchor_length >= MIN_TERMINAL_TAIL_ANCHOR_BYTES
+            and maximum_anchor_length not in allowed_anchor_lengths
+        ):
+            allowed_anchor_lengths.add(maximum_anchor_length)
+        if anchor_length not in allowed_anchor_lengths:
+            raise ValueError(
+                f"remote terminal-tail output on host {host} had invalid anchor length"
             )
     terminal_value = header.get("terminal_record_offset")
     if terminal_value is None:
@@ -5990,7 +6022,14 @@ def _extract_framed_terminal_tail_payload(
                 f"remote terminal-tail output on host {host} had invalid terminal offset"
             )
         terminal_record_offset = terminal_value
-        if terminal_record_offset < scan_start or terminal_record_offset >= source_bytes:
+        if (
+            terminal_record_offset
+            < scan_start + (1 if scan_start > 0 else 0)
+            or terminal_record_offset >= source_bytes - 1
+            or terminal_record_offset
+            > source_bytes
+            - (window_count - 1) * DEFAULT_TERMINAL_TAIL_WINDOW_BYTES
+        ):
             raise ValueError(
                 f"remote terminal-tail output on host {host} had invalid terminal offset"
             )
@@ -6077,6 +6116,11 @@ def _extract_framed_terminal_tail_payload(
             raise ValueError(
                 f"remote terminal-tail output on host {host} contained invalid base64"
             ) from error
+        if base64.b64encode(data).decode("ascii") != payload_lines[1]:
+            raise ValueError(
+                f"remote terminal-tail output on host {host} contained "
+                "non-canonical base64"
+            )
     else:
         if len(payload_lines) != 1 or expected_bytes != 0:
             raise ValueError(
@@ -6089,11 +6133,32 @@ def _extract_framed_terminal_tail_payload(
         )
     if status == "complete":
         try:
-            data.decode("utf-8")
+            message_text = data.decode("utf-8")
         except UnicodeDecodeError:
             raise ValueError(
                 f"remote terminal-tail output on host {host} was not valid UTF-8"
             ) from None
+        minimum_record_bytes = json.dumps(
+            {
+                "type": "event_msg",
+                "payload": {
+                    "type": "task_complete",
+                    "last_agent_message": message_text,
+                },
+            },
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        if (
+            len(minimum_record_bytes) > MAX_TERMINAL_TAIL_RECORD_BYTES
+            or terminal_record_offset is None
+            or terminal_record_offset + len(minimum_record_bytes) + 1
+            > source_bytes
+        ):
+            raise ValueError(
+                f"remote terminal-tail output on host {host} had impossible "
+                "terminal record bounds"
+            )
         message: bytes | None = data
     else:
         message = None

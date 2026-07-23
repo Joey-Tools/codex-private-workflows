@@ -8475,11 +8475,11 @@ class RemoteCodexProbeTerminalTailTests(unittest.TestCase):
             "ok": True,
             "status": status,
             "bytes": len(message or b""),
-            "source_bytes": 100,
-            "observed_source_bytes": 100,
+            "source_bytes": 512,
+            "observed_source_bytes": 512,
             "scan_start": 0,
-            "scan_end": 100,
-            "scanned_bytes": 100,
+            "scan_end": 512,
+            "scanned_bytes": 512,
             "window_count": 1,
             "anchor_offset": 32,
             "anchor_length": 32,
@@ -9271,11 +9271,11 @@ class RemoteCodexProbeTerminalTailTests(unittest.TestCase):
                     "ok": True,
                     "status": status,
                     "bytes": len(message or b""),
-                    "source_bytes": 100,
-                    "observed_source_bytes": 100,
+                    "source_bytes": 512,
+                    "observed_source_bytes": 512,
                     "scan_start": 0,
-                    "scan_end": 100,
-                    "scanned_bytes": 100,
+                    "scan_end": 512,
+                    "scanned_bytes": 512,
                     "window_count": 1,
                     "anchor_offset": 32,
                     "anchor_length": 32,
@@ -9377,7 +9377,7 @@ class RemoteCodexProbeTerminalTailTests(unittest.TestCase):
         )
         source_in_progress.update(
             {
-                "scan_start": 99,
+                "scan_start": 511,
                 "scanned_bytes": 1,
                 "anchor_offset": None,
                 "anchor_length": 0,
@@ -9427,7 +9427,8 @@ class RemoteCodexProbeTerminalTailTests(unittest.TestCase):
                 ),
                 "anchor_offset": (
                     tail_source
-                    - MODULE.DEFAULT_TERMINAL_TAIL_WINDOW_BYTES
+                    - 1
+                    - 64 * 1024
                 ),
                 "terminal_record_offset": None,
             }
@@ -9466,11 +9467,11 @@ class RemoteCodexProbeTerminalTailTests(unittest.TestCase):
                     "ok": True,
                     "status": "complete",
                     "bytes": len(message),
-                    "source_bytes": 100,
-                    "observed_source_bytes": 100,
+                    "source_bytes": 512,
+                    "observed_source_bytes": 512,
                     "scan_start": 0,
-                    "scan_end": 100,
-                    "scanned_bytes": 100,
+                    "scan_end": 512,
+                    "scanned_bytes": 512,
                     "window_count": 1,
                     "anchor_offset": 32,
                     "anchor_length": 32,
@@ -9542,14 +9543,36 @@ class RemoteCodexProbeTerminalTailTests(unittest.TestCase):
         shifted_scan_start.update(
             {
                 "scan_start": 1,
-                "scanned_bytes": 99,
+                "scanned_bytes": 511,
             }
         )
         cases["shifted-complete-window"] = shifted_scan_start
 
         final_lf_anchor = dict(base_header)
-        final_lf_anchor["anchor_offset"] = 68
+        final_lf_anchor["anchor_offset"] = 480
         cases["anchor-covers-final-lf"] = final_lf_anchor
+
+        final_lf_terminal = dict(base_header)
+        final_lf_terminal["terminal_record_offset"] = 511
+        cases["terminal-offset-is-final-lf"] = final_lf_terminal
+
+        impossible_anchor_length = dict(base_header)
+        impossible_anchor_length["anchor_length"] = 33
+        cases["impossible-anchor-length"] = impossible_anchor_length
+
+        suffix_source = 64 * 1024 + 512
+        anchor_outside_suffix = dict(base_header)
+        anchor_outside_suffix.update(
+            {
+                "source_bytes": suffix_source,
+                "observed_source_bytes": suffix_source,
+                "scan_end": suffix_source,
+                "scanned_bytes": suffix_source,
+                "anchor_offset": 0,
+                "terminal_record_offset": 600,
+            }
+        )
+        cases["anchor-outside-suffix-region"] = anchor_outside_suffix
 
         outside_first_window = dict(base_header)
         outside_first_window.update(
@@ -9565,6 +9588,43 @@ class RemoteCodexProbeTerminalTailTests(unittest.TestCase):
             }
         )
         cases["anchor-outside-first-window"] = outside_first_window
+
+        two_window_source = 2 * MODULE.DEFAULT_TERMINAL_TAIL_WINDOW_BYTES
+        terminal_in_newer_window = dict(base_header)
+        terminal_in_newer_window.update(
+            {
+                "source_bytes": two_window_source,
+                "observed_source_bytes": two_window_source,
+                "scan_start": 0,
+                "scan_end": two_window_source,
+                "scanned_bytes": two_window_source,
+                "window_count": 2,
+                "anchor_offset": two_window_source - 129,
+                "anchor_length": 128,
+                "terminal_record_offset": (
+                    MODULE.DEFAULT_TERMINAL_TAIL_WINDOW_BYTES + 100
+                ),
+            }
+        )
+        cases["terminal-offset-in-newer-window"] = terminal_in_newer_window
+
+        carry_record = dict(base_header)
+        carry_record.update(
+            {
+                "source_bytes": large_source,
+                "observed_source_bytes": large_source,
+                "scan_start": first_window_start,
+                "scan_end": large_source,
+                "scanned_bytes": MODULE.DEFAULT_TERMINAL_TAIL_WINDOW_BYTES,
+                "anchor_offset": large_source - 1 - 64 * 1024,
+                "terminal_record_offset": first_window_start,
+            }
+        )
+        cases["terminal-offset-is-carry"] = carry_record
+
+        record_does_not_fit = dict(base_header)
+        record_does_not_fit["terminal_record_offset"] = 500
+        cases["terminal-record-does-not-fit"] = record_does_not_fit
 
         over_scan_cap = dict(base_header)
         oversized_source = MODULE.MAX_TERMINAL_TAIL_SCAN_BYTES + 1
@@ -9644,7 +9704,8 @@ class RemoteCodexProbeTerminalTailTests(unittest.TestCase):
                 ),
                 "anchor_offset": (
                     tail_source
-                    - MODULE.DEFAULT_TERMINAL_TAIL_WINDOW_BYTES
+                    - 1
+                    - 64 * 1024
                 ),
                 "terminal_record_offset": None,
             }
@@ -9731,6 +9792,17 @@ class RemoteCodexProbeTerminalTailTests(unittest.TestCase):
         cases["nonfinite"] = (
             self._remote_terminal_tail_frame(nan_header, message=message),
             nan_header,
+        )
+        oversized_integer_header = self._remote_terminal_tail_header(
+            message=message
+        )
+        oversized_integer_header["source_bytes"] = sys.maxsize + 1
+        cases["oversized-integer"] = (
+            self._remote_terminal_tail_frame(
+                oversized_integer_header,
+                message=message,
+            ),
+            oversized_integer_header,
         )
 
         for name, (framed_output, _header) in cases.items():
@@ -9917,6 +9989,90 @@ class RemoteCodexProbeTerminalTailTests(unittest.TestCase):
         self.assertEqual(stdout, "")
         self.assertEqual(output, b"sentinel")
         self.assertIn("was not valid UTF-8", stderr)
+
+    def test_remote_terminal_tail_rejects_noncanonical_base64(self) -> None:
+        message = b"f"
+        header = self._remote_terminal_tail_header(message=message)
+        framed_output = "\n".join(
+            [
+                MODULE.REMOTE_TERMINAL_TAIL_BEGIN,
+                json.dumps(header, separators=(",", ":"), sort_keys=True),
+                "Zh==",
+                MODULE.REMOTE_TERMINAL_TAIL_END,
+                "",
+            ]
+        )
+        remote_result = subprocess.CompletedProcess(
+            args=["ssh"],
+            returncode=0,
+            stdout=framed_output,
+            stderr="",
+        )
+
+        rc, stdout, stderr, output = self._run_remote_terminal_tail_fixture(
+            remote_result
+        )
+
+        self.assertEqual(rc, 1)
+        self.assertEqual(stdout, "")
+        self.assertEqual(output, b"sentinel")
+        self.assertIn("contained non-canonical base64", stderr)
+
+    def test_remote_terminal_tail_accepts_carry_boundary_offset(self) -> None:
+        message = b"carry boundary"
+        source_bytes = 2 * MODULE.DEFAULT_TERMINAL_TAIL_WINDOW_BYTES
+        header = self._remote_terminal_tail_header(message=message)
+        header.update(
+            {
+                "source_bytes": source_bytes,
+                "observed_source_bytes": source_bytes,
+                "scan_start": 0,
+                "scan_end": source_bytes,
+                "scanned_bytes": source_bytes,
+                "window_count": 2,
+                "anchor_offset": source_bytes - 129,
+                "anchor_length": 128,
+                "terminal_record_offset": (
+                    MODULE.DEFAULT_TERMINAL_TAIL_WINDOW_BYTES
+                ),
+            }
+        )
+
+        result, extracted = MODULE._extract_framed_terminal_tail_payload(
+            self._remote_terminal_tail_frame(header, message=message),
+            host="miku-bot-dev",
+        )
+
+        self.assertEqual(result.status, "complete")
+        self.assertEqual(extracted, message)
+
+    def test_remote_terminal_tail_rejects_noncanonical_json_header(self) -> None:
+        message = b"must not publish"
+        header = self._remote_terminal_tail_header(message=message)
+        framed_output = "\n".join(
+            [
+                MODULE.REMOTE_TERMINAL_TAIL_BEGIN,
+                json.dumps(header, sort_keys=True),
+                MODULE.base64.b64encode(message).decode("ascii"),
+                MODULE.REMOTE_TERMINAL_TAIL_END,
+                "",
+            ]
+        )
+        remote_result = subprocess.CompletedProcess(
+            args=["ssh"],
+            returncode=0,
+            stdout=framed_output,
+            stderr="",
+        )
+
+        rc, stdout, stderr, output = self._run_remote_terminal_tail_fixture(
+            remote_result
+        )
+
+        self.assertEqual(rc, 1)
+        self.assertEqual(stdout, "")
+        self.assertEqual(output, b"sentinel")
+        self.assertIn("had a non-canonical payload header", stderr)
 
 
 if __name__ == "__main__":
