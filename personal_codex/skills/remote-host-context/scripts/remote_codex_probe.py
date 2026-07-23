@@ -1806,6 +1806,31 @@ def _scan_terminal_tail_handle(
         observed_source_bytes = max(observed_source_bytes, observed)
         return stable
 
+    def inspect_record(
+        record_offset: int,
+        record_bytes: bytes,
+    ) -> TerminalTailResult | None:
+        disposition, message = _terminal_tail_record_disposition(
+            record_bytes,
+            max_record_bytes=max_record_bytes,
+        )
+        if disposition == "user":
+            if not anchor_stable("before terminal-tail nonterminal result"):
+                return result("anchor_moved")
+            return result(
+                "terminal_not_reached",
+                terminal_record_offset=record_offset,
+            )
+        if disposition == "complete":
+            if not anchor_stable("before terminal-tail result publication"):
+                return result("anchor_moved")
+            return result(
+                "complete",
+                message=message,
+                terminal_record_offset=record_offset,
+            )
+        return None
+
     observed_source_bytes = max(
         observed_source_bytes,
         handle.assert_tail_coordinates(
@@ -1862,56 +1887,52 @@ def _scan_terminal_tail_handle(
             if not anchor_stable("after terminal-tail anchor selection"):
                 return result("anchor_moved")
             combined = data
-            segments = combined.split(b"\n")
-            if not segments or segments[-1] != b"":
+            if not combined.endswith(b"\n"):
                 raise ValueError("terminal-tail frozen EOF lost its LF terminator")
-            segments = segments[:-1]
+            record_end = len(combined) - 1
         else:
             combined = data + carry
-            segments = combined.split(b"\n")
+            record_end = len(combined)
 
-        segment_offsets: list[tuple[int, bytes]] = []
-        relative_offset = 0
-        for segment in segments:
-            segment_offsets.append((start + relative_offset, segment))
-            relative_offset += len(segment) + 1
-
-        if start == 0:
-            complete_records = segment_offsets
-            carry = b""
-        else:
-            if not segment_offsets:
-                carry = b""
-                complete_records = []
-            else:
-                carry = segment_offsets[0][1]
-                complete_records = segment_offsets[1:]
-            if len(carry) > max_record_bytes:
+        while True:
+            separator = combined.rfind(b"\n", 0, record_end)
+            if separator < 0:
+                break
+            record_start = separator + 1
+            record_length = record_end - record_start
+            if record_length > max_record_bytes:
                 raise ValueError(
                     "terminal-tail record too large: "
-                    f"{len(carry)} bytes > {max_record_bytes}"
+                    f"{record_length} bytes > {max_record_bytes}"
                 )
-
-        for record_offset, record_bytes in reversed(complete_records):
-            disposition, message = _terminal_tail_record_disposition(
-                record_bytes,
-                max_record_bytes=max_record_bytes,
+            record_result = inspect_record(
+                start + record_start,
+                combined[record_start:record_end],
             )
-            if disposition == "user":
-                if not anchor_stable("before terminal-tail nonterminal result"):
-                    return result("anchor_moved")
-                return result(
-                    "terminal_not_reached",
-                    terminal_record_offset=record_offset,
+            if record_result is not None:
+                return record_result
+            record_end = separator
+
+        if start == 0:
+            if record_end > max_record_bytes:
+                raise ValueError(
+                    "terminal-tail record too large: "
+                    f"{record_end} bytes > {max_record_bytes}"
                 )
-            if disposition == "complete":
-                if not anchor_stable("before terminal-tail result publication"):
-                    return result("anchor_moved")
-                return result(
-                    "complete",
-                    message=message,
-                    terminal_record_offset=record_offset,
+            record_result = inspect_record(
+                0,
+                combined[:record_end],
+            )
+            if record_result is not None:
+                return record_result
+            carry = b""
+        else:
+            if record_end > max_record_bytes:
+                raise ValueError(
+                    "terminal-tail record too large: "
+                    f"{record_end} bytes > {max_record_bytes}"
                 )
+            carry = combined[:record_end]
         cursor = start
         first_window = False
 
@@ -3719,6 +3740,32 @@ def scan_terminal_tail_handle(
         observed_source_bytes = max(observed_source_bytes, observed)
         return stable
 
+    def inspect_record(record_offset, record_bytes):
+        disposition, message = terminal_tail_record_disposition(
+            record_bytes,
+            max_record_bytes,
+        )
+        if disposition == "user":
+            if not anchor_stable(
+                "before terminal-tail nonterminal result"
+            ):
+                return make_result("anchor_moved")
+            return make_result(
+                "terminal_not_reached",
+                terminal_record_offset=record_offset,
+            )
+        if disposition == "complete":
+            if not anchor_stable(
+                "before terminal-tail result publication"
+            ):
+                return make_result("anchor_moved")
+            return make_result(
+                "complete",
+                message=message,
+                terminal_record_offset=record_offset,
+            )
+        return None
+
     observed_source_bytes = max(
         observed_source_bytes,
         handle.assert_tail_coordinates(
@@ -3775,60 +3822,58 @@ def scan_terminal_tail_handle(
             if not anchor_stable("after terminal-tail anchor selection"):
                 return make_result("anchor_moved")
             combined = data
-            segments = combined.split(b"\\n")
-            if not segments or segments[-1] != b"":
+            if not combined.endswith(b"\\n"):
                 raise ValueError("terminal-tail frozen EOF lost its LF terminator")
-            segments = segments[:-1]
+            record_end = len(combined) - 1
         else:
             combined = data + carry
-            segments = combined.split(b"\\n")
+            record_end = len(combined)
 
-        segment_offsets = []
-        relative_offset = 0
-        for segment in segments:
-            segment_offsets.append((start + relative_offset, segment))
-            relative_offset += len(segment) + 1
-        if start == 0:
-            complete_records = segment_offsets
-            carry = b""
-        else:
-            if not segment_offsets:
-                carry = b""
-                complete_records = []
-            else:
-                carry = segment_offsets[0][1]
-                complete_records = segment_offsets[1:]
-            if len(carry) > max_record_bytes:
+        while True:
+            separator = combined.rfind(b"\\n", 0, record_end)
+            if separator < 0:
+                break
+            record_start = separator + 1
+            record_length = record_end - record_start
+            if record_length > max_record_bytes:
                 raise ValueError(
                     "terminal-tail record too large: "
-                    + str(len(carry))
+                    + str(record_length)
                     + " bytes > "
                     + str(max_record_bytes)
                 )
-        for record_offset, record_bytes in reversed(complete_records):
-            disposition, message = terminal_tail_record_disposition(
-                record_bytes,
-                max_record_bytes,
+            record_result = inspect_record(
+                start + record_start,
+                combined[record_start:record_end],
             )
-            if disposition == "user":
-                if not anchor_stable(
-                    "before terminal-tail nonterminal result"
-                ):
-                    return make_result("anchor_moved")
-                return make_result(
-                    "terminal_not_reached",
-                    terminal_record_offset=record_offset,
+            if record_result is not None:
+                return record_result
+            record_end = separator
+
+        if start == 0:
+            if record_end > max_record_bytes:
+                raise ValueError(
+                    "terminal-tail record too large: "
+                    + str(record_end)
+                    + " bytes > "
+                    + str(max_record_bytes)
                 )
-            if disposition == "complete":
-                if not anchor_stable(
-                    "before terminal-tail result publication"
-                ):
-                    return make_result("anchor_moved")
-                return make_result(
-                    "complete",
-                    message=message,
-                    terminal_record_offset=record_offset,
+            record_result = inspect_record(
+                0,
+                combined[:record_end],
+            )
+            if record_result is not None:
+                return record_result
+            carry = b""
+        else:
+            if record_end > max_record_bytes:
+                raise ValueError(
+                    "terminal-tail record too large: "
+                    + str(record_end)
+                    + " bytes > "
+                    + str(max_record_bytes)
                 )
+            carry = combined[:record_end]
         cursor = start
         first_window = False
     if (

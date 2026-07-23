@@ -8670,6 +8670,7 @@ class RemoteCodexProbeTerminalTailTests(unittest.TestCase):
         self.assertEqual(result.scanned_bytes, result.scan_end - result.scan_start)
         self.assertIsNotNone(result.anchor_offset)
         self.assertGreater(result.anchor_length, 0)
+        self.assertEqual(result.terminal_record_offset, len(prefix))
         window_offsets = [
             offset
             for offset, length in pread_ranges
@@ -8806,6 +8807,98 @@ class RemoteCodexProbeTerminalTailTests(unittest.TestCase):
                     max_scan_bytes=1024,
                     max_record_bytes=512,
                 )
+
+    def test_newline_dense_window_scans_without_split_amplification(
+        self,
+    ) -> None:
+        class SplitGuardBytes(bytes):
+            def split(self, *args: object, **kwargs: object) -> list[bytes]:
+                raise AssertionError("terminal-tail scanner called bytes.split")
+
+            def splitlines(
+                self,
+                *args: object,
+                **kwargs: object,
+            ) -> list[bytes]:
+                raise AssertionError("terminal-tail scanner called bytes.splitlines")
+
+        malformed_record = (
+            b"not-json-terminal-tail-memory-guard-"
+            + b"".join(
+                f"{index:04x}".encode("ascii")
+                for index in range(64)
+            )
+            + b"\n"
+        )
+        window_bytes = MODULE.DEFAULT_TERMINAL_TAIL_WINDOW_BYTES
+        self.assertLess(len(malformed_record), window_bytes)
+        source = (
+            b"\n" * (window_bytes - len(malformed_record))
+            + malformed_record
+        )
+        self.assertEqual(len(source), window_bytes)
+
+        for scope in ("local", "embedded"):
+            with (
+                self.subTest(scope=scope),
+                tempfile.TemporaryDirectory() as temp_dir,
+            ):
+                codex_root = Path(temp_dir) / ".codex"
+                rollout = self._write_rollout_bytes(codex_root, source)
+                if scope == "local":
+                    target_globals = MODULE.__dict__
+                    pread_name = "_pread_exact"
+
+                    def read_tail() -> object:
+                        return MODULE._read_terminal_tail(
+                            codex_root,
+                            MODULE._resolve_rollout_relative_path(rollout),
+                            window_bytes=window_bytes,
+                            max_scan_bytes=window_bytes,
+                            max_record_bytes=1024,
+                        )
+
+                else:
+                    namespace = self._embedded_terminal_tail_namespace(
+                        codex_root,
+                        rollout,
+                        window_bytes=window_bytes,
+                        max_scan_bytes=window_bytes,
+                        max_record_bytes=1024,
+                    )
+                    target_globals = namespace
+                    pread_name = "pread_exact"
+
+                    def read_tail() -> object:
+                        return namespace["read_terminal_tail"](
+                            namespace["pathlib"].PurePosixPath(rollout)
+                        )
+
+                real_pread_exact = target_globals[pread_name]
+                window_reads = 0
+
+                def guard_window_bytes(
+                    fd: int,
+                    offset: int,
+                    length: int,
+                ) -> bytes:
+                    nonlocal window_reads
+                    data = real_pread_exact(fd, offset, length)
+                    if length == window_bytes:
+                        window_reads += 1
+                        return SplitGuardBytes(data)
+                    return data
+
+                with (
+                    mock.patch.dict(
+                        target_globals,
+                        {pread_name: guard_window_bytes},
+                    ),
+                    self.assertRaisesRegex(ValueError, "malformed JSONL"),
+                ):
+                    read_tail()
+
+                self.assertEqual(window_reads, 1)
 
     def test_nonfinite_json_constants_fail_closed_locally_and_embedded(
         self,
