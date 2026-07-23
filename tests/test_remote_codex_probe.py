@@ -437,6 +437,8 @@ class RemoteHostContextDocumentationTests(unittest.TestCase):
         self.assertIn("`record_limit_exceeded`", skill)
         self.assertIn("`records_examined`", skill)
         self.assertIn("shortest complete object record `{}\\n`", skill)
+        self.assertIn('{"ok":false,"error_code":...}', skill)
+        self.assertIn("Arbitrary remote exception text is never forwarded", skill)
         self.assertIn("exact UTF-8 final message", skill)
         self.assertIn("Lossless Terminal Tail", reference)
         self.assertIn("no redaction, normalization, or added newline", reference)
@@ -451,6 +453,10 @@ class RemoteHostContextDocumentationTests(unittest.TestCase):
         self.assertIn("1,000,000 complete records", reference)
         self.assertIn("`record_limit_exceeded`", reference)
         self.assertIn("`scanned_bytes >= 3 * records_examined`", reference)
+        self.assertIn("`rollout_replaced`", reference)
+        self.assertIn("`malformed_jsonl`", reference)
+        self.assertIn("never serializes arbitrary exception text", reference)
+        self.assertIn("Unknown remote `error_code` values", reference)
 
 
 class SizeGuardedBytesIO(io.BytesIO):
@@ -8656,6 +8662,124 @@ class RemoteCodexProbeTerminalTailTests(unittest.TestCase):
             output_bytes = output_path.read_bytes()
         return rc, stdout.getvalue(), stderr.getvalue(), output_bytes
 
+    def test_terminal_tail_error_code_mapping_matches_embedded(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            codex_root = Path(temp_dir) / ".codex"
+            rollout = self._write_rollout_bytes(
+                codex_root,
+                self._task_complete("mapping fixture"),
+            )
+            namespace = self._embedded_terminal_tail_namespace(
+                codex_root,
+                rollout,
+                window_bytes=256,
+                max_scan_bytes=1024,
+                max_record_bytes=1024,
+            )
+
+            cases = (
+                (FileNotFoundError("private detail"), "rollout_not_found"),
+                (PermissionError("private detail"), "rollout_unreadable"),
+                (
+                    ValueError("rollout path is a symlink private detail"),
+                    "rollout_path_invalid",
+                ),
+                (
+                    ValueError("Codex root is a symlink"),
+                    "rollout_path_invalid",
+                ),
+                (
+                    ValueError("Codex root changed during open"),
+                    "rollout_replaced",
+                ),
+                (
+                    ValueError("path uses a symlink ancestor"),
+                    "rollout_path_invalid",
+                ),
+                (
+                    ValueError("path ancestor changed during open"),
+                    "rollout_replaced",
+                ),
+                (
+                    ValueError(
+                        "rollout path replaced before terminal-tail result"
+                    ),
+                    "rollout_replaced",
+                ),
+                (
+                    ValueError(
+                        "rollout truncated below frozen EOF after window read"
+                    ),
+                    "rollout_truncated",
+                ),
+                (
+                    ValueError(
+                        "terminal-tail encountered malformed JSONL private detail"
+                    ),
+                    "malformed_jsonl",
+                ),
+                (
+                    ValueError(
+                        "terminal-tail record too large: private detail"
+                    ),
+                    "record_too_large",
+                ),
+                (
+                    ValueError(
+                        "terminal-tail scan limit must be positive private detail"
+                    ),
+                    "invalid_limits",
+                ),
+                (ValueError("private unknown detail"), "internal_failure"),
+            )
+            embedded_mapper = namespace["terminal_tail_error_code"]
+            for error, expected in cases:
+                with self.subTest(expected=expected):
+                    self.assertEqual(
+                        MODULE._terminal_tail_error_code(error),
+                        expected,
+                    )
+                    self.assertEqual(embedded_mapper(error), expected)
+
+    def test_terminal_tail_classifies_real_symlink_root_as_unsafe(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            real_codex_root = root / "real-codex"
+            rollout = self._write_rollout_bytes(
+                real_codex_root,
+                self._task_complete("symlink fixture"),
+            )
+            linked_codex_root = root / "linked-codex"
+            linked_codex_root.symlink_to(real_codex_root, target_is_directory=True)
+
+            with self.assertRaises(MODULE._TerminalTailOperationError) as local:
+                MODULE._read_terminal_tail(
+                    linked_codex_root,
+                    MODULE._resolve_rollout_relative_path(rollout),
+                    window_bytes=256,
+                    max_scan_bytes=1024,
+                    max_record_bytes=1024,
+                )
+            self.assertEqual(local.exception.error_code, "rollout_path_invalid")
+
+            namespace = self._embedded_terminal_tail_namespace(
+                linked_codex_root,
+                rollout,
+                window_bytes=256,
+                max_scan_bytes=1024,
+                max_record_bytes=1024,
+            )
+            with self.assertRaises(
+                namespace["TerminalTailOperationError"]
+            ) as embedded:
+                namespace["read_terminal_tail"](
+                    namespace["pathlib"].PurePosixPath(rollout)
+                )
+            self.assertEqual(
+                embedded.exception.error_code,
+                "rollout_path_invalid",
+            )
+
     def test_rollout_budgets_split_direct_fetch_from_automatic_reconstruction(
         self,
     ) -> None:
@@ -9229,7 +9353,7 @@ class RemoteCodexProbeTerminalTailTests(unittest.TestCase):
             self.assertEqual(len(lines), 1)
             header = json.loads(lines[0])
             self.assertFalse(header["ok"])
-            self.assertIn("malformed JSONL", header["error"])
+            self.assertEqual(header["error_code"], "malformed_jsonl")
 
     def test_duplicate_json_keys_fail_closed_locally_and_embedded(
         self,
@@ -9298,7 +9422,7 @@ class RemoteCodexProbeTerminalTailTests(unittest.TestCase):
             self.assertEqual(len(lines), 1)
             header = json.loads(lines[0])
             self.assertFalse(header["ok"])
-            self.assertIn("malformed JSONL", header["error"])
+            self.assertEqual(header["error_code"], "malformed_jsonl")
 
     def test_append_after_s0_does_not_move_frozen_tail_coordinates(self) -> None:
         message = "frozen result"
@@ -10011,6 +10135,80 @@ class RemoteCodexProbeTerminalTailTests(unittest.TestCase):
         self.assertEqual(rc, 1)
         self.assertIn("status=terminal_not_reached", stdout.getvalue())
         self.assertEqual(stderr.getvalue(), "")
+
+    def test_local_cli_uses_the_same_stable_error_categories(self) -> None:
+        rollout = (
+            "sessions/2026/07/23/"
+            "rollout-2026-07-23T10-00-00-local-errors.jsonl"
+        )
+        cases = (
+            (
+                PermissionError("private detail"),
+                "rollout_unreadable",
+            ),
+            (
+                MODULE._TerminalTailOperationError(
+                    "rollout_replaced",
+                    "private detail",
+                ),
+                "rollout_replaced",
+            ),
+            (
+                MODULE._TerminalTailOperationError(
+                    "rollout_truncated",
+                    "private detail",
+                ),
+                "rollout_truncated",
+            ),
+            (
+                MODULE._TerminalTailOperationError(
+                    "malformed_jsonl",
+                    "private detail",
+                ),
+                "malformed_jsonl",
+            ),
+            (
+                RuntimeError("private detail"),
+                "internal_failure",
+            ),
+        )
+        with tempfile.TemporaryDirectory(dir="/tmp") as temp_dir:
+            output_path = Path(temp_dir) / "terminal-result.txt"
+            output_path.write_bytes(b"sentinel")
+            for error, expected_code in cases:
+                with self.subTest(expected_code=expected_code):
+                    stdout = io.StringIO()
+                    stderr = io.StringIO()
+                    with (
+                        mock.patch.object(
+                            MODULE,
+                            "_local_codex_root",
+                            return_value=Path(temp_dir) / ".codex",
+                        ),
+                        mock.patch.object(
+                            MODULE,
+                            "_read_terminal_tail",
+                            side_effect=error,
+                        ),
+                        redirect_stdout(stdout),
+                        redirect_stderr(stderr),
+                    ):
+                        rc = MODULE.cmd_terminal_tail(
+                            argparse.Namespace(
+                                host="local",
+                                rollout=rollout,
+                                output=str(output_path),
+                            )
+                        )
+
+                    self.assertEqual(rc, 1)
+                    self.assertEqual(stdout.getvalue(), "")
+                    self.assertEqual(output_path.read_bytes(), b"sentinel")
+                    self.assertEqual(
+                        stderr.getvalue().splitlines()[-1],
+                        "error="
+                        + MODULE.TERMINAL_TAIL_ERROR_MESSAGES[expected_code],
+                    )
 
     def test_local_and_remote_cli_record_limit_status_does_not_touch_output(
         self,
@@ -10976,6 +11174,136 @@ class RemoteCodexProbeTerminalTailTests(unittest.TestCase):
                 self.assertIn("had invalid payload framing", stderr)
                 self.assertNotIn(message.decode("ascii"), stderr)
 
+    def test_remote_terminal_tail_preserves_closed_error_categories(
+        self,
+    ) -> None:
+        private_detail = "SENSITIVE-TERMINAL-TAIL-ERROR-DETAIL"
+        with tempfile.TemporaryDirectory() as temp_dir:
+            codex_root = Path(temp_dir) / ".codex"
+            rollout = self._write_rollout_bytes(
+                codex_root,
+                self._task_complete("error fixture"),
+            )
+            namespace = self._embedded_terminal_tail_namespace(
+                codex_root,
+                rollout,
+                window_bytes=256,
+                max_scan_bytes=1024,
+                max_record_bytes=1024,
+            )
+            operation_error = namespace["TerminalTailOperationError"]
+            cases = (
+                (
+                    "not-found",
+                    FileNotFoundError(private_detail),
+                    "rollout_not_found",
+                ),
+                (
+                    "os-unreadable",
+                    PermissionError(private_detail),
+                    "rollout_unreadable",
+                ),
+                (
+                    "path-unreadable",
+                    operation_error(
+                        "rollout_unreadable",
+                        private_detail,
+                    ),
+                    "rollout_unreadable",
+                ),
+                (
+                    "path-replaced",
+                    operation_error(
+                        "rollout_replaced",
+                        private_detail,
+                    ),
+                    "rollout_replaced",
+                ),
+                (
+                    "truncated",
+                    operation_error(
+                        "rollout_truncated",
+                        private_detail,
+                    ),
+                    "rollout_truncated",
+                ),
+                (
+                    "malformed-jsonl",
+                    operation_error(
+                        "malformed_jsonl",
+                        private_detail,
+                    ),
+                    "malformed_jsonl",
+                ),
+                (
+                    "unknown",
+                    RuntimeError(private_detail),
+                    "internal_failure",
+                ),
+            )
+
+            for name, error, expected_code in cases:
+                with self.subTest(name=name):
+                    namespace["read_terminal_tail"] = mock.Mock(
+                        side_effect=error
+                    )
+                    framed_output = io.StringIO()
+                    with redirect_stdout(framed_output):
+                        namespace["terminal_tail"]()
+                    frame = framed_output.getvalue()
+                    lines = MODULE._extract_framed_lines(
+                        frame,
+                        begin_marker=MODULE.REMOTE_TERMINAL_TAIL_BEGIN,
+                        end_marker=MODULE.REMOTE_TERMINAL_TAIL_END,
+                        host="embedded",
+                        command="terminal-tail",
+                    )
+                    self.assertEqual(
+                        json.loads(lines[0]),
+                        {"ok": False, "error_code": expected_code},
+                    )
+                    self.assertNotIn(private_detail, frame)
+
+                    remote_result = subprocess.CompletedProcess(
+                        args=["ssh"],
+                        returncode=0,
+                        stdout=frame,
+                        stderr="",
+                    )
+                    rc, stdout, stderr, output = (
+                        self._run_remote_terminal_tail_fixture(remote_result)
+                    )
+
+                    self.assertEqual(rc, 1)
+                    self.assertEqual(stdout, "")
+                    self.assertEqual(output, b"sentinel")
+                    self.assertEqual(
+                        stderr.splitlines()[-1],
+                        "error="
+                        + MODULE.TERMINAL_TAIL_ERROR_MESSAGES[expected_code],
+                    )
+                    self.assertNotIn(private_detail, stderr)
+
+    def test_remote_terminal_tail_accepts_each_closed_error_code(self) -> None:
+        for error_code, message in MODULE.TERMINAL_TAIL_ERROR_MESSAGES.items():
+            with self.subTest(error_code=error_code):
+                remote_result = subprocess.CompletedProcess(
+                    args=["ssh"],
+                    returncode=0,
+                    stdout=self._remote_terminal_tail_frame(
+                        {"ok": False, "error_code": error_code}
+                    ),
+                    stderr="",
+                )
+                rc, stdout, stderr, output = (
+                    self._run_remote_terminal_tail_fixture(remote_result)
+                )
+
+                self.assertEqual(rc, 1)
+                self.assertEqual(stdout, "")
+                self.assertEqual(output, b"sentinel")
+                self.assertEqual(stderr.splitlines()[-1], "error=" + message)
+
     def test_remote_terminal_tail_does_not_echo_failed_process_output(
         self,
     ) -> None:
@@ -11029,8 +11357,22 @@ class RemoteCodexProbeTerminalTailTests(unittest.TestCase):
                     "",
                 ]
             ),
-            "remote-error": self._remote_terminal_tail_frame(
+            "legacy-error-field": self._remote_terminal_tail_frame(
                 {"ok": False, "error": secret_marker}
+            ),
+            "unknown-error-code": self._remote_terminal_tail_frame(
+                {"ok": False, "error_code": secret_marker}
+            ),
+            "extra-error-field": self._remote_terminal_tail_frame(
+                {
+                    "ok": False,
+                    "error_code": "rollout_unreadable",
+                    "detail": secret_marker,
+                }
+            ),
+            "error-payload": self._remote_terminal_tail_frame(
+                {"ok": False, "error_code": "rollout_unreadable"},
+                message=secret_marker.encode("ascii"),
             ),
         }
 

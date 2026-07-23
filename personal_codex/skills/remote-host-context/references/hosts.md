@@ -145,6 +145,21 @@ The anchor is deliberately only a bounded coordinate-drift witness. There is no 
 
 Only complete LF-terminated JSONL records at or before `S0` are eligible. A trailing partial record at `S0` returns `source_in_progress`, even if an older complete task result exists. The reader accepts success only from the latest explicit `event_msg.task_complete` whose payload contains `last_agent_message`; a later complete user turn returns `terminal_not_reached`. Before slicing or parsing another complete record, both the local and embedded scanners check the independent fixed record budget. Their result and strict remote frame carry `records_examined`. The parent accepts only `0 <= records_examined <= 1,000,000` and requires `scanned_bytes >= 3 * records_examined`: every successfully parsed complete JSON object occupies at least the two bytes in `{}` plus its LF, and cross-window carry only joins non-overlapping bytes already contained in the contiguous fixed-`S0` scanned span. If the cap is exhausted while earlier evidence remains uncovered, the scanner revalidates the anchor and returns `record_limit_exceeded` with the count exactly equal to 1,000,000; it does not skip records, downgrade the condition to `tail_window_insufficient`, or write `--output`. A decisive millionth record still returns its decisive status, while full coverage at or below the cap remains nonterminal. Malformed, invalid-UTF-8, or oversized records that prevent lossless ordering remain coverage errors, and exhausting either fixed cap before reaching enough decisive evidence is not proof of completion.
 
+Remote operation errors use one canonical header with exact keys `ok` and `error_code`, no payload, and `ok` set to JSON false. The parent accepts only this closed code set and maps it to fixed local/remote CLI diagnostics:
+
+- `invalid_rollout_path`: the injected request has invalid rollout syntax.
+- `rollout_not_found`: the initial rollout entry is absent.
+- `rollout_unreadable`: the file or a required revalidation cannot be read.
+- `rollout_path_invalid`: the selected entry is unsafe, such as a symlink or non-regular file.
+- `rollout_replaced`: the pinned object/path identity or frozen tail coordinate was replaced.
+- `rollout_truncated`: the file shrank below `S0` or a fixed-coordinate read became short.
+- `malformed_jsonl`: a required record is not lossless UTF-8 JSONL with the expected object schema.
+- `record_too_large`: a record or terminal result exceeds its fixed byte limit.
+- `invalid_limits`: the injected bounded scanner limits are invalid.
+- `internal_failure`: a locally recognized producer failure did not match another public category.
+
+The producer converts its internal exception to a typed local category before framing. It never serializes arbitrary exception text. Unknown remote `error_code` values are different from the producer's known `internal_failure`: they are invalid protocol evidence, as are a legacy free-form `error` field, extra fields, any payload line, duplicate keys, non-canonical JSON, or non-string codes. None is echoed to stderr or downgraded to `internal_failure`.
+
 Current dedicated helper path for those repeated remote Codex reads:
 
 ```bash

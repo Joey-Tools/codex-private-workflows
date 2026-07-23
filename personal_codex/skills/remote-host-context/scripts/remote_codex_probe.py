@@ -38,6 +38,63 @@ MAX_TERMINAL_TAIL_RECORD_BYTES = 16 * 1024 * 1024
 MAX_TERMINAL_TAIL_RECORDS = 1_000_000
 MAX_TERMINAL_TAIL_ANCHOR_BYTES = 128
 MIN_TERMINAL_TAIL_ANCHOR_BYTES = 32
+TERMINAL_TAIL_ERROR_MESSAGES = {
+    "invalid_rollout_path": "invalid rollout path",
+    "rollout_not_found": "rollout not found",
+    "rollout_unreadable": "rollout unreadable",
+    "rollout_path_invalid": "rollout path is unsafe",
+    "rollout_replaced": "rollout replaced during terminal-tail scan",
+    "rollout_truncated": "rollout truncated below frozen EOF",
+    "malformed_jsonl": "terminal-tail encountered malformed JSONL",
+    "record_too_large": "terminal-tail record exceeds byte limit",
+    "invalid_limits": "terminal-tail limits are invalid",
+    "internal_failure": "terminal-tail scan failed",
+}
+TERMINAL_TAIL_ERROR_PREFIX_CODES = (
+    ("invalid rollout path", "invalid_rollout_path"),
+    ("path must stay under Codex root", "rollout_path_invalid"),
+    ("Codex root is a symlink", "rollout_path_invalid"),
+    ("Codex root is not a directory", "rollout_path_invalid"),
+    ("Codex root changed", "rollout_replaced"),
+    ("path uses a symlink ancestor", "rollout_path_invalid"),
+    ("path ancestor is not a directory", "rollout_path_invalid"),
+    ("path ancestor changed", "rollout_replaced"),
+    ("rollout path has an invalid file name", "rollout_path_invalid"),
+    ("rollout path must name a file", "rollout_path_invalid"),
+    ("rollout path is a symlink", "rollout_path_invalid"),
+    ("rollout path is not a regular file", "rollout_path_invalid"),
+    ("rollout unreadable", "rollout_unreadable"),
+    ("rollout path unreadable", "rollout_unreadable"),
+    ("rollout identity changed", "rollout_replaced"),
+    ("rollout object replaced", "rollout_replaced"),
+    ("rollout path replaced", "rollout_replaced"),
+    ("rollout changed during open", "rollout_replaced"),
+    ("rollout truncated below frozen EOF", "rollout_truncated"),
+    ("terminal-tail read was truncated", "rollout_truncated"),
+    (
+        "terminal-tail frozen EOF lost its LF terminator",
+        "rollout_replaced",
+    ),
+    ("terminal-tail encountered an empty JSONL record", "malformed_jsonl"),
+    ("terminal-tail record is not valid UTF-8", "malformed_jsonl"),
+    ("terminal-tail encountered malformed JSONL", "malformed_jsonl"),
+    ("terminal-tail JSONL record must be an object", "malformed_jsonl"),
+    ("terminal-tail JSONL payload must be an object", "malformed_jsonl"),
+    (
+        "terminal-tail task_complete last_agent_message must be a string",
+        "malformed_jsonl",
+    ),
+    (
+        "terminal-tail task_complete result is not valid UTF-8",
+        "malformed_jsonl",
+    ),
+    ("terminal-tail record too large", "record_too_large"),
+    ("terminal-tail result too large", "record_too_large"),
+    ("terminal-tail window must be positive", "invalid_limits"),
+    ("terminal-tail scan limit must be positive", "invalid_limits"),
+    ("terminal-tail record limit must be positive", "invalid_limits"),
+    ("terminal-tail record count limit must be positive", "invalid_limits"),
+)
 MIN_ROLLOUT_CHUNK_BYTES = 64 * 1024
 DEFAULT_ROLLOUT_CHUNK_BYTES = 1024 * 1024
 MAX_ROLLOUT_CHUNK_BYTES = 2 * 1024 * 1024
@@ -1568,6 +1625,26 @@ def _pread_exact(fd: int, offset: int, length: int) -> bytes:
     return bytes(output)
 
 
+def _terminal_tail_error_code(error: BaseException) -> str:
+    if isinstance(error, FileNotFoundError):
+        return "rollout_not_found"
+    if isinstance(error, OSError):
+        return "rollout_unreadable"
+    message = str(error)
+    for prefix, code in TERMINAL_TAIL_ERROR_PREFIX_CODES:
+        if message.startswith(prefix):
+            return code
+    return "internal_failure"
+
+
+class _TerminalTailOperationError(ValueError):
+    def __init__(self, error_code: str, detail: str) -> None:
+        if error_code not in TERMINAL_TAIL_ERROR_MESSAGES:
+            raise ValueError("invalid terminal-tail error code")
+        super().__init__(detail)
+        self.error_code = error_code
+
+
 def _select_terminal_tail_anchor(
     window: bytes,
     *,
@@ -1981,14 +2058,25 @@ def _read_terminal_tail(
     max_record_bytes: int = MAX_TERMINAL_TAIL_RECORD_BYTES,
     max_records: int = MAX_TERMINAL_TAIL_RECORDS,
 ) -> TerminalTailResult:
-    with _open_pinned_rollout_text(codex_root, rollout_relative_path) as handle:
-        return _scan_terminal_tail_handle(
-            handle,
-            window_bytes=window_bytes,
-            max_scan_bytes=max_scan_bytes,
-            max_record_bytes=max_record_bytes,
-            max_records=max_records,
-        )
+    try:
+        with _open_pinned_rollout_text(
+            codex_root,
+            rollout_relative_path,
+        ) as handle:
+            return _scan_terminal_tail_handle(
+                handle,
+                window_bytes=window_bytes,
+                max_scan_bytes=max_scan_bytes,
+                max_record_bytes=max_record_bytes,
+                max_records=max_records,
+            )
+    except _TerminalTailOperationError:
+        raise
+    except ValueError as error:
+        raise _TerminalTailOperationError(
+            _terminal_tail_error_code(error),
+            str(error),
+        ) from error
 
 
 def _open_output_parent(output: pathlib.Path) -> int:
@@ -2573,6 +2661,8 @@ MAX_TERMINAL_TAIL_RECORDS = int(
 )
 MAX_TERMINAL_TAIL_ANCHOR_BYTES = int(CONFIG.get("max_terminal_tail_anchor_bytes", 0))
 MIN_TERMINAL_TAIL_ANCHOR_BYTES = int(CONFIG.get("min_terminal_tail_anchor_bytes", 0))
+TERMINAL_TAIL_ERROR_MESSAGES = {TERMINAL_TAIL_ERROR_MESSAGES!r}
+TERMINAL_TAIL_ERROR_PREFIX_CODES = {TERMINAL_TAIL_ERROR_PREFIX_CODES!r}
 MIN_ROLLOUT_CHUNK_BYTES = int(CONFIG.get("min_rollout_chunk_bytes", 0))
 MAX_ROLLOUT_CHUNK_BYTES = int(CONFIG.get("max_rollout_chunk_bytes", 0))
 MAX_ROLLOUT_CHUNK_RECORDS = {MAX_ROLLOUT_CHUNK_RECORDS}
@@ -3539,6 +3629,26 @@ def pread_exact(fd, offset, length):
     return bytes(output)
 
 
+def terminal_tail_error_code(error):
+    if isinstance(error, FileNotFoundError):
+        return "rollout_not_found"
+    if isinstance(error, OSError):
+        return "rollout_unreadable"
+    message = str(error)
+    for prefix, code in TERMINAL_TAIL_ERROR_PREFIX_CODES:
+        if message.startswith(prefix):
+            return code
+    return "internal_failure"
+
+
+class TerminalTailOperationError(ValueError):
+    def __init__(self, error_code, detail):
+        if error_code not in TERMINAL_TAIL_ERROR_MESSAGES:
+            raise ValueError("invalid terminal-tail error code")
+        super().__init__(detail)
+        self.error_code = error_code
+
+
 def select_terminal_tail_anchor(window, window_start):
     if not window:
         return None
@@ -3944,14 +4054,22 @@ def scan_terminal_tail_handle(
 
 
 def read_terminal_tail(rel):
-    with open_pinned_rollout_text(rel) as handle:
-        return scan_terminal_tail_handle(
-            handle,
-            TERMINAL_TAIL_WINDOW_BYTES,
-            MAX_TERMINAL_TAIL_SCAN_BYTES,
-            MAX_TERMINAL_TAIL_RECORD_BYTES,
-            MAX_TERMINAL_TAIL_RECORDS,
-        )
+    try:
+        with open_pinned_rollout_text(rel) as handle:
+            return scan_terminal_tail_handle(
+                handle,
+                TERMINAL_TAIL_WINDOW_BYTES,
+                MAX_TERMINAL_TAIL_SCAN_BYTES,
+                MAX_TERMINAL_TAIL_RECORD_BYTES,
+                MAX_TERMINAL_TAIL_RECORDS,
+            )
+    except TerminalTailOperationError:
+        raise
+    except ValueError as error:
+        raise TerminalTailOperationError(
+            terminal_tail_error_code(error),
+            str(error),
+        ) from error
 
 
 def flat_archived_rollout_matches_date(rollout, date_text):
@@ -5291,58 +5409,61 @@ def terminal_tail():
     rel = pathlib.PurePosixPath(str(CONFIG["rollout"]))
     normalized = rel.as_posix()
     print(TERMINAL_TAIL_BEGIN)
+
+    def emit_error(error_code):
+        if error_code not in TERMINAL_TAIL_ERROR_MESSAGES:
+            error_code = "internal_failure"
+        print(
+            json.dumps(
+                dict(ok=False, error_code=error_code),
+                separators=(",", ":"),
+                sort_keys=True,
+            )
+        )
+        print(TERMINAL_TAIL_END)
+
     if not (
         ACTIVE_ROLLOUT_RELATIVE_RE.fullmatch(normalized)
         or ARCHIVED_ROLLOUT_RELATIVE_RE.fullmatch(normalized)
     ):
-        print(
-            json.dumps(
-                dict(ok=False, error="invalid rollout path"),
-                separators=(",", ":"),
-                sort_keys=True,
-            )
-        )
-        print(TERMINAL_TAIL_END)
+        emit_error("invalid_rollout_path")
         return
     try:
         result = read_terminal_tail(rel)
+    except TerminalTailOperationError as error:
+        emit_error(error.error_code)
+        return
     except FileNotFoundError:
-        print(
-            json.dumps(
-                dict(ok=False, error="rollout not found"),
-                separators=(",", ":"),
-                sort_keys=True,
-            )
-        )
-        print(TERMINAL_TAIL_END)
+        emit_error("rollout_not_found")
         return
     except OSError:
-        print(
-            json.dumps(
-                dict(ok=False, error="rollout unreadable"),
-                separators=(",", ":"),
-                sort_keys=True,
-            )
-        )
-        print(TERMINAL_TAIL_END)
+        emit_error("rollout_unreadable")
         return
-    except ValueError as error:
-        print(
-            json.dumps(
-                dict(ok=False, error=str(error)),
-                separators=(",", ":"),
-                sort_keys=True,
-            )
-        )
-        print(TERMINAL_TAIL_END)
+    except ValueError:
+        emit_error("internal_failure")
         return
-    message = result.pop("message")
-    header = dict(result)
-    header["ok"] = True
-    header["bytes"] = len(message) if message is not None else 0
-    print(json.dumps(header, separators=(",", ":"), sort_keys=True))
-    if message:
-        print(base64.b64encode(message).decode("ascii"))
+    except Exception:
+        emit_error("internal_failure")
+        return
+    try:
+        message = result.pop("message")
+        header = dict(result)
+        header["ok"] = True
+        header["bytes"] = len(message) if message is not None else 0
+        header_line = json.dumps(
+            header,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        payload_line = (
+            base64.b64encode(message).decode("ascii") if message else None
+        )
+    except Exception:
+        emit_error("internal_failure")
+        return
+    print(header_line)
+    if payload_line is not None:
+        print(payload_line)
     print(TERMINAL_TAIL_END)
 
 
@@ -6007,18 +6128,17 @@ def _extract_framed_terminal_tail_payload(
 
     if header.get("ok") is False:
         if (
-            set(header) != {"ok", "error"}
-            or type(header.get("error")) is not str
+            set(header) != {"ok", "error_code"}
+            or type(header.get("error_code")) is not str
+            or header["error_code"] not in TERMINAL_TAIL_ERROR_MESSAGES
             or payload_line is not None
         ):
             raise ValueError(
                 f"remote terminal-tail output on host {host} had an invalid error header"
             )
-        if header["error"] == "rollout not found":
+        if header["error_code"] == "rollout_not_found":
             raise FileNotFoundError("rollout not found")
-        raise ValueError(
-            f"remote terminal-tail operation on host {host} failed"
-        )
+        raise ValueError(TERMINAL_TAIL_ERROR_MESSAGES[header["error_code"]])
 
     success_header_keys = {
         "ok",
@@ -6839,10 +6959,31 @@ def cmd_terminal_tail(args: argparse.Namespace) -> int:
 
     try:
         if HOSTS[alias]["kind"] == "local":
-            result = _read_terminal_tail(
-                _local_codex_root(),
-                rollout_relative_path,
-            )
+            try:
+                result = _read_terminal_tail(
+                    _local_codex_root(),
+                    rollout_relative_path,
+                )
+            except FileNotFoundError:
+                raise
+            except _TerminalTailOperationError as error:
+                raise ValueError(
+                    TERMINAL_TAIL_ERROR_MESSAGES[error.error_code]
+                ) from None
+            except OSError as error:
+                raise ValueError(
+                    TERMINAL_TAIL_ERROR_MESSAGES[
+                        _terminal_tail_error_code(error)
+                    ]
+                ) from None
+            except ValueError:
+                raise ValueError(
+                    TERMINAL_TAIL_ERROR_MESSAGES["internal_failure"]
+                ) from None
+            except Exception:
+                raise ValueError(
+                    TERMINAL_TAIL_ERROR_MESSAGES["internal_failure"]
+                ) from None
         else:
             payload = {
                 "mode": "terminal-tail",

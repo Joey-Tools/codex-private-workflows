@@ -29,6 +29,7 @@ superseded_by:
 - A trailing partial JSONL record at `S0` returns `source_in_progress`. A complete user turn after the newest task completion returns `terminal_not_reached`. Success requires the latest explicit `event_msg.task_complete.last_agent_message`.
 - Local and embedded scanners check the record budget before slicing or parsing another complete record. Exhausting it before terminal or complete-coverage resolution revalidates the anchor and returns the explicit non-success coverage status `record_limit_exceeded`; no terminal payload or output file is published.
 - Results, remote frames, and CLI metadata carry `records_examined`. The strict parent requires an integer from zero through 1,000,000, exact cap equality for `record_limit_exceeded`, and at least three scanned bytes per examined record based on the shortest complete object record `{}\n`; cross-window carry cannot evade this bound because it only joins non-overlapping bytes in the contiguous scanned span.
+- The remote producer reports failures through a closed, payload-free `error_code` enum. The parent preserves stable distinctions for missing, unreadable, unsafe, replaced, truncated, malformed, oversized-record, invalid-limit, and internal failures without accepting or displaying arbitrary remote detail.
 - Direct whole-file transfer still uses its independent 16 MiB cap; callers needing whole-rollout history use the identity-bound chunk plan and its 128 MiB automatic cumulative limit instead of treating `terminal-tail` as full reconstruction.
 
 ## Next Steps
