@@ -123,6 +123,8 @@ When the complete plan is allowed, use sequential bounded `fetch-rollout-chunk` 
 
 Use `terminal-tail` instead of complete reconstruction when the narrow question is whether one Codex rollout reached its current terminal answer. It is a lossless semantic tail read: success writes the exact `event_msg.task_complete.last_agent_message` string as UTF-8, with no redaction, normalization, or added newline, to a private task-scoped output file. Stdout contains compact status and coordinate metadata rather than the answer text.
 
+The output publisher creates a random 128-bit temporary leaf beneath the descriptor-pinned parent and keeps its read/write descriptor open through descriptor-relative atomic replacement. It checks the regular-file device/inode, current UID, exact `0600` mode, single-link count, size, and exact chunked readback before and after replacement, then performs one final entry-binding check before success. A replacement of the temporary or destination entry, or an in-place content mutation before that final check, fails the command. The protected property ends at that final revalidation: ordinary Unix permissions cannot isolate one process from another process running as the same UID, so a same-UID process with parent-directory write access can still alter the destination afterward. Use a cooperative task-scoped private output directory and treat later mutation as external to this publication receipt.
+
 ```bash
 python3 "$HOME/.codex/skills/remote-host-context/scripts/remote_codex_probe.py" terminal-tail \
   --host BL-mac-mini-m4-hoteng \

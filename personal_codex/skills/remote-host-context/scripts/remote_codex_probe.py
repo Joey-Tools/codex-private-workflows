@@ -2109,6 +2109,86 @@ def _open_output_parent(output: pathlib.Path) -> int:
         raise
 
 
+def _private_output_identity_matches(
+    observed: os.stat_result,
+    expected: os.stat_result,
+) -> bool:
+    return (
+        stat.S_ISREG(observed.st_mode)
+        and stat.S_ISREG(expected.st_mode)
+        and (observed.st_dev, observed.st_ino)
+        == (expected.st_dev, expected.st_ino)
+    )
+
+
+def _assert_private_output_binding(
+    fd: int,
+    parent_fd: int,
+    entry_name: str,
+    *,
+    expected_identity: os.stat_result,
+    expected_size: int,
+) -> None:
+    descriptor_stat = os.fstat(fd)
+    try:
+        entry_stat = os.stat(
+            entry_name,
+            dir_fd=parent_fd,
+            follow_symlinks=False,
+        )
+    except FileNotFoundError as error:
+        raise ValueError("private output entry changed during publication") from error
+    for observed in (descriptor_stat, entry_stat):
+        if not _private_output_identity_matches(observed, expected_identity):
+            raise ValueError("private output entry changed during publication")
+        if observed.st_uid != os.getuid():
+            raise ValueError("private output ownership changed during publication")
+        if stat.S_IMODE(observed.st_mode) != 0o600:
+            raise ValueError("private output mode changed during publication")
+        if observed.st_nlink != 1:
+            raise ValueError("private output link count changed during publication")
+        if observed.st_size != expected_size:
+            raise ValueError("private output size changed during publication")
+
+
+def _private_output_bytes_match(fd: int, expected: bytes) -> bool:
+    pread = getattr(os, "pread", None)
+    if pread is None:
+        raise OSError("secure output writes require os.pread")
+    offset = 0
+    view = memoryview(expected)
+    while offset < len(view):
+        length = min(1024 * 1024, len(view) - offset)
+        chunk = pread(fd, length, offset)
+        if chunk != view[offset : offset + length]:
+            return False
+        offset += length
+    return pread(fd, 1, len(view)) == b""
+
+
+def _unlink_private_output_temp_if_bound(
+    parent_fd: int,
+    temp_name: str,
+    expected_identity: os.stat_result | None,
+) -> None:
+    if expected_identity is None:
+        return
+    try:
+        observed = os.stat(
+            temp_name,
+            dir_fd=parent_fd,
+            follow_symlinks=False,
+        )
+    except FileNotFoundError:
+        return
+    if not _private_output_identity_matches(observed, expected_identity):
+        return
+    try:
+        os.unlink(temp_name, dir_fd=parent_fd)
+    except FileNotFoundError:
+        pass
+
+
 def _write_private_bytes(output: pathlib.Path, data: bytes) -> None:
     parent_fd = _open_output_parent(output)
     try:
@@ -2121,9 +2201,9 @@ def _write_private_bytes(output: pathlib.Path, data: bytes) -> None:
 
         last_error: FileExistsError | None = None
         for attempt in range(100):
-            temp_name = f".{output.name}.tmp-{os.getpid()}-{attempt}"
+            temp_name = f".codex-output-{os.urandom(16).hex()}"
             flags = (
-                os.O_WRONLY
+                os.O_RDWR
                 | os.O_CREAT
                 | os.O_EXCL
                 | getattr(os, "O_NOFOLLOW", 0)
@@ -2134,23 +2214,62 @@ def _write_private_bytes(output: pathlib.Path, data: bytes) -> None:
             except FileExistsError as error:
                 last_error = error
                 continue
+            expected_identity: os.stat_result | None = None
+            published = False
             try:
-                with os.fdopen(fd, "wb") as handle:
-                    handle.write(data)
-                    os.fchmod(handle.fileno(), 0o600)
+                expected_identity = os.fstat(fd)
+                view = memoryview(data)
+                written = 0
+                while written < len(view):
+                    count = os.write(fd, view[written:])
+                    if count < 1:
+                        raise OSError("private output write made no progress")
+                    written += count
+                os.fchmod(fd, 0o600)
+                expected_identity = os.fstat(fd)
+                _assert_private_output_binding(
+                    fd,
+                    parent_fd,
+                    temp_name,
+                    expected_identity=expected_identity,
+                    expected_size=len(data),
+                )
                 os.replace(
                     temp_name,
                     output.name,
                     src_dir_fd=parent_fd,
                     dst_dir_fd=parent_fd,
                 )
+                published = True
+                _assert_private_output_binding(
+                    fd,
+                    parent_fd,
+                    output.name,
+                    expected_identity=expected_identity,
+                    expected_size=len(data),
+                )
+                if not _private_output_bytes_match(fd, data):
+                    raise ValueError(
+                        "private output content changed during publication"
+                    )
+                _assert_private_output_binding(
+                    fd,
+                    parent_fd,
+                    output.name,
+                    expected_identity=expected_identity,
+                    expected_size=len(data),
+                )
                 return
             except Exception:
-                try:
-                    os.unlink(temp_name, dir_fd=parent_fd)
-                except FileNotFoundError:
-                    pass
+                if not published:
+                    _unlink_private_output_temp_if_bound(
+                        parent_fd,
+                        temp_name,
+                        expected_identity,
+                    )
                 raise
+            finally:
+                os.close(fd)
         raise FileExistsError(
             f"could not create private temporary output for {output}"
         ) from last_error

@@ -439,6 +439,8 @@ class RemoteHostContextDocumentationTests(unittest.TestCase):
         self.assertIn("shortest complete object record `{}\\n`", skill)
         self.assertIn('{"ok":false,"error_code":...}', skill)
         self.assertIn("Arbitrary remote exception text is never forwarded", skill)
+        self.assertIn("random 128-bit temporary name", skill)
+        self.assertIn("same UID", skill)
         self.assertIn("exact UTF-8 final message", skill)
         self.assertIn("Lossless Terminal Tail", reference)
         self.assertIn("no redaction, normalization, or added newline", reference)
@@ -457,6 +459,8 @@ class RemoteHostContextDocumentationTests(unittest.TestCase):
         self.assertIn("`malformed_jsonl`", reference)
         self.assertIn("never serializes arbitrary exception text", reference)
         self.assertIn("Unknown remote `error_code` values", reference)
+        self.assertIn("exact chunked readback", reference)
+        self.assertIn("same-UID process", reference)
 
 
 class SizeGuardedBytesIO(io.BytesIO):
@@ -4691,6 +4695,194 @@ class RemoteCodexProbeChunkTests(unittest.TestCase):
             self.assertEqual(len(replace_dir_fds), 1)
             self.assertIsNotNone(replace_dir_fds[0][0])
             self.assertEqual(replace_dir_fds[0][0], replace_dir_fds[0][1])
+
+    def test_private_output_rename_ignores_new_ordinary_parent_entry(self) -> None:
+        with tempfile.TemporaryDirectory(dir="/tmp") as temp_dir:
+            root = Path(temp_dir).resolve()
+            output_parent = root / "output"
+            output_parent.mkdir()
+            output = MODULE._resolve_output_path(str(output_parent / "result.txt"))
+            moved_parent = root / "moved-output"
+            real_replace = os.replace
+
+            def swap_parent_then_replace(
+                src: str,
+                dst: str,
+                *,
+                src_dir_fd: int | None = None,
+                dst_dir_fd: int | None = None,
+            ) -> None:
+                real_replace(output_parent, moved_parent)
+                output_parent.mkdir(mode=0o700)
+                real_replace(
+                    src,
+                    dst,
+                    src_dir_fd=src_dir_fd,
+                    dst_dir_fd=dst_dir_fd,
+                )
+
+            with mock.patch.object(
+                MODULE.os,
+                "replace",
+                side_effect=swap_parent_then_replace,
+            ):
+                MODULE._write_private_bytes(output, b"expected")
+
+            written_output = moved_parent / output.name
+            self.assertEqual(written_output.read_bytes(), b"expected")
+            self.assertEqual(written_output.stat().st_mode & 0o777, 0o600)
+            self.assertFalse((output_parent / output.name).exists())
+
+    def test_private_output_success_replaces_regular_sentinel(self) -> None:
+        with tempfile.TemporaryDirectory(dir="/tmp") as temp_dir:
+            root = Path(temp_dir).resolve()
+            output = MODULE._resolve_output_path(str(root / "result.txt"))
+            output.write_bytes(b"sentinel")
+            output.chmod(0o644)
+
+            MODULE._write_private_bytes(output, b"expected")
+
+            self.assertEqual(output.read_bytes(), b"expected")
+            self.assertEqual(output.stat().st_mode & 0o777, 0o600)
+            self.assertEqual(list(root.glob(".codex-output-*")), [])
+
+    def test_private_output_rejects_temp_replacement_before_rename(self) -> None:
+        with tempfile.TemporaryDirectory(dir="/tmp") as temp_dir:
+            root = Path(temp_dir).resolve()
+            output = MODULE._resolve_output_path(str(root / "result.txt"))
+            real_replace = os.replace
+            replacement = b"replacement"
+
+            def replace_temp_then_publish(
+                src: str,
+                dst: str,
+                *,
+                src_dir_fd: int | None = None,
+                dst_dir_fd: int | None = None,
+            ) -> None:
+                self.assertRegex(src, r"^\.codex-output-[0-9a-f]{32}$")
+                self.assertIsNotNone(src_dir_fd)
+                os.unlink(src, dir_fd=src_dir_fd)
+                replacement_fd = os.open(
+                    src,
+                    os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                    0o600,
+                    dir_fd=src_dir_fd,
+                )
+                try:
+                    os.write(replacement_fd, replacement)
+                finally:
+                    os.close(replacement_fd)
+                real_replace(
+                    src,
+                    dst,
+                    src_dir_fd=src_dir_fd,
+                    dst_dir_fd=dst_dir_fd,
+                )
+
+            with (
+                mock.patch.object(
+                    MODULE.os,
+                    "replace",
+                    side_effect=replace_temp_then_publish,
+                ),
+                self.assertRaisesRegex(
+                    ValueError,
+                    "private output .* changed during publication",
+                ),
+            ):
+                MODULE._write_private_bytes(output, b"expected")
+
+            self.assertEqual(output.read_bytes(), replacement)
+
+    def test_private_output_rejects_target_replacement_after_rename(self) -> None:
+        with tempfile.TemporaryDirectory(dir="/tmp") as temp_dir:
+            root = Path(temp_dir).resolve()
+            output = MODULE._resolve_output_path(str(root / "result.txt"))
+            real_replace = os.replace
+            replacement = b"replacement"
+
+            def publish_then_replace_target(
+                src: str,
+                dst: str,
+                *,
+                src_dir_fd: int | None = None,
+                dst_dir_fd: int | None = None,
+            ) -> None:
+                real_replace(
+                    src,
+                    dst,
+                    src_dir_fd=src_dir_fd,
+                    dst_dir_fd=dst_dir_fd,
+                )
+                os.unlink(dst, dir_fd=dst_dir_fd)
+                replacement_fd = os.open(
+                    dst,
+                    os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                    0o600,
+                    dir_fd=dst_dir_fd,
+                )
+                try:
+                    os.write(replacement_fd, replacement)
+                finally:
+                    os.close(replacement_fd)
+
+            with (
+                mock.patch.object(
+                    MODULE.os,
+                    "replace",
+                    side_effect=publish_then_replace_target,
+                ),
+                self.assertRaisesRegex(
+                    ValueError,
+                    "private output .* changed during publication",
+                ),
+            ):
+                MODULE._write_private_bytes(output, b"expected")
+
+            self.assertEqual(output.read_bytes(), replacement)
+
+    def test_private_output_rejects_bound_content_mutation(self) -> None:
+        with tempfile.TemporaryDirectory(dir="/tmp") as temp_dir:
+            root = Path(temp_dir).resolve()
+            output = MODULE._resolve_output_path(str(root / "result.txt"))
+            real_replace = os.replace
+            expected = b"expected!"
+            replacement = b"tampered!"
+
+            def publish_then_mutate_target(
+                src: str,
+                dst: str,
+                *,
+                src_dir_fd: int | None = None,
+                dst_dir_fd: int | None = None,
+            ) -> None:
+                real_replace(
+                    src,
+                    dst,
+                    src_dir_fd=src_dir_fd,
+                    dst_dir_fd=dst_dir_fd,
+                )
+                target_fd = os.open(dst, os.O_WRONLY, dir_fd=dst_dir_fd)
+                try:
+                    os.write(target_fd, replacement)
+                finally:
+                    os.close(target_fd)
+
+            with (
+                mock.patch.object(
+                    MODULE.os,
+                    "replace",
+                    side_effect=publish_then_mutate_target,
+                ),
+                self.assertRaisesRegex(
+                    ValueError,
+                    "private output content changed during publication",
+                ),
+            ):
+                MODULE._write_private_bytes(output, expected)
+
+            self.assertEqual(output.read_bytes(), replacement)
 
     def test_rollout_readers_stay_on_pinned_ancestor_after_swap(self) -> None:
         operations = (
