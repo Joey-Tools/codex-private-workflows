@@ -4751,7 +4751,7 @@ class RemoteCodexProbeChunkTests(unittest.TestCase):
             root = Path(temp_dir).resolve()
             output = MODULE._resolve_output_path(str(root / "result.txt"))
             real_replace = os.replace
-            replacement = b"replacement"
+            replacement = b"replaced"
 
             def replace_temp_then_publish(
                 src: str,
@@ -4788,7 +4788,7 @@ class RemoteCodexProbeChunkTests(unittest.TestCase):
                 ),
                 self.assertRaisesRegex(
                     ValueError,
-                    "private output .* changed during publication",
+                    "private output entry changed during publication",
                 ),
             ):
                 MODULE._write_private_bytes(output, b"expected")
@@ -4800,7 +4800,7 @@ class RemoteCodexProbeChunkTests(unittest.TestCase):
             root = Path(temp_dir).resolve()
             output = MODULE._resolve_output_path(str(root / "result.txt"))
             real_replace = os.replace
-            replacement = b"replacement"
+            replacement = b"replaced"
 
             def publish_then_replace_target(
                 src: str,
@@ -4835,54 +4835,40 @@ class RemoteCodexProbeChunkTests(unittest.TestCase):
                 ),
                 self.assertRaisesRegex(
                     ValueError,
-                    "private output .* changed during publication",
+                    "private output entry changed during publication",
                 ),
             ):
                 MODULE._write_private_bytes(output, b"expected")
 
             self.assertEqual(output.read_bytes(), replacement)
 
-    def test_private_output_rejects_bound_content_mutation(self) -> None:
+    def test_private_output_rejects_prepublication_content_mutation(self) -> None:
         with tempfile.TemporaryDirectory(dir="/tmp") as temp_dir:
             root = Path(temp_dir).resolve()
             output = MODULE._resolve_output_path(str(root / "result.txt"))
-            real_replace = os.replace
+            real_match = MODULE._private_output_bytes_match
             expected = b"expected!"
             replacement = b"tampered!"
 
-            def publish_then_mutate_target(
-                src: str,
-                dst: str,
-                *,
-                src_dir_fd: int | None = None,
-                dst_dir_fd: int | None = None,
-            ) -> None:
-                real_replace(
-                    src,
-                    dst,
-                    src_dir_fd=src_dir_fd,
-                    dst_dir_fd=dst_dir_fd,
-                )
-                target_fd = os.open(dst, os.O_WRONLY, dir_fd=dst_dir_fd)
-                try:
-                    os.write(target_fd, replacement)
-                finally:
-                    os.close(target_fd)
+            def mutate_then_match(fd: int, data: bytes) -> bool:
+                os.pwrite(fd, replacement, 0)
+                return real_match(fd, data)
 
             with (
                 mock.patch.object(
-                    MODULE.os,
-                    "replace",
-                    side_effect=publish_then_mutate_target,
+                    MODULE,
+                    "_private_output_bytes_match",
+                    side_effect=mutate_then_match,
                 ),
                 self.assertRaisesRegex(
                     ValueError,
-                    "private output content changed during publication",
+                    "private output content changed before publication",
                 ),
             ):
                 MODULE._write_private_bytes(output, expected)
 
-            self.assertEqual(output.read_bytes(), replacement)
+            self.assertFalse(output.exists())
+            self.assertEqual(list(root.glob(".codex-output-*")), [])
 
     def test_rollout_readers_stay_on_pinned_ancestor_after_swap(self) -> None:
         operations = (

@@ -2138,9 +2138,12 @@ def _assert_private_output_binding(
         )
     except FileNotFoundError as error:
         raise ValueError("private output entry changed during publication") from error
+    if not _private_output_identity_matches(
+        descriptor_stat,
+        expected_identity,
+    ) or not _private_output_identity_matches(entry_stat, expected_identity):
+        raise ValueError("private output entry changed during publication")
     for observed in (descriptor_stat, entry_stat):
-        if not _private_output_identity_matches(observed, expected_identity):
-            raise ValueError("private output entry changed during publication")
         if observed.st_uid != os.getuid():
             raise ValueError("private output ownership changed during publication")
         if stat.S_IMODE(observed.st_mode) != 0o600:
@@ -2234,6 +2237,17 @@ def _write_private_bytes(output: pathlib.Path, data: bytes) -> None:
                     expected_identity=expected_identity,
                     expected_size=len(data),
                 )
+                if not _private_output_bytes_match(fd, data):
+                    raise ValueError(
+                        "private output content changed before publication"
+                    )
+                _assert_private_output_binding(
+                    fd,
+                    parent_fd,
+                    temp_name,
+                    expected_identity=expected_identity,
+                    expected_size=len(data),
+                )
                 os.replace(
                     temp_name,
                     output.name,
@@ -2241,17 +2255,6 @@ def _write_private_bytes(output: pathlib.Path, data: bytes) -> None:
                     dst_dir_fd=parent_fd,
                 )
                 published = True
-                _assert_private_output_binding(
-                    fd,
-                    parent_fd,
-                    output.name,
-                    expected_identity=expected_identity,
-                    expected_size=len(data),
-                )
-                if not _private_output_bytes_match(fd, data):
-                    raise ValueError(
-                        "private output content changed during publication"
-                    )
                 _assert_private_output_binding(
                     fd,
                     parent_fd,
