@@ -35,6 +35,7 @@ MAX_AUTOMATIC_FULL_RECONSTRUCTION_BYTES = 128 * 1024 * 1024
 DEFAULT_TERMINAL_TAIL_WINDOW_BYTES = 4 * 1024 * 1024
 MAX_TERMINAL_TAIL_SCAN_BYTES = 128 * 1024 * 1024
 MAX_TERMINAL_TAIL_RECORD_BYTES = 16 * 1024 * 1024
+MAX_TERMINAL_TAIL_RECORDS = 1_000_000
 MAX_TERMINAL_TAIL_ANCHOR_BYTES = 128
 MIN_TERMINAL_TAIL_ANCHOR_BYTES = 32
 MIN_ROLLOUT_CHUNK_BYTES = 64 * 1024
@@ -308,6 +309,7 @@ class TerminalTailResult:
     scan_end: int
     scanned_bytes: int
     window_count: int
+    records_examined: int
     anchor_offset: int | None
     anchor_length: int
     append_observed: bool
@@ -1755,6 +1757,7 @@ def _scan_terminal_tail_handle(
     window_bytes: int,
     max_scan_bytes: int,
     max_record_bytes: int,
+    max_records: int,
 ) -> TerminalTailResult:
     if window_bytes < 1:
         raise ValueError("terminal-tail window must be positive")
@@ -1762,12 +1765,15 @@ def _scan_terminal_tail_handle(
         raise ValueError("terminal-tail scan limit must be positive")
     if max_record_bytes < 1:
         raise ValueError("terminal-tail record limit must be positive")
+    if max_records < 1:
+        raise ValueError("terminal-tail record count limit must be positive")
 
     source_identity = handle.open_identity
     source_bytes = source_identity.size
     observed_source_bytes = source_bytes
     scan_start = source_bytes
     window_count = 0
+    records_examined = 0
     anchor: _TerminalTailAnchor | None = None
 
     def result(
@@ -1785,6 +1791,7 @@ def _scan_terminal_tail_handle(
             scan_end=source_bytes,
             scanned_bytes=source_bytes - scan_start,
             window_count=window_count,
+            records_examined=records_examined,
             anchor_offset=anchor.offset if anchor is not None else None,
             anchor_length=len(anchor.data) if anchor is not None else 0,
             append_observed=observed_source_bytes > source_bytes,
@@ -1829,6 +1836,18 @@ def _scan_terminal_tail_handle(
                 message=message,
                 terminal_record_offset=record_offset,
             )
+        return None
+
+    def record_limit_result() -> TerminalTailResult:
+        if not anchor_stable("before terminal-tail record-limit result"):
+            return result("anchor_moved")
+        return result("record_limit_exceeded")
+
+    def consume_record_budget() -> TerminalTailResult | None:
+        nonlocal records_examined
+        if records_examined >= max_records:
+            return record_limit_result()
+        records_examined += 1
         return None
 
     observed_source_bytes = max(
@@ -1899,6 +1918,9 @@ def _scan_terminal_tail_handle(
             if separator < 0:
                 break
             record_start = separator + 1
+            budget_result = consume_record_budget()
+            if budget_result is not None:
+                return budget_result
             record_length = record_end - record_start
             if record_length > max_record_bytes:
                 raise ValueError(
@@ -1911,9 +1933,14 @@ def _scan_terminal_tail_handle(
             )
             if record_result is not None:
                 return record_result
+            if records_examined >= max_records:
+                return record_limit_result()
             record_end = separator
 
         if start == 0:
+            budget_result = consume_record_budget()
+            if budget_result is not None:
+                return budget_result
             if record_end > max_record_bytes:
                 raise ValueError(
                     "terminal-tail record too large: "
@@ -1952,6 +1979,7 @@ def _read_terminal_tail(
     window_bytes: int = DEFAULT_TERMINAL_TAIL_WINDOW_BYTES,
     max_scan_bytes: int = MAX_TERMINAL_TAIL_SCAN_BYTES,
     max_record_bytes: int = MAX_TERMINAL_TAIL_RECORD_BYTES,
+    max_records: int = MAX_TERMINAL_TAIL_RECORDS,
 ) -> TerminalTailResult:
     with _open_pinned_rollout_text(codex_root, rollout_relative_path) as handle:
         return _scan_terminal_tail_handle(
@@ -1959,6 +1987,7 @@ def _read_terminal_tail(
             window_bytes=window_bytes,
             max_scan_bytes=max_scan_bytes,
             max_record_bytes=max_record_bytes,
+            max_records=max_records,
         )
 
 
@@ -2539,6 +2568,9 @@ MAX_FETCH_ROLLOUT_CHUNK_BYTES = int(CONFIG.get("max_fetch_rollout_chunk_bytes", 
 TERMINAL_TAIL_WINDOW_BYTES = int(CONFIG.get("terminal_tail_window_bytes", 0))
 MAX_TERMINAL_TAIL_SCAN_BYTES = int(CONFIG.get("max_terminal_tail_scan_bytes", 0))
 MAX_TERMINAL_TAIL_RECORD_BYTES = int(CONFIG.get("max_terminal_tail_record_bytes", 0))
+MAX_TERMINAL_TAIL_RECORDS = int(
+    CONFIG.get("max_terminal_tail_records", {MAX_TERMINAL_TAIL_RECORDS})
+)
 MAX_TERMINAL_TAIL_ANCHOR_BYTES = int(CONFIG.get("max_terminal_tail_anchor_bytes", 0))
 MIN_TERMINAL_TAIL_ANCHOR_BYTES = int(CONFIG.get("min_terminal_tail_anchor_bytes", 0))
 MIN_ROLLOUT_CHUNK_BYTES = int(CONFIG.get("min_rollout_chunk_bytes", 0))
@@ -3695,6 +3727,7 @@ def scan_terminal_tail_handle(
     window_bytes,
     max_scan_bytes,
     max_record_bytes,
+    max_records,
 ):
     if window_bytes < 1:
         raise ValueError("terminal-tail window must be positive")
@@ -3702,11 +3735,14 @@ def scan_terminal_tail_handle(
         raise ValueError("terminal-tail scan limit must be positive")
     if max_record_bytes < 1:
         raise ValueError("terminal-tail record limit must be positive")
+    if max_records < 1:
+        raise ValueError("terminal-tail record count limit must be positive")
     source_identity = handle.open_identity
     source_bytes = source_identity["size"]
     observed_source_bytes = source_bytes
     scan_start = source_bytes
     window_count = 0
+    records_examined = 0
     anchor = None
 
     def make_result(status, message=None, terminal_record_offset=None):
@@ -3719,6 +3755,7 @@ def scan_terminal_tail_handle(
             scan_end=source_bytes,
             scanned_bytes=source_bytes - scan_start,
             window_count=window_count,
+            records_examined=records_examined,
             anchor_offset=(anchor["offset"] if anchor is not None else None),
             anchor_length=(len(anchor["data"]) if anchor is not None else 0),
             append_observed=observed_source_bytes > source_bytes,
@@ -3764,6 +3801,18 @@ def scan_terminal_tail_handle(
                 message=message,
                 terminal_record_offset=record_offset,
             )
+        return None
+
+    def record_limit_result():
+        if not anchor_stable("before terminal-tail record-limit result"):
+            return make_result("anchor_moved")
+        return make_result("record_limit_exceeded")
+
+    def consume_record_budget():
+        nonlocal records_examined
+        if records_examined >= max_records:
+            return record_limit_result()
+        records_examined += 1
         return None
 
     observed_source_bytes = max(
@@ -3834,6 +3883,9 @@ def scan_terminal_tail_handle(
             if separator < 0:
                 break
             record_start = separator + 1
+            budget_result = consume_record_budget()
+            if budget_result is not None:
+                return budget_result
             record_length = record_end - record_start
             if record_length > max_record_bytes:
                 raise ValueError(
@@ -3848,9 +3900,14 @@ def scan_terminal_tail_handle(
             )
             if record_result is not None:
                 return record_result
+            if records_examined >= max_records:
+                return record_limit_result()
             record_end = separator
 
         if start == 0:
+            budget_result = consume_record_budget()
+            if budget_result is not None:
+                return budget_result
             if record_end > max_record_bytes:
                 raise ValueError(
                     "terminal-tail record too large: "
@@ -3893,6 +3950,7 @@ def read_terminal_tail(rel):
             TERMINAL_TAIL_WINDOW_BYTES,
             MAX_TERMINAL_TAIL_SCAN_BYTES,
             MAX_TERMINAL_TAIL_RECORD_BYTES,
+            MAX_TERMINAL_TAIL_RECORDS,
         )
 
 
@@ -5972,6 +6030,7 @@ def _extract_framed_terminal_tail_payload(
         "scan_end",
         "scanned_bytes",
         "window_count",
+        "records_examined",
         "anchor_offset",
         "anchor_length",
         "append_observed",
@@ -5988,6 +6047,7 @@ def _extract_framed_terminal_tail_payload(
         "source_in_progress",
         "terminal_not_reached",
         "tail_window_insufficient",
+        "record_limit_exceeded",
         "anchor_unavailable",
         "anchor_moved",
     }
@@ -6014,6 +6074,7 @@ def _extract_framed_terminal_tail_payload(
     scan_end = integer_field("scan_end")
     scanned_bytes = integer_field("scanned_bytes")
     window_count = integer_field("window_count")
+    records_examined = integer_field("records_examined")
     anchor_length = integer_field("anchor_length")
     expected_bytes = integer_field("bytes")
     if observed_source_bytes < source_bytes:
@@ -6038,12 +6099,23 @@ def _extract_framed_terminal_tail_payload(
         raise ValueError(
             f"remote terminal-tail output on host {host} had invalid window coordinates"
         )
+    if records_examined > MAX_TERMINAL_TAIL_RECORDS:
+        raise ValueError(
+            f"remote terminal-tail output on host {host} exceeded the record limit"
+        )
+    minimum_examined_bytes = records_examined * len(b"{}\n")
+    if scanned_bytes < minimum_examined_bytes:
+        raise ValueError(
+            f"remote terminal-tail output on host {host} had impossible "
+            "record-count evidence"
+        )
     if status == "source_in_progress":
         if (
             source_bytes < 1
             or scan_start != source_bytes - 1
             or scanned_bytes != 1
             or window_count != 1
+            or records_examined != 0
         ):
             raise ValueError(
                 f"remote terminal-tail output on host {host} had invalid "
@@ -6125,7 +6197,9 @@ def _extract_framed_terminal_tail_payload(
                 f"remote terminal-tail output on host {host} had invalid terminal offset"
             )
     if status == "complete" and (
-        anchor_offset is None or terminal_record_offset is None
+        anchor_offset is None
+        or terminal_record_offset is None
+        or records_examined < 1
     ):
         raise ValueError(
             f"remote terminal-tail output on host {host} lacked complete-result "
@@ -6150,6 +6224,7 @@ def _extract_framed_terminal_tail_payload(
         if (
             source_bytes < 1
             or window_count != 1
+            or records_examined != 0
             or anchor_offset is not None
             or terminal_record_offset is not None
         ):
@@ -6167,6 +6242,7 @@ def _extract_framed_terminal_tail_payload(
         if (
             source_bytes <= MAX_TERMINAL_TAIL_SCAN_BYTES
             or scanned_bytes != MAX_TERMINAL_TAIL_SCAN_BYTES
+            or records_examined >= MAX_TERMINAL_TAIL_RECORDS
             or anchor_offset is None
             or terminal_record_offset is not None
         ):
@@ -6174,10 +6250,23 @@ def _extract_framed_terminal_tail_payload(
                 f"remote terminal-tail output on host {host} had invalid "
                 "tail-window evidence"
             )
+    elif status == "record_limit_exceeded":
+        if (
+            scanned_bytes < 1
+            or window_count < 1
+            or records_examined != MAX_TERMINAL_TAIL_RECORDS
+            or anchor_offset is None
+            or terminal_record_offset is not None
+        ):
+            raise ValueError(
+                f"remote terminal-tail output on host {host} had invalid "
+                "record-limit evidence"
+            )
     elif status == "terminal_not_reached":
         if source_bytes == 0:
             if (
                 window_count != 0
+                or records_examined != 0
                 or anchor_offset is not None
                 or terminal_record_offset is not None
             ):
@@ -6185,8 +6274,10 @@ def _extract_framed_terminal_tail_payload(
                     f"remote terminal-tail output on host {host} had invalid "
                     "empty-source evidence"
                 )
-        elif anchor_offset is None or (
-            terminal_record_offset is None and scan_start != 0
+        elif (
+            records_examined < 1
+            or anchor_offset is None
+            or (terminal_record_offset is None and scan_start != 0)
         ):
             raise ValueError(
                 f"remote terminal-tail output on host {host} had invalid "
@@ -6262,6 +6353,7 @@ def _extract_framed_terminal_tail_payload(
         scan_end=scan_end,
         scanned_bytes=scanned_bytes,
         window_count=window_count,
+        records_examined=records_examined,
         anchor_offset=anchor_offset,
         anchor_length=anchor_length,
         append_observed=append_observed,
@@ -6715,6 +6807,8 @@ def _print_terminal_tail_metadata(
     print(f"scan_end={result.scan_end}")
     print(f"scanned_bytes={result.scanned_bytes}")
     print(f"window_count={result.window_count}")
+    print(f"records_examined={result.records_examined}")
+    print(f"max_terminal_tail_records={MAX_TERMINAL_TAIL_RECORDS}")
     print(
         "anchor_offset="
         + (str(result.anchor_offset) if result.anchor_offset is not None else "")
@@ -6765,6 +6859,7 @@ def cmd_terminal_tail(args: argparse.Namespace) -> int:
                 ),
                 "max_terminal_tail_scan_bytes": MAX_TERMINAL_TAIL_SCAN_BYTES,
                 "max_terminal_tail_record_bytes": MAX_TERMINAL_TAIL_RECORD_BYTES,
+                "max_terminal_tail_records": MAX_TERMINAL_TAIL_RECORDS,
                 "max_terminal_tail_anchor_bytes": (
                     MAX_TERMINAL_TAIL_ANCHOR_BYTES
                 ),

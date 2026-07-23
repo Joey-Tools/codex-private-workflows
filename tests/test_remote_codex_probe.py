@@ -11,7 +11,7 @@ import sys
 import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from unittest import mock
 
 
@@ -433,6 +433,10 @@ class RemoteHostContextDocumentationTests(unittest.TestCase):
         )
         self.assertIn("non-LF-terminated record at `S0` means `source_in_progress`", skill)
         self.assertIn("means `terminal_not_reached`", skill)
+        self.assertIn("1,000,000 complete JSONL records", skill)
+        self.assertIn("`record_limit_exceeded`", skill)
+        self.assertIn("`records_examined`", skill)
+        self.assertIn("shortest complete object record `{}\\n`", skill)
         self.assertIn("exact UTF-8 final message", skill)
         self.assertIn("Lossless Terminal Tail", reference)
         self.assertIn("no redaction, normalization, or added newline", reference)
@@ -444,6 +448,9 @@ class RemoteHostContextDocumentationTests(unittest.TestCase):
             "does not claim resistance to that adversarial mutation",
             reference,
         )
+        self.assertIn("1,000,000 complete records", reference)
+        self.assertIn("`record_limit_exceeded`", reference)
+        self.assertIn("`scanned_bytes >= 3 * records_examined`", reference)
 
 
 class SizeGuardedBytesIO(io.BytesIO):
@@ -8473,6 +8480,7 @@ class RemoteCodexProbeTerminalTailTests(unittest.TestCase):
         window_bytes: int,
         max_scan_bytes: int,
         max_record_bytes: int,
+        max_records: int = MODULE.MAX_TERMINAL_TAIL_RECORDS,
     ) -> dict[str, object]:
         return embedded_probe_namespace(
             {
@@ -8482,6 +8490,7 @@ class RemoteCodexProbeTerminalTailTests(unittest.TestCase):
                 "terminal_tail_window_bytes": window_bytes,
                 "max_terminal_tail_scan_bytes": max_scan_bytes,
                 "max_terminal_tail_record_bytes": max_record_bytes,
+                "max_terminal_tail_records": max_records,
                 "max_terminal_tail_anchor_bytes": (
                     MODULE.MAX_TERMINAL_TAIL_ANCHOR_BYTES
                 ),
@@ -8491,11 +8500,72 @@ class RemoteCodexProbeTerminalTailTests(unittest.TestCase):
             }
         )
 
+    def _read_local_and_embedded_with_record_counter(
+        self,
+        codex_root: Path,
+        rollout: str,
+        *,
+        max_records: int,
+        window_bytes: int = 64,
+        max_scan_bytes: int = 4096,
+        max_record_bytes: int = 1024,
+    ) -> tuple[MODULE.TerminalTailResult, dict[str, object], int, int]:
+        local_calls = 0
+        local_disposition = MODULE._terminal_tail_record_disposition
+
+        def counted_local_disposition(
+            *args: object,
+            **kwargs: object,
+        ) -> tuple[str, bytes | None]:
+            nonlocal local_calls
+            local_calls += 1
+            return local_disposition(*args, **kwargs)
+
+        with mock.patch.object(
+            MODULE,
+            "_terminal_tail_record_disposition",
+            side_effect=counted_local_disposition,
+        ):
+            local = MODULE._read_terminal_tail(
+                codex_root,
+                MODULE._resolve_rollout_relative_path(rollout),
+                window_bytes=window_bytes,
+                max_scan_bytes=max_scan_bytes,
+                max_record_bytes=max_record_bytes,
+                max_records=max_records,
+            )
+
+        namespace = self._embedded_terminal_tail_namespace(
+            codex_root,
+            rollout,
+            window_bytes=window_bytes,
+            max_scan_bytes=max_scan_bytes,
+            max_record_bytes=max_record_bytes,
+            max_records=max_records,
+        )
+        embedded_calls = 0
+        embedded_disposition = namespace["terminal_tail_record_disposition"]
+
+        def counted_embedded_disposition(
+            *args: object,
+            **kwargs: object,
+        ) -> tuple[str, bytes | None]:
+            nonlocal embedded_calls
+            embedded_calls += 1
+            return embedded_disposition(*args, **kwargs)
+
+        namespace["terminal_tail_record_disposition"] = counted_embedded_disposition
+        embedded = namespace["read_terminal_tail"](
+            namespace["pathlib"].PurePosixPath(rollout)
+        )
+        return local, embedded, local_calls, embedded_calls
+
     @staticmethod
     def _remote_terminal_tail_header(
         *,
         status: str = "complete",
         message: bytes | None = b"remote exact bytes",
+        records_examined: int = 1,
     ) -> dict[str, object]:
         return {
             "ok": True,
@@ -8507,11 +8577,34 @@ class RemoteCodexProbeTerminalTailTests(unittest.TestCase):
             "scan_end": 512,
             "scanned_bytes": 512,
             "window_count": 1,
+            "records_examined": records_examined,
             "anchor_offset": 32,
             "anchor_length": 32,
             "append_observed": False,
             "terminal_record_offset": 64,
         }
+
+    @classmethod
+    def _remote_record_limit_header(cls) -> dict[str, object]:
+        source_bytes = MODULE.MAX_TERMINAL_TAIL_RECORDS * len(b"{}\n") + 512
+        header = cls._remote_terminal_tail_header(
+            status="record_limit_exceeded",
+            message=None,
+            records_examined=MODULE.MAX_TERMINAL_TAIL_RECORDS,
+        )
+        header.update(
+            {
+                "source_bytes": source_bytes,
+                "observed_source_bytes": source_bytes,
+                "scan_start": 0,
+                "scan_end": source_bytes,
+                "scanned_bytes": source_bytes,
+                "window_count": 1,
+                "anchor_offset": source_bytes - 128,
+                "terminal_record_offset": None,
+            }
+        )
+        return header
 
     @staticmethod
     def _remote_terminal_tail_frame(
@@ -8577,6 +8670,7 @@ class RemoteCodexProbeTerminalTailTests(unittest.TestCase):
             4 * 1024 * 1024,
         )
         self.assertEqual(MODULE.MAX_TERMINAL_TAIL_RECORD_BYTES, 16 * 1024 * 1024)
+        self.assertEqual(MODULE.MAX_TERMINAL_TAIL_RECORDS, 1_000_000)
         self.assertEqual(
             MODULE.MAX_REMOTE_FETCH_ROLLOUT_STDOUT_BYTES,
             4 * ((MODULE.MAX_DIRECT_FETCH_ROLLOUT_BYTES + 2) // 3)
@@ -8772,6 +8866,180 @@ class RemoteCodexProbeTerminalTailTests(unittest.TestCase):
         self.assertEqual(result.status, "tail_window_insufficient")
         self.assertIsNone(result.message)
         self.assertEqual(result.scanned_bytes, 128)
+
+    def test_record_budget_bounds_local_and_embedded_json_parsing(self) -> None:
+        record_limit = 5
+        source = (
+            b"{}\n" * 32
+            + self._jsonl_record(
+                {
+                    "type": "noise",
+                    "payload": {
+                        "anchor": "terminal-tail-record-budget-unique-anchor",
+                    },
+                }
+            )
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            codex_root = Path(temp_dir) / ".codex"
+            rollout = self._write_rollout_bytes(codex_root, source)
+            local, embedded, local_calls, embedded_calls = (
+                self._read_local_and_embedded_with_record_counter(
+                    codex_root,
+                    rollout,
+                    max_records=record_limit,
+                )
+            )
+
+        self.assertEqual(local.status, "record_limit_exceeded")
+        self.assertEqual(embedded["status"], "record_limit_exceeded")
+        self.assertEqual(local_calls, record_limit)
+        self.assertEqual(embedded_calls, record_limit)
+        self.assertEqual(local.records_examined, record_limit)
+        self.assertEqual(embedded["records_examined"], record_limit)
+        self.assertLessEqual(local_calls, record_limit)
+        self.assertLessEqual(embedded_calls, record_limit)
+        self.assertIsNone(local.message)
+        self.assertIsNone(embedded["message"])
+        self.assertIsNotNone(local.anchor_offset)
+        self.assertIsNotNone(embedded["anchor_offset"])
+        self.assertGreater(local.scanned_bytes, 0)
+        self.assertGreater(embedded["scanned_bytes"], 0)
+        self.assertGreaterEqual(local.window_count, 1)
+        self.assertGreaterEqual(embedded["window_count"], 1)
+        parity_fields = (
+            "source_bytes",
+            "observed_source_bytes",
+            "scan_start",
+            "scan_end",
+            "scanned_bytes",
+            "window_count",
+            "records_examined",
+            "anchor_offset",
+            "anchor_length",
+            "append_observed",
+            "terminal_record_offset",
+        )
+        self.assertEqual(
+            {field: getattr(local, field) for field in parity_fields},
+            {field: embedded[field] for field in parity_fields},
+        )
+
+    def test_terminal_result_at_record_budget_boundary_succeeds(self) -> None:
+        record_limit = 3
+        message = "boundary result"
+        source = (
+            b"{}\n" * 8
+            + self._task_complete(message)
+            + self._jsonl_record(
+                {"type": "noise", "payload": {"position": "newer"}}
+            )
+            + self._jsonl_record(
+                {
+                    "type": "noise",
+                    "payload": {
+                        "anchor": "terminal-tail-boundary-unique-anchor",
+                    },
+                }
+            )
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            codex_root = Path(temp_dir) / ".codex"
+            rollout = self._write_rollout_bytes(codex_root, source)
+            local, embedded, local_calls, embedded_calls = (
+                self._read_local_and_embedded_with_record_counter(
+                    codex_root,
+                    rollout,
+                    max_records=record_limit,
+                )
+            )
+
+        self.assertEqual(local.status, "complete")
+        self.assertEqual(embedded["status"], "complete")
+        self.assertEqual(local.message, message.encode("utf-8"))
+        self.assertEqual(embedded["message"], message.encode("utf-8"))
+        self.assertEqual(local_calls, record_limit)
+        self.assertEqual(embedded_calls, record_limit)
+        self.assertEqual(local.records_examined, record_limit)
+        self.assertEqual(embedded["records_examined"], record_limit)
+
+    def test_complete_coverage_at_record_budget_boundary_is_nonterminal(
+        self,
+    ) -> None:
+        source = self._jsonl_record(
+            {
+                "type": "noise",
+                "payload": {
+                    "anchor": "terminal-tail-full-coverage-budget-anchor",
+                },
+            }
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            codex_root = Path(temp_dir) / ".codex"
+            rollout = self._write_rollout_bytes(codex_root, source)
+            local, embedded, local_calls, embedded_calls = (
+                self._read_local_and_embedded_with_record_counter(
+                    codex_root,
+                    rollout,
+                    max_records=1,
+                )
+            )
+
+        self.assertEqual(local.status, "terminal_not_reached")
+        self.assertEqual(embedded["status"], "terminal_not_reached")
+        self.assertEqual(local_calls, 1)
+        self.assertEqual(embedded_calls, 1)
+        self.assertEqual(local.records_examined, 1)
+        self.assertEqual(embedded["records_examined"], 1)
+
+    def test_terminal_tail_record_budget_override_must_be_positive(self) -> None:
+        source = self._jsonl_record(
+            {
+                "type": "noise",
+                "payload": {
+                    "anchor": "terminal-tail-positive-budget-unique-anchor",
+                },
+            }
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            codex_root = Path(temp_dir) / ".codex"
+            rollout = self._write_rollout_bytes(codex_root, source)
+            resolved_rollout = MODULE._resolve_rollout_relative_path(rollout)
+            for max_records in (0, -1):
+                with (
+                    self.subTest(scope="local", max_records=max_records),
+                    self.assertRaisesRegex(
+                        ValueError,
+                        "record count limit must be positive",
+                    ),
+                ):
+                    MODULE._read_terminal_tail(
+                        codex_root,
+                        resolved_rollout,
+                        window_bytes=64,
+                        max_scan_bytes=4096,
+                        max_record_bytes=1024,
+                        max_records=max_records,
+                    )
+
+                namespace = self._embedded_terminal_tail_namespace(
+                    codex_root,
+                    rollout,
+                    window_bytes=64,
+                    max_scan_bytes=4096,
+                    max_record_bytes=1024,
+                    max_records=max_records,
+                )
+                with (
+                    self.subTest(scope="embedded", max_records=max_records),
+                    self.assertRaisesRegex(
+                        ValueError,
+                        "record count limit must be positive",
+                    ),
+                ):
+                    namespace["read_terminal_tail"](
+                        namespace["pathlib"].PurePosixPath(rollout)
+                    )
 
     def test_complete_record_over_single_record_cap_fails_closed(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -9543,6 +9811,7 @@ class RemoteCodexProbeTerminalTailTests(unittest.TestCase):
             "scan_end",
             "scanned_bytes",
             "window_count",
+            "records_examined",
             "anchor_offset",
             "anchor_length",
             "append_observed",
@@ -9653,6 +9922,7 @@ class RemoteCodexProbeTerminalTailTests(unittest.TestCase):
                 "scan_end",
                 "scanned_bytes",
                 "window_count",
+                "records_examined",
                 "anchor_offset",
                 "anchor_length",
                 "append_observed",
@@ -9742,6 +10012,100 @@ class RemoteCodexProbeTerminalTailTests(unittest.TestCase):
         self.assertIn("status=terminal_not_reached", stdout.getvalue())
         self.assertEqual(stderr.getvalue(), "")
 
+    def test_local_and_remote_cli_record_limit_status_does_not_touch_output(
+        self,
+    ) -> None:
+        record_limit = 3
+        source = (
+            b"{}\n" * 16
+            + self._jsonl_record(
+                {
+                    "type": "noise",
+                    "payload": {
+                        "anchor": "terminal-tail-cli-record-budget-anchor",
+                    },
+                }
+            )
+        )
+        with tempfile.TemporaryDirectory(dir="/tmp") as temp_dir:
+            codex_root = Path(temp_dir) / ".codex"
+            rollout = self._write_rollout_bytes(codex_root, source)
+            output_path = Path(temp_dir) / "terminal-result.txt"
+            output_path.write_bytes(b"sentinel")
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+            read_terminal_tail = MODULE._read_terminal_tail
+
+            def read_with_small_record_budget(
+                root: Path,
+                relative_path: PurePosixPath,
+            ) -> MODULE.TerminalTailResult:
+                return read_terminal_tail(
+                    root,
+                    relative_path,
+                    window_bytes=64,
+                    max_scan_bytes=4096,
+                    max_record_bytes=1024,
+                    max_records=record_limit,
+                )
+
+            with (
+                mock.patch.object(MODULE, "_local_codex_root", return_value=codex_root),
+                mock.patch.object(
+                    MODULE,
+                    "_read_terminal_tail",
+                    side_effect=read_with_small_record_budget,
+                ),
+                mock.patch.object(
+                    MODULE,
+                    "MAX_TERMINAL_TAIL_RECORDS",
+                    record_limit,
+                ),
+                redirect_stdout(stdout),
+                redirect_stderr(stderr),
+            ):
+                local_rc = MODULE.cmd_terminal_tail(
+                    argparse.Namespace(
+                        host="local",
+                        rollout=rollout,
+                        output=str(output_path),
+                    )
+                )
+
+            self.assertEqual(output_path.read_bytes(), b"sentinel")
+
+        self.assertEqual(local_rc, 1)
+        self.assertIn("status=record_limit_exceeded", stdout.getvalue())
+        self.assertIn(f"records_examined={record_limit}", stdout.getvalue())
+        self.assertIn(
+            f"max_terminal_tail_records={record_limit}",
+            stdout.getvalue(),
+        )
+        self.assertEqual(stderr.getvalue(), "")
+
+        remote_header = self._remote_record_limit_header()
+        remote_result = subprocess.CompletedProcess(
+            args=["ssh"],
+            returncode=0,
+            stdout=self._remote_terminal_tail_frame(remote_header),
+            stderr="",
+        )
+        remote_rc, remote_stdout, remote_stderr, remote_output = (
+            self._run_remote_terminal_tail_fixture(remote_result)
+        )
+        self.assertEqual(remote_rc, 1)
+        self.assertIn("status=record_limit_exceeded", remote_stdout)
+        self.assertIn(
+            f"records_examined={MODULE.MAX_TERMINAL_TAIL_RECORDS}",
+            remote_stdout,
+        )
+        self.assertIn(
+            f"max_terminal_tail_records={MODULE.MAX_TERMINAL_TAIL_RECORDS}",
+            remote_stdout,
+        )
+        self.assertEqual(remote_stderr, "")
+        self.assertEqual(remote_output, b"sentinel")
+
     def test_remote_terminal_tail_uses_bounded_capture_and_preserves_output(
         self,
     ) -> None:
@@ -9763,6 +10127,7 @@ class RemoteCodexProbeTerminalTailTests(unittest.TestCase):
                     "scan_end": 512,
                     "scanned_bytes": 512,
                     "window_count": 1,
+                    "records_examined": 1,
                     "anchor_offset": 32,
                     "anchor_length": 32,
                     "append_observed": False,
@@ -9826,6 +10191,10 @@ class RemoteCodexProbeTerminalTailTests(unittest.TestCase):
                     payload["max_terminal_tail_scan_bytes"],
                     MODULE.MAX_TERMINAL_TAIL_SCAN_BYTES,
                 )
+                self.assertEqual(
+                    payload["max_terminal_tail_records"],
+                    MODULE.MAX_TERMINAL_TAIL_RECORDS,
+                )
                 self.assertIn(f"status={status}", stdout.getvalue())
                 if message is not None:
                     self.assertEqual(output_path.read_bytes(), message)
@@ -9851,6 +10220,7 @@ class RemoteCodexProbeTerminalTailTests(unittest.TestCase):
                 "scan_end": 0,
                 "scanned_bytes": 0,
                 "window_count": 0,
+                "records_examined": 0,
                 "anchor_offset": None,
                 "anchor_length": 0,
                 "terminal_record_offset": None,
@@ -9865,6 +10235,7 @@ class RemoteCodexProbeTerminalTailTests(unittest.TestCase):
             {
                 "scan_start": 511,
                 "scanned_bytes": 1,
+                "records_examined": 0,
                 "anchor_offset": None,
                 "anchor_length": 0,
                 "terminal_record_offset": None,
@@ -9877,6 +10248,7 @@ class RemoteCodexProbeTerminalTailTests(unittest.TestCase):
         )
         anchor_unavailable.update(
             {
+                "records_examined": 0,
                 "anchor_offset": None,
                 "anchor_length": 0,
                 "terminal_record_offset": None,
@@ -9920,6 +10292,8 @@ class RemoteCodexProbeTerminalTailTests(unittest.TestCase):
             }
         )
 
+        record_limit_exceeded = self._remote_record_limit_header()
+
         for expected_status, header in (
             ("terminal_not_reached", empty_source),
             ("source_in_progress", source_in_progress),
@@ -9927,6 +10301,7 @@ class RemoteCodexProbeTerminalTailTests(unittest.TestCase):
             ("anchor_moved", anchor_moved),
             ("terminal_not_reached", full_nonterminal),
             ("tail_window_insufficient", tail_window_insufficient),
+            ("record_limit_exceeded", record_limit_exceeded),
         ):
             with self.subTest(
                 status=expected_status,
@@ -9938,7 +10313,166 @@ class RemoteCodexProbeTerminalTailTests(unittest.TestCase):
                 )
 
                 self.assertEqual(result.status, expected_status)
+                self.assertEqual(
+                    result.records_examined,
+                    header["records_examined"],
+                )
                 self.assertIsNone(message)
+
+    def test_remote_terminal_tail_rejects_invalid_record_limit_evidence(
+        self,
+    ) -> None:
+        base_header = self._remote_record_limit_header()
+
+        impossible_exact_cap = self._remote_terminal_tail_header(
+            status="record_limit_exceeded",
+            message=None,
+            records_examined=MODULE.MAX_TERMINAL_TAIL_RECORDS,
+        )
+        impossible_exact_cap["terminal_record_offset"] = None
+
+        count_mismatch = dict(base_header)
+        count_mismatch["records_examined"] = (
+            MODULE.MAX_TERMINAL_TAIL_RECORDS - 1
+        )
+
+        no_anchor = dict(base_header)
+        no_anchor.update(
+            {
+                "anchor_offset": None,
+                "anchor_length": 0,
+            }
+        )
+
+        terminal_offset = dict(base_header)
+        terminal_offset["terminal_record_offset"] = 64
+
+        payload = b"must not publish"
+        payload_header = dict(base_header)
+        payload_header["bytes"] = len(payload)
+
+        cases = {
+            "impossible-exact-cap": self._remote_terminal_tail_frame(
+                impossible_exact_cap
+            ),
+            "count-mismatch": self._remote_terminal_tail_frame(count_mismatch),
+            "no-anchor": self._remote_terminal_tail_frame(no_anchor),
+            "terminal-offset": self._remote_terminal_tail_frame(terminal_offset),
+            "payload": self._remote_terminal_tail_frame(
+                payload_header,
+                message=payload,
+            ),
+        }
+        for name, frame in cases.items():
+            with (
+                self.subTest(name=name),
+                self.assertRaisesRegex(
+                    ValueError,
+                    "record-count evidence|record-limit evidence|payload framing",
+                ),
+            ):
+                MODULE._extract_framed_terminal_tail_payload(
+                    frame,
+                    host="miku-bot-dev",
+                )
+
+    def test_remote_terminal_tail_rejects_invalid_records_examined(self) -> None:
+        wrong_type = self._remote_terminal_tail_header()
+        wrong_type["records_examined"] = "1"
+
+        bool_count = self._remote_terminal_tail_header()
+        bool_count["records_examined"] = True
+
+        over_cap = self._remote_record_limit_header()
+        over_cap["records_examined"] = MODULE.MAX_TERMINAL_TAIL_RECORDS + 1
+
+        complete_zero = self._remote_terminal_tail_header(records_examined=0)
+
+        source_in_progress_count = self._remote_terminal_tail_header(
+            status="source_in_progress",
+            message=None,
+        )
+        source_in_progress_count.update(
+            {
+                "scan_start": 511,
+                "scanned_bytes": 1,
+                "anchor_offset": None,
+                "anchor_length": 0,
+                "terminal_record_offset": None,
+            }
+        )
+
+        anchor_unavailable_count = self._remote_terminal_tail_header(
+            status="anchor_unavailable",
+            message=None,
+        )
+        anchor_unavailable_count.update(
+            {
+                "anchor_offset": None,
+                "anchor_length": 0,
+                "terminal_record_offset": None,
+            }
+        )
+
+        tail_source = MODULE.MAX_TERMINAL_TAIL_SCAN_BYTES + 100
+        tail_window_at_cap = self._remote_terminal_tail_header(
+            status="tail_window_insufficient",
+            message=None,
+            records_examined=MODULE.MAX_TERMINAL_TAIL_RECORDS,
+        )
+        tail_window_at_cap.update(
+            {
+                "source_bytes": tail_source,
+                "observed_source_bytes": tail_source,
+                "scan_start": 100,
+                "scan_end": tail_source,
+                "scanned_bytes": MODULE.MAX_TERMINAL_TAIL_SCAN_BYTES,
+                "window_count": (
+                    MODULE.MAX_TERMINAL_TAIL_SCAN_BYTES
+                    // MODULE.DEFAULT_TERMINAL_TAIL_WINDOW_BYTES
+                ),
+                "anchor_offset": tail_source - 1 - 64 * 1024,
+                "terminal_record_offset": None,
+            }
+        )
+
+        empty_nonterminal_count = self._remote_terminal_tail_header(
+            status="terminal_not_reached",
+            message=None,
+        )
+        empty_nonterminal_count.update(
+            {
+                "source_bytes": 0,
+                "observed_source_bytes": 0,
+                "scan_start": 0,
+                "scan_end": 0,
+                "scanned_bytes": 0,
+                "window_count": 0,
+                "anchor_offset": None,
+                "anchor_length": 0,
+                "terminal_record_offset": None,
+            }
+        )
+
+        cases = {
+            "wrong-type": wrong_type,
+            "bool": bool_count,
+            "over-cap": over_cap,
+            "complete-zero": complete_zero,
+            "source-in-progress-count": source_in_progress_count,
+            "anchor-unavailable-count": anchor_unavailable_count,
+            "tail-window-at-cap": tail_window_at_cap,
+            "empty-nonterminal-count": empty_nonterminal_count,
+        }
+        for name, header in cases.items():
+            with (
+                self.subTest(name=name),
+                self.assertRaises(ValueError),
+            ):
+                MODULE._extract_framed_terminal_tail_payload(
+                    self._remote_terminal_tail_frame(header),
+                    host="miku-bot-dev",
+                )
 
     def test_remote_terminal_tail_rejects_complete_without_coordinate_evidence(
         self,
@@ -9959,6 +10493,7 @@ class RemoteCodexProbeTerminalTailTests(unittest.TestCase):
                     "scan_end": 512,
                     "scanned_bytes": 512,
                     "window_count": 1,
+                    "records_examined": 1,
                     "anchor_offset": 32,
                     "anchor_length": 32,
                     "append_observed": False,
