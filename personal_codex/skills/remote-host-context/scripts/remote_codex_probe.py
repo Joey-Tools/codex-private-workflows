@@ -866,7 +866,9 @@ class _PinnedRolloutHandle:
             )
         except FileNotFoundError as error:
             raise ValueError(f"rollout path replaced {phase}") from error
-        except (OSError, ValueError) as error:
+        except ValueError as error:
+            raise ValueError(f"rollout path replaced {phase}") from error
+        except OSError as error:
             raise ValueError(f"rollout path unreadable {phase}") from error
         if current.device != source_device or current.inode != source_inode:
             raise ValueError(f"rollout path replaced {phase}")
@@ -1619,10 +1621,7 @@ def _select_terminal_tail_anchor(
                 continue
             seen.add(position)
             candidate = window[position : position + length]
-            if not candidate or (
-                length >= MIN_TERMINAL_TAIL_ANCHOR_BYTES
-                and len(set(candidate)) < 4
-            ):
+            if not candidate:
                 continue
             first = window.find(candidate)
             if first != position:
@@ -2920,7 +2919,9 @@ class PinnedRolloutHandle:
             )
         except FileNotFoundError as error:
             raise ValueError("rollout path replaced " + phase) from error
-        except (OSError, ValueError) as error:
+        except ValueError as error:
+            raise ValueError("rollout path replaced " + phase) from error
+        except OSError as error:
             raise ValueError("rollout path unreadable " + phase) from error
         if (
             current["device"] != source_device
@@ -3539,10 +3540,7 @@ def select_terminal_tail_anchor(window, window_start):
                 continue
             seen.add(position)
             candidate = window[position : position + length]
-            if not candidate or (
-                length >= MIN_TERMINAL_TAIL_ANCHOR_BYTES
-                and len(set(candidate)) < 4
-            ):
+            if not candidate:
                 continue
             first = window.find(candidate)
             if first != position:

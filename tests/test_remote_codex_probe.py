@@ -8466,6 +8466,32 @@ class RemoteCodexProbeTerminalTailTests(unittest.TestCase):
         return rollout.relative_to(codex_root).as_posix()
 
     @staticmethod
+    def _embedded_terminal_tail_namespace(
+        codex_root: Path,
+        rollout: str,
+        *,
+        window_bytes: int,
+        max_scan_bytes: int,
+        max_record_bytes: int,
+    ) -> dict[str, object]:
+        return embedded_probe_namespace(
+            {
+                "mode": "terminal-tail",
+                "rollout": rollout,
+                "codex_root": str(codex_root),
+                "terminal_tail_window_bytes": window_bytes,
+                "max_terminal_tail_scan_bytes": max_scan_bytes,
+                "max_terminal_tail_record_bytes": max_record_bytes,
+                "max_terminal_tail_anchor_bytes": (
+                    MODULE.MAX_TERMINAL_TAIL_ANCHOR_BYTES
+                ),
+                "min_terminal_tail_anchor_bytes": (
+                    MODULE.MIN_TERMINAL_TAIL_ANCHOR_BYTES
+                ),
+            }
+        )
+
+    @staticmethod
     def _remote_terminal_tail_header(
         *,
         status: str = "complete",
@@ -9165,6 +9191,304 @@ class RemoteCodexProbeTerminalTailTests(unittest.TestCase):
                     )
 
                 self.assertTrue(mutated)
+
+    @unittest.skipUnless(hasattr(os, "symlink"), "symlink replacement is required")
+    def test_path_replacement_signals_fail_closed_local_and_embedded(
+        self,
+    ) -> None:
+        source = self._task_complete("result")
+        for scope in ("local", "embedded"):
+            for replacement_kind in (
+                "missing",
+                "regular",
+                "symlink",
+                "directory",
+            ):
+                with (
+                    self.subTest(scope=scope, replacement=replacement_kind),
+                    tempfile.TemporaryDirectory() as temp_dir,
+                ):
+                    codex_root = Path(temp_dir) / ".codex"
+                    rollout = self._write_rollout_bytes(codex_root, source)
+                    rollout_path = codex_root / rollout
+                    pinned_rollout = rollout_path.with_name(
+                        rollout_path.name + ".pinned"
+                    )
+                    if scope == "local":
+                        target_globals = MODULE.__dict__
+                        pread_name = "_pread_exact"
+
+                        def read_tail() -> object:
+                            return MODULE._read_terminal_tail(
+                                codex_root,
+                                MODULE._resolve_rollout_relative_path(rollout),
+                                window_bytes=256,
+                                max_scan_bytes=1024,
+                                max_record_bytes=512,
+                            )
+
+                    else:
+                        namespace = self._embedded_terminal_tail_namespace(
+                            codex_root,
+                            rollout,
+                            window_bytes=256,
+                            max_scan_bytes=1024,
+                            max_record_bytes=512,
+                        )
+                        target_globals = namespace
+                        pread_name = "pread_exact"
+
+                        def read_tail() -> object:
+                            return namespace["read_terminal_tail"](
+                                namespace["pathlib"].PurePosixPath(rollout)
+                            )
+
+                    real_pread_exact = target_globals[pread_name]
+                    replaced = False
+
+                    def replace_after_first_window(
+                        fd: int,
+                        offset: int,
+                        length: int,
+                    ) -> bytes:
+                        nonlocal replaced
+                        data = real_pread_exact(fd, offset, length)
+                        if not replaced and length > 1:
+                            replaced = True
+                            os.replace(rollout_path, pinned_rollout)
+                            if replacement_kind == "symlink":
+                                rollout_path.symlink_to(pinned_rollout)
+                            elif replacement_kind == "directory":
+                                rollout_path.mkdir()
+                            elif replacement_kind == "regular":
+                                rollout_path.write_bytes(source)
+                        return data
+
+                    with (
+                        mock.patch.dict(
+                            target_globals,
+                            {pread_name: replace_after_first_window},
+                        ),
+                        self.assertRaisesRegex(
+                            ValueError,
+                            (
+                                "^rollout path replaced "
+                                "after terminal-tail window read$"
+                            ),
+                        ),
+                    ):
+                        read_tail()
+
+                    self.assertTrue(replaced)
+
+    def test_unreadable_path_revalidation_stays_distinct_local_and_embedded(
+        self,
+    ) -> None:
+        source = self._task_complete("result")
+        for scope in ("local", "embedded"):
+            with (
+                self.subTest(scope=scope),
+                tempfile.TemporaryDirectory() as temp_dir,
+            ):
+                codex_root = Path(temp_dir) / ".codex"
+                rollout = self._write_rollout_bytes(codex_root, source)
+                rollout_path = codex_root / rollout
+                if scope == "local":
+                    target_globals = MODULE.__dict__
+                    pread_name = "_pread_exact"
+
+                    def read_tail() -> object:
+                        return MODULE._read_terminal_tail(
+                            codex_root,
+                            MODULE._resolve_rollout_relative_path(rollout),
+                            window_bytes=256,
+                            max_scan_bytes=1024,
+                            max_record_bytes=512,
+                        )
+
+                else:
+                    namespace = self._embedded_terminal_tail_namespace(
+                        codex_root,
+                        rollout,
+                        window_bytes=256,
+                        max_scan_bytes=1024,
+                        max_record_bytes=512,
+                    )
+                    target_globals = namespace
+                    pread_name = "pread_exact"
+
+                    def read_tail() -> object:
+                        return namespace["read_terminal_tail"](
+                            namespace["pathlib"].PurePosixPath(rollout)
+                        )
+
+                real_pread_exact = target_globals[pread_name]
+                real_stat = target_globals["os"].stat
+                window_read = False
+
+                def mark_first_window_read(
+                    fd: int,
+                    offset: int,
+                    length: int,
+                ) -> bytes:
+                    nonlocal window_read
+                    data = real_pread_exact(fd, offset, length)
+                    if length > 1:
+                        window_read = True
+                    return data
+
+                def deny_path_revalidation(
+                    path: object,
+                    *args: object,
+                    **kwargs: object,
+                ) -> os.stat_result:
+                    if (
+                        window_read
+                        and path == rollout_path.name
+                        and kwargs.get("dir_fd") is not None
+                        and kwargs.get("follow_symlinks") is False
+                    ):
+                        raise PermissionError("terminal-tail test denial")
+                    return real_stat(path, *args, **kwargs)
+
+                with (
+                    mock.patch.dict(
+                        target_globals,
+                        {pread_name: mark_first_window_read},
+                    ),
+                    mock.patch.object(
+                        target_globals["os"],
+                        "stat",
+                        side_effect=deny_path_revalidation,
+                    ),
+                    self.assertRaisesRegex(
+                        ValueError,
+                        (
+                            "^rollout path unreadable "
+                            "after terminal-tail window read$"
+                        ),
+                    ),
+                ):
+                    read_tail()
+
+                self.assertTrue(window_read)
+
+    def test_long_homogeneous_terminal_message_matches_local_and_embedded(
+        self,
+    ) -> None:
+        message = "x" * 70_000
+        expected = message.encode("utf-8")
+        source = self._task_complete(message)
+        candidate_end = len(source) - 1
+        region_start = max(0, candidate_end - 64 * 1024)
+        field_offset = source.rfind(
+            b'"last_agent_message"',
+            0,
+            candidate_end,
+        )
+        self.assertGreater(region_start, 0)
+        self.assertGreaterEqual(field_offset, 0)
+        self.assertLess(field_offset, region_start)
+
+        selector_window_start = 8192
+        anchor = MODULE._select_terminal_tail_anchor(
+            source,
+            window_start=selector_window_start,
+        )
+        self.assertIsNotNone(anchor)
+        assert anchor is not None
+        relative_anchor_offset = anchor.offset - selector_window_start
+        self.assertGreaterEqual(
+            relative_anchor_offset,
+            region_start,
+        )
+        self.assertGreaterEqual(
+            len(anchor.data),
+            MODULE.MIN_TERMINAL_TAIL_ANCHOR_BYTES,
+        )
+        self.assertLessEqual(
+            relative_anchor_offset + len(anchor.data),
+            candidate_end,
+        )
+        self.assertLess(len(set(anchor.data)), 4)
+        self.assertEqual(source.find(anchor.data), relative_anchor_offset)
+        self.assertEqual(
+            source.find(anchor.data, relative_anchor_offset + 1),
+            -1,
+        )
+
+        window_bytes = len(source)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            codex_root = Path(temp_dir) / ".codex"
+            rollout = self._write_rollout_bytes(codex_root, source)
+            local = MODULE._read_terminal_tail(
+                codex_root,
+                MODULE._resolve_rollout_relative_path(rollout),
+                window_bytes=window_bytes,
+                max_scan_bytes=window_bytes,
+                max_record_bytes=window_bytes,
+            )
+            namespace = self._embedded_terminal_tail_namespace(
+                codex_root,
+                rollout,
+                window_bytes=window_bytes,
+                max_scan_bytes=window_bytes,
+                max_record_bytes=window_bytes,
+            )
+            embedded = namespace["read_terminal_tail"](
+                namespace["pathlib"].PurePosixPath(rollout)
+            )
+
+        self.assertEqual(local.status, "complete")
+        self.assertEqual(local.message, expected)
+        self.assertEqual(embedded["status"], "complete")
+        self.assertEqual(embedded["message"], expected)
+        fields = (
+            "source_bytes",
+            "observed_source_bytes",
+            "scan_start",
+            "scan_end",
+            "scanned_bytes",
+            "window_count",
+            "anchor_offset",
+            "anchor_length",
+            "append_observed",
+            "terminal_record_offset",
+        )
+        self.assertEqual(
+            {field: getattr(local, field) for field in fields},
+            {field: embedded[field] for field in fields},
+        )
+
+    def test_terminal_tail_anchor_requires_full_initial_window_uniqueness(
+        self,
+    ) -> None:
+        record_without_lf = self._task_complete("x" * 70_000)[:-1]
+        self.assertGreater(len(record_without_lf), 64 * 1024)
+        duplicated_window = record_without_lf + record_without_lf + b"\n"
+        namespace = self._embedded_terminal_tail_namespace(
+            Path("/unused"),
+            "sessions/2026/07/23/rollout-2026-07-23T10-00-00.jsonl",
+            window_bytes=len(duplicated_window),
+            max_scan_bytes=len(duplicated_window),
+            max_record_bytes=len(duplicated_window),
+        )
+        selectors = {
+            "local": lambda: MODULE._select_terminal_tail_anchor(
+                duplicated_window,
+                window_start=4096,
+            ),
+            "embedded": lambda: namespace["select_terminal_tail_anchor"](
+                duplicated_window,
+                4096,
+            ),
+        }
+        for scope, select_anchor in selectors.items():
+            with self.subTest(scope=scope):
+                self.assertIsNone(
+                    select_anchor(),
+                    "anchor candidates must be unique across the full window",
+                )
 
     def test_local_and_embedded_terminal_tail_match(self) -> None:
         cases = {
