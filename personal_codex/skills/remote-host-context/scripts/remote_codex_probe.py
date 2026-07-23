@@ -5935,6 +5935,28 @@ def _extract_framed_terminal_tail_payload(
         raise ValueError(
             f"remote terminal-tail output on host {host} had invalid window coordinates"
         )
+    if status == "source_in_progress":
+        if (
+            source_bytes < 1
+            or scan_start != source_bytes - 1
+            or scanned_bytes != 1
+            or window_count != 1
+        ):
+            raise ValueError(
+                f"remote terminal-tail output on host {host} had invalid "
+                "source-in-progress coordinates"
+            )
+    else:
+        expected_scan_start = max(
+            max(0, source_bytes - MAX_TERMINAL_TAIL_SCAN_BYTES),
+            source_bytes
+            - window_count * DEFAULT_TERMINAL_TAIL_WINDOW_BYTES,
+        )
+        if scan_start != expected_scan_start:
+            raise ValueError(
+                f"remote terminal-tail output on host {host} had invalid "
+                "fixed-S0 window geometry"
+            )
     anchor_value = header.get("anchor_offset")
     if anchor_value is None:
         anchor_offset = None
@@ -5988,6 +6010,58 @@ def _extract_framed_terminal_tail_payload(
         raise ValueError(
             f"remote terminal-tail output on host {host} had inconsistent append metadata"
         )
+    if status == "source_in_progress":
+        if anchor_offset is not None or terminal_record_offset is not None:
+            raise ValueError(
+                f"remote terminal-tail output on host {host} had invalid "
+                "source-in-progress evidence"
+            )
+    elif status == "anchor_unavailable":
+        if (
+            source_bytes < 1
+            or window_count != 1
+            or anchor_offset is not None
+            or terminal_record_offset is not None
+        ):
+            raise ValueError(
+                f"remote terminal-tail output on host {host} had invalid "
+                "anchor-unavailable evidence"
+            )
+    elif status == "anchor_moved":
+        if anchor_offset is None or terminal_record_offset is not None:
+            raise ValueError(
+                f"remote terminal-tail output on host {host} had invalid "
+                "anchor-moved evidence"
+            )
+    elif status == "tail_window_insufficient":
+        if (
+            source_bytes <= MAX_TERMINAL_TAIL_SCAN_BYTES
+            or scanned_bytes != MAX_TERMINAL_TAIL_SCAN_BYTES
+            or anchor_offset is None
+            or terminal_record_offset is not None
+        ):
+            raise ValueError(
+                f"remote terminal-tail output on host {host} had invalid "
+                "tail-window evidence"
+            )
+    elif status == "terminal_not_reached":
+        if source_bytes == 0:
+            if (
+                window_count != 0
+                or anchor_offset is not None
+                or terminal_record_offset is not None
+            ):
+                raise ValueError(
+                    f"remote terminal-tail output on host {host} had invalid "
+                    "empty-source evidence"
+                )
+        elif anchor_offset is None or (
+            terminal_record_offset is None and scan_start != 0
+        ):
+            raise ValueError(
+                f"remote terminal-tail output on host {host} had invalid "
+                "nonterminal evidence"
+            )
     if expected_bytes > MAX_TERMINAL_TAIL_RECORD_BYTES:
         raise ValueError(
             f"remote terminal-tail output on host {host} exceeded the result limit"
@@ -6014,6 +6088,12 @@ def _extract_framed_terminal_tail_payload(
             f"remote terminal-tail output on host {host} was truncated"
         )
     if status == "complete":
+        try:
+            data.decode("utf-8")
+        except UnicodeDecodeError:
+            raise ValueError(
+                f"remote terminal-tail output on host {host} was not valid UTF-8"
+            ) from None
         message: bytes | None = data
     else:
         message = None

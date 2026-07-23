@@ -9350,6 +9350,109 @@ class RemoteCodexProbeTerminalTailTests(unittest.TestCase):
                 else:
                     self.assertEqual(output_path.read_bytes(), b"sentinel")
 
+    def test_remote_terminal_tail_accepts_closed_noncomplete_states(
+        self,
+    ) -> None:
+        empty_source = self._remote_terminal_tail_header(
+            status="terminal_not_reached",
+            message=None,
+        )
+        empty_source.update(
+            {
+                "source_bytes": 0,
+                "observed_source_bytes": 0,
+                "scan_start": 0,
+                "scan_end": 0,
+                "scanned_bytes": 0,
+                "window_count": 0,
+                "anchor_offset": None,
+                "anchor_length": 0,
+                "terminal_record_offset": None,
+            }
+        )
+
+        source_in_progress = self._remote_terminal_tail_header(
+            status="source_in_progress",
+            message=None,
+        )
+        source_in_progress.update(
+            {
+                "scan_start": 99,
+                "scanned_bytes": 1,
+                "anchor_offset": None,
+                "anchor_length": 0,
+                "terminal_record_offset": None,
+            }
+        )
+
+        anchor_unavailable = self._remote_terminal_tail_header(
+            status="anchor_unavailable",
+            message=None,
+        )
+        anchor_unavailable.update(
+            {
+                "anchor_offset": None,
+                "anchor_length": 0,
+                "terminal_record_offset": None,
+            }
+        )
+
+        anchor_moved = self._remote_terminal_tail_header(
+            status="anchor_moved",
+            message=None,
+        )
+        anchor_moved["terminal_record_offset"] = None
+
+        full_nonterminal = self._remote_terminal_tail_header(
+            status="terminal_not_reached",
+            message=None,
+        )
+        full_nonterminal["terminal_record_offset"] = None
+
+        tail_source = MODULE.MAX_TERMINAL_TAIL_SCAN_BYTES + 100
+        tail_window_insufficient = self._remote_terminal_tail_header(
+            status="tail_window_insufficient",
+            message=None,
+        )
+        tail_window_insufficient.update(
+            {
+                "source_bytes": tail_source,
+                "observed_source_bytes": tail_source,
+                "scan_start": 100,
+                "scan_end": tail_source,
+                "scanned_bytes": MODULE.MAX_TERMINAL_TAIL_SCAN_BYTES,
+                "window_count": (
+                    MODULE.MAX_TERMINAL_TAIL_SCAN_BYTES
+                    // MODULE.DEFAULT_TERMINAL_TAIL_WINDOW_BYTES
+                ),
+                "anchor_offset": (
+                    tail_source
+                    - MODULE.DEFAULT_TERMINAL_TAIL_WINDOW_BYTES
+                ),
+                "terminal_record_offset": None,
+            }
+        )
+
+        for expected_status, header in (
+            ("terminal_not_reached", empty_source),
+            ("source_in_progress", source_in_progress),
+            ("anchor_unavailable", anchor_unavailable),
+            ("anchor_moved", anchor_moved),
+            ("terminal_not_reached", full_nonterminal),
+            ("tail_window_insufficient", tail_window_insufficient),
+        ):
+            with self.subTest(
+                status=expected_status,
+                source_bytes=header["source_bytes"],
+            ):
+                result, message = MODULE._extract_framed_terminal_tail_payload(
+                    self._remote_terminal_tail_frame(header),
+                    host="miku-bot-dev",
+                )
+
+                self.assertEqual(result.status, expected_status)
+                self.assertIsNone(message)
+
     def test_remote_terminal_tail_rejects_complete_without_coordinate_evidence(
         self,
     ) -> None:
@@ -9435,6 +9538,15 @@ class RemoteCodexProbeTerminalTailTests(unittest.TestCase):
         no_window["window_count"] = 0
         cases["zero-window-count"] = no_window
 
+        shifted_scan_start = dict(base_header)
+        shifted_scan_start.update(
+            {
+                "scan_start": 1,
+                "scanned_bytes": 99,
+            }
+        )
+        cases["shifted-complete-window"] = shifted_scan_start
+
         final_lf_anchor = dict(base_header)
         final_lf_anchor["anchor_offset"] = 68
         cases["anchor-covers-final-lf"] = final_lf_anchor
@@ -9498,6 +9610,65 @@ class RemoteCodexProbeTerminalTailTests(unittest.TestCase):
                 self.assertEqual(output, b"sentinel")
                 self.assertIn("error=remote terminal-tail output", stderr)
                 self.assertNotIn(message.decode("ascii"), stderr)
+
+    def test_remote_terminal_tail_rejects_impossible_status_coordinates(
+        self,
+    ) -> None:
+        source_in_progress = self._remote_terminal_tail_header(
+            status="source_in_progress",
+            message=None,
+        )
+        source_in_progress.update(
+            {
+                "anchor_offset": None,
+                "anchor_length": 0,
+                "terminal_record_offset": None,
+            }
+        )
+
+        tail_source = MODULE.MAX_TERMINAL_TAIL_SCAN_BYTES + 100
+        tail_window_insufficient = self._remote_terminal_tail_header(
+            status="tail_window_insufficient",
+            message=None,
+        )
+        tail_window_insufficient.update(
+            {
+                "source_bytes": tail_source,
+                "observed_source_bytes": tail_source,
+                "scan_start": 101,
+                "scan_end": tail_source,
+                "scanned_bytes": MODULE.MAX_TERMINAL_TAIL_SCAN_BYTES - 1,
+                "window_count": (
+                    MODULE.MAX_TERMINAL_TAIL_SCAN_BYTES
+                    // MODULE.DEFAULT_TERMINAL_TAIL_WINDOW_BYTES
+                ),
+                "anchor_offset": (
+                    tail_source
+                    - MODULE.DEFAULT_TERMINAL_TAIL_WINDOW_BYTES
+                ),
+                "terminal_record_offset": None,
+            }
+        )
+
+        for name, header in (
+            ("source-in-progress", source_in_progress),
+            ("tail-window-insufficient", tail_window_insufficient),
+        ):
+            with self.subTest(name=name):
+                remote_result = subprocess.CompletedProcess(
+                    args=["ssh"],
+                    returncode=0,
+                    stdout=self._remote_terminal_tail_frame(header),
+                    stderr="",
+                )
+                rc, stdout, stderr, output = (
+                    self._run_remote_terminal_tail_fixture(remote_result)
+                )
+
+                self.assertEqual(rc, 1)
+                self.assertEqual(stdout, "")
+                self.assertEqual(output, b"sentinel")
+                self.assertIn("error=remote terminal-tail output", stderr)
 
     def test_remote_terminal_tail_rejects_nonexclusive_or_non_lf_frames(
         self,
@@ -9725,6 +9896,27 @@ class RemoteCodexProbeTerminalTailTests(unittest.TestCase):
                 self.assertEqual(output, b"sentinel")
                 self.assertNotIn(secret_marker, stderr)
                 self.assertIn("error=remote terminal-tail", stderr)
+
+    def test_remote_terminal_tail_rejects_invalid_utf8_payload(self) -> None:
+        invalid_utf8 = b"\xff"
+        remote_result = subprocess.CompletedProcess(
+            args=["ssh"],
+            returncode=0,
+            stdout=self._remote_terminal_tail_frame(
+                self._remote_terminal_tail_header(message=invalid_utf8),
+                message=invalid_utf8,
+            ),
+            stderr="",
+        )
+
+        rc, stdout, stderr, output = self._run_remote_terminal_tail_fixture(
+            remote_result
+        )
+
+        self.assertEqual(rc, 1)
+        self.assertEqual(stdout, "")
+        self.assertEqual(output, b"sentinel")
+        self.assertIn("was not valid UTF-8", stderr)
 
 
 if __name__ == "__main__":
