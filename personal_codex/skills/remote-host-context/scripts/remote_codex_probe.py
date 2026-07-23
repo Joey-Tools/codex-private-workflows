@@ -24,13 +24,77 @@ import stat
 import sys
 import time
 from collections.abc import Iterable
-from typing import Any
+from typing import Any, NoReturn
 
 DATE_FORMAT = "%Y/%m/%d"
 MAX_SESSION_META_LIMIT = 500
 MAX_SESSION_META_ACTIVE_CANDIDATES = MAX_SESSION_META_LIMIT + 1
 MAX_SESSION_META_DATE_COUNT = 31
-MAX_FETCH_ROLLOUT_BYTES = 16 * 1024 * 1024
+MAX_DIRECT_FETCH_ROLLOUT_BYTES = 16 * 1024 * 1024
+MAX_AUTOMATIC_FULL_RECONSTRUCTION_BYTES = 128 * 1024 * 1024
+DEFAULT_TERMINAL_TAIL_WINDOW_BYTES = 4 * 1024 * 1024
+MAX_TERMINAL_TAIL_SCAN_BYTES = 128 * 1024 * 1024
+MAX_TERMINAL_TAIL_RECORD_BYTES = 16 * 1024 * 1024
+MAX_TERMINAL_TAIL_RECORDS = 1_000_000
+MAX_TERMINAL_TAIL_ANCHOR_BYTES = 128
+MIN_TERMINAL_TAIL_ANCHOR_BYTES = 32
+TERMINAL_TAIL_ERROR_MESSAGES = {
+    "invalid_rollout_path": "invalid rollout path",
+    "rollout_not_found": "rollout not found",
+    "rollout_unreadable": "rollout unreadable",
+    "rollout_path_invalid": "rollout path is unsafe",
+    "rollout_replaced": "rollout replaced during terminal-tail scan",
+    "rollout_truncated": "rollout truncated below frozen EOF",
+    "malformed_jsonl": "terminal-tail encountered malformed JSONL",
+    "record_too_large": "terminal-tail record exceeds byte limit",
+    "invalid_limits": "terminal-tail limits are invalid",
+    "internal_failure": "terminal-tail scan failed",
+}
+TERMINAL_TAIL_ERROR_PREFIX_CODES = (
+    ("invalid rollout path", "invalid_rollout_path"),
+    ("path must stay under Codex root", "rollout_path_invalid"),
+    ("Codex root is a symlink", "rollout_path_invalid"),
+    ("Codex root is not a directory", "rollout_path_invalid"),
+    ("Codex root changed", "rollout_replaced"),
+    ("path uses a symlink ancestor", "rollout_path_invalid"),
+    ("path ancestor is not a directory", "rollout_path_invalid"),
+    ("path ancestor changed", "rollout_replaced"),
+    ("rollout path has an invalid file name", "rollout_path_invalid"),
+    ("rollout path must name a file", "rollout_path_invalid"),
+    ("rollout path is a symlink", "rollout_path_invalid"),
+    ("rollout path is not a regular file", "rollout_path_invalid"),
+    ("rollout unreadable", "rollout_unreadable"),
+    ("rollout path unreadable", "rollout_unreadable"),
+    ("rollout identity changed", "rollout_replaced"),
+    ("rollout object replaced", "rollout_replaced"),
+    ("rollout path replaced", "rollout_replaced"),
+    ("rollout changed during open", "rollout_replaced"),
+    ("rollout truncated below frozen EOF", "rollout_truncated"),
+    ("terminal-tail read was truncated", "rollout_truncated"),
+    (
+        "terminal-tail frozen EOF lost its LF terminator",
+        "rollout_replaced",
+    ),
+    ("terminal-tail encountered an empty JSONL record", "malformed_jsonl"),
+    ("terminal-tail record is not valid UTF-8", "malformed_jsonl"),
+    ("terminal-tail encountered malformed JSONL", "malformed_jsonl"),
+    ("terminal-tail JSONL record must be an object", "malformed_jsonl"),
+    ("terminal-tail JSONL payload must be an object", "malformed_jsonl"),
+    (
+        "terminal-tail task_complete last_agent_message must be a string",
+        "malformed_jsonl",
+    ),
+    (
+        "terminal-tail task_complete result is not valid UTF-8",
+        "malformed_jsonl",
+    ),
+    ("terminal-tail record too large", "record_too_large"),
+    ("terminal-tail result too large", "record_too_large"),
+    ("terminal-tail window must be positive", "invalid_limits"),
+    ("terminal-tail scan limit must be positive", "invalid_limits"),
+    ("terminal-tail record limit must be positive", "invalid_limits"),
+    ("terminal-tail record count limit must be positive", "invalid_limits"),
+)
 MIN_ROLLOUT_CHUNK_BYTES = 64 * 1024
 DEFAULT_ROLLOUT_CHUNK_BYTES = 1024 * 1024
 MAX_ROLLOUT_CHUNK_BYTES = 2 * 1024 * 1024
@@ -48,10 +112,15 @@ MAX_REMOTE_METADATA_STDOUT_BYTES = 64 * 1024
 MAX_REMOTE_STDERR_BYTES = 64 * 1024
 REMOTE_FETCH_ROLLOUT_FRAME_OVERHEAD_BYTES = 64 * 1024
 MAX_REMOTE_FETCH_ROLLOUT_STDOUT_BYTES = (
-    4 * ((MAX_FETCH_ROLLOUT_BYTES + 2) // 3) + REMOTE_FETCH_ROLLOUT_FRAME_OVERHEAD_BYTES
+    4 * ((MAX_DIRECT_FETCH_ROLLOUT_BYTES + 2) // 3)
+    + REMOTE_FETCH_ROLLOUT_FRAME_OVERHEAD_BYTES
 )
 MAX_REMOTE_FETCH_ROLLOUT_CHUNK_STDOUT_BYTES = (
     4 * ((MAX_FETCH_ROLLOUT_CHUNK_BYTES + 2) // 3)
+    + REMOTE_FETCH_ROLLOUT_FRAME_OVERHEAD_BYTES
+)
+MAX_REMOTE_TERMINAL_TAIL_STDOUT_BYTES = (
+    4 * ((MAX_TERMINAL_TAIL_RECORD_BYTES + 2) // 3)
     + REMOTE_FETCH_ROLLOUT_FRAME_OVERHEAD_BYTES
 )
 MAX_REMOTE_SESSION_META_SERIALIZED_ROW_BYTES = 64 * 1024
@@ -177,6 +246,8 @@ REMOTE_CHUNKED_ROLLOUT_SUMMARY_BEGIN = (
 REMOTE_CHUNKED_ROLLOUT_SUMMARY_END = (
     "__REMOTE_CODEX_PROBE_CHUNKED_ROLLOUT_SUMMARY_END__"
 )
+REMOTE_TERMINAL_TAIL_BEGIN = "__REMOTE_CODEX_PROBE_TERMINAL_TAIL_BEGIN__"
+REMOTE_TERMINAL_TAIL_END = "__REMOTE_CODEX_PROBE_TERMINAL_TAIL_END__"
 
 HOSTS: dict[str, dict[str, str]] = {
     "local": {"kind": "local", "label": "local", "codex_root": "~/.codex"},
@@ -283,6 +354,29 @@ class RolloutCandidateIdentity:
     snapshot: RolloutIdentity
     stable: RolloutStableIdentity
     prefix_proof: RolloutPrefixProof | None = None
+
+
+@dataclasses.dataclass(frozen=True)
+class TerminalTailResult:
+    status: str
+    message: bytes | None
+    source_bytes: int
+    observed_source_bytes: int
+    scan_start: int
+    scan_end: int
+    scanned_bytes: int
+    window_count: int
+    records_examined: int
+    anchor_offset: int | None
+    anchor_length: int
+    append_observed: bool
+    terminal_record_offset: int | None
+
+
+@dataclasses.dataclass(frozen=True)
+class _TerminalTailAnchor:
+    offset: int
+    data: bytes
 
 
 class SessionMetaRolloutError(ValueError):
@@ -801,6 +895,45 @@ class _PinnedRolloutHandle:
         self._prefix_proof = prefix_proof
         self._verified_snapshot = verified_snapshot
         return current
+
+    def assert_tail_coordinates(
+        self,
+        *,
+        source_bytes: int,
+        source_device: int,
+        source_inode: int,
+        phase: str,
+    ) -> int:
+        try:
+            descriptor = _rollout_identity_from_stat(os.fstat(self.fileno()))
+        except (OSError, ValueError) as error:
+            raise ValueError(f"rollout unreadable {phase}") from error
+        if (
+            descriptor.device != source_device
+            or descriptor.inode != source_inode
+        ):
+            raise ValueError(f"rollout object replaced {phase}")
+        if descriptor.size < source_bytes:
+            raise ValueError(f"rollout truncated below frozen EOF {phase}")
+        try:
+            current = _rollout_identity_from_stat(
+                os.stat(
+                    self._name,
+                    dir_fd=self._parent_fd,
+                    follow_symlinks=False,
+                )
+            )
+        except FileNotFoundError as error:
+            raise ValueError(f"rollout path replaced {phase}") from error
+        except ValueError as error:
+            raise ValueError(f"rollout path replaced {phase}") from error
+        except OSError as error:
+            raise ValueError(f"rollout path unreadable {phase}") from error
+        if current.device != source_device or current.inode != source_inode:
+            raise ValueError(f"rollout path replaced {phase}")
+        if current.size < source_bytes:
+            raise ValueError(f"rollout truncated below frozen EOF {phase}")
+        return max(descriptor.size, current.size)
 
     @property
     def open_identity(self) -> RolloutIdentity:
@@ -1341,11 +1474,12 @@ def _validate_source_read_budget(
                 "--authorized-source-bytes must equal expected source size: "
                 f"{authorized_source_bytes} != {identity.size}"
             )
-    if identity.size > MAX_FETCH_ROLLOUT_BYTES:
+    if identity.size > MAX_AUTOMATIC_FULL_RECONSTRUCTION_BYTES:
         if authorized_source_bytes != identity.size:
             raise ValueError(
                 "rollout exceeds automatic full-reconstruction limit: "
-                f"{identity.size} bytes > {MAX_FETCH_ROLLOUT_BYTES}; exact "
+                f"{identity.size} bytes > "
+                f"{MAX_AUTOMATIC_FULL_RECONSTRUCTION_BYTES}; exact "
                 f"--authorized-source-bytes {identity.size} is required"
             )
         return True
@@ -1353,7 +1487,9 @@ def _validate_source_read_budget(
 
 
 def _rollout_identity_record(identity: RolloutIdentity) -> dict[str, Any]:
-    automatic_allowed = identity.size <= MAX_FETCH_ROLLOUT_BYTES
+    automatic_allowed = (
+        identity.size <= MAX_AUTOMATIC_FULL_RECONSTRUCTION_BYTES
+    )
     return {
         "kind": "rollout_stat",
         "source_bytes": identity.size,
@@ -1362,7 +1498,12 @@ def _rollout_identity_record(identity: RolloutIdentity) -> dict[str, Any]:
         "source_inode": identity.inode,
         "source_mtime_ns": identity.mtime_ns,
         "source_ctime_ns": identity.ctime_ns,
-        "full_fetch_limit_bytes": MAX_FETCH_ROLLOUT_BYTES,
+        "full_fetch_limit_bytes": MAX_AUTOMATIC_FULL_RECONSTRUCTION_BYTES,
+        "automatic_full_reconstruction_limit_bytes": (
+            MAX_AUTOMATIC_FULL_RECONSTRUCTION_BYTES
+        ),
+        "direct_fetch_limit_bytes": MAX_DIRECT_FETCH_ROLLOUT_BYTES,
+        "terminal_tail_scan_limit_bytes": MAX_TERMINAL_TAIL_SCAN_BYTES,
         "automatic_full_reconstruction_allowed": automatic_allowed,
         "full_reconstruction_allowed": automatic_allowed,
     }
@@ -1466,6 +1607,478 @@ def _read_local_rollout_byte_range(
         return data
 
 
+def _pread_exact(fd: int, offset: int, length: int) -> bytes:
+    pread = getattr(os, "pread", None)
+    if pread is None:
+        raise OSError("terminal-tail requires os.pread")
+    output = bytearray()
+    while len(output) < length:
+        chunk = pread(fd, length - len(output), offset + len(output))
+        if not chunk:
+            break
+        output.extend(chunk)
+    if len(output) != length:
+        raise ValueError(
+            "terminal-tail read was truncated: "
+            f"{len(output)} bytes != {length}"
+        )
+    return bytes(output)
+
+
+def _terminal_tail_error_code(error: BaseException) -> str:
+    if isinstance(error, FileNotFoundError):
+        return "rollout_not_found"
+    if isinstance(error, OSError):
+        return "rollout_unreadable"
+    message = str(error)
+    for prefix, code in TERMINAL_TAIL_ERROR_PREFIX_CODES:
+        if message.startswith(prefix):
+            return code
+    return "internal_failure"
+
+
+class _TerminalTailOperationError(ValueError):
+    def __init__(self, error_code: str, detail: str) -> None:
+        if error_code not in TERMINAL_TAIL_ERROR_MESSAGES:
+            raise ValueError("invalid terminal-tail error code")
+        super().__init__(detail)
+        self.error_code = error_code
+
+
+def _select_terminal_tail_anchor(
+    window: bytes,
+    *,
+    window_start: int,
+) -> _TerminalTailAnchor | None:
+    if not window:
+        return None
+    candidate_end = len(window) - 1 if window.endswith(b"\n") else len(window)
+    if candidate_end <= 0:
+        return None
+    maximum_length = min(MAX_TERMINAL_TAIL_ANCHOR_BYTES, candidate_end)
+    if maximum_length < MIN_TERMINAL_TAIL_ANCHOR_BYTES:
+        return None
+    lengths = [
+        length
+        for length in (128, 96, 64, 48, 32)
+        if MIN_TERMINAL_TAIL_ANCHOR_BYTES <= length <= maximum_length
+    ]
+    if maximum_length not in lengths:
+        lengths.insert(0, maximum_length)
+
+    region_start = max(0, candidate_end - 64 * 1024)
+    key_offsets = [
+        window.rfind(key, region_start, candidate_end)
+        for key in (
+            b'"last_agent_message"',
+            b'"timestamp"',
+            b'"payload"',
+            b'"type"',
+        )
+    ]
+    for length in lengths:
+        latest_start = candidate_end - length
+        positions = [
+            latest_start,
+            max(region_start, latest_start - 257),
+            max(region_start, latest_start - 4093),
+        ]
+        for key_offset in key_offsets:
+            if key_offset >= 0:
+                positions.append(
+                    min(latest_start, max(region_start, key_offset - length // 3))
+                )
+        available = candidate_end - region_start - length
+        if available > 0:
+            positions.extend(
+                region_start + (available * index) // 15
+                for index in range(16)
+            )
+        seen: set[int] = set()
+        for position in positions:
+            if position in seen or position < 0 or position + length > candidate_end:
+                continue
+            seen.add(position)
+            candidate = window[position : position + length]
+            if not candidate:
+                continue
+            first = window.find(candidate)
+            if first != position:
+                continue
+            if window.find(candidate, position + 1) != -1:
+                continue
+            return _TerminalTailAnchor(
+                offset=window_start + position,
+                data=candidate,
+            )
+    return None
+
+
+def _terminal_tail_anchor_is_stable(
+    handle: _PinnedRolloutHandle,
+    anchor: _TerminalTailAnchor,
+    *,
+    source_bytes: int,
+    source_device: int,
+    source_inode: int,
+    phase: str,
+) -> tuple[bool, int]:
+    observed = handle.assert_tail_coordinates(
+        source_bytes=source_bytes,
+        source_device=source_device,
+        source_inode=source_inode,
+        phase=phase,
+    )
+    current = _pread_exact(handle.fileno(), anchor.offset, len(anchor.data))
+    if current != anchor.data:
+        observed = max(
+            observed,
+            handle.assert_tail_coordinates(
+                source_bytes=source_bytes,
+                source_device=source_device,
+                source_inode=source_inode,
+                phase=phase,
+            ),
+        )
+        return False, observed
+    observed = max(
+        observed,
+        handle.assert_tail_coordinates(
+            source_bytes=source_bytes,
+            source_device=source_device,
+            source_inode=source_inode,
+            phase=phase,
+        ),
+    )
+    return True, observed
+
+
+def _reject_nonfinite_json_constant(value: str) -> None:
+    raise ValueError(f"non-finite JSON constant: {value}")
+
+
+def _reject_duplicate_json_keys(
+    pairs: list[tuple[str, Any]],
+) -> dict[str, Any]:
+    parsed: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in parsed:
+            raise ValueError("duplicate JSON key")
+        parsed[key] = value
+    return parsed
+
+
+def _terminal_tail_record_disposition(
+    record_bytes: bytes,
+    *,
+    max_record_bytes: int,
+) -> tuple[str, bytes | None]:
+    if not record_bytes:
+        raise ValueError("terminal-tail encountered an empty JSONL record")
+    if len(record_bytes) > max_record_bytes:
+        raise ValueError(
+            "terminal-tail record too large: "
+            f"{len(record_bytes)} bytes > {max_record_bytes}"
+        )
+    try:
+        text = record_bytes.decode("utf-8", "strict")
+    except UnicodeDecodeError as error:
+        raise ValueError("terminal-tail record is not valid UTF-8") from error
+    try:
+        record = json.loads(
+            text,
+            parse_constant=_reject_nonfinite_json_constant,
+            object_pairs_hook=_reject_duplicate_json_keys,
+        )
+    except (ValueError, RecursionError) as error:
+        raise ValueError("terminal-tail encountered malformed JSONL") from error
+    if not isinstance(record, dict):
+        raise ValueError("terminal-tail JSONL record must be an object")
+    payload = record.get("payload", {})
+    if not isinstance(payload, dict):
+        raise ValueError("terminal-tail JSONL payload must be an object")
+    record_type = str(record.get("type", ""))
+    payload_type = str(payload.get("type", ""))
+    if record_type == "event_msg" and payload_type == "task_complete":
+        message = payload.get("last_agent_message")
+        if not isinstance(message, str):
+            raise ValueError(
+                "terminal-tail task_complete last_agent_message must be a string"
+            )
+        try:
+            encoded = message.encode("utf-8", "strict")
+        except UnicodeEncodeError as error:
+            raise ValueError(
+                "terminal-tail task_complete result is not valid UTF-8"
+            ) from error
+        if len(encoded) > max_record_bytes:
+            raise ValueError(
+                "terminal-tail result too large: "
+                f"{len(encoded)} bytes > {max_record_bytes}"
+            )
+        return "complete", encoded
+    if record_type == "event_msg" and payload_type == "user_message":
+        return "user", None
+    if (
+        record_type == "response_item"
+        and payload_type == "message"
+        and str(payload.get("role", "")) == "user"
+    ):
+        return "user", None
+    return "other", None
+
+
+def _scan_terminal_tail_handle(
+    handle: _PinnedRolloutHandle,
+    *,
+    window_bytes: int,
+    max_scan_bytes: int,
+    max_record_bytes: int,
+    max_records: int,
+) -> TerminalTailResult:
+    if window_bytes < 1:
+        raise ValueError("terminal-tail window must be positive")
+    if max_scan_bytes < 1:
+        raise ValueError("terminal-tail scan limit must be positive")
+    if max_record_bytes < 1:
+        raise ValueError("terminal-tail record limit must be positive")
+    if max_records < 1:
+        raise ValueError("terminal-tail record count limit must be positive")
+
+    source_identity = handle.open_identity
+    source_bytes = source_identity.size
+    observed_source_bytes = source_bytes
+    scan_start = source_bytes
+    window_count = 0
+    records_examined = 0
+    anchor: _TerminalTailAnchor | None = None
+
+    def result(
+        status: str,
+        *,
+        message: bytes | None = None,
+        terminal_record_offset: int | None = None,
+    ) -> TerminalTailResult:
+        return TerminalTailResult(
+            status=status,
+            message=message,
+            source_bytes=source_bytes,
+            observed_source_bytes=observed_source_bytes,
+            scan_start=scan_start,
+            scan_end=source_bytes,
+            scanned_bytes=source_bytes - scan_start,
+            window_count=window_count,
+            records_examined=records_examined,
+            anchor_offset=anchor.offset if anchor is not None else None,
+            anchor_length=len(anchor.data) if anchor is not None else 0,
+            append_observed=observed_source_bytes > source_bytes,
+            terminal_record_offset=terminal_record_offset,
+        )
+
+    def anchor_stable(phase: str) -> bool:
+        nonlocal observed_source_bytes
+        if anchor is None:
+            return False
+        stable, observed = _terminal_tail_anchor_is_stable(
+            handle,
+            anchor,
+            source_bytes=source_bytes,
+            source_device=source_identity.device,
+            source_inode=source_identity.inode,
+            phase=phase,
+        )
+        observed_source_bytes = max(observed_source_bytes, observed)
+        return stable
+
+    def inspect_record(
+        record_offset: int,
+        record_bytes: bytes,
+    ) -> TerminalTailResult | None:
+        disposition, message = _terminal_tail_record_disposition(
+            record_bytes,
+            max_record_bytes=max_record_bytes,
+        )
+        if disposition == "user":
+            if not anchor_stable("before terminal-tail nonterminal result"):
+                return result("anchor_moved")
+            return result(
+                "terminal_not_reached",
+                terminal_record_offset=record_offset,
+            )
+        if disposition == "complete":
+            if not anchor_stable("before terminal-tail result publication"):
+                return result("anchor_moved")
+            return result(
+                "complete",
+                message=message,
+                terminal_record_offset=record_offset,
+            )
+        return None
+
+    def record_limit_result() -> TerminalTailResult:
+        if not anchor_stable("before terminal-tail record-limit result"):
+            return result("anchor_moved")
+        return result("record_limit_exceeded")
+
+    def consume_record_budget() -> TerminalTailResult | None:
+        nonlocal records_examined
+        if records_examined >= max_records:
+            return record_limit_result()
+        records_examined += 1
+        return None
+
+    observed_source_bytes = max(
+        observed_source_bytes,
+        handle.assert_tail_coordinates(
+            source_bytes=source_bytes,
+            source_device=source_identity.device,
+            source_inode=source_identity.inode,
+            phase="before terminal-tail scan",
+        ),
+    )
+    if source_bytes == 0:
+        return result("terminal_not_reached")
+
+    last_byte = _pread_exact(handle.fileno(), source_bytes - 1, 1)
+    observed_source_bytes = max(
+        observed_source_bytes,
+        handle.assert_tail_coordinates(
+            source_bytes=source_bytes,
+            source_device=source_identity.device,
+            source_inode=source_identity.inode,
+            phase="after terminal-tail EOF check",
+        ),
+    )
+    if last_byte != b"\n":
+        scan_start = source_bytes - 1
+        window_count = 1
+        return result("source_in_progress")
+
+    lower_bound = max(0, source_bytes - max_scan_bytes)
+    cursor = source_bytes
+    carry = b""
+    first_window = True
+    while cursor > lower_bound:
+        if not first_window and not anchor_stable(
+            "before terminal-tail continuation window"
+        ):
+            return result("anchor_moved")
+        start = max(lower_bound, cursor - window_bytes)
+        data = _pread_exact(handle.fileno(), start, cursor - start)
+        window_count += 1
+        scan_start = start
+        observed_source_bytes = max(
+            observed_source_bytes,
+            handle.assert_tail_coordinates(
+                source_bytes=source_bytes,
+                source_device=source_identity.device,
+                source_inode=source_identity.inode,
+                phase="after terminal-tail window read",
+            ),
+        )
+        if first_window:
+            anchor = _select_terminal_tail_anchor(data, window_start=start)
+            if anchor is None:
+                return result("anchor_unavailable")
+            if not anchor_stable("after terminal-tail anchor selection"):
+                return result("anchor_moved")
+            combined = data
+            if not combined.endswith(b"\n"):
+                raise ValueError("terminal-tail frozen EOF lost its LF terminator")
+            record_end = len(combined) - 1
+        else:
+            combined = data + carry
+            record_end = len(combined)
+
+        while True:
+            separator = combined.rfind(b"\n", 0, record_end)
+            if separator < 0:
+                break
+            record_start = separator + 1
+            budget_result = consume_record_budget()
+            if budget_result is not None:
+                return budget_result
+            record_length = record_end - record_start
+            if record_length > max_record_bytes:
+                raise ValueError(
+                    "terminal-tail record too large: "
+                    f"{record_length} bytes > {max_record_bytes}"
+                )
+            record_result = inspect_record(
+                start + record_start,
+                combined[record_start:record_end],
+            )
+            if record_result is not None:
+                return record_result
+            if records_examined >= max_records:
+                return record_limit_result()
+            record_end = separator
+
+        if start == 0:
+            budget_result = consume_record_budget()
+            if budget_result is not None:
+                return budget_result
+            if record_end > max_record_bytes:
+                raise ValueError(
+                    "terminal-tail record too large: "
+                    f"{record_end} bytes > {max_record_bytes}"
+                )
+            record_result = inspect_record(
+                0,
+                combined[:record_end],
+            )
+            if record_result is not None:
+                return record_result
+            carry = b""
+        else:
+            if record_end > max_record_bytes:
+                raise ValueError(
+                    "terminal-tail record too large: "
+                    f"{record_end} bytes > {max_record_bytes}"
+                )
+            carry = combined[:record_end]
+        cursor = start
+        first_window = False
+
+    if anchor is not None and not anchor_stable(
+        "before terminal-tail incomplete result"
+    ):
+        return result("anchor_moved")
+    if lower_bound > 0:
+        return result("tail_window_insufficient")
+    return result("terminal_not_reached")
+
+
+def _read_terminal_tail(
+    codex_root: pathlib.Path,
+    rollout_relative_path: pathlib.PurePosixPath,
+    *,
+    window_bytes: int = DEFAULT_TERMINAL_TAIL_WINDOW_BYTES,
+    max_scan_bytes: int = MAX_TERMINAL_TAIL_SCAN_BYTES,
+    max_record_bytes: int = MAX_TERMINAL_TAIL_RECORD_BYTES,
+    max_records: int = MAX_TERMINAL_TAIL_RECORDS,
+) -> TerminalTailResult:
+    try:
+        with _open_pinned_rollout_text(
+            codex_root,
+            rollout_relative_path,
+        ) as handle:
+            return _scan_terminal_tail_handle(
+                handle,
+                window_bytes=window_bytes,
+                max_scan_bytes=max_scan_bytes,
+                max_record_bytes=max_record_bytes,
+                max_records=max_records,
+            )
+    except _TerminalTailOperationError:
+        raise
+    except ValueError as error:
+        raise _TerminalTailOperationError(
+            _terminal_tail_error_code(error),
+            str(error),
+        ) from error
+
+
 def _open_output_parent(output: pathlib.Path) -> int:
     if not output.is_absolute() or output.name in ("", ".", ".."):
         raise ValueError("output path must name an absolute file")
@@ -1496,6 +2109,89 @@ def _open_output_parent(output: pathlib.Path) -> int:
         raise
 
 
+def _private_output_identity_matches(
+    observed: os.stat_result,
+    expected: os.stat_result,
+) -> bool:
+    return (
+        stat.S_ISREG(observed.st_mode)
+        and stat.S_ISREG(expected.st_mode)
+        and (observed.st_dev, observed.st_ino)
+        == (expected.st_dev, expected.st_ino)
+    )
+
+
+def _assert_private_output_binding(
+    fd: int,
+    parent_fd: int,
+    entry_name: str,
+    *,
+    expected_identity: os.stat_result,
+    expected_size: int,
+) -> None:
+    descriptor_stat = os.fstat(fd)
+    try:
+        entry_stat = os.stat(
+            entry_name,
+            dir_fd=parent_fd,
+            follow_symlinks=False,
+        )
+    except FileNotFoundError as error:
+        raise ValueError("private output entry changed during publication") from error
+    if not _private_output_identity_matches(
+        descriptor_stat,
+        expected_identity,
+    ) or not _private_output_identity_matches(entry_stat, expected_identity):
+        raise ValueError("private output entry changed during publication")
+    for observed in (descriptor_stat, entry_stat):
+        if observed.st_uid != os.getuid():
+            raise ValueError("private output ownership changed during publication")
+        if stat.S_IMODE(observed.st_mode) != 0o600:
+            raise ValueError("private output mode changed during publication")
+        if observed.st_nlink != 1:
+            raise ValueError("private output link count changed during publication")
+        if observed.st_size != expected_size:
+            raise ValueError("private output size changed during publication")
+
+
+def _private_output_bytes_match(fd: int, expected: bytes) -> bool:
+    pread = getattr(os, "pread", None)
+    if pread is None:
+        raise OSError("secure output writes require os.pread")
+    offset = 0
+    view = memoryview(expected)
+    while offset < len(view):
+        length = min(1024 * 1024, len(view) - offset)
+        chunk = pread(fd, length, offset)
+        if chunk != view[offset : offset + length]:
+            return False
+        offset += length
+    return pread(fd, 1, len(view)) == b""
+
+
+def _unlink_private_output_temp_if_bound(
+    parent_fd: int,
+    temp_name: str,
+    expected_identity: os.stat_result | None,
+) -> None:
+    if expected_identity is None:
+        return
+    try:
+        observed = os.stat(
+            temp_name,
+            dir_fd=parent_fd,
+            follow_symlinks=False,
+        )
+    except FileNotFoundError:
+        return
+    if not _private_output_identity_matches(observed, expected_identity):
+        return
+    try:
+        os.unlink(temp_name, dir_fd=parent_fd)
+    except FileNotFoundError:
+        pass
+
+
 def _write_private_bytes(output: pathlib.Path, data: bytes) -> None:
     parent_fd = _open_output_parent(output)
     try:
@@ -1508,9 +2204,9 @@ def _write_private_bytes(output: pathlib.Path, data: bytes) -> None:
 
         last_error: FileExistsError | None = None
         for attempt in range(100):
-            temp_name = f".{output.name}.tmp-{os.getpid()}-{attempt}"
+            temp_name = f".codex-output-{os.urandom(16).hex()}"
             flags = (
-                os.O_WRONLY
+                os.O_RDWR
                 | os.O_CREAT
                 | os.O_EXCL
                 | getattr(os, "O_NOFOLLOW", 0)
@@ -1521,23 +2217,62 @@ def _write_private_bytes(output: pathlib.Path, data: bytes) -> None:
             except FileExistsError as error:
                 last_error = error
                 continue
+            expected_identity: os.stat_result | None = None
+            published = False
             try:
-                with os.fdopen(fd, "wb") as handle:
-                    handle.write(data)
-                    os.fchmod(handle.fileno(), 0o600)
+                expected_identity = os.fstat(fd)
+                view = memoryview(data)
+                written = 0
+                while written < len(view):
+                    count = os.write(fd, view[written:])
+                    if count < 1:
+                        raise OSError("private output write made no progress")
+                    written += count
+                os.fchmod(fd, 0o600)
+                expected_identity = os.fstat(fd)
+                _assert_private_output_binding(
+                    fd,
+                    parent_fd,
+                    temp_name,
+                    expected_identity=expected_identity,
+                    expected_size=len(data),
+                )
+                if not _private_output_bytes_match(fd, data):
+                    raise ValueError(
+                        "private output content changed before publication"
+                    )
+                _assert_private_output_binding(
+                    fd,
+                    parent_fd,
+                    temp_name,
+                    expected_identity=expected_identity,
+                    expected_size=len(data),
+                )
                 os.replace(
                     temp_name,
                     output.name,
                     src_dir_fd=parent_fd,
                     dst_dir_fd=parent_fd,
                 )
+                published = True
+                _assert_private_output_binding(
+                    fd,
+                    parent_fd,
+                    output.name,
+                    expected_identity=expected_identity,
+                    expected_size=len(data),
+                )
                 return
             except Exception:
-                try:
-                    os.unlink(temp_name, dir_fd=parent_fd)
-                except FileNotFoundError:
-                    pass
+                if not published:
+                    _unlink_private_output_temp_if_bound(
+                        parent_fd,
+                        temp_name,
+                        expected_identity,
+                    )
                 raise
+            finally:
+                os.close(fd)
         raise FileExistsError(
             f"could not create private temporary output for {output}"
         ) from last_error
@@ -2033,8 +2768,23 @@ CONFIG = json.loads({encoded!r})
 DATE_STRINGS = CONFIG.get("dates", [])
 LIMIT = int(CONFIG.get("limit", 0))
 ROOT = pathlib.Path(CONFIG["codex_root"]).expanduser()
-MAX_FETCH_ROLLOUT_BYTES = int(CONFIG.get("max_fetch_rollout_bytes", 0))
+MAX_DIRECT_FETCH_ROLLOUT_BYTES = int(
+    CONFIG.get("max_direct_fetch_rollout_bytes", 0)
+)
+MAX_AUTOMATIC_FULL_RECONSTRUCTION_BYTES = int(
+    CONFIG.get("max_automatic_full_reconstruction_bytes", 0)
+)
 MAX_FETCH_ROLLOUT_CHUNK_BYTES = int(CONFIG.get("max_fetch_rollout_chunk_bytes", 0))
+TERMINAL_TAIL_WINDOW_BYTES = int(CONFIG.get("terminal_tail_window_bytes", 0))
+MAX_TERMINAL_TAIL_SCAN_BYTES = int(CONFIG.get("max_terminal_tail_scan_bytes", 0))
+MAX_TERMINAL_TAIL_RECORD_BYTES = int(CONFIG.get("max_terminal_tail_record_bytes", 0))
+MAX_TERMINAL_TAIL_RECORDS = int(
+    CONFIG.get("max_terminal_tail_records", {MAX_TERMINAL_TAIL_RECORDS})
+)
+MAX_TERMINAL_TAIL_ANCHOR_BYTES = int(CONFIG.get("max_terminal_tail_anchor_bytes", 0))
+MIN_TERMINAL_TAIL_ANCHOR_BYTES = int(CONFIG.get("min_terminal_tail_anchor_bytes", 0))
+TERMINAL_TAIL_ERROR_MESSAGES = {TERMINAL_TAIL_ERROR_MESSAGES!r}
+TERMINAL_TAIL_ERROR_PREFIX_CODES = {TERMINAL_TAIL_ERROR_PREFIX_CODES!r}
 MIN_ROLLOUT_CHUNK_BYTES = int(CONFIG.get("min_rollout_chunk_bytes", 0))
 MAX_ROLLOUT_CHUNK_BYTES = int(CONFIG.get("max_rollout_chunk_bytes", 0))
 MAX_ROLLOUT_CHUNK_RECORDS = {MAX_ROLLOUT_CHUNK_RECORDS}
@@ -2099,6 +2849,8 @@ ROLLOUT_SUMMARY_BEGIN = {REMOTE_ROLLOUT_SUMMARY_BEGIN!r}
 ROLLOUT_SUMMARY_END = {REMOTE_ROLLOUT_SUMMARY_END!r}
 CHUNKED_ROLLOUT_SUMMARY_BEGIN = {REMOTE_CHUNKED_ROLLOUT_SUMMARY_BEGIN!r}
 CHUNKED_ROLLOUT_SUMMARY_END = {REMOTE_CHUNKED_ROLLOUT_SUMMARY_END!r}
+TERMINAL_TAIL_BEGIN = {REMOTE_TERMINAL_TAIL_BEGIN!r}
+TERMINAL_TAIL_END = {REMOTE_TERMINAL_TAIL_END!r}
 
 
 def directory_open_flags():
@@ -2403,6 +3155,47 @@ class PinnedRolloutHandle:
         self.prefix_proof = prefix_proof
         self.verified_snapshot = verified_snapshot
         return current
+
+    def assert_tail_coordinates(
+        self,
+        source_bytes,
+        source_device,
+        source_inode,
+        phase,
+    ):
+        try:
+            descriptor = rollout_identity_from_stat(os.fstat(self.fileno()))
+        except (OSError, ValueError) as error:
+            raise ValueError("rollout unreadable " + phase) from error
+        if (
+            descriptor["device"] != source_device
+            or descriptor["inode"] != source_inode
+        ):
+            raise ValueError("rollout object replaced " + phase)
+        if descriptor["size"] < source_bytes:
+            raise ValueError("rollout truncated below frozen EOF " + phase)
+        try:
+            current = rollout_identity_from_stat(
+                os.stat(
+                    self.name,
+                    dir_fd=self.parent_fd,
+                    follow_symlinks=False,
+                )
+            )
+        except FileNotFoundError as error:
+            raise ValueError("rollout path replaced " + phase) from error
+        except ValueError as error:
+            raise ValueError("rollout path replaced " + phase) from error
+        except OSError as error:
+            raise ValueError("rollout path unreadable " + phase) from error
+        if (
+            current["device"] != source_device
+            or current["inode"] != source_inode
+        ):
+            raise ValueError("rollout path replaced " + phase)
+        if current["size"] < source_bytes:
+            raise ValueError("rollout truncated below frozen EOF " + phase)
+        return max(descriptor["size"], current["size"])
 
 
 def open_pinned_rollout_text_from_parent_fd(
@@ -2839,13 +3632,13 @@ def validate_source_read_budget(identity):
             raise ValueError("authorized source bytes must be non-negative")
         if AUTHORIZED_SOURCE_BYTES != identity["size"]:
             raise ValueError("authorized source bytes must equal expected source size")
-    if identity["size"] > MAX_FETCH_ROLLOUT_BYTES:
+    if identity["size"] > MAX_AUTOMATIC_FULL_RECONSTRUCTION_BYTES:
         if AUTHORIZED_SOURCE_BYTES != identity["size"]:
             raise ValueError(
                 "rollout exceeds automatic full-reconstruction limit: "
                 + str(identity["size"])
                 + " bytes > "
-                + str(MAX_FETCH_ROLLOUT_BYTES)
+                + str(MAX_AUTOMATIC_FULL_RECONSTRUCTION_BYTES)
                 + "; exact authorized source bytes required"
             )
         return True
@@ -2853,7 +3646,9 @@ def validate_source_read_budget(identity):
 
 
 def rollout_identity_record(identity):
-    automatic_allowed = identity["size"] <= MAX_FETCH_ROLLOUT_BYTES
+    automatic_allowed = (
+        identity["size"] <= MAX_AUTOMATIC_FULL_RECONSTRUCTION_BYTES
+    )
     return {{
         "kind": "rollout_stat",
         "source_bytes": identity["size"],
@@ -2862,7 +3657,10 @@ def rollout_identity_record(identity):
         "source_inode": identity["inode"],
         "source_mtime_ns": identity["mtime_ns"],
         "source_ctime_ns": identity["ctime_ns"],
-        "full_fetch_limit_bytes": MAX_FETCH_ROLLOUT_BYTES,
+        "full_fetch_limit_bytes": MAX_AUTOMATIC_FULL_RECONSTRUCTION_BYTES,
+        "automatic_full_reconstruction_limit_bytes": MAX_AUTOMATIC_FULL_RECONSTRUCTION_BYTES,
+        "direct_fetch_limit_bytes": MAX_DIRECT_FETCH_ROLLOUT_BYTES,
+        "terminal_tail_scan_limit_bytes": MAX_TERMINAL_TAIL_SCAN_BYTES,
         "automatic_full_reconstruction_allowed": automatic_allowed,
         "full_reconstruction_allowed": automatic_allowed,
     }}
@@ -2931,6 +3729,469 @@ def read_rollout_byte_range(rel, byte_start, byte_end, max_bytes, expected_ident
         if len(data) != length:
             raise ValueError("rollout chunk read was truncated")
         return data
+
+
+def pread_exact(fd, offset, length):
+    pread = getattr(os, "pread", None)
+    if pread is None:
+        raise OSError("terminal-tail requires os.pread")
+    output = bytearray()
+    while len(output) < length:
+        chunk = pread(fd, length - len(output), offset + len(output))
+        if not chunk:
+            break
+        output.extend(chunk)
+    if len(output) != length:
+        raise ValueError(
+            "terminal-tail read was truncated: "
+            + str(len(output))
+            + " bytes != "
+            + str(length)
+        )
+    return bytes(output)
+
+
+def terminal_tail_error_code(error):
+    if isinstance(error, FileNotFoundError):
+        return "rollout_not_found"
+    if isinstance(error, OSError):
+        return "rollout_unreadable"
+    message = str(error)
+    for prefix, code in TERMINAL_TAIL_ERROR_PREFIX_CODES:
+        if message.startswith(prefix):
+            return code
+    return "internal_failure"
+
+
+class TerminalTailOperationError(ValueError):
+    def __init__(self, error_code, detail):
+        if error_code not in TERMINAL_TAIL_ERROR_MESSAGES:
+            raise ValueError("invalid terminal-tail error code")
+        super().__init__(detail)
+        self.error_code = error_code
+
+
+def select_terminal_tail_anchor(window, window_start):
+    if not window:
+        return None
+    candidate_end = len(window) - 1 if window.endswith(b"\\n") else len(window)
+    if candidate_end <= 0:
+        return None
+    maximum_length = min(MAX_TERMINAL_TAIL_ANCHOR_BYTES, candidate_end)
+    if maximum_length < MIN_TERMINAL_TAIL_ANCHOR_BYTES:
+        return None
+    lengths = [
+        length
+        for length in (128, 96, 64, 48, 32)
+        if MIN_TERMINAL_TAIL_ANCHOR_BYTES <= length <= maximum_length
+    ]
+    if maximum_length not in lengths:
+        lengths.insert(0, maximum_length)
+    region_start = max(0, candidate_end - 64 * 1024)
+    key_offsets = [
+        window.rfind(key, region_start, candidate_end)
+        for key in (
+            b'"last_agent_message"',
+            b'"timestamp"',
+            b'"payload"',
+            b'"type"',
+        )
+    ]
+    for length in lengths:
+        latest_start = candidate_end - length
+        positions = [
+            latest_start,
+            max(region_start, latest_start - 257),
+            max(region_start, latest_start - 4093),
+        ]
+        for key_offset in key_offsets:
+            if key_offset >= 0:
+                positions.append(
+                    min(latest_start, max(region_start, key_offset - length // 3))
+                )
+        available = candidate_end - region_start - length
+        if available > 0:
+            positions.extend(
+                region_start + (available * index) // 15
+                for index in range(16)
+            )
+        seen = set()
+        for position in positions:
+            if (
+                position in seen
+                or position < 0
+                or position + length > candidate_end
+            ):
+                continue
+            seen.add(position)
+            candidate = window[position : position + length]
+            if not candidate:
+                continue
+            first = window.find(candidate)
+            if first != position:
+                continue
+            if window.find(candidate, position + 1) != -1:
+                continue
+            return dict(
+                offset=window_start + position,
+                data=candidate,
+            )
+    return None
+
+
+def terminal_tail_anchor_is_stable(
+    handle,
+    anchor,
+    source_bytes,
+    source_device,
+    source_inode,
+    phase,
+):
+    observed = handle.assert_tail_coordinates(
+        source_bytes,
+        source_device,
+        source_inode,
+        phase,
+    )
+    current = pread_exact(
+        handle.fileno(),
+        anchor["offset"],
+        len(anchor["data"]),
+    )
+    if current != anchor["data"]:
+        observed = max(
+            observed,
+            handle.assert_tail_coordinates(
+                source_bytes,
+                source_device,
+                source_inode,
+                phase,
+            ),
+        )
+        return False, observed
+    observed = max(
+        observed,
+        handle.assert_tail_coordinates(
+            source_bytes,
+            source_device,
+            source_inode,
+            phase,
+        ),
+    )
+    return True, observed
+
+
+def reject_nonfinite_json_constant(value):
+    raise ValueError("non-finite JSON constant: " + str(value))
+
+
+def reject_duplicate_json_keys(pairs):
+    parsed = dict()
+    for key, value in pairs:
+        if key in parsed:
+            raise ValueError("duplicate JSON key")
+        parsed[key] = value
+    return parsed
+
+
+def terminal_tail_record_disposition(record_bytes, max_record_bytes):
+    if not record_bytes:
+        raise ValueError("terminal-tail encountered an empty JSONL record")
+    if len(record_bytes) > max_record_bytes:
+        raise ValueError(
+            "terminal-tail record too large: "
+            + str(len(record_bytes))
+            + " bytes > "
+            + str(max_record_bytes)
+        )
+    try:
+        text = record_bytes.decode("utf-8", "strict")
+    except UnicodeDecodeError as error:
+        raise ValueError("terminal-tail record is not valid UTF-8") from error
+    try:
+        record = json.loads(
+            text,
+            parse_constant=reject_nonfinite_json_constant,
+            object_pairs_hook=reject_duplicate_json_keys,
+        )
+    except (ValueError, RecursionError) as error:
+        raise ValueError("terminal-tail encountered malformed JSONL") from error
+    if not isinstance(record, dict):
+        raise ValueError("terminal-tail JSONL record must be an object")
+    payload = record.get("payload", dict())
+    if not isinstance(payload, dict):
+        raise ValueError("terminal-tail JSONL payload must be an object")
+    record_type = str(record.get("type", ""))
+    payload_type = str(payload.get("type", ""))
+    if record_type == "event_msg" and payload_type == "task_complete":
+        message = payload.get("last_agent_message")
+        if not isinstance(message, str):
+            raise ValueError(
+                "terminal-tail task_complete last_agent_message must be a string"
+            )
+        try:
+            encoded = message.encode("utf-8", "strict")
+        except UnicodeEncodeError as error:
+            raise ValueError(
+                "terminal-tail task_complete result is not valid UTF-8"
+            ) from error
+        if len(encoded) > max_record_bytes:
+            raise ValueError(
+                "terminal-tail result too large: "
+                + str(len(encoded))
+                + " bytes > "
+                + str(max_record_bytes)
+            )
+        return "complete", encoded
+    if record_type == "event_msg" and payload_type == "user_message":
+        return "user", None
+    if (
+        record_type == "response_item"
+        and payload_type == "message"
+        and str(payload.get("role", "")) == "user"
+    ):
+        return "user", None
+    return "other", None
+
+
+def scan_terminal_tail_handle(
+    handle,
+    window_bytes,
+    max_scan_bytes,
+    max_record_bytes,
+    max_records,
+):
+    if window_bytes < 1:
+        raise ValueError("terminal-tail window must be positive")
+    if max_scan_bytes < 1:
+        raise ValueError("terminal-tail scan limit must be positive")
+    if max_record_bytes < 1:
+        raise ValueError("terminal-tail record limit must be positive")
+    if max_records < 1:
+        raise ValueError("terminal-tail record count limit must be positive")
+    source_identity = handle.open_identity
+    source_bytes = source_identity["size"]
+    observed_source_bytes = source_bytes
+    scan_start = source_bytes
+    window_count = 0
+    records_examined = 0
+    anchor = None
+
+    def make_result(status, message=None, terminal_record_offset=None):
+        return dict(
+            status=status,
+            message=message,
+            source_bytes=source_bytes,
+            observed_source_bytes=observed_source_bytes,
+            scan_start=scan_start,
+            scan_end=source_bytes,
+            scanned_bytes=source_bytes - scan_start,
+            window_count=window_count,
+            records_examined=records_examined,
+            anchor_offset=(anchor["offset"] if anchor is not None else None),
+            anchor_length=(len(anchor["data"]) if anchor is not None else 0),
+            append_observed=observed_source_bytes > source_bytes,
+            terminal_record_offset=terminal_record_offset,
+        )
+
+    def anchor_stable(phase):
+        nonlocal observed_source_bytes
+        if anchor is None:
+            return False
+        stable, observed = terminal_tail_anchor_is_stable(
+            handle,
+            anchor,
+            source_bytes,
+            source_identity["device"],
+            source_identity["inode"],
+            phase,
+        )
+        observed_source_bytes = max(observed_source_bytes, observed)
+        return stable
+
+    def inspect_record(record_offset, record_bytes):
+        disposition, message = terminal_tail_record_disposition(
+            record_bytes,
+            max_record_bytes,
+        )
+        if disposition == "user":
+            if not anchor_stable(
+                "before terminal-tail nonterminal result"
+            ):
+                return make_result("anchor_moved")
+            return make_result(
+                "terminal_not_reached",
+                terminal_record_offset=record_offset,
+            )
+        if disposition == "complete":
+            if not anchor_stable(
+                "before terminal-tail result publication"
+            ):
+                return make_result("anchor_moved")
+            return make_result(
+                "complete",
+                message=message,
+                terminal_record_offset=record_offset,
+            )
+        return None
+
+    def record_limit_result():
+        if not anchor_stable("before terminal-tail record-limit result"):
+            return make_result("anchor_moved")
+        return make_result("record_limit_exceeded")
+
+    def consume_record_budget():
+        nonlocal records_examined
+        if records_examined >= max_records:
+            return record_limit_result()
+        records_examined += 1
+        return None
+
+    observed_source_bytes = max(
+        observed_source_bytes,
+        handle.assert_tail_coordinates(
+            source_bytes,
+            source_identity["device"],
+            source_identity["inode"],
+            "before terminal-tail scan",
+        ),
+    )
+    if source_bytes == 0:
+        return make_result("terminal_not_reached")
+    last_byte = pread_exact(handle.fileno(), source_bytes - 1, 1)
+    observed_source_bytes = max(
+        observed_source_bytes,
+        handle.assert_tail_coordinates(
+            source_bytes,
+            source_identity["device"],
+            source_identity["inode"],
+            "after terminal-tail EOF check",
+        ),
+    )
+    if last_byte != b"\\n":
+        scan_start = source_bytes - 1
+        window_count = 1
+        return make_result("source_in_progress")
+
+    lower_bound = max(0, source_bytes - max_scan_bytes)
+    cursor = source_bytes
+    carry = b""
+    first_window = True
+    while cursor > lower_bound:
+        if (
+            not first_window
+            and not anchor_stable("before terminal-tail continuation window")
+        ):
+            return make_result("anchor_moved")
+        start = max(lower_bound, cursor - window_bytes)
+        data = pread_exact(handle.fileno(), start, cursor - start)
+        window_count += 1
+        scan_start = start
+        observed_source_bytes = max(
+            observed_source_bytes,
+            handle.assert_tail_coordinates(
+                source_bytes,
+                source_identity["device"],
+                source_identity["inode"],
+                "after terminal-tail window read",
+            ),
+        )
+        if first_window:
+            anchor = select_terminal_tail_anchor(data, start)
+            if anchor is None:
+                return make_result("anchor_unavailable")
+            if not anchor_stable("after terminal-tail anchor selection"):
+                return make_result("anchor_moved")
+            combined = data
+            if not combined.endswith(b"\\n"):
+                raise ValueError("terminal-tail frozen EOF lost its LF terminator")
+            record_end = len(combined) - 1
+        else:
+            combined = data + carry
+            record_end = len(combined)
+
+        while True:
+            separator = combined.rfind(b"\\n", 0, record_end)
+            if separator < 0:
+                break
+            record_start = separator + 1
+            budget_result = consume_record_budget()
+            if budget_result is not None:
+                return budget_result
+            record_length = record_end - record_start
+            if record_length > max_record_bytes:
+                raise ValueError(
+                    "terminal-tail record too large: "
+                    + str(record_length)
+                    + " bytes > "
+                    + str(max_record_bytes)
+                )
+            record_result = inspect_record(
+                start + record_start,
+                combined[record_start:record_end],
+            )
+            if record_result is not None:
+                return record_result
+            if records_examined >= max_records:
+                return record_limit_result()
+            record_end = separator
+
+        if start == 0:
+            budget_result = consume_record_budget()
+            if budget_result is not None:
+                return budget_result
+            if record_end > max_record_bytes:
+                raise ValueError(
+                    "terminal-tail record too large: "
+                    + str(record_end)
+                    + " bytes > "
+                    + str(max_record_bytes)
+                )
+            record_result = inspect_record(
+                0,
+                combined[:record_end],
+            )
+            if record_result is not None:
+                return record_result
+            carry = b""
+        else:
+            if record_end > max_record_bytes:
+                raise ValueError(
+                    "terminal-tail record too large: "
+                    + str(record_end)
+                    + " bytes > "
+                    + str(max_record_bytes)
+                )
+            carry = combined[:record_end]
+        cursor = start
+        first_window = False
+    if (
+        anchor is not None
+        and not anchor_stable("before terminal-tail incomplete result")
+    ):
+        return make_result("anchor_moved")
+    if lower_bound > 0:
+        return make_result("tail_window_insufficient")
+    return make_result("terminal_not_reached")
+
+
+def read_terminal_tail(rel):
+    try:
+        with open_pinned_rollout_text(rel) as handle:
+            return scan_terminal_tail_handle(
+                handle,
+                TERMINAL_TAIL_WINDOW_BYTES,
+                MAX_TERMINAL_TAIL_SCAN_BYTES,
+                MAX_TERMINAL_TAIL_RECORD_BYTES,
+                MAX_TERMINAL_TAIL_RECORDS,
+            )
+    except TerminalTailOperationError:
+        raise
+    except ValueError as error:
+        raise TerminalTailOperationError(
+            terminal_tail_error_code(error),
+            str(error),
+        ) from error
 
 
 def flat_archived_rollout_matches_date(rollout, date_text):
@@ -3603,13 +4864,19 @@ def chunk_meta_record(
         or "no_structured_evidence" in reason_codes
         or redacted_or_signal_only_records > 0
     )
-    automatic_allowed = source_identity["size"] <= MAX_FETCH_ROLLOUT_BYTES
+    automatic_allowed = (
+        source_identity["size"]
+        <= MAX_AUTOMATIC_FULL_RECONSTRUCTION_BYTES
+    )
     meta = {{
         "kind": "chunk_meta",
         "line": chunk["record_start"],
         "source_bytes": source_identity["size"],
         "source_identity": rollout_identity_token(source_identity),
-        "full_fetch_limit_bytes": MAX_FETCH_ROLLOUT_BYTES,
+        "full_fetch_limit_bytes": MAX_AUTOMATIC_FULL_RECONSTRUCTION_BYTES,
+        "automatic_full_reconstruction_limit_bytes": MAX_AUTOMATIC_FULL_RECONSTRUCTION_BYTES,
+        "direct_fetch_limit_bytes": MAX_DIRECT_FETCH_ROLLOUT_BYTES,
+        "terminal_tail_scan_limit_bytes": MAX_TERMINAL_TAIL_SCAN_BYTES,
         "automatic_full_reconstruction_allowed": automatic_allowed,
         "full_reconstruction_allowed": automatic_allowed or AUTHORIZED_SOURCE_BYTES == source_identity["size"],
         "authorized_source_bytes": AUTHORIZED_SOURCE_BYTES,
@@ -3654,7 +4921,8 @@ def rollout_summary_meta_record(source_identity, source_sha256):
         "source_sha256": source_sha256,
         "authorized_source_bytes": AUTHORIZED_SOURCE_BYTES,
         "full_reconstruction_allowed": (
-            source_identity["size"] <= MAX_FETCH_ROLLOUT_BYTES
+            source_identity["size"]
+            <= MAX_AUTOMATIC_FULL_RECONSTRUCTION_BYTES
             or AUTHORIZED_SOURCE_BYTES == source_identity["size"]
         ),
         "min_chunk_bytes": MIN_ROLLOUT_CHUNK_BYTES,
@@ -4259,6 +5527,68 @@ def iter_session_meta():
     print(SESSION_META_END)
 
 
+def terminal_tail():
+    rel = pathlib.PurePosixPath(str(CONFIG["rollout"]))
+    normalized = rel.as_posix()
+    print(TERMINAL_TAIL_BEGIN)
+
+    def emit_error(error_code):
+        if error_code not in TERMINAL_TAIL_ERROR_MESSAGES:
+            error_code = "internal_failure"
+        print(
+            json.dumps(
+                dict(ok=False, error_code=error_code),
+                separators=(",", ":"),
+                sort_keys=True,
+            )
+        )
+        print(TERMINAL_TAIL_END)
+
+    if not (
+        ACTIVE_ROLLOUT_RELATIVE_RE.fullmatch(normalized)
+        or ARCHIVED_ROLLOUT_RELATIVE_RE.fullmatch(normalized)
+    ):
+        emit_error("invalid_rollout_path")
+        return
+    try:
+        result = read_terminal_tail(rel)
+    except TerminalTailOperationError as error:
+        emit_error(error.error_code)
+        return
+    except FileNotFoundError:
+        emit_error("rollout_not_found")
+        return
+    except OSError:
+        emit_error("rollout_unreadable")
+        return
+    except ValueError:
+        emit_error("internal_failure")
+        return
+    except Exception:
+        emit_error("internal_failure")
+        return
+    try:
+        message = result.pop("message")
+        header = dict(result)
+        header["ok"] = True
+        header["bytes"] = len(message) if message is not None else 0
+        header_line = json.dumps(
+            header,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        payload_line = (
+            base64.b64encode(message).decode("ascii") if message else None
+        )
+    except Exception:
+        emit_error("internal_failure")
+        return
+    print(header_line)
+    if payload_line is not None:
+        print(payload_line)
+    print(TERMINAL_TAIL_END)
+
+
 def fetch_rollout():
     rel = pathlib.PurePosixPath(str(CONFIG["rollout"]))
     normalized = rel.as_posix()
@@ -4271,7 +5601,7 @@ def fetch_rollout():
         print(FETCH_ROLLOUT_END)
         return
     try:
-        size, data = read_rollout_bytes(rel, MAX_FETCH_ROLLOUT_BYTES)
+        size, data = read_rollout_bytes(rel, MAX_DIRECT_FETCH_ROLLOUT_BYTES)
     except FileNotFoundError:
         print(json.dumps({{"ok": False, "error": "rollout not found"}}, separators=(",", ":"), sort_keys=True))
         print(FETCH_ROLLOUT_END)
@@ -4350,6 +5680,8 @@ elif CONFIG["mode"] == "rollout-summary":
     summarize_rollout()
 elif CONFIG["mode"] == "chunked-rollout-summary":
     summarize_rollout_chunks()
+elif CONFIG["mode"] == "terminal-tail":
+    terminal_tail()
 else:
     raise SystemExit("unknown mode: " + str(CONFIG["mode"]))
 """.lstrip()
@@ -4680,7 +6012,7 @@ def _fetch_local_rollout(
     return _read_local_rollout_bytes(
         codex_root,
         rollout_relative_path,
-        max_bytes=MAX_FETCH_ROLLOUT_BYTES,
+        max_bytes=MAX_DIRECT_FETCH_ROLLOUT_BYTES,
     )
 
 
@@ -4765,7 +6097,7 @@ def _extract_framed_fetch_rollout_payload(
     end_marker: str,
     host: str,
     command: str,
-    max_bytes: int = MAX_FETCH_ROLLOUT_BYTES,
+    max_bytes: int = MAX_DIRECT_FETCH_ROLLOUT_BYTES,
     expected_source_identity: str | None = None,
 ) -> bytes:
     payload_lines = _extract_framed_lines(
@@ -4825,6 +6157,451 @@ def _extract_framed_fetch_rollout_payload(
     if len(data) > max_bytes:
         raise ValueError(f"rollout too large: {len(data)} bytes > {max_bytes}")
     return data
+
+
+def _extract_framed_terminal_tail_payload(
+    text: str,
+    *,
+    host: str,
+) -> tuple[TerminalTailResult, bytes | None]:
+    def invalid_frame() -> ValueError:
+        return ValueError(
+            f"remote terminal-tail output on host {host} had invalid framing"
+        )
+
+    if not text.endswith("\n") or "\r" in text:
+        raise invalid_frame()
+    frame_body = text[:-1]
+    begin_prefix = REMOTE_TERMINAL_TAIL_BEGIN + "\n"
+    if not frame_body.startswith(begin_prefix):
+        raise invalid_frame()
+    header_line, header_separator, remainder = frame_body[
+        len(begin_prefix) :
+    ].partition("\n")
+    if (
+        not header_separator
+        or header_line in (
+            REMOTE_TERMINAL_TAIL_BEGIN,
+            REMOTE_TERMINAL_TAIL_END,
+        )
+    ):
+        raise invalid_frame()
+    payload_line: str | None
+    if remainder == REMOTE_TERMINAL_TAIL_END:
+        payload_line = None
+    else:
+        payload_line, payload_separator, final_line = remainder.partition("\n")
+        if not payload_separator:
+            raise invalid_frame()
+        if final_line != REMOTE_TERMINAL_TAIL_END:
+            extra_line, extra_separator, extra_end = final_line.partition("\n")
+            if (
+                extra_separator
+                and extra_end == REMOTE_TERMINAL_TAIL_END
+                and extra_line
+                not in (
+                    REMOTE_TERMINAL_TAIL_BEGIN,
+                    REMOTE_TERMINAL_TAIL_END,
+                )
+            ):
+                raise ValueError(
+                    f"remote terminal-tail output on host {host} had invalid "
+                    "payload framing"
+                )
+            raise invalid_frame()
+        if payload_line in (
+            REMOTE_TERMINAL_TAIL_BEGIN,
+            REMOTE_TERMINAL_TAIL_END,
+        ):
+            raise invalid_frame()
+
+    def reject_nonfinite_constant(_value: str) -> NoReturn:
+        raise ValueError("non-finite JSON constant")
+
+    try:
+        header = json.loads(
+            header_line,
+            parse_constant=reject_nonfinite_constant,
+            object_pairs_hook=_reject_duplicate_json_keys,
+        )
+    except (json.JSONDecodeError, TypeError, ValueError, RecursionError):
+        raise ValueError(
+            f"remote terminal-tail output on host {host} had an invalid payload header"
+        ) from None
+    if type(header) is not dict:
+        raise ValueError(
+            f"remote terminal-tail output on host {host} had an invalid payload header"
+        )
+    try:
+        canonical_header = json.dumps(
+            header,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+    except (TypeError, ValueError, RecursionError):
+        raise ValueError(
+            f"remote terminal-tail output on host {host} had an invalid payload header"
+        ) from None
+    if canonical_header != header_line:
+        raise ValueError(
+            f"remote terminal-tail output on host {host} had a non-canonical "
+            "payload header"
+        )
+
+    if header.get("ok") is False:
+        if (
+            set(header) != {"ok", "error_code"}
+            or type(header.get("error_code")) is not str
+            or header["error_code"] not in TERMINAL_TAIL_ERROR_MESSAGES
+            or payload_line is not None
+        ):
+            raise ValueError(
+                f"remote terminal-tail output on host {host} had an invalid error header"
+            )
+        if header["error_code"] == "rollout_not_found":
+            raise FileNotFoundError("rollout not found")
+        raise ValueError(TERMINAL_TAIL_ERROR_MESSAGES[header["error_code"]])
+
+    success_header_keys = {
+        "ok",
+        "status",
+        "bytes",
+        "source_bytes",
+        "observed_source_bytes",
+        "scan_start",
+        "scan_end",
+        "scanned_bytes",
+        "window_count",
+        "records_examined",
+        "anchor_offset",
+        "anchor_length",
+        "append_observed",
+        "terminal_record_offset",
+    }
+    if header.get("ok") is not True or set(header) != success_header_keys:
+        raise ValueError(
+            f"remote terminal-tail output on host {host} had an invalid success header"
+        )
+
+    status = header["status"]
+    allowed_statuses = {
+        "complete",
+        "source_in_progress",
+        "terminal_not_reached",
+        "tail_window_insufficient",
+        "record_limit_exceeded",
+        "anchor_unavailable",
+        "anchor_moved",
+    }
+    if type(status) is not str or status not in allowed_statuses:
+        raise ValueError(
+            f"remote terminal-tail output on host {host} had an invalid status"
+        )
+
+    def integer_field(name: str, *, minimum: int = 0) -> int:
+        value = header[name]
+        if (
+            type(value) is not int
+            or value < minimum
+            or value > sys.maxsize
+        ):
+            raise ValueError(
+                f"remote terminal-tail output on host {host} had invalid {name}"
+            )
+        return value
+
+    source_bytes = integer_field("source_bytes")
+    observed_source_bytes = integer_field("observed_source_bytes")
+    scan_start = integer_field("scan_start")
+    scan_end = integer_field("scan_end")
+    scanned_bytes = integer_field("scanned_bytes")
+    window_count = integer_field("window_count")
+    records_examined = integer_field("records_examined")
+    anchor_length = integer_field("anchor_length")
+    expected_bytes = integer_field("bytes")
+    if observed_source_bytes < source_bytes:
+        raise ValueError(
+            f"remote terminal-tail output on host {host} reported source rollback"
+        )
+    if (
+        scan_end != source_bytes
+        or scan_start > scan_end
+        or scanned_bytes != scan_end - scan_start
+    ):
+        raise ValueError(
+            f"remote terminal-tail output on host {host} had invalid scan coordinates"
+        )
+    expected_window_count = (
+        scanned_bytes + DEFAULT_TERMINAL_TAIL_WINDOW_BYTES - 1
+    ) // DEFAULT_TERMINAL_TAIL_WINDOW_BYTES
+    if (
+        scanned_bytes > MAX_TERMINAL_TAIL_SCAN_BYTES
+        or window_count != expected_window_count
+    ):
+        raise ValueError(
+            f"remote terminal-tail output on host {host} had invalid window coordinates"
+        )
+    if records_examined > MAX_TERMINAL_TAIL_RECORDS:
+        raise ValueError(
+            f"remote terminal-tail output on host {host} exceeded the record limit"
+        )
+    minimum_examined_bytes = records_examined * len(b"{}\n")
+    if scanned_bytes < minimum_examined_bytes:
+        raise ValueError(
+            f"remote terminal-tail output on host {host} had impossible "
+            "record-count evidence"
+        )
+    if status == "source_in_progress":
+        if (
+            source_bytes < 1
+            or scan_start != source_bytes - 1
+            or scanned_bytes != 1
+            or window_count != 1
+            or records_examined != 0
+        ):
+            raise ValueError(
+                f"remote terminal-tail output on host {host} had invalid "
+                "source-in-progress coordinates"
+            )
+    else:
+        expected_scan_start = max(
+            max(0, source_bytes - MAX_TERMINAL_TAIL_SCAN_BYTES),
+            source_bytes
+            - window_count * DEFAULT_TERMINAL_TAIL_WINDOW_BYTES,
+        )
+        if scan_start != expected_scan_start:
+            raise ValueError(
+                f"remote terminal-tail output on host {host} had invalid "
+                "fixed-S0 window geometry"
+            )
+    anchor_value = header.get("anchor_offset")
+    if anchor_value is None:
+        anchor_offset = None
+        if anchor_length != 0:
+            raise ValueError(
+                f"remote terminal-tail output on host {host} had invalid anchor metadata"
+            )
+    else:
+        if type(anchor_value) is not int:
+            raise ValueError(
+                f"remote terminal-tail output on host {host} had invalid anchor metadata"
+            )
+        anchor_offset = anchor_value
+        if (
+            anchor_offset < scan_start
+            or anchor_offset
+            < max(0, source_bytes - 1 - 64 * 1024)
+            or anchor_length < MIN_TERMINAL_TAIL_ANCHOR_BYTES
+            or anchor_length > MAX_TERMINAL_TAIL_ANCHOR_BYTES
+            or anchor_offset + anchor_length > source_bytes - 1
+        ):
+            raise ValueError(
+                f"remote terminal-tail output on host {host} had invalid anchor metadata"
+            )
+        maximum_anchor_length = min(
+            MAX_TERMINAL_TAIL_ANCHOR_BYTES,
+            min(DEFAULT_TERMINAL_TAIL_WINDOW_BYTES, source_bytes) - 1,
+        )
+        allowed_anchor_lengths = {
+            length
+            for length in (128, 96, 64, 48, 32)
+            if MIN_TERMINAL_TAIL_ANCHOR_BYTES
+            <= length
+            <= maximum_anchor_length
+        }
+        if (
+            maximum_anchor_length >= MIN_TERMINAL_TAIL_ANCHOR_BYTES
+            and maximum_anchor_length not in allowed_anchor_lengths
+        ):
+            allowed_anchor_lengths.add(maximum_anchor_length)
+        if anchor_length not in allowed_anchor_lengths:
+            raise ValueError(
+                f"remote terminal-tail output on host {host} had invalid anchor length"
+            )
+    terminal_value = header.get("terminal_record_offset")
+    if terminal_value is None:
+        terminal_record_offset = None
+    else:
+        if type(terminal_value) is not int:
+            raise ValueError(
+                f"remote terminal-tail output on host {host} had invalid terminal offset"
+            )
+        terminal_record_offset = terminal_value
+        if (
+            terminal_record_offset
+            < scan_start + (1 if scan_start > 0 else 0)
+            or terminal_record_offset >= source_bytes - 1
+            or terminal_record_offset
+            > source_bytes
+            - (window_count - 1) * DEFAULT_TERMINAL_TAIL_WINDOW_BYTES
+        ):
+            raise ValueError(
+                f"remote terminal-tail output on host {host} had invalid terminal offset"
+            )
+    if status == "complete" and (
+        anchor_offset is None
+        or terminal_record_offset is None
+        or records_examined < 1
+    ):
+        raise ValueError(
+            f"remote terminal-tail output on host {host} lacked complete-result "
+            "coordinate evidence"
+        )
+    append_observed = header["append_observed"]
+    if type(append_observed) is not bool:
+        raise ValueError(
+            f"remote terminal-tail output on host {host} had invalid append metadata"
+        )
+    if append_observed != (observed_source_bytes > source_bytes):
+        raise ValueError(
+            f"remote terminal-tail output on host {host} had inconsistent append metadata"
+        )
+    if status == "source_in_progress":
+        if anchor_offset is not None or terminal_record_offset is not None:
+            raise ValueError(
+                f"remote terminal-tail output on host {host} had invalid "
+                "source-in-progress evidence"
+            )
+    elif status == "anchor_unavailable":
+        if (
+            source_bytes < 1
+            or window_count != 1
+            or records_examined != 0
+            or anchor_offset is not None
+            or terminal_record_offset is not None
+        ):
+            raise ValueError(
+                f"remote terminal-tail output on host {host} had invalid "
+                "anchor-unavailable evidence"
+            )
+    elif status == "anchor_moved":
+        if anchor_offset is None or terminal_record_offset is not None:
+            raise ValueError(
+                f"remote terminal-tail output on host {host} had invalid "
+                "anchor-moved evidence"
+            )
+    elif status == "tail_window_insufficient":
+        if (
+            source_bytes <= MAX_TERMINAL_TAIL_SCAN_BYTES
+            or scanned_bytes != MAX_TERMINAL_TAIL_SCAN_BYTES
+            or records_examined >= MAX_TERMINAL_TAIL_RECORDS
+            or anchor_offset is None
+            or terminal_record_offset is not None
+        ):
+            raise ValueError(
+                f"remote terminal-tail output on host {host} had invalid "
+                "tail-window evidence"
+            )
+    elif status == "record_limit_exceeded":
+        if (
+            scanned_bytes < 1
+            or window_count < 1
+            or records_examined != MAX_TERMINAL_TAIL_RECORDS
+            or anchor_offset is None
+            or terminal_record_offset is not None
+        ):
+            raise ValueError(
+                f"remote terminal-tail output on host {host} had invalid "
+                "record-limit evidence"
+            )
+    elif status == "terminal_not_reached":
+        if source_bytes == 0:
+            if (
+                window_count != 0
+                or records_examined != 0
+                or anchor_offset is not None
+                or terminal_record_offset is not None
+            ):
+                raise ValueError(
+                    f"remote terminal-tail output on host {host} had invalid "
+                    "empty-source evidence"
+                )
+        elif (
+            records_examined < 1
+            or anchor_offset is None
+            or (terminal_record_offset is None and scan_start != 0)
+        ):
+            raise ValueError(
+                f"remote terminal-tail output on host {host} had invalid "
+                "nonterminal evidence"
+            )
+    if expected_bytes > MAX_TERMINAL_TAIL_RECORD_BYTES:
+        raise ValueError(
+            f"remote terminal-tail output on host {host} exceeded the result limit"
+        )
+    if status == "complete" and expected_bytes > 0:
+        if payload_line is None:
+            raise ValueError(
+                f"remote terminal-tail output on host {host} had invalid payload framing"
+            )
+        try:
+            data = base64.b64decode(payload_line, validate=True)
+        except (binascii.Error, ValueError) as error:
+            raise ValueError(
+                f"remote terminal-tail output on host {host} contained invalid base64"
+            ) from error
+        if base64.b64encode(data).decode("ascii") != payload_line:
+            raise ValueError(
+                f"remote terminal-tail output on host {host} contained "
+                "non-canonical base64"
+            )
+    else:
+        if payload_line is not None or expected_bytes != 0:
+            raise ValueError(
+                f"remote terminal-tail output on host {host} had invalid payload framing"
+            )
+        data = b""
+    if len(data) != expected_bytes:
+        raise ValueError(
+            f"remote terminal-tail output on host {host} was truncated"
+        )
+    if status == "complete":
+        try:
+            message_text = data.decode("utf-8")
+        except UnicodeDecodeError:
+            raise ValueError(
+                f"remote terminal-tail output on host {host} was not valid UTF-8"
+            ) from None
+        minimum_record_bytes = json.dumps(
+            {
+                "type": "event_msg",
+                "payload": {
+                    "type": "task_complete",
+                    "last_agent_message": message_text,
+                },
+            },
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        if (
+            len(minimum_record_bytes) > MAX_TERMINAL_TAIL_RECORD_BYTES
+            or terminal_record_offset is None
+            or terminal_record_offset + len(minimum_record_bytes) + 1
+            > source_bytes
+        ):
+            raise ValueError(
+                f"remote terminal-tail output on host {host} had impossible "
+                "terminal record bounds"
+            )
+        message: bytes | None = data
+    else:
+        message = None
+    result = TerminalTailResult(
+        status=status,
+        message=message,
+        source_bytes=source_bytes,
+        observed_source_bytes=observed_source_bytes,
+        scan_start=scan_start,
+        scan_end=scan_end,
+        scanned_bytes=scanned_bytes,
+        window_count=window_count,
+        records_examined=records_examined,
+        anchor_offset=anchor_offset,
+        anchor_length=anchor_length,
+        append_observed=append_observed,
+        terminal_record_offset=terminal_record_offset,
+    )
+    return result, message
 
 
 def _extract_framed_rollout_summary_records(
@@ -5183,7 +6960,9 @@ def cmd_fetch_rollout(args: argparse.Namespace) -> int:
                 "mode": "fetch-rollout",
                 "rollout": rollout_relative_path.as_posix(),
                 "codex_root": HOSTS[alias]["codex_root"],
-                "max_fetch_rollout_bytes": MAX_FETCH_ROLLOUT_BYTES,
+                "max_direct_fetch_rollout_bytes": (
+                    MAX_DIRECT_FETCH_ROLLOUT_BYTES
+                ),
             }
             try:
                 result = _run_remote_python_bounded(
@@ -5254,6 +7033,178 @@ def cmd_fetch_rollout(args: argparse.Namespace) -> int:
     return 0
 
 
+def _print_terminal_tail_metadata(
+    *,
+    alias: str,
+    rollout_relative_path: pathlib.PurePosixPath,
+    result: TerminalTailResult,
+    output: pathlib.Path | None,
+) -> None:
+    print(f"host={alias}")
+    print(f"rollout={rollout_relative_path.as_posix()}")
+    print(f"status={result.status}")
+    print(f"source_bytes={result.source_bytes}")
+    print(f"observed_source_bytes={result.observed_source_bytes}")
+    print(f"scan_start={result.scan_start}")
+    print(f"scan_end={result.scan_end}")
+    print(f"scanned_bytes={result.scanned_bytes}")
+    print(f"window_count={result.window_count}")
+    print(f"records_examined={result.records_examined}")
+    print(f"max_terminal_tail_records={MAX_TERMINAL_TAIL_RECORDS}")
+    print(
+        "anchor_offset="
+        + (str(result.anchor_offset) if result.anchor_offset is not None else "")
+    )
+    print(f"anchor_length={result.anchor_length}")
+    print(f"append_observed={str(result.append_observed).lower()}")
+    print(
+        "terminal_record_offset="
+        + (
+            str(result.terminal_record_offset)
+            if result.terminal_record_offset is not None
+            else ""
+        )
+    )
+    if output is not None:
+        print(f"output={output}")
+        print(f"bytes={len(result.message or b'')}")
+
+
+def cmd_terminal_tail(args: argparse.Namespace) -> int:
+    try:
+        hosts = _resolve_hosts([args.host])
+        alias = hosts[0]
+        rollout_relative_path = _resolve_rollout_relative_path(args.rollout)
+        output = _resolve_output_path(args.output)
+    except ValueError as error:
+        return _error(str(error))
+
+    try:
+        if HOSTS[alias]["kind"] == "local":
+            try:
+                result = _read_terminal_tail(
+                    _local_codex_root(),
+                    rollout_relative_path,
+                )
+            except FileNotFoundError:
+                raise
+            except _TerminalTailOperationError as error:
+                raise ValueError(
+                    TERMINAL_TAIL_ERROR_MESSAGES[error.error_code]
+                ) from None
+            except OSError as error:
+                raise ValueError(
+                    TERMINAL_TAIL_ERROR_MESSAGES[
+                        _terminal_tail_error_code(error)
+                    ]
+                ) from None
+            except ValueError:
+                raise ValueError(
+                    TERMINAL_TAIL_ERROR_MESSAGES["internal_failure"]
+                ) from None
+            except Exception:
+                raise ValueError(
+                    TERMINAL_TAIL_ERROR_MESSAGES["internal_failure"]
+                ) from None
+        else:
+            payload = {
+                "mode": "terminal-tail",
+                "rollout": rollout_relative_path.as_posix(),
+                "codex_root": HOSTS[alias]["codex_root"],
+                "max_direct_fetch_rollout_bytes": (
+                    MAX_DIRECT_FETCH_ROLLOUT_BYTES
+                ),
+                "max_automatic_full_reconstruction_bytes": (
+                    MAX_AUTOMATIC_FULL_RECONSTRUCTION_BYTES
+                ),
+                "terminal_tail_window_bytes": (
+                    DEFAULT_TERMINAL_TAIL_WINDOW_BYTES
+                ),
+                "max_terminal_tail_scan_bytes": MAX_TERMINAL_TAIL_SCAN_BYTES,
+                "max_terminal_tail_record_bytes": MAX_TERMINAL_TAIL_RECORD_BYTES,
+                "max_terminal_tail_records": MAX_TERMINAL_TAIL_RECORDS,
+                "max_terminal_tail_anchor_bytes": (
+                    MAX_TERMINAL_TAIL_ANCHOR_BYTES
+                ),
+                "min_terminal_tail_anchor_bytes": (
+                    MIN_TERMINAL_TAIL_ANCHOR_BYTES
+                ),
+            }
+            try:
+                process = _run_remote_python_bounded(
+                    alias,
+                    payload,
+                    max_stdout_bytes=MAX_REMOTE_TERMINAL_TAIL_STDOUT_BYTES,
+                )
+            except RuntimeError:
+                print(f"host={alias}", file=sys.stderr)
+                print(f"rollout={rollout_relative_path.as_posix()}", file=sys.stderr)
+                print(
+                    "error=remote terminal-tail process failed",
+                    file=sys.stderr,
+                )
+                return 1
+            if process.returncode != 0:
+                print(f"host={alias}", file=sys.stderr)
+                print(f"rollout={rollout_relative_path.as_posix()}", file=sys.stderr)
+                print(
+                    "error=remote terminal-tail process failed",
+                    file=sys.stderr,
+                )
+                print(
+                    f"remote_returncode={process.returncode}",
+                    file=sys.stderr,
+                )
+                return 1
+            result, _message = _extract_framed_terminal_tail_payload(
+                process.stdout,
+                host=alias,
+            )
+    except FileNotFoundError:
+        print(f"host={alias}", file=sys.stderr)
+        print(f"rollout={rollout_relative_path.as_posix()}", file=sys.stderr)
+        print("error=rollout not found", file=sys.stderr)
+        return 1
+    except OSError:
+        print(f"host={alias}", file=sys.stderr)
+        print(f"rollout={rollout_relative_path.as_posix()}", file=sys.stderr)
+        print("error=rollout unreadable", file=sys.stderr)
+        return 1
+    except ValueError as error:
+        print(f"host={alias}", file=sys.stderr)
+        print(f"rollout={rollout_relative_path.as_posix()}", file=sys.stderr)
+        print(f"error={error}", file=sys.stderr)
+        return 1
+
+    if result.status != "complete":
+        _print_terminal_tail_metadata(
+            alias=alias,
+            rollout_relative_path=rollout_relative_path,
+            result=result,
+            output=None,
+        )
+        return 1
+    if result.message is None:
+        print(f"host={alias}", file=sys.stderr)
+        print(f"rollout={rollout_relative_path.as_posix()}", file=sys.stderr)
+        print("error=terminal-tail complete result was missing output", file=sys.stderr)
+        return 1
+    try:
+        _write_private_bytes(output, result.message)
+    except (OSError, ValueError) as error:
+        print(f"host={alias}", file=sys.stderr)
+        print(f"rollout={rollout_relative_path.as_posix()}", file=sys.stderr)
+        print(f"error={error}", file=sys.stderr)
+        return 1
+    _print_terminal_tail_metadata(
+        alias=alias,
+        rollout_relative_path=rollout_relative_path,
+        result=result,
+        output=output,
+    )
+    return 0
+
+
 def cmd_rollout_stat(args: argparse.Namespace) -> int:
     try:
         hosts = _resolve_hosts([args.host])
@@ -5282,7 +7233,13 @@ def cmd_rollout_stat(args: argparse.Namespace) -> int:
                 "mode": "rollout-stat",
                 "rollout": rollout_relative_path.as_posix(),
                 "codex_root": HOSTS[alias]["codex_root"],
-                "max_fetch_rollout_bytes": MAX_FETCH_ROLLOUT_BYTES,
+                "max_direct_fetch_rollout_bytes": (
+                    MAX_DIRECT_FETCH_ROLLOUT_BYTES
+                ),
+                "max_automatic_full_reconstruction_bytes": (
+                    MAX_AUTOMATIC_FULL_RECONSTRUCTION_BYTES
+                ),
+                "max_terminal_tail_scan_bytes": MAX_TERMINAL_TAIL_SCAN_BYTES,
                 "expected_source_identity": (
                     _rollout_identity_token(expected_identity)
                     if expected_identity is not None
@@ -5390,7 +7347,9 @@ def cmd_fetch_rollout_chunk(args: argparse.Namespace) -> int:
                 "codex_root": HOSTS[alias]["codex_root"],
                 "byte_start": args.byte_start,
                 "byte_end": args.byte_end,
-                "max_fetch_rollout_bytes": MAX_FETCH_ROLLOUT_BYTES,
+                "max_automatic_full_reconstruction_bytes": (
+                    MAX_AUTOMATIC_FULL_RECONSTRUCTION_BYTES
+                ),
                 "max_fetch_rollout_chunk_bytes": MAX_FETCH_ROLLOUT_CHUNK_BYTES,
                 "expected_source_identity": _rollout_identity_token(expected_identity),
                 "expected_source_bytes": expected_identity.size,
@@ -6031,13 +7990,20 @@ def _chunk_meta_record(
         or "no_structured_evidence" in reason_codes
         or redacted_or_signal_only_records > 0
     )
-    automatic_allowed = source_identity.size <= MAX_FETCH_ROLLOUT_BYTES
+    automatic_allowed = (
+        source_identity.size <= MAX_AUTOMATIC_FULL_RECONSTRUCTION_BYTES
+    )
     meta = {
         "kind": "chunk_meta",
         "line": chunk.record_start,
         "source_bytes": source_identity.size,
         "source_identity": _rollout_identity_token(source_identity),
-        "full_fetch_limit_bytes": MAX_FETCH_ROLLOUT_BYTES,
+        "full_fetch_limit_bytes": MAX_AUTOMATIC_FULL_RECONSTRUCTION_BYTES,
+        "automatic_full_reconstruction_limit_bytes": (
+            MAX_AUTOMATIC_FULL_RECONSTRUCTION_BYTES
+        ),
+        "direct_fetch_limit_bytes": MAX_DIRECT_FETCH_ROLLOUT_BYTES,
+        "terminal_tail_scan_limit_bytes": MAX_TERMINAL_TAIL_SCAN_BYTES,
         "automatic_full_reconstruction_allowed": automatic_allowed,
         "full_reconstruction_allowed": (
             automatic_allowed or authorized_source_bytes == source_identity.size
@@ -6101,7 +8067,8 @@ def _rollout_summary_meta_record(
             "source_sha256": source_sha256,
             "authorized_source_bytes": authorized_source_bytes,
             "full_reconstruction_allowed": (
-                source_identity.size <= MAX_FETCH_ROLLOUT_BYTES
+                source_identity.size
+                <= MAX_AUTOMATIC_FULL_RECONSTRUCTION_BYTES
                 or authorized_source_bytes == source_identity.size
             ),
             "min_chunk_bytes": MIN_ROLLOUT_CHUNK_BYTES,
@@ -6410,7 +8377,13 @@ def cmd_chunked_rollout_summary(args: argparse.Namespace) -> int:
                 "mode": "chunked-rollout-summary",
                 "rollout": rollout_relative_path.as_posix(),
                 "codex_root": HOSTS[alias]["codex_root"],
-                "max_fetch_rollout_bytes": MAX_FETCH_ROLLOUT_BYTES,
+                "max_direct_fetch_rollout_bytes": (
+                    MAX_DIRECT_FETCH_ROLLOUT_BYTES
+                ),
+                "max_automatic_full_reconstruction_bytes": (
+                    MAX_AUTOMATIC_FULL_RECONSTRUCTION_BYTES
+                ),
+                "max_terminal_tail_scan_bytes": MAX_TERMINAL_TAIL_SCAN_BYTES,
                 "max_fetch_rollout_chunk_bytes": MAX_FETCH_ROLLOUT_CHUNK_BYTES,
                 "min_rollout_chunk_bytes": MIN_ROLLOUT_CHUNK_BYTES,
                 "max_rollout_chunk_bytes": MAX_ROLLOUT_CHUNK_BYTES,
@@ -6537,6 +8510,29 @@ def build_parser() -> argparse.ArgumentParser:
         help="Output path must resolve under .codex-tmp/remote-host-context/ or /tmp.",
     )
     fetch_rollout.set_defaults(func=cmd_fetch_rollout)
+
+    terminal_tail = subparsers.add_parser(
+        "terminal-tail",
+        help=(
+            "Read the latest terminal task result from a frozen rollout EOF "
+            "with bounded absolute-offset tail reads."
+        ),
+    )
+    terminal_tail.add_argument("--host", required=True)
+    terminal_tail.add_argument(
+        "--rollout",
+        required=True,
+        help="Relative rollout path under the remote Codex root (sessions/... or archived_sessions/...).",
+    )
+    terminal_tail.add_argument(
+        "--output",
+        required=True,
+        help=(
+            "Exact terminal result output path; it must resolve under "
+            ".codex-tmp/remote-host-context/ or /tmp."
+        ),
+    )
+    terminal_tail.set_defaults(func=cmd_terminal_tail)
 
     rollout_stat = subparsers.add_parser(
         "rollout-stat",

@@ -108,16 +108,59 @@ Begin a chunked full-reconstruction attempt with metadata-only `rollout-stat`. S
 
 For full task reconstruction, sort every `chunk_meta` row by `byte_start`, consume all of them, and build the complete fetch plan before issuing the first chunk fetch. Validate all of these conditions first:
 
-- Every row reports the same `source_bytes` and `full_fetch_limit_bytes`.
+- Every row reports the same `source_bytes` and `full_fetch_limit_bytes`; the full-reconstruction field is the 128 MiB cumulative plan limit and is not the separate 16 MiB direct whole-file fetch limit.
 - `rollout_meta` and every `chunk_meta` row report the same `source_identity` and `source_bytes` returned by the preflight stat.
 - Each row contributes every listed `fetch_ranges[]` entry in order, or its complete `byte_start`/`byte_end` range when no split ranges are listed.
 - The globally ordered ranges start at byte 0, remain gap-free and non-overlapping, and end at `source_bytes` exactly.
 - The sum of all planned range lengths equals `source_bytes`.
-- Every row reports `full_reconstruction_allowed=true`, and either the automatic path has `source_bytes` at most 16 MiB (16,777,216 bytes) or the over-limit path carries Joey's exact-rollout, exact-byte-count authorization.
+- Every row reports `full_reconstruction_allowed=true`, and either the automatic path has `source_bytes` at most 128 MiB (134,217,728 bytes) or the over-limit path carries Joey's exact-rollout, exact-byte-count authorization.
 
-If `source_bytes` exceeds 16,777,216 bytes, the helper rejects the summary scan and chunk fetches before reading content unless the caller supplies `--authorized-source-bytes` equal to that exact preflight size. Before doing so, issue zero chunk fetches, report the exact rollout, exact `source_bytes`, and exact `full_fetch_limit_bytes`, then request Joey's explicit authorization for that exact rollout and byte count or use a future server-side lossless filter. Never silently loop over the ranges of an over-limit rollout. After explicit authorization, keep an exact cumulative byte count, preserve gap-free non-overlapping coverage, and stop when the authorized `source_bytes` has been fetched; authorization for another byte count is invalid, and if the source identity or range plan changes, abort and rebuild the plan instead of extending the authorization.
+If `source_bytes` exceeds 134,217,728 bytes, the helper rejects the summary scan and chunk fetches before reading content unless the caller supplies `--authorized-source-bytes` equal to that exact preflight size. Before doing so, issue zero chunk fetches, report the exact rollout, exact `source_bytes`, and exact `full_fetch_limit_bytes`, then request Joey's explicit authorization for that exact rollout and byte count. Never silently loop over the ranges of an over-limit rollout. After explicit authorization, keep an exact cumulative byte count, preserve gap-free non-overlapping coverage, and stop when the authorized `source_bytes` has been fetched; authorization for another byte count is invalid, and if the source identity or range plan changes, abort and rebuild the plan instead of extending the authorization.
 
 When the complete plan is allowed, use sequential bounded `fetch-rollout-chunk` calls with the original expected size and identity, reassemble the complete exact JSONL record stream in byte order, verify its byte count and SHA-256 against `source_bytes` and `rollout_meta.source_sha256`, and then run a final `rollout-stat` with those original expected values. Only after all three checks pass may the complete stream be handed to `codex-session-mining` for replay-prefix and wrapper filtering. Do not pre-filter chunks based on summary text, `raw_fetch_recommended`, or whether the summary exposed a user message. An append, truncation, pathname replacement, short read, digest mismatch, or final-stat mismatch invalidates the snapshot; discard all partial chunks and restart from byte 0 with a new stat.
+
+### Lossless Terminal Tail
+
+Use `terminal-tail` instead of complete reconstruction when the narrow question is whether one Codex rollout reached its current terminal answer. It is a lossless semantic tail read: success writes the exact `event_msg.task_complete.last_agent_message` string as UTF-8, with no redaction, normalization, or added newline, to a private task-scoped output file. Stdout contains compact status and coordinate metadata rather than the answer text.
+
+The output publisher creates a random 128-bit temporary leaf beneath the descriptor-pinned parent and keeps its read/write descriptor open through descriptor-relative atomic replacement. Before publication it checks the regular-file device/inode, current UID, exact `0600` mode, single-link count, size, and exact chunked readback; it rechecks the temporary binding immediately before replacement and the destination binding immediately afterward. Under a cooperative same-UID model, success means the verified temporary object was atomically installed as the output entry. Ordinary Unix permissions do not isolate processes running as the same UID: a hostile same-UID process with parent-directory write access can race the temporary entry or modify/replace the destination as soon as it is visible. That threat is outside this receipt rather than something a single post-publication readback can exclude. Use a cooperative task-scoped private output directory.
+
+```bash
+python3 "$HOME/.codex/skills/remote-host-context/scripts/remote_codex_probe.py" terminal-tail \
+  --host BL-mac-mini-m4-hoteng \
+  --rollout sessions/2026/06/30/rollout-example.jsonl \
+  --output .codex-tmp/remote-host-context/terminal-last-agent-message.txt
+```
+
+The reader opens and pins the rollout through the existing no-follow descriptor traversal, then freezes the descriptor's initial EOF as `S0`. It reads backward from that fixed coordinate with absolute-offset `pread` calls in windows of at most 4 MiB, moving the next cursor to the previous window's start. It never recalculates the cursor from a later EOF, so append growth cannot duplicate or skip bytes. The total unique tail span is capped at 128 MiB (134,217,728 bytes), and each attempt independently examines at most 1,000,000 complete records.
+
+The protected property is fixed-`S0` reading under ordinary Codex append and prefix-metadata-update behavior, with a bounded coordinate witness rather than complete-content immutability or adversarial tamper proof:
+
+- The opened object and the pinned parent's current pathname entry must still identify the same regular file, and its size must remain at least `S0`.
+- Append growth after `S0` is allowed and excluded from the frozen attempt.
+- `mtime` or `ctime` changes alone do not invalidate the attempt.
+- Prefix metadata overwrites are allowed when they do not move the frozen tail coordinates.
+- The helper chooses a distinctive 32- through 128-byte raw substring near `S0`, proves it unique in the initial bounded suffix window, records its absolute offset, and rechecks the same bytes at that offset before later windows and before output. It may use bounded search to establish uniqueness or diagnose a mismatch, but it never relocates the coordinate to a moved copy.
+- A missing, ambiguous, or moved anchor stops the attempt. There is no automatic retry or relocation; a later explicit invocation may freeze a new `S0`.
+
+The anchor is deliberately only a bounded coordinate-drift witness. There is no digest of the prefix or every scanned range, and an overwrite outside the anchor can remain undetected. A same-inode rewrite can also evade the witness if it deliberately places the same anchor bytes at the recorded absolute offset; the protocol does not claim resistance to that adversarial mutation. This limitation is accepted because the normal producer model is append growth plus possible prefix-metadata updates, while a full content proof would reject those desired updates or require rereading the evidence range. Use the immutable full-reconstruction protocol when byte-for-byte stability or hostile same-inode mutation resistance is required.
+
+Only complete LF-terminated JSONL records at or before `S0` are eligible. A trailing partial record at `S0` returns `source_in_progress`, even if an older complete task result exists. The reader accepts success only from the latest explicit `event_msg.task_complete` whose payload contains `last_agent_message`; a later complete user turn returns `terminal_not_reached`. Before slicing or parsing another complete record, both the local and embedded scanners check the independent fixed record budget. Their result and strict remote frame carry `records_examined`. The parent accepts only `0 <= records_examined <= 1,000,000` and requires `scanned_bytes >= 3 * records_examined`: every successfully parsed complete JSON object occupies at least the two bytes in `{}` plus its LF, and cross-window carry only joins non-overlapping bytes already contained in the contiguous fixed-`S0` scanned span. If the cap is exhausted while earlier evidence remains uncovered, the scanner revalidates the anchor and returns `record_limit_exceeded` with the count exactly equal to 1,000,000; it does not skip records, downgrade the condition to `tail_window_insufficient`, or write `--output`. A decisive millionth record still returns its decisive status, while full coverage at or below the cap remains nonterminal. Malformed, invalid-UTF-8, or oversized records that prevent lossless ordering remain coverage errors, and exhausting either fixed cap before reaching enough decisive evidence is not proof of completion.
+
+Remote operation errors use one canonical header with exact keys `ok` and `error_code`, no payload, and `ok` set to JSON false. The parent accepts only this closed code set and maps it to fixed local/remote CLI diagnostics:
+
+- `invalid_rollout_path`: the injected request has invalid rollout syntax.
+- `rollout_not_found`: the initial rollout entry is absent.
+- `rollout_unreadable`: the file or a required revalidation cannot be read.
+- `rollout_path_invalid`: the selected entry is unsafe, such as a symlink or non-regular file.
+- `rollout_replaced`: the pinned object/path identity or frozen tail coordinate was replaced.
+- `rollout_truncated`: the file shrank below `S0` or a fixed-coordinate read became short.
+- `malformed_jsonl`: a required record is not lossless UTF-8 JSONL with the expected object schema.
+- `record_too_large`: a record or terminal result exceeds its fixed byte limit.
+- `invalid_limits`: the injected bounded scanner limits are invalid.
+- `internal_failure`: a locally recognized producer failure did not match another public category.
+
+The producer converts its internal exception to a typed local category before framing. It never serializes arbitrary exception text. Unknown remote `error_code` values are different from the producer's known `internal_failure`: they are invalid protocol evidence, as are a legacy free-form `error` field, extra fields, any payload line, duplicate keys, non-canonical JSON, or non-string codes. None is echoed to stderr or downgraded to `internal_failure`.
 
 Current dedicated helper path for those repeated remote Codex reads:
 
@@ -140,8 +183,8 @@ python3 "$HOME/.codex/skills/remote-host-context/scripts/remote_codex_probe.py" 
 ```
 
 `session-meta` takes `--date YYYY/MM/DD`, not `YYYY-MM-DD`.
-`fetch-rollout` takes one destination file via `--output`; point it at a task-scoped file path, not a directory.
-Use `rollout-summary` only for fast bounded prefix triage. If a rollout is too large to copy cleanly, run `rollout-stat` and then use `chunked-rollout-summary` for the complete whole-rollout range map bound to that exact identity. Each `chunk_meta` row repeats `source_bytes`, `source_identity`, `full_fetch_limit_bytes`, and `full_reconstruction_allowed` so the whole plan can be checked before any chunk fetch. For full task reconstruction, apply the 16 MiB complete-plan gate above, then fetch every allowed range from every `chunk_meta` row with sequential identity-bound `fetch-rollout-chunk` calls; summary rows alone are not sufficient evidence of all human follow-ups and must not choose omissions.
+`fetch-rollout` takes one destination file via `--output`; point it at a task-scoped file path, not a directory. Its direct whole-file copy remains limited to 16 MiB (16,777,216 bytes), independently of the 128 MiB cumulative full-reconstruction limit.
+Use `rollout-summary` only for fast bounded prefix triage. If a rollout is too large to copy cleanly, run `rollout-stat` and then use `chunked-rollout-summary` for the complete whole-rollout range map bound to that exact identity. Each `chunk_meta` row repeats `source_bytes`, `source_identity`, `full_fetch_limit_bytes`, and `full_reconstruction_allowed` so the whole plan can be checked before any chunk fetch. For full task reconstruction, apply the 128 MiB complete-plan gate above, then fetch every allowed range from every `chunk_meta` row with sequential identity-bound `fetch-rollout-chunk` calls; summary rows alone are not sufficient evidence of all human follow-ups and must not choose omissions.
 Concrete bounded-read shape:
 
 ```bash
@@ -155,9 +198,9 @@ python3 "$HOME/.codex/skills/remote-host-context/scripts/remote_codex_probe.py" 
   --max-text-chars 400
 ```
 
-`rollout-summary` scans only a bounded prefix and emits a small structured skim. `chunked-rollout-summary` scans the file in bounded chunks but still emits lossy summaries; for full reconstruction, validate the complete coordinate plan and its global byte budget before fetching anything, then use all allowed coordinates to fetch the complete exact record stream before delegating interpretation to `codex-session-mining`.
+`rollout-summary` scans only a bounded prefix and emits a small structured skim. `chunked-rollout-summary` scans the file in bounded chunks but still emits lossy summaries; for full reconstruction, validate the complete coordinate plan and its 128 MiB automatic global byte budget before fetching anything, then use all allowed coordinates to fetch the complete exact record stream before delegating interpretation to `codex-session-mining`.
 
-Identity-bound command sequence (substitute the values emitted by the first command; include `--authorized-source-bytes <SOURCE_BYTES>` on summary and fetch calls only after exact over-limit authorization):
+Identity-bound command sequence (substitute the values emitted by the first command; include `--authorized-source-bytes <SOURCE_BYTES>` on summary and fetch calls only after exact authorization above 128 MiB):
 
 ```bash
 python3 "$HOME/.codex/skills/remote-host-context/scripts/remote_codex_probe.py" rollout-stat \

@@ -11,7 +11,7 @@ import sys
 import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from unittest import mock
 
 
@@ -404,6 +404,63 @@ class RemoteHostContextDocumentationTests(unittest.TestCase):
                 "codex-hoteng-srv-01",
             ],
         )
+
+    def test_skill_documents_lossless_terminal_tail_contract(self) -> None:
+        skill = SKILL_PATH.read_text(encoding="utf-8")
+        reference = HOSTS_REFERENCE_PATH.read_text(encoding="utf-8")
+
+        self.assertIn("A direct whole-file `fetch-rollout` remains capped at 16 MiB", skill)
+        self.assertIn(
+            "automatic complete reconstruction through the validated chunk plan "
+            "is capped at 128 MiB",
+            skill,
+        )
+        self.assertIn("freezes the opened descriptor's initial EOF as `S0`", skill)
+        self.assertIn("absolute-offset 4 MiB `pread` windows", skill)
+        self.assertIn("scans at most 128 MiB", skill)
+        self.assertIn(
+            "fixed-`S0` read protocol with a bounded coordinate witness",
+            skill,
+        )
+        self.assertIn("Append growth and prefix metadata overwrites", skill)
+        self.assertIn("`mtime` and `ctime` changes alone are not failures", skill)
+        self.assertIn("distinctive raw substring at its original absolute offset", skill)
+        self.assertIn("without relocating it or retrying automatically", skill)
+        self.assertIn("does not hash the prefix", skill)
+        self.assertIn(
+            "same-inode rewrite that deliberately places identical anchor bytes",
+            skill,
+        )
+        self.assertIn("non-LF-terminated record at `S0` means `source_in_progress`", skill)
+        self.assertIn("means `terminal_not_reached`", skill)
+        self.assertIn("1,000,000 complete JSONL records", skill)
+        self.assertIn("`record_limit_exceeded`", skill)
+        self.assertIn("`records_examined`", skill)
+        self.assertIn("shortest complete object record `{}\\n`", skill)
+        self.assertIn('{"ok":false,"error_code":...}', skill)
+        self.assertIn("Arbitrary remote exception text is never forwarded", skill)
+        self.assertIn("random 128-bit temporary name", skill)
+        self.assertIn("same UID", skill)
+        self.assertIn("exact UTF-8 final message", skill)
+        self.assertIn("Lossless Terminal Tail", reference)
+        self.assertIn("no redaction, normalization, or added newline", reference)
+        self.assertIn("moving the next cursor to the previous window's start", reference)
+        self.assertIn("never recalculates the cursor from a later EOF", reference)
+        self.assertIn("There is no automatic retry or relocation", reference)
+        self.assertIn("There is no digest of the prefix or every scanned range", reference)
+        self.assertIn(
+            "does not claim resistance to that adversarial mutation",
+            reference,
+        )
+        self.assertIn("1,000,000 complete records", reference)
+        self.assertIn("`record_limit_exceeded`", reference)
+        self.assertIn("`scanned_bytes >= 3 * records_examined`", reference)
+        self.assertIn("`rollout_replaced`", reference)
+        self.assertIn("`malformed_jsonl`", reference)
+        self.assertIn("never serializes arbitrary exception text", reference)
+        self.assertIn("Unknown remote `error_code` values", reference)
+        self.assertIn("exact chunked readback", reference)
+        self.assertIn("same-UID process", reference)
 
 
 class SizeGuardedBytesIO(io.BytesIO):
@@ -4639,6 +4696,180 @@ class RemoteCodexProbeChunkTests(unittest.TestCase):
             self.assertIsNotNone(replace_dir_fds[0][0])
             self.assertEqual(replace_dir_fds[0][0], replace_dir_fds[0][1])
 
+    def test_private_output_rename_ignores_new_ordinary_parent_entry(self) -> None:
+        with tempfile.TemporaryDirectory(dir="/tmp") as temp_dir:
+            root = Path(temp_dir).resolve()
+            output_parent = root / "output"
+            output_parent.mkdir()
+            output = MODULE._resolve_output_path(str(output_parent / "result.txt"))
+            moved_parent = root / "moved-output"
+            real_replace = os.replace
+
+            def swap_parent_then_replace(
+                src: str,
+                dst: str,
+                *,
+                src_dir_fd: int | None = None,
+                dst_dir_fd: int | None = None,
+            ) -> None:
+                real_replace(output_parent, moved_parent)
+                output_parent.mkdir(mode=0o700)
+                real_replace(
+                    src,
+                    dst,
+                    src_dir_fd=src_dir_fd,
+                    dst_dir_fd=dst_dir_fd,
+                )
+
+            with mock.patch.object(
+                MODULE.os,
+                "replace",
+                side_effect=swap_parent_then_replace,
+            ):
+                MODULE._write_private_bytes(output, b"expected")
+
+            written_output = moved_parent / output.name
+            self.assertEqual(written_output.read_bytes(), b"expected")
+            self.assertEqual(written_output.stat().st_mode & 0o777, 0o600)
+            self.assertFalse((output_parent / output.name).exists())
+
+    def test_private_output_success_replaces_regular_sentinel(self) -> None:
+        with tempfile.TemporaryDirectory(dir="/tmp") as temp_dir:
+            root = Path(temp_dir).resolve()
+            output = MODULE._resolve_output_path(str(root / "result.txt"))
+            output.write_bytes(b"sentinel")
+            output.chmod(0o644)
+
+            MODULE._write_private_bytes(output, b"expected")
+
+            self.assertEqual(output.read_bytes(), b"expected")
+            self.assertEqual(output.stat().st_mode & 0o777, 0o600)
+            self.assertEqual(list(root.glob(".codex-output-*")), [])
+
+    def test_private_output_rejects_temp_replacement_before_rename(self) -> None:
+        with tempfile.TemporaryDirectory(dir="/tmp") as temp_dir:
+            root = Path(temp_dir).resolve()
+            output = MODULE._resolve_output_path(str(root / "result.txt"))
+            real_replace = os.replace
+            replacement = b"replaced"
+
+            def replace_temp_then_publish(
+                src: str,
+                dst: str,
+                *,
+                src_dir_fd: int | None = None,
+                dst_dir_fd: int | None = None,
+            ) -> None:
+                self.assertRegex(src, r"^\.codex-output-[0-9a-f]{32}$")
+                self.assertIsNotNone(src_dir_fd)
+                os.unlink(src, dir_fd=src_dir_fd)
+                replacement_fd = os.open(
+                    src,
+                    os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                    0o600,
+                    dir_fd=src_dir_fd,
+                )
+                try:
+                    os.write(replacement_fd, replacement)
+                finally:
+                    os.close(replacement_fd)
+                real_replace(
+                    src,
+                    dst,
+                    src_dir_fd=src_dir_fd,
+                    dst_dir_fd=dst_dir_fd,
+                )
+
+            with (
+                mock.patch.object(
+                    MODULE.os,
+                    "replace",
+                    side_effect=replace_temp_then_publish,
+                ),
+                self.assertRaisesRegex(
+                    ValueError,
+                    "private output entry changed during publication",
+                ),
+            ):
+                MODULE._write_private_bytes(output, b"expected")
+
+            self.assertEqual(output.read_bytes(), replacement)
+
+    def test_private_output_rejects_target_replacement_after_rename(self) -> None:
+        with tempfile.TemporaryDirectory(dir="/tmp") as temp_dir:
+            root = Path(temp_dir).resolve()
+            output = MODULE._resolve_output_path(str(root / "result.txt"))
+            real_replace = os.replace
+            replacement = b"replaced"
+
+            def publish_then_replace_target(
+                src: str,
+                dst: str,
+                *,
+                src_dir_fd: int | None = None,
+                dst_dir_fd: int | None = None,
+            ) -> None:
+                real_replace(
+                    src,
+                    dst,
+                    src_dir_fd=src_dir_fd,
+                    dst_dir_fd=dst_dir_fd,
+                )
+                os.unlink(dst, dir_fd=dst_dir_fd)
+                replacement_fd = os.open(
+                    dst,
+                    os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                    0o600,
+                    dir_fd=dst_dir_fd,
+                )
+                try:
+                    os.write(replacement_fd, replacement)
+                finally:
+                    os.close(replacement_fd)
+
+            with (
+                mock.patch.object(
+                    MODULE.os,
+                    "replace",
+                    side_effect=publish_then_replace_target,
+                ),
+                self.assertRaisesRegex(
+                    ValueError,
+                    "private output entry changed during publication",
+                ),
+            ):
+                MODULE._write_private_bytes(output, b"expected")
+
+            self.assertEqual(output.read_bytes(), replacement)
+
+    def test_private_output_rejects_prepublication_content_mutation(self) -> None:
+        with tempfile.TemporaryDirectory(dir="/tmp") as temp_dir:
+            root = Path(temp_dir).resolve()
+            output = MODULE._resolve_output_path(str(root / "result.txt"))
+            real_match = MODULE._private_output_bytes_match
+            expected = b"expected!"
+            replacement = b"tampered!"
+
+            def mutate_then_match(fd: int, data: bytes) -> bool:
+                os.pwrite(fd, replacement, 0)
+                return real_match(fd, data)
+
+            with (
+                mock.patch.object(
+                    MODULE,
+                    "_private_output_bytes_match",
+                    side_effect=mutate_then_match,
+                ),
+                self.assertRaisesRegex(
+                    ValueError,
+                    "private output content changed before publication",
+                ),
+            ):
+                MODULE._write_private_bytes(output, expected)
+
+            self.assertFalse(output.exists())
+            self.assertEqual(list(root.glob(".codex-output-*")), [])
+
     def test_rollout_readers_stay_on_pinned_ancestor_after_swap(self) -> None:
         operations = (
             "rollout-stat",
@@ -4755,7 +4986,7 @@ class RemoteCodexProbeChunkTests(unittest.TestCase):
                         data = MODULE._read_local_rollout_bytes(
                             codex_root,
                             rollout_relative,
-                            max_bytes=MODULE.MAX_FETCH_ROLLOUT_BYTES,
+                            max_bytes=MODULE.MAX_DIRECT_FETCH_ROLLOUT_BYTES,
                         )
                         self.assertEqual(data, trusted_data)
                     elif operation == "fetch-rollout-chunk":
@@ -4819,7 +5050,7 @@ class RemoteCodexProbeChunkTests(unittest.TestCase):
                 MODULE._read_local_rollout_bytes(
                     codex_root,
                     rollout_relative,
-                    max_bytes=MODULE.MAX_FETCH_ROLLOUT_BYTES,
+                    max_bytes=MODULE.MAX_DIRECT_FETCH_ROLLOUT_BYTES,
                 )
 
         self.assertTrue(swapped)
@@ -4867,7 +5098,7 @@ class RemoteCodexProbeChunkTests(unittest.TestCase):
                 MODULE._read_local_rollout_bytes(
                     codex_root,
                     rollout_relative,
-                    max_bytes=MODULE.MAX_FETCH_ROLLOUT_BYTES,
+                    max_bytes=MODULE.MAX_DIRECT_FETCH_ROLLOUT_BYTES,
                 )
 
         self.assertTrue(swapped)
@@ -4915,7 +5146,7 @@ class RemoteCodexProbeChunkTests(unittest.TestCase):
                 MODULE._read_local_rollout_bytes(
                     codex_root,
                     rollout_relative,
-                    max_bytes=MODULE.MAX_FETCH_ROLLOUT_BYTES,
+                    max_bytes=MODULE.MAX_DIRECT_FETCH_ROLLOUT_BYTES,
                 )
 
         self.assertTrue(swapped)
@@ -5110,7 +5341,7 @@ class RemoteCodexProbeChunkTests(unittest.TestCase):
                 MODULE._read_local_rollout_bytes(
                     codex_root,
                     rollout_relative,
-                    max_bytes=MODULE.MAX_FETCH_ROLLOUT_BYTES,
+                    max_bytes=MODULE.MAX_DIRECT_FETCH_ROLLOUT_BYTES,
             )
 
             self.assertTrue(unlinked)
@@ -5123,7 +5354,9 @@ class RemoteCodexProbeChunkTests(unittest.TestCase):
                     "mode": "fetch-rollout",
                     "rollout": rollout,
                     "codex_root": str(codex_root),
-                    "max_fetch_rollout_bytes": MODULE.MAX_FETCH_ROLLOUT_BYTES,
+                    "max_direct_fetch_rollout_bytes": (
+                        MODULE.MAX_DIRECT_FETCH_ROLLOUT_BYTES
+                    ),
                 }
             )
             marker = (
@@ -5209,7 +5442,7 @@ class RemoteCodexProbeChunkTests(unittest.TestCase):
                 MODULE._read_local_rollout_bytes(
                     codex_root,
                     rollout_relative,
-                    max_bytes=MODULE.MAX_FETCH_ROLLOUT_BYTES,
+                    max_bytes=MODULE.MAX_DIRECT_FETCH_ROLLOUT_BYTES,
                 )
 
         self.assertTrue(swapped)
@@ -5236,7 +5469,9 @@ class RemoteCodexProbeChunkTests(unittest.TestCase):
                     "mode": "fetch-rollout",
                     "rollout": rollout,
                     "codex_root": str(codex_root),
-                    "max_fetch_rollout_bytes": MODULE.MAX_FETCH_ROLLOUT_BYTES,
+                    "max_direct_fetch_rollout_bytes": (
+                        MODULE.MAX_DIRECT_FETCH_ROLLOUT_BYTES
+                    ),
                 }
             )
             marker = (
@@ -5314,7 +5549,9 @@ class RemoteCodexProbeChunkTests(unittest.TestCase):
                     "mode": "fetch-rollout",
                     "rollout": rollout,
                     "codex_root": str(codex_root),
-                    "max_fetch_rollout_bytes": MODULE.MAX_FETCH_ROLLOUT_BYTES,
+                    "max_direct_fetch_rollout_bytes": (
+                        MODULE.MAX_DIRECT_FETCH_ROLLOUT_BYTES
+                    ),
                 }
             )
             marker = (
@@ -5790,7 +6027,9 @@ class RemoteCodexProbeChunkTests(unittest.TestCase):
                 "summary_tail_records": 4,
                 "summary_max_text_chars": 200,
                 "chunk_bytes": MODULE.MIN_ROLLOUT_CHUNK_BYTES,
-                "max_fetch_rollout_bytes": MODULE.MAX_FETCH_ROLLOUT_BYTES,
+                "max_automatic_full_reconstruction_bytes": (
+                    MODULE.MAX_AUTOMATIC_FULL_RECONSTRUCTION_BYTES
+                ),
                 "max_fetch_rollout_chunk_bytes": MODULE.MAX_FETCH_ROLLOUT_CHUNK_BYTES,
                 "min_rollout_chunk_bytes": MODULE.MIN_ROLLOUT_CHUNK_BYTES,
                 "max_rollout_chunk_bytes": MODULE.MAX_ROLLOUT_CHUNK_BYTES,
@@ -5809,7 +6048,9 @@ class RemoteCodexProbeChunkTests(unittest.TestCase):
                 "codex_root": "/home/hoteng/.codex",
                 "byte_start": 0,
                 "byte_end": 120,
-                "max_fetch_rollout_bytes": MODULE.MAX_FETCH_ROLLOUT_BYTES,
+                "max_automatic_full_reconstruction_bytes": (
+                    MODULE.MAX_AUTOMATIC_FULL_RECONSTRUCTION_BYTES
+                ),
                 "max_fetch_rollout_chunk_bytes": MODULE.MAX_FETCH_ROLLOUT_CHUNK_BYTES,
                 "expected_source_bytes": identity.size,
                 "expected_source_identity": token,
@@ -5821,7 +6062,9 @@ class RemoteCodexProbeChunkTests(unittest.TestCase):
                 "mode": "fetch-rollout",
                 "rollout": "sessions/2026/05/26/rollout-a.jsonl",
                 "codex_root": "/home/hoteng/.codex",
-                "max_fetch_rollout_bytes": MODULE.MAX_FETCH_ROLLOUT_BYTES,
+                "max_direct_fetch_rollout_bytes": (
+                    MODULE.MAX_DIRECT_FETCH_ROLLOUT_BYTES
+                ),
             }
         )
         summary_script = MODULE._remote_python_script(
@@ -5842,7 +6085,9 @@ class RemoteCodexProbeChunkTests(unittest.TestCase):
         compile(full_fetch_script, "<fetch-rollout>", "exec")
         compile(summary_script, "<rollout-summary>", "exec")
         self.assertIn(
-            '"full_fetch_limit_bytes": MAX_FETCH_ROLLOUT_BYTES', chunked_script
+            '"full_fetch_limit_bytes": '
+            "MAX_AUTOMATIC_FULL_RECONSTRUCTION_BYTES",
+            chunked_script,
         )
         self.assertIn(
             '"full_reconstruction_allowed": automatic_allowed or AUTHORIZED_SOURCE_BYTES == source_identity["size"]',
@@ -5939,7 +6184,8 @@ class RemoteCodexProbeChunkTests(unittest.TestCase):
         alias, payload = run_remote.call_args.args
         self.assertEqual(alias, "miku-bot-dev")
         self.assertEqual(
-            payload["max_fetch_rollout_bytes"], MODULE.MAX_FETCH_ROLLOUT_BYTES
+            payload["max_automatic_full_reconstruction_bytes"],
+            MODULE.MAX_AUTOMATIC_FULL_RECONSTRUCTION_BYTES,
         )
         self.assertEqual(
             payload["max_fetch_rollout_chunk_bytes"],
@@ -5977,7 +6223,9 @@ class RemoteCodexProbeChunkTests(unittest.TestCase):
                     "summary_tail_records": 0,
                     "summary_max_text_chars": 200,
                     "chunk_bytes": MODULE.MIN_ROLLOUT_CHUNK_BYTES,
-                    "max_fetch_rollout_bytes": MODULE.MAX_FETCH_ROLLOUT_BYTES,
+                    "max_automatic_full_reconstruction_bytes": (
+                        MODULE.MAX_AUTOMATIC_FULL_RECONSTRUCTION_BYTES
+                    ),
                     "max_fetch_rollout_chunk_bytes": MODULE.MAX_FETCH_ROLLOUT_CHUNK_BYTES,
                     "min_rollout_chunk_bytes": MODULE.MIN_ROLLOUT_CHUNK_BYTES,
                     "max_rollout_chunk_bytes": MODULE.MAX_ROLLOUT_CHUNK_BYTES,
@@ -6032,7 +6280,9 @@ class RemoteCodexProbeChunkTests(unittest.TestCase):
                     "summary_tail_records": 0,
                     "summary_max_text_chars": 200,
                     "chunk_bytes": 64,
-                    "max_fetch_rollout_bytes": MODULE.MAX_FETCH_ROLLOUT_BYTES,
+                    "max_automatic_full_reconstruction_bytes": (
+                        MODULE.MAX_AUTOMATIC_FULL_RECONSTRUCTION_BYTES
+                    ),
                     "max_fetch_rollout_chunk_bytes": 16,
                     "min_rollout_chunk_bytes": 1,
                     "max_rollout_chunk_bytes": 1024,
@@ -6102,7 +6352,8 @@ class RemoteCodexProbeChunkTests(unittest.TestCase):
         )
         self.assertTrue(
             all(
-                record["full_fetch_limit_bytes"] == MODULE.MAX_FETCH_ROLLOUT_BYTES
+                record["full_fetch_limit_bytes"]
+                == MODULE.MAX_AUTOMATIC_FULL_RECONSTRUCTION_BYTES
                 for record in chunk_meta
             )
         )
@@ -6129,7 +6380,11 @@ class RemoteCodexProbeChunkTests(unittest.TestCase):
             oversized_record=False,
             lines=("",),
         )
-        with mock.patch.object(MODULE, "MAX_FETCH_ROLLOUT_BYTES", 64):
+        with mock.patch.object(
+            MODULE,
+            "MAX_AUTOMATIC_FULL_RECONSTRUCTION_BYTES",
+            64,
+        ):
             meta = MODULE._chunk_meta_record(
                 chunk=chunk,
                 records=[],
@@ -6260,7 +6515,9 @@ class RemoteCodexProbeChunkTests(unittest.TestCase):
                     "summary_tail_records": 4,
                     "summary_max_text_chars": 200,
                     "chunk_bytes": identity.size,
-                    "max_fetch_rollout_bytes": MODULE.MAX_FETCH_ROLLOUT_BYTES,
+                    "max_automatic_full_reconstruction_bytes": (
+                        MODULE.MAX_AUTOMATIC_FULL_RECONSTRUCTION_BYTES
+                    ),
                     "max_fetch_rollout_chunk_bytes": (
                         MODULE.MAX_FETCH_ROLLOUT_CHUNK_BYTES
                     ),
@@ -6382,7 +6639,9 @@ class RemoteCodexProbeChunkTests(unittest.TestCase):
                     "summary_tail_records": 4,
                     "summary_max_text_chars": 200,
                     "chunk_bytes": identity.size,
-                    "max_fetch_rollout_bytes": MODULE.MAX_FETCH_ROLLOUT_BYTES,
+                    "max_automatic_full_reconstruction_bytes": (
+                        MODULE.MAX_AUTOMATIC_FULL_RECONSTRUCTION_BYTES
+                    ),
                     "max_fetch_rollout_chunk_bytes": (
                         MODULE.MAX_FETCH_ROLLOUT_CHUNK_BYTES
                     ),
@@ -6519,7 +6778,9 @@ class RemoteCodexProbeChunkTests(unittest.TestCase):
                     "summary_tail_records": 4,
                     "summary_max_text_chars": 200,
                     "chunk_bytes": identity.size,
-                    "max_fetch_rollout_bytes": MODULE.MAX_FETCH_ROLLOUT_BYTES,
+                    "max_automatic_full_reconstruction_bytes": (
+                        MODULE.MAX_AUTOMATIC_FULL_RECONSTRUCTION_BYTES
+                    ),
                     "max_fetch_rollout_chunk_bytes": (
                         MODULE.MAX_FETCH_ROLLOUT_CHUNK_BYTES
                     ),
@@ -6577,12 +6838,12 @@ class RemoteCodexProbeChunkTests(unittest.TestCase):
     def test_chunked_summary_rejects_global_fetch_plan_local_and_embedded(
         self,
     ) -> None:
-        error_text = "fetch range plan too large: 4097 ranges > 4096"
+        error_text = "fetch range plan too large: 5 ranges > 4"
         with tempfile.TemporaryDirectory() as temp_dir:
             codex_root = Path(temp_dir) / ".codex"
             rollout = write_rollout(
                 codex_root,
-                ["{}"] * (MODULE.MAX_FETCH_RANGE_PLAN_ENTRIES + 1),
+                ["{}"] * 5,
             )
             identity = rollout_identity(codex_root, rollout)
             expected_identity = identity_kwargs(identity)
@@ -6596,9 +6857,10 @@ class RemoteCodexProbeChunkTests(unittest.TestCase):
                 mock.patch.object(MODULE, "MIN_ROLLOUT_CHUNK_BYTES", 1),
                 mock.patch.object(
                     MODULE,
-                    "MAX_FETCH_ROLLOUT_BYTES",
+                    "MAX_AUTOMATIC_FULL_RECONSTRUCTION_BYTES",
                     identity.size - 1,
                 ),
+                mock.patch.object(MODULE, "MAX_FETCH_RANGE_PLAN_ENTRIES", 4),
             ):
                 local_stdout = io.StringIO()
                 local_stderr = io.StringIO()
@@ -6625,16 +6887,14 @@ class RemoteCodexProbeChunkTests(unittest.TestCase):
                     "summary_tail_records": 0,
                     "summary_max_text_chars": 200,
                     "chunk_bytes": 1,
-                    "max_fetch_rollout_bytes": identity.size - 1,
+                    "max_automatic_full_reconstruction_bytes": identity.size - 1,
                     "max_fetch_rollout_chunk_bytes": identity.size,
                     "min_rollout_chunk_bytes": 1,
                     "max_rollout_chunk_bytes": identity.size,
                     "max_chunked_summary_output_bytes": (
                         MODULE.MAX_CHUNKED_ROLLOUT_SUMMARY_OUTPUT_BYTES
                     ),
-                    "max_fetch_range_plan_entries": (
-                        MODULE.MAX_FETCH_RANGE_PLAN_ENTRIES
-                    ),
+                    "max_fetch_range_plan_entries": 4,
                     "expected_source_bytes": identity.size,
                     "expected_source_identity": MODULE._rollout_identity_token(
                         identity
@@ -6765,7 +7025,9 @@ class RemoteCodexProbeChunkTests(unittest.TestCase):
                 "summary_tail_records": 4,
                 "summary_max_text_chars": 200,
                 "chunk_bytes": chunk_bytes,
-                "max_fetch_rollout_bytes": MODULE.MAX_FETCH_ROLLOUT_BYTES,
+                "max_automatic_full_reconstruction_bytes": (
+                    MODULE.MAX_AUTOMATIC_FULL_RECONSTRUCTION_BYTES
+                ),
                 "max_fetch_rollout_chunk_bytes": identity.size,
                 "min_rollout_chunk_bytes": 1,
                 "max_rollout_chunk_bytes": identity.size,
@@ -6871,7 +7133,9 @@ class RemoteCodexProbeChunkTests(unittest.TestCase):
                     "summary_tail_records": 4,
                     "summary_max_text_chars": 200,
                     "chunk_bytes": 60,
-                    "max_fetch_rollout_bytes": MODULE.MAX_FETCH_ROLLOUT_BYTES,
+                    "max_automatic_full_reconstruction_bytes": (
+                        MODULE.MAX_AUTOMATIC_FULL_RECONSTRUCTION_BYTES
+                    ),
                     "max_fetch_rollout_chunk_bytes": 80,
                     "min_rollout_chunk_bytes": 1,
                     "max_rollout_chunk_bytes": identity.size,
@@ -7171,7 +7435,7 @@ class RemoteCodexProbeChunkTests(unittest.TestCase):
                 )
                 self.assertEqual(
                     {record["full_fetch_limit_bytes"] for record in chunk_meta_rows},
-                    {MODULE.MAX_FETCH_ROLLOUT_BYTES},
+                    {MODULE.MAX_AUTOMATIC_FULL_RECONSTRUCTION_BYTES},
                 )
                 self.assertTrue(
                     all(
@@ -7193,7 +7457,10 @@ class RemoteCodexProbeChunkTests(unittest.TestCase):
                     byte_end - byte_start for byte_start, byte_end in expected_ranges
                 )
                 self.assertEqual(planned_bytes, len(source_data))
-                self.assertLessEqual(planned_bytes, MODULE.MAX_FETCH_ROLLOUT_BYTES)
+                self.assertLessEqual(
+                    planned_bytes,
+                    MODULE.MAX_AUTOMATIC_FULL_RECONSTRUCTION_BYTES,
+                )
 
                 os.chdir(workspace)
                 try:
@@ -7344,7 +7611,11 @@ class RemoteCodexProbeChunkTests(unittest.TestCase):
                 "expected_identity": identity,
             }
             with (
-                mock.patch.object(MODULE, "MAX_FETCH_ROLLOUT_BYTES", identity.size - 1),
+                mock.patch.object(
+                    MODULE,
+                    "MAX_AUTOMATIC_FULL_RECONSTRUCTION_BYTES",
+                    identity.size - 1,
+                ),
                 mock.patch.object(MODULE, "MIN_ROLLOUT_CHUNK_BYTES", 1),
             ):
                 with mock.patch.object(MODULE, "_iter_rollout_chunks") as iterator:
@@ -7487,7 +7758,7 @@ class RemoteCodexProbeChunkTests(unittest.TestCase):
                         MODULE._read_local_rollout_bytes(
                             codex_root,
                             MODULE._resolve_rollout_relative_path(rollout),
-                            max_bytes=MODULE.MAX_FETCH_ROLLOUT_BYTES,
+                            max_bytes=MODULE.MAX_DIRECT_FETCH_ROLLOUT_BYTES,
                         )
 
                 self.assertEqual(read_sizes, [len(source_data) + 1])
@@ -8323,6 +8594,3147 @@ class RemoteCodexProbeChunkTests(unittest.TestCase):
 
         self.assertEqual(rc, 2)
         self.assertIn("chunk too large: 9 bytes > 8", buffer.getvalue())
+
+
+class RemoteCodexProbeTerminalTailTests(unittest.TestCase):
+    @staticmethod
+    def _jsonl_record(record: dict[str, object]) -> bytes:
+        return (
+            json.dumps(
+                record,
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ).encode("utf-8")
+            + b"\n"
+        )
+
+    @classmethod
+    def _task_complete(cls, message: str) -> bytes:
+        return cls._jsonl_record(
+            {
+                "type": "event_msg",
+                "payload": {
+                    "type": "task_complete",
+                    "last_agent_message": message,
+                },
+            }
+        )
+
+    @classmethod
+    def _event_user_message(cls, message: str) -> bytes:
+        return cls._jsonl_record(
+            {
+                "type": "event_msg",
+                "payload": {
+                    "type": "user_message",
+                    "message": message,
+                },
+            }
+        )
+
+    @classmethod
+    def _response_user_message(cls, message: str) -> bytes:
+        return cls._jsonl_record(
+            {
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": message}],
+                },
+            }
+        )
+
+    @staticmethod
+    def _write_rollout_bytes(codex_root: Path, data: bytes) -> str:
+        rollout_dir = codex_root / "sessions/2026/07/23"
+        rollout_dir.mkdir(parents=True)
+        rollout = (
+            rollout_dir
+            / "rollout-2026-07-23T10-00-00-terminal-tail.jsonl"
+        )
+        rollout.write_bytes(data)
+        return rollout.relative_to(codex_root).as_posix()
+
+    @staticmethod
+    def _embedded_terminal_tail_namespace(
+        codex_root: Path,
+        rollout: str,
+        *,
+        window_bytes: int,
+        max_scan_bytes: int,
+        max_record_bytes: int,
+        max_records: int = MODULE.MAX_TERMINAL_TAIL_RECORDS,
+    ) -> dict[str, object]:
+        return embedded_probe_namespace(
+            {
+                "mode": "terminal-tail",
+                "rollout": rollout,
+                "codex_root": str(codex_root),
+                "terminal_tail_window_bytes": window_bytes,
+                "max_terminal_tail_scan_bytes": max_scan_bytes,
+                "max_terminal_tail_record_bytes": max_record_bytes,
+                "max_terminal_tail_records": max_records,
+                "max_terminal_tail_anchor_bytes": (
+                    MODULE.MAX_TERMINAL_TAIL_ANCHOR_BYTES
+                ),
+                "min_terminal_tail_anchor_bytes": (
+                    MODULE.MIN_TERMINAL_TAIL_ANCHOR_BYTES
+                ),
+            }
+        )
+
+    def _read_local_and_embedded_with_record_counter(
+        self,
+        codex_root: Path,
+        rollout: str,
+        *,
+        max_records: int,
+        window_bytes: int = 64,
+        max_scan_bytes: int = 4096,
+        max_record_bytes: int = 1024,
+    ) -> tuple[MODULE.TerminalTailResult, dict[str, object], int, int]:
+        local_calls = 0
+        local_disposition = MODULE._terminal_tail_record_disposition
+
+        def counted_local_disposition(
+            *args: object,
+            **kwargs: object,
+        ) -> tuple[str, bytes | None]:
+            nonlocal local_calls
+            local_calls += 1
+            return local_disposition(*args, **kwargs)
+
+        with mock.patch.object(
+            MODULE,
+            "_terminal_tail_record_disposition",
+            side_effect=counted_local_disposition,
+        ):
+            local = MODULE._read_terminal_tail(
+                codex_root,
+                MODULE._resolve_rollout_relative_path(rollout),
+                window_bytes=window_bytes,
+                max_scan_bytes=max_scan_bytes,
+                max_record_bytes=max_record_bytes,
+                max_records=max_records,
+            )
+
+        namespace = self._embedded_terminal_tail_namespace(
+            codex_root,
+            rollout,
+            window_bytes=window_bytes,
+            max_scan_bytes=max_scan_bytes,
+            max_record_bytes=max_record_bytes,
+            max_records=max_records,
+        )
+        embedded_calls = 0
+        embedded_disposition = namespace["terminal_tail_record_disposition"]
+
+        def counted_embedded_disposition(
+            *args: object,
+            **kwargs: object,
+        ) -> tuple[str, bytes | None]:
+            nonlocal embedded_calls
+            embedded_calls += 1
+            return embedded_disposition(*args, **kwargs)
+
+        namespace["terminal_tail_record_disposition"] = counted_embedded_disposition
+        embedded = namespace["read_terminal_tail"](
+            namespace["pathlib"].PurePosixPath(rollout)
+        )
+        return local, embedded, local_calls, embedded_calls
+
+    @staticmethod
+    def _remote_terminal_tail_header(
+        *,
+        status: str = "complete",
+        message: bytes | None = b"remote exact bytes",
+        records_examined: int = 1,
+    ) -> dict[str, object]:
+        return {
+            "ok": True,
+            "status": status,
+            "bytes": len(message or b""),
+            "source_bytes": 512,
+            "observed_source_bytes": 512,
+            "scan_start": 0,
+            "scan_end": 512,
+            "scanned_bytes": 512,
+            "window_count": 1,
+            "records_examined": records_examined,
+            "anchor_offset": 32,
+            "anchor_length": 32,
+            "append_observed": False,
+            "terminal_record_offset": 64,
+        }
+
+    @classmethod
+    def _remote_record_limit_header(cls) -> dict[str, object]:
+        source_bytes = MODULE.MAX_TERMINAL_TAIL_RECORDS * len(b"{}\n") + 512
+        header = cls._remote_terminal_tail_header(
+            status="record_limit_exceeded",
+            message=None,
+            records_examined=MODULE.MAX_TERMINAL_TAIL_RECORDS,
+        )
+        header.update(
+            {
+                "source_bytes": source_bytes,
+                "observed_source_bytes": source_bytes,
+                "scan_start": 0,
+                "scan_end": source_bytes,
+                "scanned_bytes": source_bytes,
+                "window_count": 1,
+                "anchor_offset": source_bytes - 128,
+                "terminal_record_offset": None,
+            }
+        )
+        return header
+
+    @staticmethod
+    def _remote_terminal_tail_frame(
+        header: dict[str, object],
+        *,
+        message: bytes | None = None,
+    ) -> str:
+        lines = [
+            MODULE.REMOTE_TERMINAL_TAIL_BEGIN,
+            json.dumps(header, separators=(",", ":"), sort_keys=True),
+        ]
+        if message:
+            lines.append(MODULE.base64.b64encode(message).decode("ascii"))
+        lines.extend([MODULE.REMOTE_TERMINAL_TAIL_END, ""])
+        return "\n".join(lines)
+
+    def _run_remote_terminal_tail_fixture(
+        self,
+        remote_result: subprocess.CompletedProcess[str] | Exception,
+    ) -> tuple[int, str, str, bytes]:
+        with tempfile.TemporaryDirectory(dir="/tmp") as temp_dir:
+            output_path = Path(temp_dir) / "terminal-result.txt"
+            output_path.write_bytes(b"sentinel")
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+            if isinstance(remote_result, Exception):
+                remote_mock = mock.patch.object(
+                    MODULE,
+                    "_run_remote_python_bounded",
+                    side_effect=remote_result,
+                )
+            else:
+                remote_mock = mock.patch.object(
+                    MODULE,
+                    "_run_remote_python_bounded",
+                    return_value=remote_result,
+                )
+            with remote_mock, redirect_stdout(stdout), redirect_stderr(stderr):
+                rc = MODULE.cmd_terminal_tail(
+                    argparse.Namespace(
+                        host="miku-bot-dev",
+                        rollout=(
+                            "sessions/2026/07/23/"
+                            "rollout-2026-07-23T10-00-00-remote.jsonl"
+                        ),
+                        output=str(output_path),
+                    )
+                )
+            output_bytes = output_path.read_bytes()
+        return rc, stdout.getvalue(), stderr.getvalue(), output_bytes
+
+    def test_terminal_tail_error_code_mapping_matches_embedded(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            codex_root = Path(temp_dir) / ".codex"
+            rollout = self._write_rollout_bytes(
+                codex_root,
+                self._task_complete("mapping fixture"),
+            )
+            namespace = self._embedded_terminal_tail_namespace(
+                codex_root,
+                rollout,
+                window_bytes=256,
+                max_scan_bytes=1024,
+                max_record_bytes=1024,
+            )
+
+            cases = (
+                (FileNotFoundError("private detail"), "rollout_not_found"),
+                (PermissionError("private detail"), "rollout_unreadable"),
+                (
+                    ValueError("rollout path is a symlink private detail"),
+                    "rollout_path_invalid",
+                ),
+                (
+                    ValueError("Codex root is a symlink"),
+                    "rollout_path_invalid",
+                ),
+                (
+                    ValueError("Codex root changed during open"),
+                    "rollout_replaced",
+                ),
+                (
+                    ValueError("path uses a symlink ancestor"),
+                    "rollout_path_invalid",
+                ),
+                (
+                    ValueError("path ancestor changed during open"),
+                    "rollout_replaced",
+                ),
+                (
+                    ValueError(
+                        "rollout path replaced before terminal-tail result"
+                    ),
+                    "rollout_replaced",
+                ),
+                (
+                    ValueError(
+                        "rollout truncated below frozen EOF after window read"
+                    ),
+                    "rollout_truncated",
+                ),
+                (
+                    ValueError(
+                        "terminal-tail encountered malformed JSONL private detail"
+                    ),
+                    "malformed_jsonl",
+                ),
+                (
+                    ValueError(
+                        "terminal-tail record too large: private detail"
+                    ),
+                    "record_too_large",
+                ),
+                (
+                    ValueError(
+                        "terminal-tail scan limit must be positive private detail"
+                    ),
+                    "invalid_limits",
+                ),
+                (ValueError("private unknown detail"), "internal_failure"),
+            )
+            embedded_mapper = namespace["terminal_tail_error_code"]
+            for error, expected in cases:
+                with self.subTest(expected=expected):
+                    self.assertEqual(
+                        MODULE._terminal_tail_error_code(error),
+                        expected,
+                    )
+                    self.assertEqual(embedded_mapper(error), expected)
+
+    def test_terminal_tail_classifies_real_symlink_root_as_unsafe(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            real_codex_root = root / "real-codex"
+            rollout = self._write_rollout_bytes(
+                real_codex_root,
+                self._task_complete("symlink fixture"),
+            )
+            linked_codex_root = root / "linked-codex"
+            linked_codex_root.symlink_to(real_codex_root, target_is_directory=True)
+
+            with self.assertRaises(MODULE._TerminalTailOperationError) as local:
+                MODULE._read_terminal_tail(
+                    linked_codex_root,
+                    MODULE._resolve_rollout_relative_path(rollout),
+                    window_bytes=256,
+                    max_scan_bytes=1024,
+                    max_record_bytes=1024,
+                )
+            self.assertEqual(local.exception.error_code, "rollout_path_invalid")
+
+            namespace = self._embedded_terminal_tail_namespace(
+                linked_codex_root,
+                rollout,
+                window_bytes=256,
+                max_scan_bytes=1024,
+                max_record_bytes=1024,
+            )
+            with self.assertRaises(
+                namespace["TerminalTailOperationError"]
+            ) as embedded:
+                namespace["read_terminal_tail"](
+                    namespace["pathlib"].PurePosixPath(rollout)
+                )
+            self.assertEqual(
+                embedded.exception.error_code,
+                "rollout_path_invalid",
+            )
+
+    def test_rollout_budgets_split_direct_fetch_from_automatic_reconstruction(
+        self,
+    ) -> None:
+        self.assertEqual(MODULE.MAX_DIRECT_FETCH_ROLLOUT_BYTES, 16 * 1024 * 1024)
+        self.assertEqual(
+            MODULE.MAX_AUTOMATIC_FULL_RECONSTRUCTION_BYTES,
+            128 * 1024 * 1024,
+        )
+        self.assertEqual(MODULE.MAX_TERMINAL_TAIL_SCAN_BYTES, 128 * 1024 * 1024)
+        self.assertEqual(
+            MODULE.DEFAULT_TERMINAL_TAIL_WINDOW_BYTES,
+            4 * 1024 * 1024,
+        )
+        self.assertEqual(MODULE.MAX_TERMINAL_TAIL_RECORD_BYTES, 16 * 1024 * 1024)
+        self.assertEqual(MODULE.MAX_TERMINAL_TAIL_RECORDS, 1_000_000)
+        self.assertEqual(
+            MODULE.MAX_REMOTE_FETCH_ROLLOUT_STDOUT_BYTES,
+            4 * ((MODULE.MAX_DIRECT_FETCH_ROLLOUT_BYTES + 2) // 3)
+            + MODULE.REMOTE_FETCH_ROLLOUT_FRAME_OVERHEAD_BYTES,
+        )
+
+        identity = MODULE.RolloutIdentity(
+            MODULE.MAX_DIRECT_FETCH_ROLLOUT_BYTES + 1,
+            1,
+            2,
+            3,
+            4,
+        )
+        self.assertFalse(MODULE._validate_source_read_budget(identity, None))
+        record = MODULE._rollout_identity_record(identity)
+        self.assertEqual(
+            record["full_fetch_limit_bytes"],
+            MODULE.MAX_AUTOMATIC_FULL_RECONSTRUCTION_BYTES,
+        )
+        self.assertEqual(
+            record["automatic_full_reconstruction_limit_bytes"],
+            MODULE.MAX_AUTOMATIC_FULL_RECONSTRUCTION_BYTES,
+        )
+        self.assertEqual(
+            record["direct_fetch_limit_bytes"],
+            MODULE.MAX_DIRECT_FETCH_ROLLOUT_BYTES,
+        )
+        self.assertEqual(
+            record["terminal_tail_scan_limit_bytes"],
+            MODULE.MAX_TERMINAL_TAIL_SCAN_BYTES,
+        )
+        self.assertTrue(record["automatic_full_reconstruction_allowed"])
+
+    def test_direct_fetch_keeps_its_independent_small_limit(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            codex_root = Path(temp_dir) / ".codex"
+            rollout = self._write_rollout_bytes(codex_root, b"x" * 9)
+            with mock.patch.object(
+                MODULE,
+                "MAX_DIRECT_FETCH_ROLLOUT_BYTES",
+                8,
+            ):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "(?:exceeds 8-byte limit|too large: 9 bytes > 8)",
+                ):
+                    MODULE._fetch_local_rollout(
+                        codex_root,
+                        MODULE._resolve_rollout_relative_path(rollout),
+                    )
+
+    def test_complete_tail_reads_multiple_absolute_windows_and_preserves_bytes(
+        self,
+    ) -> None:
+        message = "  result\r\n雪\x00tail  "
+        prefix = b"".join(
+            self._jsonl_record({"type": "noise", "payload": {"index": index}})
+            for index in range(8)
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            codex_root = Path(temp_dir) / ".codex"
+            rollout = self._write_rollout_bytes(
+                codex_root,
+                prefix + self._task_complete(message),
+            )
+            source_bytes = (codex_root / rollout).stat().st_size
+            pread_ranges: list[tuple[int, int]] = []
+            real_pread_exact = MODULE._pread_exact
+
+            def record_pread(fd: int, offset: int, length: int) -> bytes:
+                pread_ranges.append((offset, length))
+                return real_pread_exact(fd, offset, length)
+
+            with mock.patch.object(
+                MODULE,
+                "_pread_exact",
+                side_effect=record_pread,
+            ):
+                result = MODULE._read_terminal_tail(
+                    codex_root,
+                    MODULE._resolve_rollout_relative_path(rollout),
+                    window_bytes=64,
+                    max_scan_bytes=4096,
+                    max_record_bytes=1024,
+                )
+
+        self.assertEqual(result.status, "complete")
+        self.assertEqual(result.message, message.encode("utf-8"))
+        self.assertGreater(result.window_count, 1)
+        self.assertEqual(result.scan_end, result.source_bytes)
+        self.assertEqual(result.scanned_bytes, result.scan_end - result.scan_start)
+        self.assertIsNotNone(result.anchor_offset)
+        self.assertGreater(result.anchor_length, 0)
+        self.assertEqual(result.terminal_record_offset, len(prefix))
+        window_offsets = [
+            offset
+            for offset, length in pread_ranges
+            if length == 64 and (source_bytes - offset) % 64 == 0
+        ]
+        self.assertGreaterEqual(len(window_offsets), 2)
+        self.assertEqual(
+            window_offsets,
+            [
+                source_bytes - 64 * index
+                for index in range(1, len(window_offsets) + 1)
+            ],
+        )
+
+    def test_trailing_partial_record_takes_precedence_over_older_completion(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            codex_root = Path(temp_dir) / ".codex"
+            rollout = self._write_rollout_bytes(
+                codex_root,
+                self._task_complete("stale result") + b'{"type":"event_msg"',
+            )
+            result = MODULE._read_terminal_tail(
+                codex_root,
+                MODULE._resolve_rollout_relative_path(rollout),
+                window_bytes=64,
+                max_scan_bytes=1024,
+                max_record_bytes=512,
+            )
+
+        self.assertEqual(result.status, "source_in_progress")
+        self.assertIsNone(result.message)
+
+    def test_latest_complete_record_wins(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            codex_root = Path(temp_dir) / ".codex"
+            rollout = self._write_rollout_bytes(
+                codex_root,
+                self._task_complete("older")
+                + self._jsonl_record({"type": "noise", "payload": "between"})
+                + self._task_complete("newer"),
+            )
+            result = MODULE._read_terminal_tail(
+                codex_root,
+                MODULE._resolve_rollout_relative_path(rollout),
+                window_bytes=64,
+                max_scan_bytes=2048,
+                max_record_bytes=1024,
+            )
+
+        self.assertEqual(result.status, "complete")
+        self.assertEqual(result.message, b"newer")
+
+    def test_later_user_turn_makes_older_completion_non_terminal(self) -> None:
+        later_turns = {
+            "event_msg": self._event_user_message("continue"),
+            "response_item": self._response_user_message("continue"),
+        }
+        for shape, later_turn in later_turns.items():
+            with (
+                self.subTest(shape=shape),
+                tempfile.TemporaryDirectory() as temp_dir,
+            ):
+                codex_root = Path(temp_dir) / ".codex"
+                rollout = self._write_rollout_bytes(
+                    codex_root,
+                    self._task_complete("stale result") + later_turn,
+                )
+                result = MODULE._read_terminal_tail(
+                    codex_root,
+                    MODULE._resolve_rollout_relative_path(rollout),
+                    window_bytes=64,
+                    max_scan_bytes=2048,
+                    max_record_bytes=1024,
+                )
+
+            self.assertEqual(result.status, "terminal_not_reached")
+            self.assertIsNone(result.message)
+
+    def test_scan_budget_exhaustion_is_explicit(self) -> None:
+        data = b"".join(
+            self._jsonl_record(
+                {"type": "noise", "payload": {"index": index, "text": "x" * 40}}
+            )
+            for index in range(12)
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            codex_root = Path(temp_dir) / ".codex"
+            rollout = self._write_rollout_bytes(codex_root, data)
+            result = MODULE._read_terminal_tail(
+                codex_root,
+                MODULE._resolve_rollout_relative_path(rollout),
+                window_bytes=64,
+                max_scan_bytes=128,
+                max_record_bytes=1024,
+            )
+
+        self.assertEqual(result.status, "tail_window_insufficient")
+        self.assertIsNone(result.message)
+        self.assertEqual(result.scanned_bytes, 128)
+
+    def test_record_budget_bounds_local_and_embedded_json_parsing(self) -> None:
+        record_limit = 5
+        source = (
+            b"{}\n" * 32
+            + self._jsonl_record(
+                {
+                    "type": "noise",
+                    "payload": {
+                        "anchor": "terminal-tail-record-budget-unique-anchor",
+                    },
+                }
+            )
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            codex_root = Path(temp_dir) / ".codex"
+            rollout = self._write_rollout_bytes(codex_root, source)
+            local, embedded, local_calls, embedded_calls = (
+                self._read_local_and_embedded_with_record_counter(
+                    codex_root,
+                    rollout,
+                    max_records=record_limit,
+                )
+            )
+
+        self.assertEqual(local.status, "record_limit_exceeded")
+        self.assertEqual(embedded["status"], "record_limit_exceeded")
+        self.assertEqual(local_calls, record_limit)
+        self.assertEqual(embedded_calls, record_limit)
+        self.assertEqual(local.records_examined, record_limit)
+        self.assertEqual(embedded["records_examined"], record_limit)
+        self.assertLessEqual(local_calls, record_limit)
+        self.assertLessEqual(embedded_calls, record_limit)
+        self.assertIsNone(local.message)
+        self.assertIsNone(embedded["message"])
+        self.assertIsNotNone(local.anchor_offset)
+        self.assertIsNotNone(embedded["anchor_offset"])
+        self.assertGreater(local.scanned_bytes, 0)
+        self.assertGreater(embedded["scanned_bytes"], 0)
+        self.assertGreaterEqual(local.window_count, 1)
+        self.assertGreaterEqual(embedded["window_count"], 1)
+        parity_fields = (
+            "source_bytes",
+            "observed_source_bytes",
+            "scan_start",
+            "scan_end",
+            "scanned_bytes",
+            "window_count",
+            "records_examined",
+            "anchor_offset",
+            "anchor_length",
+            "append_observed",
+            "terminal_record_offset",
+        )
+        self.assertEqual(
+            {field: getattr(local, field) for field in parity_fields},
+            {field: embedded[field] for field in parity_fields},
+        )
+
+    def test_terminal_result_at_record_budget_boundary_succeeds(self) -> None:
+        record_limit = 3
+        message = "boundary result"
+        source = (
+            b"{}\n" * 8
+            + self._task_complete(message)
+            + self._jsonl_record(
+                {"type": "noise", "payload": {"position": "newer"}}
+            )
+            + self._jsonl_record(
+                {
+                    "type": "noise",
+                    "payload": {
+                        "anchor": "terminal-tail-boundary-unique-anchor",
+                    },
+                }
+            )
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            codex_root = Path(temp_dir) / ".codex"
+            rollout = self._write_rollout_bytes(codex_root, source)
+            local, embedded, local_calls, embedded_calls = (
+                self._read_local_and_embedded_with_record_counter(
+                    codex_root,
+                    rollout,
+                    max_records=record_limit,
+                )
+            )
+
+        self.assertEqual(local.status, "complete")
+        self.assertEqual(embedded["status"], "complete")
+        self.assertEqual(local.message, message.encode("utf-8"))
+        self.assertEqual(embedded["message"], message.encode("utf-8"))
+        self.assertEqual(local_calls, record_limit)
+        self.assertEqual(embedded_calls, record_limit)
+        self.assertEqual(local.records_examined, record_limit)
+        self.assertEqual(embedded["records_examined"], record_limit)
+
+    def test_complete_coverage_at_record_budget_boundary_is_nonterminal(
+        self,
+    ) -> None:
+        source = self._jsonl_record(
+            {
+                "type": "noise",
+                "payload": {
+                    "anchor": "terminal-tail-full-coverage-budget-anchor",
+                },
+            }
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            codex_root = Path(temp_dir) / ".codex"
+            rollout = self._write_rollout_bytes(codex_root, source)
+            local, embedded, local_calls, embedded_calls = (
+                self._read_local_and_embedded_with_record_counter(
+                    codex_root,
+                    rollout,
+                    max_records=1,
+                )
+            )
+
+        self.assertEqual(local.status, "terminal_not_reached")
+        self.assertEqual(embedded["status"], "terminal_not_reached")
+        self.assertEqual(local_calls, 1)
+        self.assertEqual(embedded_calls, 1)
+        self.assertEqual(local.records_examined, 1)
+        self.assertEqual(embedded["records_examined"], 1)
+
+    def test_terminal_tail_record_budget_override_must_be_positive(self) -> None:
+        source = self._jsonl_record(
+            {
+                "type": "noise",
+                "payload": {
+                    "anchor": "terminal-tail-positive-budget-unique-anchor",
+                },
+            }
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            codex_root = Path(temp_dir) / ".codex"
+            rollout = self._write_rollout_bytes(codex_root, source)
+            resolved_rollout = MODULE._resolve_rollout_relative_path(rollout)
+            for max_records in (0, -1):
+                with (
+                    self.subTest(scope="local", max_records=max_records),
+                    self.assertRaisesRegex(
+                        ValueError,
+                        "record count limit must be positive",
+                    ),
+                ):
+                    MODULE._read_terminal_tail(
+                        codex_root,
+                        resolved_rollout,
+                        window_bytes=64,
+                        max_scan_bytes=4096,
+                        max_record_bytes=1024,
+                        max_records=max_records,
+                    )
+
+                namespace = self._embedded_terminal_tail_namespace(
+                    codex_root,
+                    rollout,
+                    window_bytes=64,
+                    max_scan_bytes=4096,
+                    max_record_bytes=1024,
+                    max_records=max_records,
+                )
+                with (
+                    self.subTest(scope="embedded", max_records=max_records),
+                    self.assertRaisesRegex(
+                        ValueError,
+                        "record count limit must be positive",
+                    ),
+                ):
+                    namespace["read_terminal_tail"](
+                        namespace["pathlib"].PurePosixPath(rollout)
+                    )
+
+    def test_complete_record_over_single_record_cap_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            codex_root = Path(temp_dir) / ".codex"
+            rollout = self._write_rollout_bytes(
+                codex_root,
+                self._task_complete("x" * 256),
+            )
+            with self.assertRaisesRegex(
+                ValueError,
+                "record.*(?:too large|limit)|(?:too large|limit).*record",
+            ):
+                MODULE._read_terminal_tail(
+                    codex_root,
+                    MODULE._resolve_rollout_relative_path(rollout),
+                    window_bytes=512,
+                    max_scan_bytes=1024,
+                    max_record_bytes=64,
+                )
+
+    def test_complete_malformed_jsonl_record_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            codex_root = Path(temp_dir) / ".codex"
+            rollout = self._write_rollout_bytes(
+                codex_root,
+                self._task_complete("must not escape") + b"{not-json}\n",
+            )
+            with self.assertRaisesRegex(ValueError, "malformed|JSON"):
+                MODULE._read_terminal_tail(
+                    codex_root,
+                    MODULE._resolve_rollout_relative_path(rollout),
+                    window_bytes=64,
+                    max_scan_bytes=1024,
+                    max_record_bytes=512,
+                )
+
+    def test_newline_dense_window_scans_without_split_amplification(
+        self,
+    ) -> None:
+        class SplitGuardBytes(bytes):
+            def split(self, *args: object, **kwargs: object) -> list[bytes]:
+                raise AssertionError("terminal-tail scanner called bytes.split")
+
+            def splitlines(
+                self,
+                *args: object,
+                **kwargs: object,
+            ) -> list[bytes]:
+                raise AssertionError("terminal-tail scanner called bytes.splitlines")
+
+        malformed_record = (
+            b"not-json-terminal-tail-memory-guard-"
+            + b"".join(
+                f"{index:04x}".encode("ascii")
+                for index in range(64)
+            )
+            + b"\n"
+        )
+        window_bytes = MODULE.DEFAULT_TERMINAL_TAIL_WINDOW_BYTES
+        self.assertLess(len(malformed_record), window_bytes)
+        source = (
+            b"\n" * (window_bytes - len(malformed_record))
+            + malformed_record
+        )
+        self.assertEqual(len(source), window_bytes)
+
+        for scope in ("local", "embedded"):
+            with (
+                self.subTest(scope=scope),
+                tempfile.TemporaryDirectory() as temp_dir,
+            ):
+                codex_root = Path(temp_dir) / ".codex"
+                rollout = self._write_rollout_bytes(codex_root, source)
+                if scope == "local":
+                    target_globals = MODULE.__dict__
+                    pread_name = "_pread_exact"
+
+                    def read_tail() -> object:
+                        return MODULE._read_terminal_tail(
+                            codex_root,
+                            MODULE._resolve_rollout_relative_path(rollout),
+                            window_bytes=window_bytes,
+                            max_scan_bytes=window_bytes,
+                            max_record_bytes=1024,
+                        )
+
+                else:
+                    namespace = self._embedded_terminal_tail_namespace(
+                        codex_root,
+                        rollout,
+                        window_bytes=window_bytes,
+                        max_scan_bytes=window_bytes,
+                        max_record_bytes=1024,
+                    )
+                    target_globals = namespace
+                    pread_name = "pread_exact"
+
+                    def read_tail() -> object:
+                        return namespace["read_terminal_tail"](
+                            namespace["pathlib"].PurePosixPath(rollout)
+                        )
+
+                real_pread_exact = target_globals[pread_name]
+                window_reads = 0
+
+                def guard_window_bytes(
+                    fd: int,
+                    offset: int,
+                    length: int,
+                ) -> bytes:
+                    nonlocal window_reads
+                    data = real_pread_exact(fd, offset, length)
+                    if length == window_bytes:
+                        window_reads += 1
+                        return SplitGuardBytes(data)
+                    return data
+
+                with (
+                    mock.patch.dict(
+                        target_globals,
+                        {pread_name: guard_window_bytes},
+                    ),
+                    self.assertRaisesRegex(ValueError, "malformed JSONL"),
+                ):
+                    read_tail()
+
+                self.assertEqual(window_reads, 1)
+
+    def test_nonfinite_json_constants_fail_closed_locally_and_embedded(
+        self,
+    ) -> None:
+        for constant in ("NaN", "Infinity", "-Infinity"):
+            with (
+                self.subTest(constant=constant),
+                tempfile.TemporaryDirectory() as temp_dir,
+            ):
+                codex_root = Path(temp_dir) / ".codex"
+                record = (
+                    b'{"type":"event_msg","payload":{"type":"task_complete",'
+                    b'"last_agent_message":"must not escape"},"nonfinite":'
+                    + constant.encode("ascii")
+                    + b"}\n"
+                )
+                rollout = self._write_rollout_bytes(codex_root, record)
+                relative_path = MODULE._resolve_rollout_relative_path(rollout)
+                with self.assertRaisesRegex(ValueError, "malformed JSONL"):
+                    MODULE._read_terminal_tail(
+                        codex_root,
+                        relative_path,
+                        window_bytes=256,
+                        max_scan_bytes=1024,
+                        max_record_bytes=1024,
+                    )
+
+                script = MODULE._remote_python_script(
+                    {
+                        "mode": "terminal-tail",
+                        "rollout": rollout,
+                        "codex_root": str(codex_root),
+                        "terminal_tail_window_bytes": 256,
+                        "max_terminal_tail_scan_bytes": 1024,
+                        "max_terminal_tail_record_bytes": 1024,
+                        "max_terminal_tail_anchor_bytes": (
+                            MODULE.MAX_TERMINAL_TAIL_ANCHOR_BYTES
+                        ),
+                        "min_terminal_tail_anchor_bytes": (
+                            MODULE.MIN_TERMINAL_TAIL_ANCHOR_BYTES
+                        ),
+                    }
+                )
+                embedded = subprocess.run(
+                    [sys.executable, "-"],
+                    input=script,
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+
+            self.assertEqual(embedded.returncode, 0, embedded.stderr)
+            lines = MODULE._extract_framed_lines(
+                embedded.stdout,
+                begin_marker=MODULE.REMOTE_TERMINAL_TAIL_BEGIN,
+                end_marker=MODULE.REMOTE_TERMINAL_TAIL_END,
+                host="embedded",
+                command="terminal-tail",
+            )
+            self.assertEqual(len(lines), 1)
+            header = json.loads(lines[0])
+            self.assertFalse(header["ok"])
+            self.assertEqual(header["error_code"], "malformed_jsonl")
+
+    def test_duplicate_json_keys_fail_closed_locally_and_embedded(
+        self,
+    ) -> None:
+        cases = {
+            "top-level": (
+                b'{"type":"event_msg","type":"event_msg","payload":'
+                b'{"type":"task_complete",'
+                b'"last_agent_message":"must not escape"}}\n'
+            ),
+            "nested-last-agent-message": (
+                b'{"type":"event_msg","payload":{"type":"task_complete",'
+                b'"last_agent_message":"first",'
+                b'"last_agent_message":"must not escape"}}\n'
+            ),
+        }
+        for name, record in cases.items():
+            with (
+                self.subTest(name=name),
+                tempfile.TemporaryDirectory() as temp_dir,
+            ):
+                codex_root = Path(temp_dir) / ".codex"
+                rollout = self._write_rollout_bytes(codex_root, record)
+                relative_path = MODULE._resolve_rollout_relative_path(rollout)
+                with self.assertRaisesRegex(ValueError, "malformed JSONL"):
+                    MODULE._read_terminal_tail(
+                        codex_root,
+                        relative_path,
+                        window_bytes=256,
+                        max_scan_bytes=1024,
+                        max_record_bytes=1024,
+                    )
+
+                script = MODULE._remote_python_script(
+                    {
+                        "mode": "terminal-tail",
+                        "rollout": rollout,
+                        "codex_root": str(codex_root),
+                        "terminal_tail_window_bytes": 256,
+                        "max_terminal_tail_scan_bytes": 1024,
+                        "max_terminal_tail_record_bytes": 1024,
+                        "max_terminal_tail_anchor_bytes": (
+                            MODULE.MAX_TERMINAL_TAIL_ANCHOR_BYTES
+                        ),
+                        "min_terminal_tail_anchor_bytes": (
+                            MODULE.MIN_TERMINAL_TAIL_ANCHOR_BYTES
+                        ),
+                    }
+                )
+                embedded = subprocess.run(
+                    [sys.executable, "-"],
+                    input=script,
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+
+            self.assertEqual(embedded.returncode, 0, embedded.stderr)
+            lines = MODULE._extract_framed_lines(
+                embedded.stdout,
+                begin_marker=MODULE.REMOTE_TERMINAL_TAIL_BEGIN,
+                end_marker=MODULE.REMOTE_TERMINAL_TAIL_END,
+                host="embedded",
+                command="terminal-tail",
+            )
+            self.assertEqual(len(lines), 1)
+            header = json.loads(lines[0])
+            self.assertFalse(header["ok"])
+            self.assertEqual(header["error_code"], "malformed_jsonl")
+
+    def test_append_after_s0_does_not_move_frozen_tail_coordinates(self) -> None:
+        message = "frozen result"
+        with tempfile.TemporaryDirectory() as temp_dir:
+            codex_root = Path(temp_dir) / ".codex"
+            rollout = self._write_rollout_bytes(
+                codex_root,
+                self._jsonl_record({"type": "noise", "payload": "prefix"})
+                + self._task_complete(message),
+            )
+            rollout_path = codex_root / rollout
+            real_pread = MODULE.os.pread
+            mutated = False
+
+            def append_after_first_read(fd: int, size: int, offset: int) -> bytes:
+                nonlocal mutated
+                data = real_pread(fd, size, offset)
+                if not mutated and size > 1:
+                    mutated = True
+                    with rollout_path.open("ab") as handle:
+                        handle.write(self._event_user_message("later append"))
+                return data
+
+            with mock.patch.object(
+                MODULE.os,
+                "pread",
+                side_effect=append_after_first_read,
+            ):
+                result = MODULE._read_terminal_tail(
+                    codex_root,
+                    MODULE._resolve_rollout_relative_path(rollout),
+                    window_bytes=256,
+                    max_scan_bytes=1024,
+                    max_record_bytes=512,
+                )
+
+        self.assertTrue(mutated)
+        self.assertEqual(result.status, "complete")
+        self.assertEqual(result.message, message.encode("utf-8"))
+        self.assertTrue(result.append_observed)
+        self.assertGreater(result.observed_source_bytes, result.source_bytes)
+
+    def test_append_may_repeat_anchor_without_changing_frozen_coordinates(
+        self,
+    ) -> None:
+        message = "frozen result " + "".join(
+            f"{index:04x}-" for index in range(96)
+        )
+        source = (
+            self._jsonl_record({"type": "noise", "payload": "prefix"})
+            + self._task_complete(message)
+        )
+        window_bytes = 512
+        window_start = max(0, len(source) - window_bytes)
+        anchor = MODULE._select_terminal_tail_anchor(
+            source[window_start:],
+            window_start=window_start,
+        )
+        self.assertIsNotNone(anchor)
+        assert anchor is not None
+        with tempfile.TemporaryDirectory() as temp_dir:
+            codex_root = Path(temp_dir) / ".codex"
+            rollout = self._write_rollout_bytes(codex_root, source)
+            rollout_path = codex_root / rollout
+            real_pread = MODULE.os.pread
+            mutated = False
+
+            def append_duplicate_anchor(
+                fd: int,
+                size: int,
+                offset: int,
+            ) -> bytes:
+                nonlocal mutated
+                data = real_pread(fd, size, offset)
+                if not mutated and size > 1:
+                    mutated = True
+                    with rollout_path.open("ab") as handle:
+                        handle.write(anchor.data + b"\n")
+                return data
+
+            with mock.patch.object(
+                MODULE.os,
+                "pread",
+                side_effect=append_duplicate_anchor,
+            ):
+                result = MODULE._read_terminal_tail(
+                    codex_root,
+                    MODULE._resolve_rollout_relative_path(rollout),
+                    window_bytes=window_bytes,
+                    max_scan_bytes=2048,
+                    max_record_bytes=1024,
+                )
+
+        self.assertTrue(mutated)
+        self.assertEqual(result.status, "complete")
+        self.assertEqual(result.message, message.encode("utf-8"))
+        self.assertTrue(result.append_observed)
+
+    def test_same_length_prefix_overwrite_does_not_invalidate_tail(self) -> None:
+        message = "stable coordinates " + ("z" * 256)
+        prefix = self._jsonl_record(
+            {"type": "noise", "payload": {"text": "a" * 64}}
+        )
+        replacement_prefix = self._jsonl_record(
+            {"type": "noise", "payload": {"text": "b" * 64}}
+        )
+        self.assertEqual(len(prefix), len(replacement_prefix))
+        middle = b"".join(
+            self._jsonl_record(
+                {"type": "noise", "payload": {"index": index, "text": "m" * 32}}
+            )
+            for index in range(4)
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            codex_root = Path(temp_dir) / ".codex"
+            rollout = self._write_rollout_bytes(
+                codex_root,
+                prefix + middle + self._task_complete(message),
+            )
+            rollout_path = codex_root / rollout
+            real_pread = MODULE.os.pread
+            mutated = False
+
+            def overwrite_after_first_read(
+                fd: int,
+                size: int,
+                offset: int,
+            ) -> bytes:
+                nonlocal mutated
+                data = real_pread(fd, size, offset)
+                if not mutated and size > 1:
+                    mutated = True
+                    with rollout_path.open("r+b") as handle:
+                        handle.write(replacement_prefix)
+                return data
+
+            with mock.patch.object(
+                MODULE.os,
+                "pread",
+                side_effect=overwrite_after_first_read,
+            ):
+                result = MODULE._read_terminal_tail(
+                    codex_root,
+                    MODULE._resolve_rollout_relative_path(rollout),
+                    window_bytes=512,
+                    max_scan_bytes=2048,
+                    max_record_bytes=1024,
+                )
+
+        self.assertTrue(mutated)
+        self.assertEqual(result.status, "complete")
+        self.assertEqual(result.message, message.encode("utf-8"))
+        self.assertFalse(result.append_observed)
+
+    def test_prefix_insertion_reports_anchor_moved_without_relocation(self) -> None:
+        message = "must not relocate"
+        original = (
+            self._jsonl_record({"type": "noise", "payload": "prefix"})
+            + self._task_complete(message)
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            codex_root = Path(temp_dir) / ".codex"
+            rollout = self._write_rollout_bytes(codex_root, original)
+            rollout_path = codex_root / rollout
+            real_pread = MODULE.os.pread
+            pread_calls = 0
+
+            def insert_after_first_read(fd: int, size: int, offset: int) -> bytes:
+                nonlocal pread_calls
+                data = real_pread(fd, size, offset)
+                if size > 1:
+                    pread_calls += 1
+                if pread_calls == 1 and size > 1:
+                    with rollout_path.open("r+b") as handle:
+                        handle.write(b"x" + original)
+                return data
+
+            with mock.patch.object(
+                MODULE.os,
+                "pread",
+                side_effect=insert_after_first_read,
+            ):
+                result = MODULE._read_terminal_tail(
+                    codex_root,
+                    MODULE._resolve_rollout_relative_path(rollout),
+                    window_bytes=256,
+                    max_scan_bytes=1024,
+                    max_record_bytes=512,
+                )
+
+        self.assertEqual(result.status, "anchor_moved")
+        self.assertIsNone(result.message)
+        self.assertGreaterEqual(pread_calls, 2)
+        self.assertLessEqual(pread_calls, 3)
+
+    def test_truncation_and_path_replacement_fail_closed(self) -> None:
+        original = (
+            self._jsonl_record({"type": "noise", "payload": "prefix"})
+            + self._task_complete("result")
+        )
+        for mutation in ("truncate", "replace"):
+            with (
+                self.subTest(mutation=mutation),
+                tempfile.TemporaryDirectory() as temp_dir,
+            ):
+                codex_root = Path(temp_dir) / ".codex"
+                rollout = self._write_rollout_bytes(codex_root, original)
+                rollout_path = codex_root / rollout
+                real_pread = MODULE.os.pread
+                mutated = False
+
+                def mutate_after_first_window(
+                    fd: int,
+                    size: int,
+                    offset: int,
+                ) -> bytes:
+                    nonlocal mutated
+                    data = real_pread(fd, size, offset)
+                    if not mutated and size > 1:
+                        mutated = True
+                        if mutation == "truncate":
+                            with rollout_path.open("r+b") as handle:
+                                handle.truncate(len(original) - 1)
+                        else:
+                            replacement = rollout_path.with_suffix(".replacement")
+                            replacement.write_bytes(original)
+                            os.replace(replacement, rollout_path)
+                    return data
+
+                with (
+                    mock.patch.object(
+                        MODULE.os,
+                        "pread",
+                        side_effect=mutate_after_first_window,
+                    ),
+                    self.assertRaisesRegex(
+                        ValueError,
+                        (
+                            "truncated below frozen EOF"
+                            if mutation == "truncate"
+                            else "path replaced"
+                        ),
+                    ),
+                ):
+                    MODULE._read_terminal_tail(
+                        codex_root,
+                        MODULE._resolve_rollout_relative_path(rollout),
+                        window_bytes=256,
+                        max_scan_bytes=1024,
+                        max_record_bytes=512,
+                    )
+
+                self.assertTrue(mutated)
+
+    @unittest.skipUnless(hasattr(os, "symlink"), "symlink replacement is required")
+    def test_path_replacement_signals_fail_closed_local_and_embedded(
+        self,
+    ) -> None:
+        source = self._task_complete("result")
+        for scope in ("local", "embedded"):
+            for replacement_kind in (
+                "missing",
+                "regular",
+                "symlink",
+                "directory",
+            ):
+                with (
+                    self.subTest(scope=scope, replacement=replacement_kind),
+                    tempfile.TemporaryDirectory() as temp_dir,
+                ):
+                    codex_root = Path(temp_dir) / ".codex"
+                    rollout = self._write_rollout_bytes(codex_root, source)
+                    rollout_path = codex_root / rollout
+                    pinned_rollout = rollout_path.with_name(
+                        rollout_path.name + ".pinned"
+                    )
+                    if scope == "local":
+                        target_globals = MODULE.__dict__
+                        pread_name = "_pread_exact"
+
+                        def read_tail() -> object:
+                            return MODULE._read_terminal_tail(
+                                codex_root,
+                                MODULE._resolve_rollout_relative_path(rollout),
+                                window_bytes=256,
+                                max_scan_bytes=1024,
+                                max_record_bytes=512,
+                            )
+
+                    else:
+                        namespace = self._embedded_terminal_tail_namespace(
+                            codex_root,
+                            rollout,
+                            window_bytes=256,
+                            max_scan_bytes=1024,
+                            max_record_bytes=512,
+                        )
+                        target_globals = namespace
+                        pread_name = "pread_exact"
+
+                        def read_tail() -> object:
+                            return namespace["read_terminal_tail"](
+                                namespace["pathlib"].PurePosixPath(rollout)
+                            )
+
+                    real_pread_exact = target_globals[pread_name]
+                    replaced = False
+
+                    def replace_after_first_window(
+                        fd: int,
+                        offset: int,
+                        length: int,
+                    ) -> bytes:
+                        nonlocal replaced
+                        data = real_pread_exact(fd, offset, length)
+                        if not replaced and length > 1:
+                            replaced = True
+                            os.replace(rollout_path, pinned_rollout)
+                            if replacement_kind == "symlink":
+                                rollout_path.symlink_to(pinned_rollout)
+                            elif replacement_kind == "directory":
+                                rollout_path.mkdir()
+                            elif replacement_kind == "regular":
+                                rollout_path.write_bytes(source)
+                        return data
+
+                    with (
+                        mock.patch.dict(
+                            target_globals,
+                            {pread_name: replace_after_first_window},
+                        ),
+                        self.assertRaisesRegex(
+                            ValueError,
+                            (
+                                "^rollout path replaced "
+                                "after terminal-tail window read$"
+                            ),
+                        ),
+                    ):
+                        read_tail()
+
+                    self.assertTrue(replaced)
+
+    def test_unreadable_path_revalidation_stays_distinct_local_and_embedded(
+        self,
+    ) -> None:
+        source = self._task_complete("result")
+        for scope in ("local", "embedded"):
+            with (
+                self.subTest(scope=scope),
+                tempfile.TemporaryDirectory() as temp_dir,
+            ):
+                codex_root = Path(temp_dir) / ".codex"
+                rollout = self._write_rollout_bytes(codex_root, source)
+                rollout_path = codex_root / rollout
+                if scope == "local":
+                    target_globals = MODULE.__dict__
+                    pread_name = "_pread_exact"
+
+                    def read_tail() -> object:
+                        return MODULE._read_terminal_tail(
+                            codex_root,
+                            MODULE._resolve_rollout_relative_path(rollout),
+                            window_bytes=256,
+                            max_scan_bytes=1024,
+                            max_record_bytes=512,
+                        )
+
+                else:
+                    namespace = self._embedded_terminal_tail_namespace(
+                        codex_root,
+                        rollout,
+                        window_bytes=256,
+                        max_scan_bytes=1024,
+                        max_record_bytes=512,
+                    )
+                    target_globals = namespace
+                    pread_name = "pread_exact"
+
+                    def read_tail() -> object:
+                        return namespace["read_terminal_tail"](
+                            namespace["pathlib"].PurePosixPath(rollout)
+                        )
+
+                real_pread_exact = target_globals[pread_name]
+                real_stat = target_globals["os"].stat
+                window_read = False
+
+                def mark_first_window_read(
+                    fd: int,
+                    offset: int,
+                    length: int,
+                ) -> bytes:
+                    nonlocal window_read
+                    data = real_pread_exact(fd, offset, length)
+                    if length > 1:
+                        window_read = True
+                    return data
+
+                def deny_path_revalidation(
+                    path: object,
+                    *args: object,
+                    **kwargs: object,
+                ) -> os.stat_result:
+                    if (
+                        window_read
+                        and path == rollout_path.name
+                        and kwargs.get("dir_fd") is not None
+                        and kwargs.get("follow_symlinks") is False
+                    ):
+                        raise PermissionError("terminal-tail test denial")
+                    return real_stat(path, *args, **kwargs)
+
+                with (
+                    mock.patch.dict(
+                        target_globals,
+                        {pread_name: mark_first_window_read},
+                    ),
+                    mock.patch.object(
+                        target_globals["os"],
+                        "stat",
+                        side_effect=deny_path_revalidation,
+                    ),
+                    self.assertRaisesRegex(
+                        ValueError,
+                        (
+                            "^rollout path unreadable "
+                            "after terminal-tail window read$"
+                        ),
+                    ),
+                ):
+                    read_tail()
+
+                self.assertTrue(window_read)
+
+    def test_long_homogeneous_terminal_message_matches_local_and_embedded(
+        self,
+    ) -> None:
+        message = "x" * 70_000
+        expected = message.encode("utf-8")
+        source = self._task_complete(message)
+        candidate_end = len(source) - 1
+        region_start = max(0, candidate_end - 64 * 1024)
+        field_offset = source.rfind(
+            b'"last_agent_message"',
+            0,
+            candidate_end,
+        )
+        self.assertGreater(region_start, 0)
+        self.assertGreaterEqual(field_offset, 0)
+        self.assertLess(field_offset, region_start)
+
+        selector_window_start = 8192
+        anchor = MODULE._select_terminal_tail_anchor(
+            source,
+            window_start=selector_window_start,
+        )
+        self.assertIsNotNone(anchor)
+        assert anchor is not None
+        relative_anchor_offset = anchor.offset - selector_window_start
+        self.assertGreaterEqual(
+            relative_anchor_offset,
+            region_start,
+        )
+        self.assertGreaterEqual(
+            len(anchor.data),
+            MODULE.MIN_TERMINAL_TAIL_ANCHOR_BYTES,
+        )
+        self.assertLessEqual(
+            relative_anchor_offset + len(anchor.data),
+            candidate_end,
+        )
+        self.assertLess(len(set(anchor.data)), 4)
+        self.assertEqual(source.find(anchor.data), relative_anchor_offset)
+        self.assertEqual(
+            source.find(anchor.data, relative_anchor_offset + 1),
+            -1,
+        )
+
+        window_bytes = len(source)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            codex_root = Path(temp_dir) / ".codex"
+            rollout = self._write_rollout_bytes(codex_root, source)
+            local = MODULE._read_terminal_tail(
+                codex_root,
+                MODULE._resolve_rollout_relative_path(rollout),
+                window_bytes=window_bytes,
+                max_scan_bytes=window_bytes,
+                max_record_bytes=window_bytes,
+            )
+            namespace = self._embedded_terminal_tail_namespace(
+                codex_root,
+                rollout,
+                window_bytes=window_bytes,
+                max_scan_bytes=window_bytes,
+                max_record_bytes=window_bytes,
+            )
+            embedded = namespace["read_terminal_tail"](
+                namespace["pathlib"].PurePosixPath(rollout)
+            )
+
+        self.assertEqual(local.status, "complete")
+        self.assertEqual(local.message, expected)
+        self.assertEqual(embedded["status"], "complete")
+        self.assertEqual(embedded["message"], expected)
+        fields = (
+            "source_bytes",
+            "observed_source_bytes",
+            "scan_start",
+            "scan_end",
+            "scanned_bytes",
+            "window_count",
+            "records_examined",
+            "anchor_offset",
+            "anchor_length",
+            "append_observed",
+            "terminal_record_offset",
+        )
+        self.assertEqual(
+            {field: getattr(local, field) for field in fields},
+            {field: embedded[field] for field in fields},
+        )
+
+    def test_terminal_tail_anchor_requires_full_initial_window_uniqueness(
+        self,
+    ) -> None:
+        record_without_lf = self._task_complete("x" * 70_000)[:-1]
+        self.assertGreater(len(record_without_lf), 64 * 1024)
+        duplicated_window = record_without_lf + record_without_lf + b"\n"
+        namespace = self._embedded_terminal_tail_namespace(
+            Path("/unused"),
+            "sessions/2026/07/23/rollout-2026-07-23T10-00-00.jsonl",
+            window_bytes=len(duplicated_window),
+            max_scan_bytes=len(duplicated_window),
+            max_record_bytes=len(duplicated_window),
+        )
+        selectors = {
+            "local": lambda: MODULE._select_terminal_tail_anchor(
+                duplicated_window,
+                window_start=4096,
+            ),
+            "embedded": lambda: namespace["select_terminal_tail_anchor"](
+                duplicated_window,
+                4096,
+            ),
+        }
+        for scope, select_anchor in selectors.items():
+            with self.subTest(scope=scope):
+                self.assertIsNone(
+                    select_anchor(),
+                    "anchor candidates must be unique across the full window",
+                )
+
+    def test_local_and_embedded_terminal_tail_match(self) -> None:
+        cases = {
+            "complete": self._task_complete("remote parity"),
+            "source_in_progress": (
+                self._task_complete("stale") + b'{"type":"event_msg"'
+            ),
+            "terminal_not_reached": (
+                self._task_complete("stale")
+                + self._event_user_message("continue")
+            ),
+            "anchor_unavailable": b"{}\n",
+        }
+        for expected_status, data in cases.items():
+            with (
+                self.subTest(status=expected_status),
+                tempfile.TemporaryDirectory() as temp_dir,
+            ):
+                codex_root = Path(temp_dir) / ".codex"
+                rollout = self._write_rollout_bytes(codex_root, data)
+                local = MODULE._read_terminal_tail(
+                    codex_root,
+                    MODULE._resolve_rollout_relative_path(rollout),
+                    window_bytes=64,
+                    max_scan_bytes=2048,
+                    max_record_bytes=1024,
+                )
+                script = MODULE._remote_python_script(
+                    {
+                        "mode": "terminal-tail",
+                        "rollout": rollout,
+                        "codex_root": str(codex_root),
+                        "terminal_tail_window_bytes": 64,
+                        "max_terminal_tail_scan_bytes": 2048,
+                        "max_terminal_tail_record_bytes": 1024,
+                        "max_terminal_tail_anchor_bytes": (
+                            MODULE.MAX_TERMINAL_TAIL_ANCHOR_BYTES
+                        ),
+                        "min_terminal_tail_anchor_bytes": (
+                            MODULE.MIN_TERMINAL_TAIL_ANCHOR_BYTES
+                        ),
+                    }
+                )
+                embedded = subprocess.run(
+                    [sys.executable, "-"],
+                    input=script,
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+
+            self.assertEqual(embedded.returncode, 0, embedded.stderr)
+            lines = MODULE._extract_framed_lines(
+                embedded.stdout,
+                begin_marker=MODULE.REMOTE_TERMINAL_TAIL_BEGIN,
+                end_marker=MODULE.REMOTE_TERMINAL_TAIL_END,
+                host="embedded",
+                command="terminal-tail",
+            )
+            self.assertGreaterEqual(len(lines), 1)
+            header = json.loads(lines[0])
+            self.assertTrue(header["ok"])
+            self.assertEqual(header["status"], expected_status)
+            self.assertEqual(local.status, expected_status)
+            fields = (
+                "source_bytes",
+                "observed_source_bytes",
+                "scan_start",
+                "scan_end",
+                "scanned_bytes",
+                "window_count",
+                "records_examined",
+                "anchor_offset",
+                "anchor_length",
+                "append_observed",
+                "terminal_record_offset",
+            )
+            self.assertEqual(
+                {field: getattr(local, field) for field in fields},
+                {field: header[field] for field in fields},
+            )
+            if expected_status == "complete":
+                self.assertEqual(len(lines), 2)
+                self.assertEqual(
+                    MODULE.base64.b64decode(lines[1], validate=True),
+                    local.message,
+                )
+            else:
+                self.assertEqual(len(lines), 1)
+                self.assertIsNone(local.message)
+            if expected_status == "anchor_unavailable":
+                self.assertLess(
+                    local.source_bytes - 1,
+                    MODULE.MIN_TERMINAL_TAIL_ANCHOR_BYTES,
+                )
+                self.assertIsNone(local.anchor_offset)
+                self.assertEqual(local.anchor_length, 0)
+
+    def test_local_cli_writes_exact_message_without_echoing_it(self) -> None:
+        message = "  exact\r\n终端\x00bytes  "
+        expected = message.encode("utf-8")
+        with tempfile.TemporaryDirectory(dir="/tmp") as temp_dir:
+            codex_root = Path(temp_dir) / ".codex"
+            rollout = self._write_rollout_bytes(
+                codex_root,
+                self._task_complete(message),
+            )
+            output_path = Path(temp_dir) / "terminal-result.txt"
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+            with (
+                mock.patch.object(MODULE, "_local_codex_root", return_value=codex_root),
+                redirect_stdout(stdout),
+                redirect_stderr(stderr),
+            ):
+                rc = MODULE.cmd_terminal_tail(
+                    argparse.Namespace(
+                        host="local",
+                        rollout=rollout,
+                        output=str(output_path),
+                    )
+                )
+
+            self.assertEqual(output_path.read_bytes(), expected)
+
+        self.assertEqual(rc, 0, stderr.getvalue())
+        self.assertNotIn(message, stdout.getvalue())
+        self.assertNotIn(message, stderr.getvalue())
+        self.assertIn("status=complete", stdout.getvalue())
+        self.assertIn(f"bytes={len(expected)}", stdout.getvalue())
+
+    def test_local_cli_nonterminal_status_does_not_touch_output(self) -> None:
+        with tempfile.TemporaryDirectory(dir="/tmp") as temp_dir:
+            codex_root = Path(temp_dir) / ".codex"
+            rollout = self._write_rollout_bytes(
+                codex_root,
+                self._task_complete("stale") + self._event_user_message("continue"),
+            )
+            output_path = Path(temp_dir) / "must-not-exist.txt"
+            output_path.write_bytes(b"sentinel")
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+            with (
+                mock.patch.object(MODULE, "_local_codex_root", return_value=codex_root),
+                redirect_stdout(stdout),
+                redirect_stderr(stderr),
+            ):
+                rc = MODULE.cmd_terminal_tail(
+                    argparse.Namespace(
+                        host="local",
+                        rollout=rollout,
+                        output=str(output_path),
+                    )
+                )
+
+            self.assertEqual(output_path.read_bytes(), b"sentinel")
+
+        self.assertEqual(rc, 1)
+        self.assertIn("status=terminal_not_reached", stdout.getvalue())
+        self.assertEqual(stderr.getvalue(), "")
+
+    def test_local_cli_uses_the_same_stable_error_categories(self) -> None:
+        rollout = (
+            "sessions/2026/07/23/"
+            "rollout-2026-07-23T10-00-00-local-errors.jsonl"
+        )
+        cases = (
+            (
+                PermissionError("private detail"),
+                "rollout_unreadable",
+            ),
+            (
+                MODULE._TerminalTailOperationError(
+                    "rollout_replaced",
+                    "private detail",
+                ),
+                "rollout_replaced",
+            ),
+            (
+                MODULE._TerminalTailOperationError(
+                    "rollout_truncated",
+                    "private detail",
+                ),
+                "rollout_truncated",
+            ),
+            (
+                MODULE._TerminalTailOperationError(
+                    "malformed_jsonl",
+                    "private detail",
+                ),
+                "malformed_jsonl",
+            ),
+            (
+                RuntimeError("private detail"),
+                "internal_failure",
+            ),
+        )
+        with tempfile.TemporaryDirectory(dir="/tmp") as temp_dir:
+            output_path = Path(temp_dir) / "terminal-result.txt"
+            output_path.write_bytes(b"sentinel")
+            for error, expected_code in cases:
+                with self.subTest(expected_code=expected_code):
+                    stdout = io.StringIO()
+                    stderr = io.StringIO()
+                    with (
+                        mock.patch.object(
+                            MODULE,
+                            "_local_codex_root",
+                            return_value=Path(temp_dir) / ".codex",
+                        ),
+                        mock.patch.object(
+                            MODULE,
+                            "_read_terminal_tail",
+                            side_effect=error,
+                        ),
+                        redirect_stdout(stdout),
+                        redirect_stderr(stderr),
+                    ):
+                        rc = MODULE.cmd_terminal_tail(
+                            argparse.Namespace(
+                                host="local",
+                                rollout=rollout,
+                                output=str(output_path),
+                            )
+                        )
+
+                    self.assertEqual(rc, 1)
+                    self.assertEqual(stdout.getvalue(), "")
+                    self.assertEqual(output_path.read_bytes(), b"sentinel")
+                    self.assertEqual(
+                        stderr.getvalue().splitlines()[-1],
+                        "error="
+                        + MODULE.TERMINAL_TAIL_ERROR_MESSAGES[expected_code],
+                    )
+
+    def test_local_and_remote_cli_record_limit_status_does_not_touch_output(
+        self,
+    ) -> None:
+        record_limit = 3
+        source = (
+            b"{}\n" * 16
+            + self._jsonl_record(
+                {
+                    "type": "noise",
+                    "payload": {
+                        "anchor": "terminal-tail-cli-record-budget-anchor",
+                    },
+                }
+            )
+        )
+        with tempfile.TemporaryDirectory(dir="/tmp") as temp_dir:
+            codex_root = Path(temp_dir) / ".codex"
+            rollout = self._write_rollout_bytes(codex_root, source)
+            output_path = Path(temp_dir) / "terminal-result.txt"
+            output_path.write_bytes(b"sentinel")
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+            read_terminal_tail = MODULE._read_terminal_tail
+
+            def read_with_small_record_budget(
+                root: Path,
+                relative_path: PurePosixPath,
+            ) -> MODULE.TerminalTailResult:
+                return read_terminal_tail(
+                    root,
+                    relative_path,
+                    window_bytes=64,
+                    max_scan_bytes=4096,
+                    max_record_bytes=1024,
+                    max_records=record_limit,
+                )
+
+            with (
+                mock.patch.object(MODULE, "_local_codex_root", return_value=codex_root),
+                mock.patch.object(
+                    MODULE,
+                    "_read_terminal_tail",
+                    side_effect=read_with_small_record_budget,
+                ),
+                mock.patch.object(
+                    MODULE,
+                    "MAX_TERMINAL_TAIL_RECORDS",
+                    record_limit,
+                ),
+                redirect_stdout(stdout),
+                redirect_stderr(stderr),
+            ):
+                local_rc = MODULE.cmd_terminal_tail(
+                    argparse.Namespace(
+                        host="local",
+                        rollout=rollout,
+                        output=str(output_path),
+                    )
+                )
+
+            self.assertEqual(output_path.read_bytes(), b"sentinel")
+
+        self.assertEqual(local_rc, 1)
+        self.assertIn("status=record_limit_exceeded", stdout.getvalue())
+        self.assertIn(f"records_examined={record_limit}", stdout.getvalue())
+        self.assertIn(
+            f"max_terminal_tail_records={record_limit}",
+            stdout.getvalue(),
+        )
+        self.assertEqual(stderr.getvalue(), "")
+
+        remote_header = self._remote_record_limit_header()
+        remote_result = subprocess.CompletedProcess(
+            args=["ssh"],
+            returncode=0,
+            stdout=self._remote_terminal_tail_frame(remote_header),
+            stderr="",
+        )
+        remote_rc, remote_stdout, remote_stderr, remote_output = (
+            self._run_remote_terminal_tail_fixture(remote_result)
+        )
+        self.assertEqual(remote_rc, 1)
+        self.assertIn("status=record_limit_exceeded", remote_stdout)
+        self.assertIn(
+            f"records_examined={MODULE.MAX_TERMINAL_TAIL_RECORDS}",
+            remote_stdout,
+        )
+        self.assertIn(
+            f"max_terminal_tail_records={MODULE.MAX_TERMINAL_TAIL_RECORDS}",
+            remote_stdout,
+        )
+        self.assertEqual(remote_stderr, "")
+        self.assertEqual(remote_output, b"sentinel")
+
+    def test_remote_terminal_tail_uses_bounded_capture_and_preserves_output(
+        self,
+    ) -> None:
+        for status, message, expected_rc in (
+            ("complete", b"remote exact\nbytes", 0),
+            ("terminal_not_reached", None, 1),
+        ):
+            with (
+                self.subTest(status=status),
+                tempfile.TemporaryDirectory(dir="/tmp") as temp_dir,
+            ):
+                header = {
+                    "ok": True,
+                    "status": status,
+                    "bytes": len(message or b""),
+                    "source_bytes": 512,
+                    "observed_source_bytes": 512,
+                    "scan_start": 0,
+                    "scan_end": 512,
+                    "scanned_bytes": 512,
+                    "window_count": 1,
+                    "records_examined": 1,
+                    "anchor_offset": 32,
+                    "anchor_length": 32,
+                    "append_observed": False,
+                    "terminal_record_offset": 64,
+                }
+                frame = [
+                    MODULE.REMOTE_TERMINAL_TAIL_BEGIN,
+                    json.dumps(header, separators=(",", ":"), sort_keys=True),
+                ]
+                if message is not None:
+                    frame.append(MODULE.base64.b64encode(message).decode("ascii"))
+                frame.extend([MODULE.REMOTE_TERMINAL_TAIL_END, ""])
+                remote_result = subprocess.CompletedProcess(
+                    args=["ssh"],
+                    returncode=0,
+                    stdout="\n".join(frame),
+                    stderr="",
+                )
+                output_path = Path(temp_dir) / "terminal-result.txt"
+                if message is None:
+                    output_path.write_bytes(b"sentinel")
+                stdout = io.StringIO()
+                stderr = io.StringIO()
+                with (
+                    mock.patch.object(
+                        MODULE,
+                        "_run_remote_python_bounded",
+                        return_value=remote_result,
+                    ) as bounded_run,
+                    redirect_stdout(stdout),
+                    redirect_stderr(stderr),
+                ):
+                    rc = MODULE.cmd_terminal_tail(
+                        argparse.Namespace(
+                            host="miku-bot-dev",
+                            rollout=(
+                                "sessions/2026/07/23/"
+                                "rollout-2026-07-23T10-00-00-remote.jsonl"
+                            ),
+                            output=str(output_path),
+                        )
+                    )
+
+                self.assertEqual(rc, expected_rc, stderr.getvalue())
+                bounded_run.assert_called_once()
+                self.assertEqual(
+                    bounded_run.call_args.kwargs["max_stdout_bytes"],
+                    MODULE.MAX_REMOTE_TERMINAL_TAIL_STDOUT_BYTES,
+                )
+                payload = bounded_run.call_args.args[1]
+                self.assertEqual(payload["mode"], "terminal-tail")
+                self.assertEqual(
+                    payload["max_direct_fetch_rollout_bytes"],
+                    MODULE.MAX_DIRECT_FETCH_ROLLOUT_BYTES,
+                )
+                self.assertEqual(
+                    payload["max_automatic_full_reconstruction_bytes"],
+                    MODULE.MAX_AUTOMATIC_FULL_RECONSTRUCTION_BYTES,
+                )
+                self.assertEqual(
+                    payload["max_terminal_tail_scan_bytes"],
+                    MODULE.MAX_TERMINAL_TAIL_SCAN_BYTES,
+                )
+                self.assertEqual(
+                    payload["max_terminal_tail_records"],
+                    MODULE.MAX_TERMINAL_TAIL_RECORDS,
+                )
+                self.assertIn(f"status={status}", stdout.getvalue())
+                if message is not None:
+                    self.assertEqual(output_path.read_bytes(), message)
+                    self.assertNotIn(
+                        message.decode("utf-8"),
+                        stdout.getvalue(),
+                    )
+                else:
+                    self.assertEqual(output_path.read_bytes(), b"sentinel")
+
+    def test_remote_terminal_tail_accepts_closed_noncomplete_states(
+        self,
+    ) -> None:
+        empty_source = self._remote_terminal_tail_header(
+            status="terminal_not_reached",
+            message=None,
+        )
+        empty_source.update(
+            {
+                "source_bytes": 0,
+                "observed_source_bytes": 0,
+                "scan_start": 0,
+                "scan_end": 0,
+                "scanned_bytes": 0,
+                "window_count": 0,
+                "records_examined": 0,
+                "anchor_offset": None,
+                "anchor_length": 0,
+                "terminal_record_offset": None,
+            }
+        )
+
+        source_in_progress = self._remote_terminal_tail_header(
+            status="source_in_progress",
+            message=None,
+        )
+        source_in_progress.update(
+            {
+                "scan_start": 511,
+                "scanned_bytes": 1,
+                "records_examined": 0,
+                "anchor_offset": None,
+                "anchor_length": 0,
+                "terminal_record_offset": None,
+            }
+        )
+
+        anchor_unavailable = self._remote_terminal_tail_header(
+            status="anchor_unavailable",
+            message=None,
+        )
+        anchor_unavailable.update(
+            {
+                "records_examined": 0,
+                "anchor_offset": None,
+                "anchor_length": 0,
+                "terminal_record_offset": None,
+            }
+        )
+
+        anchor_moved = self._remote_terminal_tail_header(
+            status="anchor_moved",
+            message=None,
+        )
+        anchor_moved["terminal_record_offset"] = None
+
+        full_nonterminal = self._remote_terminal_tail_header(
+            status="terminal_not_reached",
+            message=None,
+        )
+        full_nonterminal["terminal_record_offset"] = None
+
+        tail_source = MODULE.MAX_TERMINAL_TAIL_SCAN_BYTES + 100
+        tail_window_insufficient = self._remote_terminal_tail_header(
+            status="tail_window_insufficient",
+            message=None,
+        )
+        tail_window_insufficient.update(
+            {
+                "source_bytes": tail_source,
+                "observed_source_bytes": tail_source,
+                "scan_start": 100,
+                "scan_end": tail_source,
+                "scanned_bytes": MODULE.MAX_TERMINAL_TAIL_SCAN_BYTES,
+                "window_count": (
+                    MODULE.MAX_TERMINAL_TAIL_SCAN_BYTES
+                    // MODULE.DEFAULT_TERMINAL_TAIL_WINDOW_BYTES
+                ),
+                "anchor_offset": (
+                    tail_source
+                    - 1
+                    - 64 * 1024
+                ),
+                "terminal_record_offset": None,
+            }
+        )
+
+        record_limit_exceeded = self._remote_record_limit_header()
+
+        for expected_status, header in (
+            ("terminal_not_reached", empty_source),
+            ("source_in_progress", source_in_progress),
+            ("anchor_unavailable", anchor_unavailable),
+            ("anchor_moved", anchor_moved),
+            ("terminal_not_reached", full_nonterminal),
+            ("tail_window_insufficient", tail_window_insufficient),
+            ("record_limit_exceeded", record_limit_exceeded),
+        ):
+            with self.subTest(
+                status=expected_status,
+                source_bytes=header["source_bytes"],
+            ):
+                result, message = MODULE._extract_framed_terminal_tail_payload(
+                    self._remote_terminal_tail_frame(header),
+                    host="miku-bot-dev",
+                )
+
+                self.assertEqual(result.status, expected_status)
+                self.assertEqual(
+                    result.records_examined,
+                    header["records_examined"],
+                )
+                self.assertIsNone(message)
+
+    def test_remote_terminal_tail_rejects_invalid_record_limit_evidence(
+        self,
+    ) -> None:
+        base_header = self._remote_record_limit_header()
+
+        impossible_exact_cap = self._remote_terminal_tail_header(
+            status="record_limit_exceeded",
+            message=None,
+            records_examined=MODULE.MAX_TERMINAL_TAIL_RECORDS,
+        )
+        impossible_exact_cap["terminal_record_offset"] = None
+
+        count_mismatch = dict(base_header)
+        count_mismatch["records_examined"] = (
+            MODULE.MAX_TERMINAL_TAIL_RECORDS - 1
+        )
+
+        no_anchor = dict(base_header)
+        no_anchor.update(
+            {
+                "anchor_offset": None,
+                "anchor_length": 0,
+            }
+        )
+
+        terminal_offset = dict(base_header)
+        terminal_offset["terminal_record_offset"] = 64
+
+        payload = b"must not publish"
+        payload_header = dict(base_header)
+        payload_header["bytes"] = len(payload)
+
+        cases = {
+            "impossible-exact-cap": self._remote_terminal_tail_frame(
+                impossible_exact_cap
+            ),
+            "count-mismatch": self._remote_terminal_tail_frame(count_mismatch),
+            "no-anchor": self._remote_terminal_tail_frame(no_anchor),
+            "terminal-offset": self._remote_terminal_tail_frame(terminal_offset),
+            "payload": self._remote_terminal_tail_frame(
+                payload_header,
+                message=payload,
+            ),
+        }
+        for name, frame in cases.items():
+            with (
+                self.subTest(name=name),
+                self.assertRaisesRegex(
+                    ValueError,
+                    "record-count evidence|record-limit evidence|payload framing",
+                ),
+            ):
+                MODULE._extract_framed_terminal_tail_payload(
+                    frame,
+                    host="miku-bot-dev",
+                )
+
+    def test_remote_terminal_tail_rejects_invalid_records_examined(self) -> None:
+        wrong_type = self._remote_terminal_tail_header()
+        wrong_type["records_examined"] = "1"
+
+        bool_count = self._remote_terminal_tail_header()
+        bool_count["records_examined"] = True
+
+        over_cap = self._remote_record_limit_header()
+        over_cap["records_examined"] = MODULE.MAX_TERMINAL_TAIL_RECORDS + 1
+
+        complete_zero = self._remote_terminal_tail_header(records_examined=0)
+
+        source_in_progress_count = self._remote_terminal_tail_header(
+            status="source_in_progress",
+            message=None,
+        )
+        source_in_progress_count.update(
+            {
+                "scan_start": 511,
+                "scanned_bytes": 1,
+                "anchor_offset": None,
+                "anchor_length": 0,
+                "terminal_record_offset": None,
+            }
+        )
+
+        anchor_unavailable_count = self._remote_terminal_tail_header(
+            status="anchor_unavailable",
+            message=None,
+        )
+        anchor_unavailable_count.update(
+            {
+                "anchor_offset": None,
+                "anchor_length": 0,
+                "terminal_record_offset": None,
+            }
+        )
+
+        tail_source = MODULE.MAX_TERMINAL_TAIL_SCAN_BYTES + 100
+        tail_window_at_cap = self._remote_terminal_tail_header(
+            status="tail_window_insufficient",
+            message=None,
+            records_examined=MODULE.MAX_TERMINAL_TAIL_RECORDS,
+        )
+        tail_window_at_cap.update(
+            {
+                "source_bytes": tail_source,
+                "observed_source_bytes": tail_source,
+                "scan_start": 100,
+                "scan_end": tail_source,
+                "scanned_bytes": MODULE.MAX_TERMINAL_TAIL_SCAN_BYTES,
+                "window_count": (
+                    MODULE.MAX_TERMINAL_TAIL_SCAN_BYTES
+                    // MODULE.DEFAULT_TERMINAL_TAIL_WINDOW_BYTES
+                ),
+                "anchor_offset": tail_source - 1 - 64 * 1024,
+                "terminal_record_offset": None,
+            }
+        )
+
+        empty_nonterminal_count = self._remote_terminal_tail_header(
+            status="terminal_not_reached",
+            message=None,
+        )
+        empty_nonterminal_count.update(
+            {
+                "source_bytes": 0,
+                "observed_source_bytes": 0,
+                "scan_start": 0,
+                "scan_end": 0,
+                "scanned_bytes": 0,
+                "window_count": 0,
+                "anchor_offset": None,
+                "anchor_length": 0,
+                "terminal_record_offset": None,
+            }
+        )
+
+        cases = {
+            "wrong-type": wrong_type,
+            "bool": bool_count,
+            "over-cap": over_cap,
+            "complete-zero": complete_zero,
+            "source-in-progress-count": source_in_progress_count,
+            "anchor-unavailable-count": anchor_unavailable_count,
+            "tail-window-at-cap": tail_window_at_cap,
+            "empty-nonterminal-count": empty_nonterminal_count,
+        }
+        for name, header in cases.items():
+            with (
+                self.subTest(name=name),
+                self.assertRaises(ValueError),
+            ):
+                MODULE._extract_framed_terminal_tail_payload(
+                    self._remote_terminal_tail_frame(header),
+                    host="miku-bot-dev",
+                )
+
+    def test_remote_terminal_tail_rejects_complete_without_coordinate_evidence(
+        self,
+    ) -> None:
+        for missing_field in ("anchor_offset", "terminal_record_offset"):
+            with (
+                self.subTest(missing_field=missing_field),
+                tempfile.TemporaryDirectory(dir="/tmp") as temp_dir,
+            ):
+                message = b"must not publish"
+                header = {
+                    "ok": True,
+                    "status": "complete",
+                    "bytes": len(message),
+                    "source_bytes": 512,
+                    "observed_source_bytes": 512,
+                    "scan_start": 0,
+                    "scan_end": 512,
+                    "scanned_bytes": 512,
+                    "window_count": 1,
+                    "records_examined": 1,
+                    "anchor_offset": 32,
+                    "anchor_length": 32,
+                    "append_observed": False,
+                    "terminal_record_offset": 64,
+                }
+                header[missing_field] = None
+                if missing_field == "anchor_offset":
+                    header["anchor_length"] = 0
+                frame = [
+                    MODULE.REMOTE_TERMINAL_TAIL_BEGIN,
+                    json.dumps(header, separators=(",", ":"), sort_keys=True),
+                    MODULE.base64.b64encode(message).decode("ascii"),
+                    MODULE.REMOTE_TERMINAL_TAIL_END,
+                    "",
+                ]
+                remote_result = subprocess.CompletedProcess(
+                    args=["ssh"],
+                    returncode=0,
+                    stdout="\n".join(frame),
+                    stderr="",
+                )
+                output_path = Path(temp_dir) / "terminal-result.txt"
+                output_path.write_bytes(b"sentinel")
+                stdout = io.StringIO()
+                stderr = io.StringIO()
+                with (
+                    mock.patch.object(
+                        MODULE,
+                        "_run_remote_python_bounded",
+                        return_value=remote_result,
+                    ),
+                    redirect_stdout(stdout),
+                    redirect_stderr(stderr),
+                ):
+                    rc = MODULE.cmd_terminal_tail(
+                        argparse.Namespace(
+                            host="miku-bot-dev",
+                            rollout=(
+                                "sessions/2026/07/23/"
+                                "rollout-2026-07-23T10-00-00-remote.jsonl"
+                            ),
+                            output=str(output_path),
+                        )
+                    )
+
+                self.assertEqual(rc, 1)
+                self.assertEqual(output_path.read_bytes(), b"sentinel")
+                self.assertEqual(stdout.getvalue(), "")
+                self.assertIn(
+                    "lacked complete-result coordinate evidence",
+                    stderr.getvalue(),
+                )
+
+    def test_remote_terminal_tail_rejects_impossible_complete_coordinates(
+        self,
+    ) -> None:
+        message = b"must not publish"
+        base_header = self._remote_terminal_tail_header(message=message)
+        first_window_start = 100
+        large_source = MODULE.DEFAULT_TERMINAL_TAIL_WINDOW_BYTES + 100
+        cases: dict[str, dict[str, object]] = {}
+
+        no_window = dict(base_header)
+        no_window["window_count"] = 0
+        cases["zero-window-count"] = no_window
+
+        shifted_scan_start = dict(base_header)
+        shifted_scan_start.update(
+            {
+                "scan_start": 1,
+                "scanned_bytes": 511,
+            }
+        )
+        cases["shifted-complete-window"] = shifted_scan_start
+
+        final_lf_anchor = dict(base_header)
+        final_lf_anchor["anchor_offset"] = 480
+        cases["anchor-covers-final-lf"] = final_lf_anchor
+
+        final_lf_terminal = dict(base_header)
+        final_lf_terminal["terminal_record_offset"] = 511
+        cases["terminal-offset-is-final-lf"] = final_lf_terminal
+
+        impossible_anchor_length = dict(base_header)
+        impossible_anchor_length["anchor_length"] = 33
+        cases["impossible-anchor-length"] = impossible_anchor_length
+
+        suffix_source = 64 * 1024 + 512
+        anchor_outside_suffix = dict(base_header)
+        anchor_outside_suffix.update(
+            {
+                "source_bytes": suffix_source,
+                "observed_source_bytes": suffix_source,
+                "scan_end": suffix_source,
+                "scanned_bytes": suffix_source,
+                "anchor_offset": 0,
+                "terminal_record_offset": 600,
+            }
+        )
+        cases["anchor-outside-suffix-region"] = anchor_outside_suffix
+
+        outside_first_window = dict(base_header)
+        outside_first_window.update(
+            {
+                "source_bytes": large_source,
+                "observed_source_bytes": large_source,
+                "scan_start": 0,
+                "scan_end": large_source,
+                "scanned_bytes": large_source,
+                "window_count": 2,
+                "anchor_offset": first_window_start - 1,
+                "terminal_record_offset": first_window_start,
+            }
+        )
+        cases["anchor-outside-first-window"] = outside_first_window
+
+        two_window_source = 2 * MODULE.DEFAULT_TERMINAL_TAIL_WINDOW_BYTES
+        terminal_in_newer_window = dict(base_header)
+        terminal_in_newer_window.update(
+            {
+                "source_bytes": two_window_source,
+                "observed_source_bytes": two_window_source,
+                "scan_start": 0,
+                "scan_end": two_window_source,
+                "scanned_bytes": two_window_source,
+                "window_count": 2,
+                "anchor_offset": two_window_source - 129,
+                "anchor_length": 128,
+                "terminal_record_offset": (
+                    MODULE.DEFAULT_TERMINAL_TAIL_WINDOW_BYTES + 100
+                ),
+            }
+        )
+        cases["terminal-offset-in-newer-window"] = terminal_in_newer_window
+
+        carry_record = dict(base_header)
+        carry_record.update(
+            {
+                "source_bytes": large_source,
+                "observed_source_bytes": large_source,
+                "scan_start": first_window_start,
+                "scan_end": large_source,
+                "scanned_bytes": MODULE.DEFAULT_TERMINAL_TAIL_WINDOW_BYTES,
+                "anchor_offset": large_source - 1 - 64 * 1024,
+                "terminal_record_offset": first_window_start,
+            }
+        )
+        cases["terminal-offset-is-carry"] = carry_record
+
+        record_does_not_fit = dict(base_header)
+        record_does_not_fit["terminal_record_offset"] = 500
+        cases["terminal-record-does-not-fit"] = record_does_not_fit
+
+        over_scan_cap = dict(base_header)
+        oversized_source = MODULE.MAX_TERMINAL_TAIL_SCAN_BYTES + 1
+        over_scan_cap.update(
+            {
+                "source_bytes": oversized_source,
+                "observed_source_bytes": oversized_source,
+                "scan_start": 0,
+                "scan_end": oversized_source,
+                "scanned_bytes": oversized_source,
+                "window_count": (
+                    oversized_source
+                    + MODULE.DEFAULT_TERMINAL_TAIL_WINDOW_BYTES
+                    - 1
+                )
+                // MODULE.DEFAULT_TERMINAL_TAIL_WINDOW_BYTES,
+                "anchor_offset": (
+                    oversized_source
+                    - MODULE.DEFAULT_TERMINAL_TAIL_WINDOW_BYTES
+                ),
+                "terminal_record_offset": 0,
+            }
+        )
+        cases["scan-cap-exceeded"] = over_scan_cap
+
+        for name, header in cases.items():
+            with self.subTest(name=name):
+                remote_result = subprocess.CompletedProcess(
+                    args=["ssh"],
+                    returncode=0,
+                    stdout=self._remote_terminal_tail_frame(
+                        header,
+                        message=message,
+                    ),
+                    stderr="",
+                )
+                rc, stdout, stderr, output = (
+                    self._run_remote_terminal_tail_fixture(remote_result)
+                )
+
+                self.assertEqual(rc, 1)
+                self.assertEqual(stdout, "")
+                self.assertEqual(output, b"sentinel")
+                self.assertIn("error=remote terminal-tail output", stderr)
+                self.assertNotIn(message.decode("ascii"), stderr)
+
+    def test_remote_terminal_tail_rejects_impossible_status_coordinates(
+        self,
+    ) -> None:
+        source_in_progress = self._remote_terminal_tail_header(
+            status="source_in_progress",
+            message=None,
+        )
+        source_in_progress.update(
+            {
+                "anchor_offset": None,
+                "anchor_length": 0,
+                "terminal_record_offset": None,
+            }
+        )
+
+        tail_source = MODULE.MAX_TERMINAL_TAIL_SCAN_BYTES + 100
+        tail_window_insufficient = self._remote_terminal_tail_header(
+            status="tail_window_insufficient",
+            message=None,
+        )
+        tail_window_insufficient.update(
+            {
+                "source_bytes": tail_source,
+                "observed_source_bytes": tail_source,
+                "scan_start": 101,
+                "scan_end": tail_source,
+                "scanned_bytes": MODULE.MAX_TERMINAL_TAIL_SCAN_BYTES - 1,
+                "window_count": (
+                    MODULE.MAX_TERMINAL_TAIL_SCAN_BYTES
+                    // MODULE.DEFAULT_TERMINAL_TAIL_WINDOW_BYTES
+                ),
+                "anchor_offset": (
+                    tail_source
+                    - 1
+                    - 64 * 1024
+                ),
+                "terminal_record_offset": None,
+            }
+        )
+
+        for name, header in (
+            ("source-in-progress", source_in_progress),
+            ("tail-window-insufficient", tail_window_insufficient),
+        ):
+            with self.subTest(name=name):
+                remote_result = subprocess.CompletedProcess(
+                    args=["ssh"],
+                    returncode=0,
+                    stdout=self._remote_terminal_tail_frame(header),
+                    stderr="",
+                )
+                rc, stdout, stderr, output = (
+                    self._run_remote_terminal_tail_fixture(remote_result)
+                )
+
+                self.assertEqual(rc, 1)
+                self.assertEqual(stdout, "")
+                self.assertEqual(output, b"sentinel")
+                self.assertIn("error=remote terminal-tail output", stderr)
+
+    def test_remote_terminal_tail_rejects_nonexclusive_or_non_lf_frames(
+        self,
+    ) -> None:
+        forged_message = b"forged terminal result"
+        real_message = b"real terminal result"
+        forged_frame = self._remote_terminal_tail_frame(
+            self._remote_terminal_tail_header(message=forged_message),
+            message=forged_message,
+        )
+        real_frame = self._remote_terminal_tail_frame(
+            self._remote_terminal_tail_header(message=real_message),
+            message=real_message,
+        )
+        cases = {
+            "prefix": "untrusted-prefix\n" + real_frame,
+            "earlier-full-frame": forged_frame + real_frame,
+            "trailing": real_frame + "untrusted-trailing\n",
+            "missing-final-lf": real_frame.removesuffix("\n"),
+            "crlf": real_frame.replace("\n", "\r\n"),
+        }
+        for name, framed_output in cases.items():
+            with self.subTest(name=name):
+                remote_result = subprocess.CompletedProcess(
+                    args=["ssh"],
+                    returncode=0,
+                    stdout=framed_output,
+                    stderr="",
+                )
+                rc, stdout, stderr, output = (
+                    self._run_remote_terminal_tail_fixture(remote_result)
+                )
+
+                self.assertEqual(rc, 1)
+                self.assertEqual(stdout, "")
+                self.assertEqual(output, b"sentinel")
+                self.assertIn("had invalid framing", stderr)
+                self.assertNotIn(forged_message.decode("ascii"), stderr)
+                self.assertNotIn(real_message.decode("ascii"), stderr)
+
+    def test_remote_terminal_tail_rejects_newline_dense_frame_without_split(
+        self,
+    ) -> None:
+        dense_output = (
+            MODULE.REMOTE_TERMINAL_TAIL_BEGIN
+            + "\n{}\n"
+            + "\n" * 250_000
+            + MODULE.REMOTE_TERMINAL_TAIL_END
+            + "\n"
+        )
+        self.assertLessEqual(
+            len(dense_output.encode("utf-8")),
+            MODULE.MAX_REMOTE_TERMINAL_TAIL_STDOUT_BYTES,
+        )
+        remote_result = subprocess.CompletedProcess(
+            args=["ssh"],
+            returncode=0,
+            stdout=dense_output,
+            stderr="",
+        )
+
+        rc, stdout, stderr, output = self._run_remote_terminal_tail_fixture(
+            remote_result
+        )
+
+        self.assertEqual(rc, 1)
+        self.assertEqual(stdout, "")
+        self.assertEqual(output, b"sentinel")
+        self.assertIn("had invalid framing", stderr)
+
+        class SplitGuardText(str):
+            def __getitem__(self, key: object) -> object:
+                value = super().__getitem__(key)
+                if isinstance(value, str):
+                    return type(self)(value)
+                return value
+
+            def split(self, *args: object, **kwargs: object) -> list[str]:
+                raise AssertionError("terminal-tail framing must not use split")
+
+            def splitlines(
+                self,
+                *args: object,
+                **kwargs: object,
+            ) -> list[str]:
+                raise AssertionError(
+                    "terminal-tail framing must not use splitlines"
+                )
+
+        message = b"partitioned frame"
+        result, extracted = MODULE._extract_framed_terminal_tail_payload(
+            SplitGuardText(
+                self._remote_terminal_tail_frame(
+                    self._remote_terminal_tail_header(message=message),
+                    message=message,
+                )
+            ),
+            host="miku-bot-dev",
+        )
+        self.assertEqual(result.status, "complete")
+        self.assertEqual(extracted, message)
+
+    def test_remote_terminal_tail_rejects_non_strict_header_types(
+        self,
+    ) -> None:
+        message = b"must not publish"
+        cases: dict[str, tuple[str, dict[str, object] | None]] = {}
+        for name, field, value in (
+            ("ok-string", "ok", "true"),
+            ("ok-integer", "ok", 1),
+            ("numeric-string", "source_bytes", "100"),
+            ("numeric-boolean", "scan_start", True),
+        ):
+            header = self._remote_terminal_tail_header(message=message)
+            header[field] = value
+            cases[name] = (
+                self._remote_terminal_tail_frame(header, message=message),
+                header,
+            )
+        nan_header = self._remote_terminal_tail_header(message=message)
+        nan_header["source_bytes"] = float("nan")
+        cases["nonfinite"] = (
+            self._remote_terminal_tail_frame(nan_header, message=message),
+            nan_header,
+        )
+        oversized_integer_header = self._remote_terminal_tail_header(
+            message=message
+        )
+        oversized_integer_header["source_bytes"] = sys.maxsize + 1
+        cases["oversized-integer"] = (
+            self._remote_terminal_tail_frame(
+                oversized_integer_header,
+                message=message,
+            ),
+            oversized_integer_header,
+        )
+
+        for name, (framed_output, _header) in cases.items():
+            with self.subTest(name=name):
+                remote_result = subprocess.CompletedProcess(
+                    args=["ssh"],
+                    returncode=0,
+                    stdout=framed_output,
+                    stderr="",
+                )
+                rc, stdout, stderr, output = (
+                    self._run_remote_terminal_tail_fixture(remote_result)
+                )
+
+                self.assertEqual(rc, 1)
+                self.assertEqual(stdout, "")
+                self.assertEqual(output, b"sentinel")
+                self.assertIn("error=remote terminal-tail output", stderr)
+                self.assertNotIn(message.decode("ascii"), stderr)
+
+    def test_remote_terminal_tail_rejects_payload_shape_mismatches(self) -> None:
+        message = b"must not publish"
+        encoded = MODULE.base64.b64encode(message).decode("ascii")
+        complete_header = self._remote_terminal_tail_header(message=message)
+        empty_complete_header = self._remote_terminal_tail_header(message=b"")
+        nonterminal_header = self._remote_terminal_tail_header(
+            status="terminal_not_reached",
+            message=None,
+        )
+        cases = {
+            "complete-extra-line": "\n".join(
+                [
+                    MODULE.REMOTE_TERMINAL_TAIL_BEGIN,
+                    json.dumps(
+                        complete_header,
+                        separators=(",", ":"),
+                        sort_keys=True,
+                    ),
+                    encoded,
+                    encoded,
+                    MODULE.REMOTE_TERMINAL_TAIL_END,
+                    "",
+                ]
+            ),
+            "empty-complete-payload": "\n".join(
+                [
+                    MODULE.REMOTE_TERMINAL_TAIL_BEGIN,
+                    json.dumps(
+                        empty_complete_header,
+                        separators=(",", ":"),
+                        sort_keys=True,
+                    ),
+                    encoded,
+                    MODULE.REMOTE_TERMINAL_TAIL_END,
+                    "",
+                ]
+            ),
+            "nonterminal-payload": "\n".join(
+                [
+                    MODULE.REMOTE_TERMINAL_TAIL_BEGIN,
+                    json.dumps(
+                        nonterminal_header,
+                        separators=(",", ":"),
+                        sort_keys=True,
+                    ),
+                    encoded,
+                    MODULE.REMOTE_TERMINAL_TAIL_END,
+                    "",
+                ]
+            ),
+        }
+
+        for name, framed_output in cases.items():
+            with self.subTest(name=name):
+                remote_result = subprocess.CompletedProcess(
+                    args=["ssh"],
+                    returncode=0,
+                    stdout=framed_output,
+                    stderr="",
+                )
+                rc, stdout, stderr, output = (
+                    self._run_remote_terminal_tail_fixture(remote_result)
+                )
+
+                self.assertEqual(rc, 1)
+                self.assertEqual(stdout, "")
+                self.assertEqual(output, b"sentinel")
+                self.assertIn("had invalid payload framing", stderr)
+                self.assertNotIn(message.decode("ascii"), stderr)
+
+    def test_remote_terminal_tail_preserves_closed_error_categories(
+        self,
+    ) -> None:
+        private_detail = "SENSITIVE-TERMINAL-TAIL-ERROR-DETAIL"
+        with tempfile.TemporaryDirectory() as temp_dir:
+            codex_root = Path(temp_dir) / ".codex"
+            rollout = self._write_rollout_bytes(
+                codex_root,
+                self._task_complete("error fixture"),
+            )
+            namespace = self._embedded_terminal_tail_namespace(
+                codex_root,
+                rollout,
+                window_bytes=256,
+                max_scan_bytes=1024,
+                max_record_bytes=1024,
+            )
+            operation_error = namespace["TerminalTailOperationError"]
+            cases = (
+                (
+                    "not-found",
+                    FileNotFoundError(private_detail),
+                    "rollout_not_found",
+                ),
+                (
+                    "os-unreadable",
+                    PermissionError(private_detail),
+                    "rollout_unreadable",
+                ),
+                (
+                    "path-unreadable",
+                    operation_error(
+                        "rollout_unreadable",
+                        private_detail,
+                    ),
+                    "rollout_unreadable",
+                ),
+                (
+                    "path-replaced",
+                    operation_error(
+                        "rollout_replaced",
+                        private_detail,
+                    ),
+                    "rollout_replaced",
+                ),
+                (
+                    "truncated",
+                    operation_error(
+                        "rollout_truncated",
+                        private_detail,
+                    ),
+                    "rollout_truncated",
+                ),
+                (
+                    "malformed-jsonl",
+                    operation_error(
+                        "malformed_jsonl",
+                        private_detail,
+                    ),
+                    "malformed_jsonl",
+                ),
+                (
+                    "unknown",
+                    RuntimeError(private_detail),
+                    "internal_failure",
+                ),
+            )
+
+            for name, error, expected_code in cases:
+                with self.subTest(name=name):
+                    namespace["read_terminal_tail"] = mock.Mock(
+                        side_effect=error
+                    )
+                    framed_output = io.StringIO()
+                    with redirect_stdout(framed_output):
+                        namespace["terminal_tail"]()
+                    frame = framed_output.getvalue()
+                    lines = MODULE._extract_framed_lines(
+                        frame,
+                        begin_marker=MODULE.REMOTE_TERMINAL_TAIL_BEGIN,
+                        end_marker=MODULE.REMOTE_TERMINAL_TAIL_END,
+                        host="embedded",
+                        command="terminal-tail",
+                    )
+                    self.assertEqual(
+                        json.loads(lines[0]),
+                        {"ok": False, "error_code": expected_code},
+                    )
+                    self.assertNotIn(private_detail, frame)
+
+                    remote_result = subprocess.CompletedProcess(
+                        args=["ssh"],
+                        returncode=0,
+                        stdout=frame,
+                        stderr="",
+                    )
+                    rc, stdout, stderr, output = (
+                        self._run_remote_terminal_tail_fixture(remote_result)
+                    )
+
+                    self.assertEqual(rc, 1)
+                    self.assertEqual(stdout, "")
+                    self.assertEqual(output, b"sentinel")
+                    self.assertEqual(
+                        stderr.splitlines()[-1],
+                        "error="
+                        + MODULE.TERMINAL_TAIL_ERROR_MESSAGES[expected_code],
+                    )
+                    self.assertNotIn(private_detail, stderr)
+
+    def test_remote_terminal_tail_accepts_each_closed_error_code(self) -> None:
+        for error_code, message in MODULE.TERMINAL_TAIL_ERROR_MESSAGES.items():
+            with self.subTest(error_code=error_code):
+                remote_result = subprocess.CompletedProcess(
+                    args=["ssh"],
+                    returncode=0,
+                    stdout=self._remote_terminal_tail_frame(
+                        {"ok": False, "error_code": error_code}
+                    ),
+                    stderr="",
+                )
+                rc, stdout, stderr, output = (
+                    self._run_remote_terminal_tail_fixture(remote_result)
+                )
+
+                self.assertEqual(rc, 1)
+                self.assertEqual(stdout, "")
+                self.assertEqual(output, b"sentinel")
+                self.assertEqual(stderr.splitlines()[-1], "error=" + message)
+
+    def test_remote_terminal_tail_does_not_echo_failed_process_output(
+        self,
+    ) -> None:
+        secret_stdout = "SENSITIVE-REMOTE-STDOUT"
+        secret_stderr = "SENSITIVE-REMOTE-STDERR"
+        for name, remote_stderr in (
+            ("empty-stderr", ""),
+            ("sensitive-stderr", secret_stderr),
+        ):
+            with self.subTest(name=name):
+                remote_result = subprocess.CompletedProcess(
+                    args=["ssh"],
+                    returncode=7,
+                    stdout=secret_stdout,
+                    stderr=remote_stderr,
+                )
+
+                rc, stdout, stderr, output = (
+                    self._run_remote_terminal_tail_fixture(remote_result)
+                )
+
+                self.assertEqual(rc, 1)
+                self.assertEqual(stdout, "")
+                self.assertEqual(output, b"sentinel")
+                self.assertIn("error=remote terminal-tail process failed", stderr)
+                self.assertIn("remote_returncode=7", stderr)
+                self.assertNotIn(secret_stdout, stderr)
+                self.assertNotIn(secret_stderr, stderr)
+
+    def test_remote_terminal_tail_does_not_echo_runtime_error(self) -> None:
+        secret_error = "SENSITIVE-RUNTIME-DETAIL"
+
+        rc, stdout, stderr, output = self._run_remote_terminal_tail_fixture(
+            RuntimeError(secret_error)
+        )
+
+        self.assertEqual(rc, 1)
+        self.assertEqual(stdout, "")
+        self.assertEqual(output, b"sentinel")
+        self.assertIn("error=remote terminal-tail process failed", stderr)
+        self.assertNotIn(secret_error, stderr)
+
+    def test_remote_terminal_tail_does_not_echo_invalid_header(self) -> None:
+        secret_marker = "SENSITIVE-INVALID-HEADER"
+        cases = {
+            "malformed": "\n".join(
+                [
+                    MODULE.REMOTE_TERMINAL_TAIL_BEGIN,
+                    f"not-json-{secret_marker}",
+                    MODULE.REMOTE_TERMINAL_TAIL_END,
+                    "",
+                ]
+            ),
+            "legacy-error-field": self._remote_terminal_tail_frame(
+                {"ok": False, "error": secret_marker}
+            ),
+            "unknown-error-code": self._remote_terminal_tail_frame(
+                {"ok": False, "error_code": secret_marker}
+            ),
+            "extra-error-field": self._remote_terminal_tail_frame(
+                {
+                    "ok": False,
+                    "error_code": "rollout_unreadable",
+                    "detail": secret_marker,
+                }
+            ),
+            "error-payload": self._remote_terminal_tail_frame(
+                {"ok": False, "error_code": "rollout_unreadable"},
+                message=secret_marker.encode("ascii"),
+            ),
+        }
+
+        for name, framed_output in cases.items():
+            with self.subTest(name=name):
+                remote_result = subprocess.CompletedProcess(
+                    args=["ssh"],
+                    returncode=0,
+                    stdout=framed_output,
+                    stderr="",
+                )
+                rc, stdout, stderr, output = (
+                    self._run_remote_terminal_tail_fixture(remote_result)
+                )
+
+                self.assertEqual(rc, 1)
+                self.assertEqual(stdout, "")
+                self.assertEqual(output, b"sentinel")
+                self.assertNotIn(secret_marker, stderr)
+                self.assertIn("error=remote terminal-tail", stderr)
+
+    def test_remote_terminal_tail_normalizes_header_recursion(self) -> None:
+        parsing_secret = "SENSITIVE-PARSING-RECURSION"
+        parsing_result = subprocess.CompletedProcess(
+            args=["ssh"],
+            returncode=0,
+            stdout="\n".join(
+                [
+                    MODULE.REMOTE_TERMINAL_TAIL_BEGIN,
+                    "{}",
+                    MODULE.REMOTE_TERMINAL_TAIL_END,
+                    "",
+                ]
+            ),
+            stderr="",
+        )
+        with mock.patch.object(
+            MODULE.json,
+            "loads",
+            side_effect=RecursionError(parsing_secret),
+        ):
+            rc, stdout, stderr, output = (
+                self._run_remote_terminal_tail_fixture(parsing_result)
+            )
+
+        self.assertEqual(rc, 1)
+        self.assertEqual(stdout, "")
+        self.assertEqual(output, b"sentinel")
+        self.assertIn("had an invalid payload header", stderr)
+        self.assertNotIn("Traceback", stderr)
+        self.assertNotIn(parsing_secret, stderr)
+
+        valid_result = subprocess.CompletedProcess(
+            args=["ssh"],
+            returncode=0,
+            stdout=self._remote_terminal_tail_frame(
+                self._remote_terminal_tail_header(
+                    status="terminal_not_reached",
+                    message=None,
+                )
+            ),
+            stderr="",
+        )
+        serialization_secret = "SENSITIVE-SERIALIZATION-RECURSION"
+        with mock.patch.object(
+            MODULE.json,
+            "dumps",
+            side_effect=RecursionError(serialization_secret),
+        ):
+            rc, stdout, stderr, output = (
+                self._run_remote_terminal_tail_fixture(valid_result)
+            )
+
+        self.assertEqual(rc, 1)
+        self.assertEqual(stdout, "")
+        self.assertEqual(output, b"sentinel")
+        self.assertIn("had an invalid payload header", stderr)
+        self.assertNotIn("Traceback", stderr)
+        self.assertNotIn(serialization_secret, stderr)
+
+    def test_remote_terminal_tail_rejects_invalid_utf8_payload(self) -> None:
+        invalid_utf8 = b"\xff"
+        remote_result = subprocess.CompletedProcess(
+            args=["ssh"],
+            returncode=0,
+            stdout=self._remote_terminal_tail_frame(
+                self._remote_terminal_tail_header(message=invalid_utf8),
+                message=invalid_utf8,
+            ),
+            stderr="",
+        )
+
+        rc, stdout, stderr, output = self._run_remote_terminal_tail_fixture(
+            remote_result
+        )
+
+        self.assertEqual(rc, 1)
+        self.assertEqual(stdout, "")
+        self.assertEqual(output, b"sentinel")
+        self.assertIn("was not valid UTF-8", stderr)
+
+    def test_remote_terminal_tail_rejects_noncanonical_base64(self) -> None:
+        message = b"f"
+        header = self._remote_terminal_tail_header(message=message)
+        framed_output = "\n".join(
+            [
+                MODULE.REMOTE_TERMINAL_TAIL_BEGIN,
+                json.dumps(header, separators=(",", ":"), sort_keys=True),
+                "Zh==",
+                MODULE.REMOTE_TERMINAL_TAIL_END,
+                "",
+            ]
+        )
+        remote_result = subprocess.CompletedProcess(
+            args=["ssh"],
+            returncode=0,
+            stdout=framed_output,
+            stderr="",
+        )
+
+        rc, stdout, stderr, output = self._run_remote_terminal_tail_fixture(
+            remote_result
+        )
+
+        self.assertEqual(rc, 1)
+        self.assertEqual(stdout, "")
+        self.assertEqual(output, b"sentinel")
+        self.assertIn("contained non-canonical base64", stderr)
+
+    def test_remote_terminal_tail_accepts_carry_boundary_offset(self) -> None:
+        message = b"carry boundary"
+        source_bytes = 2 * MODULE.DEFAULT_TERMINAL_TAIL_WINDOW_BYTES
+        header = self._remote_terminal_tail_header(message=message)
+        header.update(
+            {
+                "source_bytes": source_bytes,
+                "observed_source_bytes": source_bytes,
+                "scan_start": 0,
+                "scan_end": source_bytes,
+                "scanned_bytes": source_bytes,
+                "window_count": 2,
+                "anchor_offset": source_bytes - 129,
+                "anchor_length": 128,
+                "terminal_record_offset": (
+                    MODULE.DEFAULT_TERMINAL_TAIL_WINDOW_BYTES
+                ),
+            }
+        )
+
+        result, extracted = MODULE._extract_framed_terminal_tail_payload(
+            self._remote_terminal_tail_frame(header, message=message),
+            host="miku-bot-dev",
+        )
+
+        self.assertEqual(result.status, "complete")
+        self.assertEqual(extracted, message)
+
+    def test_remote_terminal_tail_rejects_noncanonical_json_header(self) -> None:
+        message = b"must not publish"
+        header = self._remote_terminal_tail_header(message=message)
+        framed_output = "\n".join(
+            [
+                MODULE.REMOTE_TERMINAL_TAIL_BEGIN,
+                json.dumps(header, sort_keys=True),
+                MODULE.base64.b64encode(message).decode("ascii"),
+                MODULE.REMOTE_TERMINAL_TAIL_END,
+                "",
+            ]
+        )
+        remote_result = subprocess.CompletedProcess(
+            args=["ssh"],
+            returncode=0,
+            stdout=framed_output,
+            stderr="",
+        )
+
+        rc, stdout, stderr, output = self._run_remote_terminal_tail_fixture(
+            remote_result
+        )
+
+        self.assertEqual(rc, 1)
+        self.assertEqual(stdout, "")
+        self.assertEqual(output, b"sentinel")
+        self.assertIn("had a non-canonical payload header", stderr)
 
 
 if __name__ == "__main__":
