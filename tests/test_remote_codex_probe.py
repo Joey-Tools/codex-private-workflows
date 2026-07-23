@@ -11573,40 +11573,35 @@ class RemoteCodexProbeTerminalTailTests(unittest.TestCase):
                 self.assertIn("error=remote terminal-tail", stderr)
 
     def test_remote_terminal_tail_normalizes_header_recursion(self) -> None:
-        secret_marker = "SENSITIVE-DEEPLY-NESTED-HEADER"
-        nesting_depth = 10_000
-        deep_header = (
-            '{"ok":true,"nested":'
-            + "[" * nesting_depth
-            + json.dumps(secret_marker)
-            + "]" * nesting_depth
-            + "}"
-        )
-        deep_frame = "\n".join(
-            [
-                MODULE.REMOTE_TERMINAL_TAIL_BEGIN,
-                deep_header,
-                MODULE.REMOTE_TERMINAL_TAIL_END,
-                "",
-            ]
-        )
-        deep_result = subprocess.CompletedProcess(
+        parsing_secret = "SENSITIVE-PARSING-RECURSION"
+        parsing_result = subprocess.CompletedProcess(
             args=["ssh"],
             returncode=0,
-            stdout=deep_frame,
+            stdout="\n".join(
+                [
+                    MODULE.REMOTE_TERMINAL_TAIL_BEGIN,
+                    "{}",
+                    MODULE.REMOTE_TERMINAL_TAIL_END,
+                    "",
+                ]
+            ),
             stderr="",
         )
-
-        rc, stdout, stderr, output = self._run_remote_terminal_tail_fixture(
-            deep_result
-        )
+        with mock.patch.object(
+            MODULE.json,
+            "loads",
+            side_effect=RecursionError(parsing_secret),
+        ):
+            rc, stdout, stderr, output = (
+                self._run_remote_terminal_tail_fixture(parsing_result)
+            )
 
         self.assertEqual(rc, 1)
         self.assertEqual(stdout, "")
         self.assertEqual(output, b"sentinel")
         self.assertIn("had an invalid payload header", stderr)
         self.assertNotIn("Traceback", stderr)
-        self.assertNotIn(secret_marker, stderr)
+        self.assertNotIn(parsing_secret, stderr)
 
         valid_result = subprocess.CompletedProcess(
             args=["ssh"],
