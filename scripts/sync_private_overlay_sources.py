@@ -456,6 +456,12 @@ SYNC_RULES = (
         "codex-review-workflows",
         "skills/review-orchestration-playbook",
         "personal_codex/skills/review-orchestration-playbook",
+        (
+            Replacement(
+                "cd skills/review-orchestration-playbook/scripts/",
+                "cd personal_codex/skills/review-orchestration-playbook/scripts/",
+            ),
+        ),
         common_joey_text=True,
         regular_file_overlays=(
             RegularFileOverlay(
@@ -492,6 +498,78 @@ RETIRED_TARGETS = tuple(
 )
 
 CANONICAL_REVIEW_TARGET = _path("personal_codex/skills/review-orchestration-playbook")
+INDEPENDENT_CODEX_REVIEW_ROOT = _path("scripts/independent_codex_pr_review")
+INDEPENDENT_CODEX_REVIEW_REQUIRED_FILES = tuple(
+    _path(path)
+    for path in (
+        ".gitignore",
+        "README.md",
+        "independent-codex-pr-review",
+        "review_supervisor/__init__.py",
+        "review_supervisor/appserver_protocol.py",
+        "review_supervisor/appserver_runtime.py",
+        "review_supervisor/auth_carrier.py",
+        "review_supervisor/auth_refresh.py",
+        "review_supervisor/checkout.py",
+        "review_supervisor/cli.py",
+        "review_supervisor/codex_executable.py",
+        "review_supervisor/constants.py",
+        "review_supervisor/custody.py",
+        "review_supervisor/direct_gate.py",
+        "review_supervisor/errors.py",
+        "review_supervisor/evidence.py",
+        "review_supervisor/final_transport.py",
+        "review_supervisor/frozen_source.py",
+        "review_supervisor/gitraw.py",
+        "review_supervisor/ledger.py",
+        "review_supervisor/lfs.py",
+        "review_supervisor/logs.py",
+        "review_supervisor/models.py",
+        "review_supervisor/no_child_profile.py",
+        "review_supervisor/process.py",
+        "review_supervisor/prompt.py",
+        "review_supervisor/recovery_cleanup.py",
+        "review_supervisor/review_execution.py",
+        "review_supervisor/runtime.py",
+        "review_supervisor/secureio.py",
+        "review_supervisor/settlement_state.py",
+        "review_supervisor/signal_relay.py",
+        "review_supervisor/supervisor.py",
+        "review_supervisor/wire.py",
+        "tests/__init__.py",
+        "tests/run_hosted_no_child_fail_closed.py",
+        "tests/run_required_deterministic_supervisor.py",
+        "tests/run_required_no_child_profile.py",
+        "tests/support.py",
+        "tests/synthetic_fixtures.py",
+        "tests/test_appserver_protocol.py",
+        "tests/test_appserver_runtime.py",
+        "tests/test_auth_carrier.py",
+        "tests/test_auth_refresh.py",
+        "tests/test_checkout.py",
+        "tests/test_cli.py",
+        "tests/test_codex_executable.py",
+        "tests/test_custody.py",
+        "tests/test_direct_gate.py",
+        "tests/test_evidence.py",
+        "tests/test_frozen_source.py",
+        "tests/test_git_checkout.py",
+        "tests/test_ledger.py",
+        "tests/test_lfs.py",
+        "tests/test_logs.py",
+        "tests/test_no_child_profile.py",
+        "tests/test_prompt.py",
+        "tests/test_recovery_cleanup.py",
+        "tests/test_review_execution.py",
+        "tests/test_runtime_helpers.py",
+        "tests/test_runtime_process.py",
+        "tests/test_secureio.py",
+        "tests/test_settlement_state.py",
+        "tests/test_signal_relay.py",
+        "tests/test_supervisor.py",
+        "tests/test_wire.py",
+    )
+)
 CANONICAL_REVIEW_REQUIRED_FILES = tuple(
     _path(path)
     for path in (
@@ -511,6 +589,8 @@ CANONICAL_REVIEW_REQUIRED_FILES = tuple(
         "references/review-lane-contracts.md",
         "references/review-prompt-templates.md",
         "references/synthetic-token-fixtures.md",
+        "scripts/build_claude_keychain_broker_macos.sh",
+        "scripts/install_claude_keychain_broker_macos.sh",
         "scripts/isolated_review",
         "scripts/named_claude_preflight",
         "scripts/named_lane_guard",
@@ -518,6 +598,7 @@ CANONICAL_REVIEW_REQUIRED_FILES = tuple(
         "scripts/review_runtime/__init__.py",
         "scripts/review_runtime/claude_capabilities.py",
         "scripts/review_runtime/claude_code_release.asc",
+        "scripts/review_runtime/claude_keychain_broker",
         "scripts/review_runtime/claude_keychain_broker.c",
         "scripts/review_runtime/claude_linux.py",
         "scripts/review_runtime/claude_linux_launcher.c",
@@ -545,6 +626,7 @@ CANONICAL_REVIEW_REQUIRED_FILES = tuple(
         "tests/test_cli.py",
         "tests/test_common.py",
         "tests/test_contracts.py",
+        "tests/test_installer.py",
         "tests/fixtures/ci/canonical.yml",
         "tests/fixtures/ci/private.yml",
         "tests/fixtures/compat/codex-review-gate.yml",
@@ -558,6 +640,9 @@ CANONICAL_REVIEW_REQUIRED_FILES = tuple(
         "tests/test_validate_claude_stream.py",
         "tests/test_workspace.py",
     )
+) + tuple(
+    INDEPENDENT_CODEX_REVIEW_ROOT / relative
+    for relative in INDEPENDENT_CODEX_REVIEW_REQUIRED_FILES
 )
 RETIRED_REVIEW_REFERENCES = (
     "pr-readiness-review-workflow",
@@ -718,6 +803,29 @@ def _remove_retired_targets(repo_root: Path) -> None:
             target.unlink()
 
 
+def _validate_canonical_review_exact_tree_inventories(
+    file_parts: set[tuple[str, ...]],
+    *,
+    surface: str,
+) -> None:
+    prefix = INDEPENDENT_CODEX_REVIEW_ROOT.parts
+    actual = {
+        parts[len(prefix) :]
+        for parts in file_parts
+        if parts[: len(prefix)] == prefix and len(parts) > len(prefix)
+    }
+    expected = {relative.parts for relative in INDEPENDENT_CODEX_REVIEW_REQUIRED_FILES}
+    if actual == expected:
+        return
+
+    missing = sorted("/".join(parts) for parts in expected - actual)
+    unexpected = sorted("/".join(parts) for parts in actual - expected)
+    raise SyncError(
+        "canonical review exact tree inventory mismatch at "
+        f"{surface}: missing={missing}; unexpected={unexpected}"
+    )
+
+
 def _validate_canonical_review_target_contents(target: Path) -> None:
     if not target.exists():
         return
@@ -726,6 +834,15 @@ def _validate_canonical_review_target_contents(target: Path) -> None:
             raise SyncError(
                 f"canonical review target missing required file: {relative}"
             )
+    file_parts = {
+        path.relative_to(target).parts
+        for path in target.rglob("*")
+        if path.is_file() and not _is_ignored_relative(path, target, EXCLUDED_NAMES)
+    }
+    _validate_canonical_review_exact_tree_inventories(
+        file_parts,
+        surface=str(target),
+    )
     for path in sorted(target.rglob("*.md")):
         text = path.read_text(encoding="utf-8")
         for reference in RETIRED_REVIEW_REFERENCES:
@@ -3160,6 +3277,10 @@ def _validate_regular_file_overlay_required_manifest_paths(
                 "canonical review target missing required file at "
                 f"{surface}: {relative}"
             )
+    _validate_canonical_review_exact_tree_inventories(
+        files,
+        surface=surface,
+    )
 
 
 def _copy_regular_file_overlay_public_source_to_prepared(

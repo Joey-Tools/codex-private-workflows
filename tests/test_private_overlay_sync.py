@@ -771,8 +771,23 @@ class PrivateOverlaySyncTests(unittest.TestCase):
             Path("references/claude-2.1.212-stream-schema.json"),
             Path("references/claude-stream-compatibility.json"),
             Path("references/claude-stream-schema.json"),
+            Path("scripts/build_claude_keychain_broker_macos.sh"),
+            Path("scripts/install_claude_keychain_broker_macos.sh"),
+            Path(
+                "scripts/independent_codex_pr_review/"
+                "independent-codex-pr-review"
+            ),
+            Path(
+                "scripts/independent_codex_pr_review/"
+                "review_supervisor/supervisor.py"
+            ),
+            Path(
+                "scripts/independent_codex_pr_review/"
+                "tests/run_required_no_child_profile.py"
+            ),
             Path("scripts/named_claude_preflight"),
             Path("scripts/named_lane_guard"),
+            Path("scripts/review_runtime/claude_keychain_broker"),
             Path("scripts/review_runtime/claude_stream_contract.py"),
             Path("scripts/review_runtime/claude_version_policy.py"),
             Path("scripts/review_runtime/fd_exec.py"),
@@ -787,6 +802,7 @@ class PrivateOverlaySyncTests(unittest.TestCase):
             Path("tests/test_named_claude_preflight.py"),
             Path("tests/test_named_lane.py"),
             Path("tests/test_review_result.py"),
+            Path("tests/test_installer.py"),
             Path("tests/test_validate_claude_stream.py"),
         )
         self.assertTrue(
@@ -813,6 +829,55 @@ class PrivateOverlaySyncTests(unittest.TestCase):
                     re.escape(f"missing required file: {missing}"),
                 ):
                     SYNC_MODULE._validate_canonical_review_target_contents(target)
+
+    def test_private_review_sync_rewrites_trusted_mac_gate_path(self) -> None:
+        review_root = REPO_ROOT / SYNC_MODULE.CANONICAL_REVIEW_TARGET
+        private_prefix = (
+            "cd personal_codex/skills/review-orchestration-playbook/scripts/"
+        )
+        canonical_prefix = "cd skills/review-orchestration-playbook/scripts/"
+
+        for relative in (
+            Path("references/pr-readiness.md"),
+            Path("tests/test_contracts.py"),
+        ):
+            with self.subTest(relative=relative):
+                text = (review_root / relative).read_text(encoding="utf-8")
+                self.assertIn(private_prefix, text)
+                self.assertNotIn(canonical_prefix, text)
+
+    def test_independent_supervisor_sync_uses_exact_file_inventory(self) -> None:
+        review_root = REPO_ROOT / SYNC_MODULE.CANONICAL_REVIEW_TARGET
+        supervisor_root = review_root / SYNC_MODULE.INDEPENDENT_CODEX_REVIEW_ROOT
+        actual = {
+            path.relative_to(supervisor_root)
+            for path in supervisor_root.rglob("*")
+            if path.is_file()
+            and path.name != "__pycache__"
+            and path.suffix != ".pyc"
+        }
+        self.assertEqual(
+            set(SYNC_MODULE.INDEPENDENT_CODEX_REVIEW_REQUIRED_FILES),
+            actual,
+        )
+
+        target = self.repo_root / "canonical-review-exact-inventory"
+        for relative in SYNC_MODULE.CANONICAL_REVIEW_REQUIRED_FILES:
+            path = target / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("canonical\n", encoding="utf-8")
+        unexpected = (
+            target
+            / SYNC_MODULE.INDEPENDENT_CODEX_REVIEW_ROOT
+            / "review_supervisor/unreviewed.py"
+        )
+        unexpected.write_text("unexpected\n", encoding="utf-8")
+
+        with self.assertRaisesRegex(
+            SYNC_MODULE.SyncError,
+            "exact tree inventory mismatch",
+        ):
+            SYNC_MODULE._validate_canonical_review_target_contents(target)
 
     def test_sync_rejects_retired_review_reference_outside_canonical_target(
         self,
@@ -5454,7 +5519,16 @@ class PrivateOverlaySyncTests(unittest.TestCase):
             for rule in SYNC_MODULE.SYNC_RULES
             if rule.target == SYNC_MODULE.CANONICAL_REVIEW_TARGET
         )
-        self.assertEqual(rule.replacements, SYNC_MODULE.COMMON_JOEY_TEXT_REPLACEMENTS)
+        self.assertEqual(
+            rule.replacements,
+            (
+                SYNC_MODULE.Replacement(
+                    "cd skills/review-orchestration-playbook/scripts/",
+                    "cd personal_codex/skills/review-orchestration-playbook/scripts/",
+                ),
+            )
+            + SYNC_MODULE.COMMON_JOEY_TEXT_REPLACEMENTS,
+        )
         obsolete_layout_replacements = {
             "REPO_ROOT = SKILL_ROOT.parents[1]",
             "(REPO_ROOT / relative).exists()",

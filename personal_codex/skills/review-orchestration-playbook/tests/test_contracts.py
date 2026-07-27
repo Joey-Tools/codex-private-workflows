@@ -1708,7 +1708,7 @@ class RepositoryContractTest(unittest.TestCase):
             "nine tests run, zero skips",
             "Any push invalidates that evidence",
             "Hosted CI's blocker-signature probe is not a substitute",
-            "cd skills/review-orchestration-playbook/scripts/"
+            "cd personal_codex/skills/review-orchestration-playbook/scripts/"
             "independent_codex_pr_review",
             "TRUSTED_PYTHON=/absolute/path/to/parent-validated/python3.13",
             '"$TRUSTED_PYTHON" -B -m tests.run_required_no_child_profile',

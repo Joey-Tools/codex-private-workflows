@@ -78,7 +78,7 @@ runner:
 
 ```bash
 TRUSTED_PYTHON=/absolute/path/to/parent-validated/python3.13
-cd skills/review-orchestration-playbook/scripts/independent_codex_pr_review
+cd personal_codex/skills/review-orchestration-playbook/scripts/independent_codex_pr_review
 CODEX_REVIEW_REQUIRE_LIVE_NO_CHILD_PROFILE=1 PYTHONDONTWRITEBYTECODE=1 "$TRUSTED_PYTHON" -B -m tests.run_required_no_child_profile
 ```
 
