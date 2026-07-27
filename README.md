@@ -28,7 +28,7 @@ test suite on both Ubuntu and macOS at that minimum runtime, while the private
 overlay packaging and sync tests run on the Linux matrix leg.
 
 ```bash
-python3 -m py_compile \
+python3 -B -c 'import pathlib, sys; [compile(pathlib.Path(path).read_bytes(), path, "exec") for path in sys.argv[1:]]' \
   scripts/codex_personal_sync.py \
   scripts/build_personal_codex_package.py \
   scripts/private_overlay_release.py \
@@ -36,7 +36,7 @@ python3 -m py_compile \
   tests/test_private_overlay_package.py \
   tests/test_private_overlay_sync.py
 
-python3 -m unittest discover -s tests
+PYTHONDONTWRITEBYTECODE=1 python3 -B -m unittest discover -s tests
 ```
 
 ## Release

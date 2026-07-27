@@ -6145,6 +6145,31 @@ class PrivateOverlaySyncTests(unittest.TestCase):
         self.assertIn('test "$PYTHON_39_RESULT" = "success"', workflow)
         self.assertIn('test "$PLATFORM_SAFETY_RESULT" = "success"', workflow)
 
+    def test_python_workflows_disable_implicit_bytecode(self) -> None:
+        workflow_paths = (
+            REPO_ROOT / ".github" / "workflows" / "ci.yml",
+            REPO_ROOT / ".github" / "workflows" / "release.yml",
+            REPO_ROOT / ".github" / "workflows" / "scheduled-sync-release.yml",
+        )
+
+        for workflow_path in workflow_paths:
+            with self.subTest(workflow=workflow_path.name):
+                workflow = workflow_path.read_text(encoding="utf-8")
+                workflow_preamble, separator, _jobs = workflow.partition("\njobs:\n")
+                self.assertEqual(separator, "\njobs:\n")
+                self.assertIn(
+                    '\nenv:\n  PYTHONDONTWRITEBYTECODE: "1"\n',
+                    workflow_preamble,
+                )
+
+        readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
+        self.assertIn("python3 -B -c 'import pathlib, sys;", readme)
+        self.assertIn(
+            "PYTHONDONTWRITEBYTECODE=1 python3 -B -m unittest discover -s tests",
+            readme,
+        )
+        self.assertNotIn("python3 -m py_compile", readme)
+
     def test_manifest_canonical_skills_are_backed_by_sync_rules(self) -> None:
         manifest = json.loads(
             (REPO_ROOT / "personal_codex" / "private-sync-manifest.json").read_text(
