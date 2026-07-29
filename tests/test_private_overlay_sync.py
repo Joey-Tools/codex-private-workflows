@@ -6365,6 +6365,20 @@ class PrivateOverlaySyncTests(unittest.TestCase):
             "already matches the full generated overlay tree and contains", workflow
         )
 
+    def test_python_workflows_disable_bytecode_before_runtime_imports(self) -> None:
+        bytecode_guard = 'env:\n  PYTHONDONTWRITEBYTECODE: "1"\n'
+        for workflow_name in (
+            "ci.yml",
+            "release.yml",
+            "scheduled-sync-release.yml",
+        ):
+            with self.subTest(workflow=workflow_name):
+                workflow = (
+                    REPO_ROOT / ".github" / "workflows" / workflow_name
+                ).read_text(encoding="utf-8")
+                self.assertIn(bytecode_guard, workflow)
+                self.assertLess(workflow.index(bytecode_guard), workflow.index("jobs:"))
+
     def test_readme_documents_sync_pr_token_permissions(self) -> None:
         readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
 
