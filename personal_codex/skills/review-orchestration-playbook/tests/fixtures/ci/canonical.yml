@@ -9,6 +9,9 @@ on:
 permissions:
   contents: read
 
+env:
+  PYTHONDONTWRITEBYTECODE: "1"
+
 jobs:
   platform_tests:
     name: platform-tests (${{ matrix.os }})
@@ -38,9 +41,14 @@ jobs:
           if [[ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]]; then
             sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
           fi
-      - name: Compile Python helpers
+      - name: Check Python helper syntax without bytecode
         run: |
-          python3 -m py_compile skills/review-orchestration-playbook/scripts/isolated_review skills/review-orchestration-playbook/scripts/review_runtime/*.py
+          python3 -B -c 'import pathlib, sys; [compile(pathlib.Path(path).read_bytes(), path, "exec") for path in sys.argv[1:]]' \
+            skills/review-orchestration-playbook/scripts/isolated_review \
+            skills/review-orchestration-playbook/scripts/named_claude_preflight \
+            skills/review-orchestration-playbook/scripts/named_lane_guard \
+            skills/review-orchestration-playbook/scripts/validate_claude_stream.py \
+            skills/review-orchestration-playbook/scripts/review_runtime/*.py
       - name: Check Linux launcher C syntax
         run: |
           cc -std=c11 -O2 -Wall -Wextra -Werror -D_POSIX_C_SOURCE=200809L -fsyntax-only skills/review-orchestration-playbook/scripts/review_runtime/claude_linux_launcher.c
@@ -53,15 +61,85 @@ jobs:
           CODEX_REVIEW_RUN_LINUX_ISOLATION_INTEGRATION: "1"
         run: |
           python3 -m unittest -v skills/review-orchestration-playbook/tests/test_claude_linux.py
+      - name: Require source-only Python tree
+        if: always()
+        run: |
+          python3 -B -c 'import pathlib, sys; artifacts = [str(path) for path in pathlib.Path(".").rglob("*") if path.name == "__pycache__" or path.suffix in {".pyc", ".pyo"}][:20]; sys.exit("bytecode artifacts: " + ", ".join(artifacts)) if artifacts else None'
+
+  broker_reproducibility:
+    name: broker-reproducibility (macos-26)
+    runs-on: macos-26
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Require hosted-runner byte reproduction
+        env:
+          DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
+        run: |
+          /bin/bash \
+            skills/review-orchestration-playbook/scripts/build_claude_keychain_broker_macos.sh \
+            --check
+
+  independent_supervisor_tests:
+    name: independent-supervisor (python-3.13)
+    runs-on: macos-26
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Check independent review supervisor syntax without bytecode
+        working-directory: skills/review-orchestration-playbook/scripts/independent_codex_pr_review
+        run: |
+          python3 -B -c 'import pathlib; paths = [pathlib.Path("independent-codex-pr-review"), *sorted(pathlib.Path("review_supervisor").rglob("*.py"))]; [compile(path.read_bytes(), str(path), "exec") for path in paths]'
+      - name: Report hosted no-child runtime fingerprint
+        run: |
+          /usr/bin/sw_vers -productVersion
+          /usr/bin/sw_vers -buildVersion
+          /usr/bin/uname -r
+          /usr/bin/uname -m
+          /usr/bin/shasum -a 256 /usr/bin/sandbox-exec
+      - name: Match hosted no-child blocker signature
+        working-directory: skills/review-orchestration-playbook/scripts/independent_codex_pr_review
+        env:
+          CODEX_REVIEW_LIVE_NO_CHILD_RUNTIME_PROFILE: github-macos-26-arm64-26.4-25E246
+          CODEX_REVIEW_RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          CODEX_REVIEW_RUNNER_ARCH: ${{ runner.arch }}
+        run: |
+          python3 -m tests.run_hosted_no_child_fail_closed
+      - name: Run deterministic independent supervisor tests
+        working-directory: skills/review-orchestration-playbook/scripts/independent_codex_pr_review
+        run: |
+          python3 -m tests.run_required_deterministic_supervisor
+      - name: Verify installed release tree remains immutable
+        working-directory: skills/review-orchestration-playbook/tests
+        run: |
+          python3 -m unittest -v test_contracts.RepositoryContractTest.test_installed_supervisor_preflight_keeps_release_tree_immutable
+      - name: Verify independent review supervisor CLI
+        working-directory: skills/review-orchestration-playbook/scripts/independent_codex_pr_review
+        run: |
+          python3 independent-codex-pr-review --help
+      - name: Require source-only Python tree
+        if: always()
+        run: |
+          python3 -B -c 'import pathlib, sys; artifacts = [str(path) for path in pathlib.Path(".").rglob("*") if path.name == "__pycache__" or path.suffix in {".pyc", ".pyo"}][:20]; sys.exit("bytecode artifacts: " + ", ".join(artifacts)) if artifacts else None'
 
   test:
     name: test
     if: ${{ always() }}
-    needs: platform_tests
+    needs:
+      - platform_tests
+      - broker_reproducibility
+      - independent_supervisor_tests
     runs-on: ubuntu-latest
     steps:
       - name: Require every platform test to pass
         env:
           PLATFORM_TESTS_RESULT: ${{ needs.platform_tests.result }}
+          BROKER_REPRODUCIBILITY_RESULT: ${{ needs.broker_reproducibility.result }}
+          INDEPENDENT_SUPERVISOR_RESULT: ${{ needs.independent_supervisor_tests.result }}
         run: |
           test "$PLATFORM_TESTS_RESULT" = "success"
+          test "$BROKER_REPRODUCIBILITY_RESULT" = "success"
+          test "$INDEPENDENT_SUPERVISOR_RESULT" = "success"

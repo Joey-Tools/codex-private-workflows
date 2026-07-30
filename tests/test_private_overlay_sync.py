@@ -6379,6 +6379,36 @@ class PrivateOverlaySyncTests(unittest.TestCase):
                 self.assertIn(bytecode_guard, workflow)
                 self.assertLess(workflow.index(bytecode_guard), workflow.index("jobs:"))
 
+    def test_release_workflows_pin_review_runtime_python_and_dependencies(
+        self,
+    ) -> None:
+        expected_setup_counts = {
+            "release.yml": 2,
+            "scheduled-sync-release.yml": 1,
+        }
+        setup_pattern = re.compile(
+            r"uses: actions/setup-python@v5\n"
+            r"\s+with:\n"
+            r'\s+python-version: "3\.10"\n'
+        )
+        for workflow_name, expected_count in expected_setup_counts.items():
+            with self.subTest(workflow=workflow_name):
+                workflow = (
+                    REPO_ROOT / ".github" / "workflows" / workflow_name
+                ).read_text(encoding="utf-8")
+                self.assertEqual(
+                    len(setup_pattern.findall(workflow)),
+                    expected_count,
+                )
+                self.assertEqual(
+                    workflow.count(
+                        "python3 -m pip install --disable-pip-version-check "
+                        "--no-input 'tomli==2.2.1; python_version < \"3.11\"'"
+                    ),
+                    expected_count,
+                )
+                self.assertNotIn('python-version: "3.x"', workflow)
+
     def test_readme_documents_sync_pr_token_permissions(self) -> None:
         readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
 
