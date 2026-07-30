@@ -773,6 +773,7 @@ class PrivateOverlaySyncTests(unittest.TestCase):
             Path("references/claude-stream-schema.json"),
             Path("scripts/named_claude_preflight"),
             Path("scripts/named_lane_guard"),
+            Path("scripts/install_claude_keychain_broker_macos.sh"),
             Path("scripts/review_runtime/claude_stream_contract.py"),
             Path("scripts/review_runtime/claude_version_policy.py"),
             Path("scripts/review_runtime/fd_exec.py"),
@@ -783,6 +784,7 @@ class PrivateOverlaySyncTests(unittest.TestCase):
             Path("scripts/validate_claude_stream.py"),
             Path("tests/fixtures/compat/codex-review-gate.yml"),
             Path("tests/test_fd_exec.py"),
+            Path("tests/test_installer.py"),
             Path("tests/test_claude_refresh_lock.py"),
             Path("tests/test_named_claude_preflight.py"),
             Path("tests/test_named_lane.py"),
@@ -813,6 +815,36 @@ class PrivateOverlaySyncTests(unittest.TestCase):
                     re.escape(f"missing required file: {missing}"),
                 ):
                     SYNC_MODULE._validate_canonical_review_target_contents(target)
+
+    def test_sync_rejects_missing_keychain_broker_install_contract(self) -> None:
+        rule, target = self._create_canonical_regular_file_overlay_rule()
+        source = self.source_root / rule.repo / rule.source
+        required_files = (
+            Path("scripts/install_claude_keychain_broker_macos.sh"),
+            Path("tests/test_installer.py"),
+        )
+
+        for missing in required_files:
+            with self.subTest(missing=missing):
+                missing_path = source / missing
+                original = missing_path.read_bytes()
+                missing_path.unlink()
+                try:
+                    with self.assertRaisesRegex(
+                        SYNC_MODULE.SyncError,
+                        re.escape(
+                            "missing required file at prepared public source: "
+                            f"{missing}"
+                        ),
+                    ):
+                        SYNC_MODULE.sync_sources(
+                            self.repo_root,
+                            self.source_root,
+                            (rule,),
+                        )
+                    self.assertTrue((target / "old-marker").is_file())
+                finally:
+                    missing_path.write_bytes(original)
 
     def test_sync_rejects_retired_review_reference_outside_canonical_target(
         self,
@@ -6389,7 +6421,7 @@ class PrivateOverlaySyncTests(unittest.TestCase):
         setup_pattern = re.compile(
             r"uses: actions/setup-python@v5\n"
             r"\s+with:\n"
-            r'\s+python-version: "3\.10"\n'
+            r'\s+python-version: "3\.10\.20"\n'
         )
         for workflow_name, expected_count in expected_setup_counts.items():
             with self.subTest(workflow=workflow_name):
@@ -6407,6 +6439,7 @@ class PrivateOverlaySyncTests(unittest.TestCase):
                     ),
                     expected_count,
                 )
+                self.assertNotIn('python-version: "3.10"', workflow)
                 self.assertNotIn('python-version: "3.x"', workflow)
 
     def test_readme_documents_sync_pr_token_permissions(self) -> None:
