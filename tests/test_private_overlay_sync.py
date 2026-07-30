@@ -879,6 +879,32 @@ class PrivateOverlaySyncTests(unittest.TestCase):
         ):
             SYNC_MODULE._validate_canonical_review_target_contents(target)
 
+    def test_sync_rejects_ignored_upstream_independent_supervisor_file(
+        self,
+    ) -> None:
+        rule, target = self._create_canonical_regular_file_overlay_rule()
+        unexpected = (
+            self.source_root
+            / rule.repo
+            / rule.source
+            / SYNC_MODULE.INDEPENDENT_CODEX_REVIEW_ROOT
+            / ".github"
+            / "unreviewed.yml"
+        )
+        unexpected.parent.mkdir()
+        unexpected.write_text("unreviewed\n", encoding="utf-8")
+
+        with self.assertRaisesRegex(
+            SYNC_MODULE.SyncError,
+            "raw exact tree inventory mismatch.*unexpected=.github",
+        ):
+            SYNC_MODULE.sync_sources(self.repo_root, self.source_root, (rule,))
+
+        self.assertEqual(
+            (target / "old-marker").read_text(encoding="utf-8"),
+            "old\n",
+        )
+
     def test_sync_rejects_retired_review_reference_outside_canonical_target(
         self,
     ) -> None:
@@ -6235,6 +6261,9 @@ class PrivateOverlaySyncTests(unittest.TestCase):
                     '\nenv:\n  PYTHONDONTWRITEBYTECODE: "1"\n',
                     workflow_preamble,
                 )
+                self.assertNotIn("python3 -m py_compile", workflow)
+                self.assertNotIn("python3 -m compileall", workflow)
+                self.assertIn("Require source-only Python tree", workflow)
 
         readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
         self.assertIn("python3 -B -c 'import pathlib, sys;", readme)

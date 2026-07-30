@@ -503,6 +503,7 @@ INDEPENDENT_CODEX_REVIEW_REQUIRED_FILES = tuple(
     _path(path)
     for path in (
         ".gitignore",
+        "ACCOUNT_LOCAL_RETENTION_V1",
         "README.md",
         "independent-codex-pr-review",
         "review_supervisor/__init__.py",
@@ -522,6 +523,7 @@ INDEPENDENT_CODEX_REVIEW_REQUIRED_FILES = tuple(
         "review_supervisor/frozen_source.py",
         "review_supervisor/gitraw.py",
         "review_supervisor/ledger.py",
+        "review_supervisor/legacy_retention.py",
         "review_supervisor/lfs.py",
         "review_supervisor/logs.py",
         "review_supervisor/models.py",
@@ -569,6 +571,15 @@ INDEPENDENT_CODEX_REVIEW_REQUIRED_FILES = tuple(
         "tests/test_supervisor.py",
         "tests/test_wire.py",
     )
+)
+INDEPENDENT_CODEX_REVIEW_REQUIRED_FILE_PARTS = frozenset(
+    relative.parts for relative in INDEPENDENT_CODEX_REVIEW_REQUIRED_FILES
+)
+INDEPENDENT_CODEX_REVIEW_REQUIRED_DIRECTORY_PARTS = frozenset(
+    parent.parts
+    for relative in INDEPENDENT_CODEX_REVIEW_REQUIRED_FILES
+    for parent in relative.parents
+    if parent != Path(".")
 )
 CANONICAL_REVIEW_REQUIRED_FILES = tuple(
     _path(path)
@@ -826,9 +837,39 @@ def _validate_canonical_review_exact_tree_inventories(
     )
 
 
+def _validate_canonical_review_raw_tree_entry(
+    relative_parts: tuple[str, ...],
+    *,
+    surface: str,
+) -> None:
+    prefix = INDEPENDENT_CODEX_REVIEW_ROOT.parts
+    if (
+        relative_parts[: len(prefix)] != prefix
+        or len(relative_parts) <= len(prefix)
+    ):
+        return
+    independent_relative = relative_parts[len(prefix) :]
+    if (
+        independent_relative in INDEPENDENT_CODEX_REVIEW_REQUIRED_FILE_PARTS
+        or independent_relative
+        in INDEPENDENT_CODEX_REVIEW_REQUIRED_DIRECTORY_PARTS
+    ):
+        return
+    unexpected = "/".join(independent_relative)
+    raise SyncError(
+        "canonical review raw exact tree inventory mismatch at "
+        f"{surface}: unexpected={unexpected}"
+    )
+
+
 def _validate_canonical_review_target_contents(target: Path) -> None:
     if not target.exists():
         return
+    for path in target.rglob("*"):
+        _validate_canonical_review_raw_tree_entry(
+            path.relative_to(target).parts,
+            surface=str(target),
+        )
     for relative in CANONICAL_REVIEW_REQUIRED_FILES:
         if not (target / relative).is_file():
             raise SyncError(
@@ -1471,6 +1512,7 @@ def _capture_regular_file_overlay_tree_manifest(
     *,
     label: str,
     ignored_names: frozenset[str] = frozenset(),
+    raw_entry_validator: Callable[[tuple[str, ...]], None] | None = None,
 ) -> _RegularFileOverlayTreeManifest:
     if os.scandir not in os.supports_fd:
         raise SyncError(
@@ -1516,6 +1558,9 @@ def _capture_regular_file_overlay_tree_manifest(
         )
         scanned_entries += len(initial_names)
         for name in initial_names:
+            child_parts = (*relative_parts, name)
+            if raw_entry_validator is not None:
+                raw_entry_validator(child_parts)
             if _is_ignored_name(name, ignored_names):
                 continue
             if len(entries) >= MAX_REGULAR_FILE_OVERLAY_TREE_ENTRIES:
@@ -1523,7 +1568,6 @@ def _capture_regular_file_overlay_tree_manifest(
                     f"regular-file overlay {label} tree exceeds "
                     f"{MAX_REGULAR_FILE_OVERLAY_TREE_ENTRIES} entries"
                 )
-            child_parts = (*relative_parts, name)
             child_label = "/".join(child_parts)
             try:
                 named_before = os.stat(
@@ -3291,6 +3335,16 @@ def _copy_regular_file_overlay_public_source_to_prepared(
     rule: SyncRule,
 ) -> _RegularFileOverlayTreeManifest:
     ignored_names = EXCLUDED_NAMES | frozenset(rule.exclude_names)
+    raw_entry_validator: Callable[[tuple[str, ...]], None] | None = None
+    if rule.target == CANONICAL_REVIEW_TARGET:
+
+        def validate_raw_entry(relative_parts: tuple[str, ...]) -> None:
+            _validate_canonical_review_raw_tree_entry(
+                relative_parts,
+                surface="public source",
+            )
+
+        raw_entry_validator = validate_raw_entry
     nonblocking = getattr(os, "O_NONBLOCK", None)
     if nonblocking is None:
         raise SyncError(
@@ -3318,6 +3372,7 @@ def _copy_regular_file_overlay_public_source_to_prepared(
             source_root.descriptor,
             label="initial public source",
             ignored_names=ignored_names,
+            raw_entry_validator=raw_entry_validator,
         )
         if _overlay_file_identity(source_root_metadata) != source_manifest.root_identity:
             raise SyncError("regular-file overlay public source root changed")
@@ -3360,9 +3415,11 @@ def _copy_regular_file_overlay_public_source_to_prepared(
             )
             budget.scanned_entries += len(names)
             for name in names:
+                child_relative = relative / name
+                if raw_entry_validator is not None:
+                    raw_entry_validator(child_relative.parts)
                 if _is_ignored_name(name, ignored_names):
                     continue
-                child_relative = relative / name
                 if len(child_relative.parts) > MAX_REGULAR_FILE_OVERLAY_TREE_DEPTH:
                     raise SyncError(
                         "regular-file overlay public source tree depth exceeds "
@@ -3650,6 +3707,7 @@ def _copy_regular_file_overlay_public_source_to_prepared(
             source_root.descriptor,
             label="final public source",
             ignored_names=ignored_names,
+            raw_entry_validator=raw_entry_validator,
         )
         if final_source_manifest != source_manifest:
             raise SyncError(

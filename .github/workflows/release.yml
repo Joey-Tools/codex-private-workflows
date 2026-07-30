@@ -41,9 +41,9 @@ jobs:
         with:
           python-version: "3.x"
 
-      - name: Compile helpers
+      - name: Check helper syntax without bytecode
         run: |
-          python3 -m py_compile \
+          python3 -B -c 'import pathlib, sys; [compile(pathlib.Path(path).read_bytes(), path, "exec") for path in sys.argv[1:]]' \
             scripts/codex_personal_sync.py \
             scripts/build_personal_codex_package.py \
             scripts/validate_sync_manifest_changes.py \
@@ -91,6 +91,11 @@ jobs:
             --sha "$GITHUB_SHA" \
             --dist dist
 
+      - name: Require source-only Python tree
+        if: always()
+        run: |
+          python3 -B -c 'import pathlib, sys; artifacts = [str(path) for path in pathlib.Path(".").rglob("*") if path.name == "__pycache__" or path.suffix in {".pyc", ".pyo"}][:20]; sys.exit("bytecode artifacts: " + ", ".join(artifacts)) if artifacts else None'
+
   publish:
     name: Publish private overlay release
     if: github.event_name != 'pull_request' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
@@ -132,3 +137,8 @@ jobs:
             --sha "$GITHUB_SHA" \
             --dist dist \
             --source-event "$GITHUB_EVENT_NAME"
+
+      - name: Require source-only Python tree
+        if: always()
+        run: |
+          python3 -B -c 'import pathlib, sys; artifacts = [str(path) for path in pathlib.Path(".").rglob("*") if path.name == "__pycache__" or path.suffix in {".pyc", ".pyo"}][:20]; sys.exit("bytecode artifacts: " + ", ".join(artifacts)) if artifacts else None'

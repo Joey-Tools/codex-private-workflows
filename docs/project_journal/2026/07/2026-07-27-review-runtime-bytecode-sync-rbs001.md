@@ -3,7 +3,7 @@ id: 20260727-rbs001
 title: Review Runtime Bytecode Sync
 status: completed
 created: 2026-07-27
-updated: 2026-07-27
+updated: 2026-07-30
 branch: wip/review-runtime-bytecode-sync
 pr:
 supersedes: []
@@ -38,9 +38,13 @@ superseded_by:
 - The post-suite repository inventory contains no `__pycache__`, `.pyc`, or `.pyo` entry.
 - Focused private workflow, synthetic-token, private policy-scope, and installed-bundle no-bytecode regressions passed.
 - Canonical follow-up https://github.com/Joey-Tools/codex-review-workflows/pull/82 merged as `739ee04bb6813b00f590f2ce70d2ac8087c66562` and corrects the private policy-scope path used by the shared contract.
+- Canonical https://github.com/Joey-Tools/codex-review-workflows/pull/84 merged as `0f77fb7b1dd59f5eed522fa9699497aa013695fc`; its tree exactly matches the reviewed signed head `4aec88368dcf5c101174fa3838ac870933e8bfa8`.
 - Fresh Codex review of `b4caaf5dcc5e266a4022f5c9fa2999427c56145d..e296f4b00f5bfc1525bf57be3c6df87827c319cd` found the private trusted-Mac path and sync completeness gaps; both are corrected in the follow-up head with focused regressions.
-- The complete synced review suite ran 2,817 tests with 12 skips; its only parent-sandbox failure was the nested `sandbox-exec` broker case, which passed 1/1 outside the parent sandbox.
-- The final private root suite passed 1,332/1,332 in 205.043 seconds after both review fixes.
+- The final private root suite passed 1,333/1,333 in 167.831 seconds.
+- The complete synced review suite ran 2,820 tests with 13 skips; its only parent-sandbox failure was the nested `sandbox-exec` broker case, which passed 1/1 outside the parent sandbox.
+- The independent-supervisor deterministic runner passed 604/604 in 215.849 seconds.
+- The installed-release immutability selector, canonical exact-inventory checks, source-only syntax compilation, and independent supervisor CLI smoke test passed under Python 3.13.
 - `actionlint`, canonical CI fixture equality, Ruff lint, project-journal validation, and `git diff --check` passed.
 - Whole-file Ruff format remains non-clean on pre-existing private test formatting outside this change; the new hunk matches Ruff's expected output and no unrelated formatting rewrite was applied.
 - No local Python 3.10 run was performed.
+- `Claude lane temporarily waived by Joey before 2026-08-01 00:00 Asia/Shanghai`; the unrun lane is not counted as a completed named double or triple.

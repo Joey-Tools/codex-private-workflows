@@ -142,10 +142,10 @@ jobs:
           echo "changed=true" >> "$GITHUB_OUTPUT"
           printf '%s\n' "$status"
 
-      - name: Compile helpers
+      - name: Check helper syntax without bytecode
         if: steps.changes.outputs.changed == 'true' || steps.current-release.outputs.complete == 'false'
         run: |
-          python3 -m py_compile \
+          python3 -B -c 'import pathlib, sys; [compile(pathlib.Path(path).read_bytes(), path, "exec") for path in sys.argv[1:]]' \
             scripts/codex_personal_sync.py \
             scripts/build_personal_codex_package.py \
             scripts/validate_sync_manifest_changes.py \
@@ -255,7 +255,7 @@ jobs:
           - Replaces the previous scheduled direct-push path, which is blocked by branch rules.
 
           ## Validation
-          - python3 -m py_compile scripts/codex_personal_sync.py scripts/build_personal_codex_package.py scripts/validate_sync_manifest_changes.py scripts/private_overlay_release.py scripts/sync_private_overlay_sources.py tests/test_package_builder_safety.py tests/test_personal_sync_reconciliation_safety.py tests/test_private_overlay_package.py tests/test_private_overlay_sync.py tests/test_release_manifest_baseline.py tests/test_sync_manifest_changes.py
+          - Source-only Python syntax check for release, sync, package, and test helpers.
           - python3 -m unittest discover -s tests
           - python3 -m unittest discover -s personal_codex/skills/review-orchestration-playbook/tests -p 'test_*.py'
           - python3 -m unittest discover -s personal_codex/skills/waited-delivery/tests -p 'test_*.py'
@@ -358,3 +358,8 @@ jobs:
         run: |
           python3 scripts/validate_sync_manifest_changes.py \
             --release-repo "$GITHUB_REPOSITORY"
+
+      - name: Require source-only Python tree
+        if: always()
+        run: |
+          python3 -B -c 'import pathlib, sys; artifacts = [str(path) for path in pathlib.Path(".").rglob("*") if path.name == "__pycache__" or path.suffix in {".pyc", ".pyo"}][:20]; sys.exit("bytecode artifacts: " + ", ".join(artifacts)) if artifacts else None'
