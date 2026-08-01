@@ -3,9 +3,9 @@ id: 20260727-rbs001
 title: Review Runtime Bytecode Sync
 status: completed
 created: 2026-07-27
-updated: 2026-07-30
+updated: 2026-08-01
 branch: wip/review-runtime-bytecode-sync
-pr:
+pr: 139
 supersedes: []
 superseded_by:
 ---
@@ -26,6 +26,7 @@ superseded_by:
 - Private CI matches the canonical private-profile fixture byte for byte.
 - Private policy-scope validation resolves `agents/reviewer.toml` beneath `personal_codex/`, while canonical validation remains repository-rooted.
 - Private sync rewrites the trusted-Mac operator command to the `personal_codex/` layout and fail-closes on any missing or unreviewed file in the independent-supervisor subtree.
+- The private review tree now matches the actual canonical PR #85 squash-merge tree for the complete reviewed file inventory, including caller-owned child-outcome receipts, read-only child isolation, and double-fork custody recovery.
 
 ## Next Steps
 
@@ -51,3 +52,12 @@ superseded_by:
 - Whole-file Ruff format remains non-clean on pre-existing private test formatting outside this change; the new hunk matches Ruff's expected output and no unrelated formatting rewrite was applied.
 - No local Python 3.10 run was performed.
 - `Claude lane temporarily waived by Joey before 2026-08-01 00:00 Asia/Shanghai`; the unrun lane is not counted as a completed named double or triple.
+- Canonical PR #85 merged as `b807cf90a2c8235ea79ef5013655bd7c52e4c886` with parent `0f77fb7b1dd59f5eed522fa9699497aa013695fc`; its tree `7a9246c7b3b9d47c9694956cefb8f43f9c8ebb87` exactly matches the final reviewed signed head tree.
+- The final private sync used that merge tree with Git's `0644`/`0755` access policy preserved. The installed-release immutability contract then passed and confirmed that preflight state is account-local while the release tree remains unchanged.
+- All final validation used uv 0.11.18 with its managed CPython 3.13.13 runtime; no second Python version was used.
+- The final private root suite passed 1,334/1,334 in 86.429 seconds with the fixture-required `umask 022` and isolated Git configuration.
+- The final host-level synced review suite passed 2,825/2,825 with 15 expected skips in 532.557 seconds. The process-local open-file limit was raised to 4,096 so the intentional 254-level accepted cleanup boundary could run on macOS; the 255-level rejected boundary remained covered.
+- The deterministic independent-supervisor gate passed 802/802 in 104.234 seconds with selected-identity SHA-256 `d937a349ec87ffbd440be7e73734f5ea7533331c7212d5977c7661481b0a3516`.
+- The complete read-only installation module passed 111/111 in 9.929 seconds, ten ordered normal/failure-injection double-fork rounds passed 20/20 in 67.387 seconds, and the repository contract module passed 105/105 with eight expected skips in 4.325 seconds.
+- The exact independent-supervisor inventory, private trusted-Mac path rewrite, installed-release immutability, and private CI fixture selectors passed. Source-only compilation covered 109 Python/entrypoint files, Ruff 0.13.2 lint passed, Bash syntax passed, the private root CI remained byte-identical to its reviewed fixture, project-journal validation passed, and no bytecode artifact remained.
+- Ruff 0.13.2 format reports the same nine pre-existing files on both PR head `960a234e953e390cc1720877a7dcdf8d1947ca16` and the final synchronized tree, so no unrelated formatter-only rewrite was added. Local `shellcheck` and `actionlint` executables were unavailable; Bash syntax, repository workflow contracts, fixture equality, and the canonical merged CI evidence provide the local fallbacks.
