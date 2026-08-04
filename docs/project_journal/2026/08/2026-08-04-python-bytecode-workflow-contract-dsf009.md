@@ -5,7 +5,7 @@ status: completed
 created: 2026-08-04
 updated: 2026-08-04
 branch: codex/fix-python-bytecode-workflow-contract
-pr:
+pr: https://github.com/Joey-Tools/codex-private-workflows/pull/142
 supersedes: []
 superseded_by:
 ---
@@ -31,6 +31,7 @@ superseded_by:
 ## Evidence
 
 - https://github.com/Joey-Tools/codex-private-workflows/actions/runs/30902462487
+- https://github.com/Joey-Tools/codex-private-workflows/pull/142
 - `RuntimeError: review_runtime requires bytecode to be disabled before import`
 - `.github/workflows/ci.yml`
 - `.github/workflows/release.yml`
