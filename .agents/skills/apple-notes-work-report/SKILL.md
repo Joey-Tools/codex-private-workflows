@@ -73,6 +73,12 @@ It covers read-only auditing, evidence collection from `~/.codex`, two-tier back
 - Use [references/report-drafting-style.md](references/report-drafting-style.md) for the preferred shape and fallback rules.
 - When the exact bucket/list formatting matters, also follow [references/report-drafting-example.md](references/report-drafting-example.md) instead of improvising a new layout.
 
+## Bucket Identity
+
+- Derive bucket labels from stable workstream identity, not word similarity. Canonical repository or cwd identity outranks prose mentions, session titles, and guessed abbreviations.
+- Apply explicit exceptions before preserving an existing note label: the exact `webex-message-archiver` repository always maps to `#webex-message-archiver`. Never place that work under `#WME` solely because the evidence mentions Webex; `#WME` requires explicit WME evidence.
+- For all other work, follow the precedence in [references/report-drafting-style.md](references/report-drafting-style.md). If the mapping remains unclear, keep it outside the draft as a needs-scope-confirmation item instead of guessing a bucket.
+
 ## Default Inclusion Boundary
 
 - Do not assume every scanned session belongs in Joey's work daily report.
