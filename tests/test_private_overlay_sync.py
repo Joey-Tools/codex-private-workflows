@@ -6414,7 +6414,7 @@ class PrivateOverlaySyncTests(unittest.TestCase):
                 command_context = "\n".join(
                     job_lines[command_start : line_index + 1]
                 )
-                variable_index = command_context.index("PYTHONDONTWRITEBYTECODE")
+                variable_index = command_context.rfind("PYTHONDONTWRITEBYTECODE")
                 env_index = command_context.rfind(
                     "/usr/bin/env -i", 0, variable_index
                 )
@@ -6503,6 +6503,14 @@ jobs:
     steps:
       - run: |
           /usr/bin/env -i PYTHONDONTWRITEBYTECODE=0 PYTHONDONTWRITEBYTECODE=1 \
+            python3 -I -B -S test.py
+""",
+            "duplicate-across-separated-continuations": r"""  test:
+    steps:
+      - run: |
+          /usr/bin/env -i \
+            PYTHONDONTWRITEBYTECODE=1 \
+            true; PYTHONDONTWRITEBYTECODE=1 \
             python3 -I -B -S test.py
 """,
         }
