@@ -94,10 +94,12 @@ SHA-promotion or allowlist hardening. The current generated PR workflow declares
 only `contents: read` and contains no `secrets.*` references.
 
 The sync PR step requires a `PRIVATE_OVERLAY_SYNC_PR_TOKEN` secret with repository
-contents, pull-request, and issues write access. The workflow uses that token for
-branch pushes, PR creation, and the `codex-automation` PR label so the resulting
-PR `pull_request` validation workflows are not suppressed as `GITHUB_TOKEN`-triggered
-events.
+contents, pull-request, and issues write access. Because sync can update
+`.github/workflows/ci.yml`, a fine-grained PAT or GitHub App token must also grant
+`Workflows: write`; a classic PAT must include the `workflow` scope. The workflow
+uses that token for branch pushes, PR creation, and the `codex-automation` PR label
+so the resulting PR `pull_request` validation workflows are not suppressed as
+`GITHUB_TOKEN`-triggered events.
 
 After merging a Joey-Tools source-repo PR that should flow into the private overlay,
 trigger the sync manually so the release is not delayed until the fallback window:

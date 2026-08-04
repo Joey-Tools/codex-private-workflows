@@ -6783,6 +6783,9 @@ class PrivateOverlaySyncTests(unittest.TestCase):
 
         self.assertIn("PRIVATE_OVERLAY_SYNC_PR_TOKEN", readme)
         self.assertIn("contents, pull-request, and issues write access", readme)
+        self.assertIn("fine-grained PAT or GitHub App token", readme)
+        self.assertIn("`Workflows: write`", readme)
+        self.assertIn("classic PAT must include the `workflow` scope", readme)
         self.assertIn("codex-automation", readme)
 
     def test_readme_documents_canonical_source_trust_boundary(self) -> None:
