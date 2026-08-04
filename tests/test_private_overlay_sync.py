@@ -6165,6 +6165,24 @@ class PrivateOverlaySyncTests(unittest.TestCase):
         self.assertEqual(checked_out_repos, sync_rule_repos)
         self.assertEqual(checked_out_paths, sync_rule_repos)
 
+    def test_python_workflows_disable_bytecode_before_runtime_imports(self) -> None:
+        workflow_paths = (
+            REPO_ROOT / ".github" / "workflows" / "ci.yml",
+            REPO_ROOT / ".github" / "workflows" / "release.yml",
+            REPO_ROOT / ".github" / "workflows" / "scheduled-sync-release.yml",
+        )
+
+        for workflow_path in workflow_paths:
+            with self.subTest(workflow=workflow_path.name):
+                workflow = workflow_path.read_text(encoding="utf-8")
+                preamble, separator, _jobs = workflow.partition("\njobs:\n")
+                self.assertEqual(separator, "\njobs:\n")
+                self.assertIn(
+                    '\nenv:\n  PYTHONDONTWRITEBYTECODE: "1"\n',
+                    preamble,
+                )
+                self.assertEqual(workflow.count("PYTHONDONTWRITEBYTECODE"), 1)
+
     def test_release_workflows_use_vm_backed_runners(self) -> None:
         workflows = {
             "scheduled sync-release": (

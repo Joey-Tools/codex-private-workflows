@@ -16,6 +16,9 @@ permissions:
   contents: write
   pull-requests: write
 
+env:
+  PYTHONDONTWRITEBYTECODE: "1"
+
 concurrency:
   group: private-overlay-release-${{ github.repository }}-${{ github.ref }}
   cancel-in-progress: false
