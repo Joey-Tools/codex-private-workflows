@@ -12,6 +12,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shlex
 import shutil
 import stat
 import sys
@@ -6399,6 +6400,7 @@ class PrivateOverlaySyncTests(unittest.TestCase):
             for line_index, line in enumerate(job_lines):
                 if "PYTHONDONTWRITEBYTECODE" not in line:
                     continue
+                self.assertEqual(line.count("PYTHONDONTWRITEBYTECODE"), 1)
                 self.assertRegex(
                     line.strip(),
                     r"\bPYTHONDONTWRITEBYTECODE=1\s*\\$",
@@ -6412,7 +6414,23 @@ class PrivateOverlaySyncTests(unittest.TestCase):
                 command_context = "\n".join(
                     job_lines[command_start : line_index + 1]
                 )
-                self.assertIn("/usr/bin/env -i", command_context)
+                variable_index = command_context.index("PYTHONDONTWRITEBYTECODE")
+                env_index = command_context.rfind(
+                    "/usr/bin/env -i", 0, variable_index
+                )
+                self.assertGreaterEqual(env_index, 0)
+                env_arguments = command_context[
+                    env_index + len("/usr/bin/env -i") : variable_index
+                ]
+                self.assertNotRegex(env_arguments, r"[;&|]")
+                try:
+                    argument_tokens = shlex.split(
+                        env_arguments.replace("\\\n", " ")
+                    )
+                except ValueError as error:
+                    self.fail(f"invalid env -i argument quoting: {error}")
+                for argument in argument_tokens:
+                    self.assertRegex(argument, r"^[A-Z_][A-Z0-9_]*=.+$")
 
         workflow_paths = (
             REPO_ROOT / ".github" / "workflows" / "ci.yml",
@@ -6473,6 +6491,18 @@ jobs:
     steps:
       - run: |
           PYTHONDONTWRITEBYTECODE=1 \
+            python3 -I -B -S test.py
+""",
+            "separated-from-scrubbed-command": r"""  test:
+    steps:
+      - run: |
+          /usr/bin/env -i true; PYTHONDONTWRITEBYTECODE=1 \
+            python3 -I -B -S test.py
+""",
+            "duplicate-on-admitted-line": r"""  test:
+    steps:
+      - run: |
+          /usr/bin/env -i PYTHONDONTWRITEBYTECODE=0 PYTHONDONTWRITEBYTECODE=1 \
             python3 -I -B -S test.py
 """,
         }
