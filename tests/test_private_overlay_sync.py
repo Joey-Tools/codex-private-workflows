@@ -1050,8 +1050,7 @@ class PrivateOverlaySyncTests(unittest.TestCase):
         source.write_text(
             "\n".join(
                 [
-                    "Manage repository project journals.",
-                    "For repositories, assume docs exist.",
+                    "Maintain repository project journals and their optional local tooling.",
                     "Find repositories recently touched by Codex sessions.",
                     "Use this when converting existing repositories.",
                     "Do not batch-install hooks across repositories.",
@@ -1082,12 +1081,14 @@ class PrivateOverlaySyncTests(unittest.TestCase):
             / "SKILL.md"
         )
         text = target.read_text(encoding="utf-8")
-        self.assertIn("Manage Joey repo project journals.", text)
-        self.assertIn("For Joey repos, assume docs exist.", text)
+        self.assertIn(
+            "Maintain Joey repo project journals and their optional local tooling.",
+            text,
+        )
         self.assertIn("Find Joey repos recently touched by Codex sessions.", text)
         self.assertIn("Use this when converting existing Joey repos.", text)
         self.assertIn("Do not batch-install hooks across Joey repos.", text)
-        self.assertNotIn("For repositories", text)
+        self.assertNotIn("Maintain repository project journals", text)
         synced_script = (
             self.repo_root
             / "personal_codex"
@@ -1100,6 +1101,39 @@ class PrivateOverlaySyncTests(unittest.TestCase):
             "Manage cross-repo project journal indexes for Joey's Codex workflows.",
             synced_script.read_text(encoding="utf-8"),
         )
+
+    def test_project_journal_sync_rule_rejects_frontmatter_drift(self) -> None:
+        source = self.source_root / "codex-project-journal" / "SKILL.md"
+        source.parent.mkdir(parents=True)
+        source.write_text(
+            "\n".join(
+                [
+                    "Archive repository project journals.",
+                    "Find repositories recently touched by Codex sessions.",
+                    "Use this when converting existing repositories.",
+                    "Do not batch-install hooks across repositories.",
+                    "",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        script = source.parent / "scripts" / "project_journal.py"
+        script.parent.mkdir()
+        script.write_text(
+            '"""Manage cross-repo project journal indexes for Codex workflows."""\n',
+            encoding="utf-8",
+        )
+        rule = next(
+            rule
+            for rule in SYNC_MODULE.SYNC_RULES
+            if rule.target == Path("personal_codex/skills/project-journal")
+        )
+
+        with self.assertRaisesRegex(
+            SYNC_MODULE.SyncError,
+            "Maintain repository project journals",
+        ):
+            SYNC_MODULE.sync_sources(self.repo_root, self.source_root, (rule,))
 
     def test_skill_authoring_sync_rule_copies_validator_wrapper(self) -> None:
         source = (

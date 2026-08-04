@@ -434,10 +434,9 @@ SYNC_RULES = (
         "personal_codex/skills/project-journal",
         (
             Replacement(
-                "Manage repository project journals",
-                "Manage Joey repo project journals",
+                "Maintain repository project journals",
+                "Maintain Joey repo project journals",
             ),
-            Replacement("For repositories", "For Joey repos"),
             Replacement("repositories recently touched", "Joey repos recently touched"),
             Replacement("existing repositories", "existing Joey repos"),
             Replacement(
