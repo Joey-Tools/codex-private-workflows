@@ -44,6 +44,8 @@ class Replacement:
     old: str
     new: str
     required: bool = True
+    path: Path | None = None
+    required_count: int | None = None
 
 
 @dataclass(frozen=True)
@@ -434,10 +436,11 @@ SYNC_RULES = (
         "personal_codex/skills/project-journal",
         (
             Replacement(
-                "Manage repository project journals",
-                "Manage Joey repo project journals",
+                "description: Maintain repository project journals",
+                "description: Maintain Joey repo project journals",
+                path=Path("SKILL.md"),
+                required_count=1,
             ),
-            Replacement("For repositories", "For Joey repos"),
             Replacement("repositories recently touched", "Joey repos recently touched"),
             Replacement("existing repositories", "existing Joey repos"),
             Replacement(
@@ -928,19 +931,25 @@ def _validate_no_retired_review_references(
                 )
 
 
-def _apply_replacements(path: Path, replacements: tuple[Replacement, ...]) -> set[int]:
+def _apply_replacements(
+    path: Path,
+    relative: Path,
+    replacements: tuple[Replacement, ...],
+) -> dict[int, int]:
     try:
         text = path.read_text(encoding="utf-8")
     except UnicodeDecodeError:
-        return set()
+        return {}
     changed = False
-    found: set[int] = set()
+    found: dict[int, int] = {}
     for index, replacement in enumerate(replacements):
+        if replacement.path is not None and replacement.path != relative:
+            continue
         if replacement.old not in text:
             continue
+        found[index] = text.count(replacement.old)
         text = text.replace(replacement.old, replacement.new)
         changed = True
-        found.add(index)
     if changed:
         path.write_text(text, encoding="utf-8")
     return found
@@ -958,11 +967,29 @@ def _text_candidate_paths(target: Path, rule: SyncRule) -> list[Path]:
 def _apply_rule_replacements(target: Path, rule: SyncRule) -> None:
     if not rule.replacements:
         return
-    found: set[int] = set()
+    found: dict[int, int] = {}
     for path in _text_candidate_paths(target, rule):
-        found.update(_apply_replacements(path, rule.replacements))
+        relative = path.relative_to(target) if target.is_dir() else Path(path.name)
+        for index, count in _apply_replacements(
+            path,
+            relative,
+            rule.replacements,
+        ).items():
+            found[index] = found.get(index, 0) + count
+    _validate_replacement_counts(rule, found)
+
+
+def _validate_replacement_counts(rule: SyncRule, found: dict[int, int]) -> None:
     for index, replacement in enumerate(rule.replacements):
-        if replacement.required and index not in found:
+        actual_count = found.get(index, 0)
+        if replacement.required_count is not None:
+            if actual_count != replacement.required_count:
+                raise SyncError(
+                    "required replacement count mismatch for "
+                    f"{rule.target}: {replacement.old!r} "
+                    f"({actual_count} != {replacement.required_count})"
+                )
+        elif replacement.required and actual_count == 0:
             raise SyncError(
                 f"required replacement did not match for {rule.target}: {replacement.old!r}"
             )
@@ -3263,7 +3290,7 @@ def _apply_regular_file_overlay_rule_to_bytes(
     data: bytes,
     relative: Path,
     rule: SyncRule,
-    found_replacements: set[int],
+    found_replacements: dict[int, int],
 ) -> bytes:
     if not _is_text_candidate(relative, rule.text_extensions):
         return data
@@ -3272,10 +3299,14 @@ def _apply_regular_file_overlay_rule_to_bytes(
     except UnicodeDecodeError:
         return data
     for index, replacement in enumerate(rule.replacements):
+        if replacement.path is not None and replacement.path != relative:
+            continue
         if replacement.old not in text:
             continue
+        found_replacements[index] = (
+            found_replacements.get(index, 0) + text.count(replacement.old)
+        )
         text = text.replace(replacement.old, replacement.new)
-        found_replacements.add(index)
     for residual in rule.forbidden_residuals:
         if residual in text:
             raise SyncError(
@@ -3387,7 +3418,7 @@ def _copy_regular_file_overlay_public_source_to_prepared(
             label="initial public source",
         )
         visited_entries: set[tuple[str, ...]] = set()
-        found_replacements: set[int] = set()
+        found_replacements: dict[int, int] = {}
         budget = _RegularFileOverlayCopyBudget()
         manifest_builder = _RegularFileOverlayManifestBuilder()
         source_file_flags = (
@@ -3686,12 +3717,7 @@ def _copy_regular_file_overlay_public_source_to_prepared(
             raise SyncError(
                 "regular-file overlay public source manifest coverage changed"
             )
-        for index, replacement in enumerate(rule.replacements):
-            if replacement.required and index not in found_replacements:
-                raise SyncError(
-                    "required replacement did not match for "
-                    f"{rule.target}: {replacement.old!r}"
-                )
+        _validate_replacement_counts(rule, found_replacements)
         try:
             source_root_after = os.fstat(source_root.descriptor)
             os.fchmod(
