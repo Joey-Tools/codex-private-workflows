@@ -64,6 +64,7 @@ class SyncRule:
     exclude_names: tuple[str, ...] = ()
     forbidden_residuals: tuple[str, ...] = ()
     regular_file_overlays: tuple[RegularFileOverlay, ...] = ()
+    replacement_excluded_paths: tuple[Path, ...] = ()
 
 
 def _path(raw: str) -> Path:
@@ -133,6 +134,7 @@ def _rule(
     replacements: tuple[Replacement, ...] = (),
     *,
     common_joey_text: bool = False,
+    replacement_excluded_paths: tuple[str, ...] = (),
     exclude_names: tuple[str, ...] = (),
     forbidden_residuals: tuple[str, ...] = (),
     regular_file_overlays: tuple[RegularFileOverlay, ...] = (),
@@ -144,6 +146,9 @@ def _rule(
         source=_path(source),
         target=_path(target),
         replacements=replacements,
+        replacement_excluded_paths=tuple(
+            _path(path) for path in replacement_excluded_paths
+        ),
         exclude_names=exclude_names,
         forbidden_residuals=forbidden_residuals,
         regular_file_overlays=regular_file_overlays,
@@ -457,9 +462,15 @@ SYNC_RULES = (
     ),
     _rule(
         "codex-review-workflows",
+        "skills/review-orchestration-playbook/tests/fixtures/ci/private.yml",
+        ".github/workflows/ci.yml",
+    ),
+    _rule(
+        "codex-review-workflows",
         "skills/review-orchestration-playbook",
         "personal_codex/skills/review-orchestration-playbook",
         common_joey_text=True,
+        replacement_excluded_paths=("tests/fixtures/ci/private.yml",),
         regular_file_overlays=(
             RegularFileOverlay(
                 Path(
@@ -800,12 +811,73 @@ def _text_candidate_paths(target: Path, rule: SyncRule) -> list[Path]:
     return [path for path in paths if _is_text_candidate(path, rule.text_extensions)]
 
 
+def _validate_replacement_excluded_paths(rules: tuple[SyncRule, ...]) -> None:
+    for rule in rules:
+        excluded_paths = rule.replacement_excluded_paths
+        if excluded_paths and not rule.replacements:
+            raise SyncError(
+                f"replacement-excluded paths require replacements: {rule.target}"
+            )
+        seen: set[Path] = set()
+        path_scoped_replacements = {
+            replacement.path
+            for replacement in rule.replacements
+            if replacement.path is not None
+        }
+        for relative in excluded_paths:
+            if (
+                not isinstance(relative, Path)
+                or relative == Path(".")
+                or relative.is_absolute()
+                or ".." in relative.parts
+            ):
+                raise SyncError(
+                    f"unsafe replacement-excluded path for {rule.target}: {relative}"
+                )
+            if relative in seen:
+                raise SyncError(
+                    f"duplicate replacement-excluded path for {rule.target}: {relative}"
+                )
+            if relative in path_scoped_replacements:
+                raise SyncError(
+                    "replacement-excluded path conflicts with path-scoped "
+                    f"replacement for {rule.target}: {relative}"
+                )
+            seen.add(relative)
+
+
+def _validate_replacement_excluded_candidates(
+    rule: SyncRule,
+    candidates: set[Path],
+    *,
+    surface: str,
+) -> None:
+    for relative in rule.replacement_excluded_paths:
+        if relative not in candidates:
+            raise SyncError(
+                "replacement-excluded path is missing or not a text candidate at "
+                f"{surface} for {rule.target}: {relative}"
+            )
+
+
 def _apply_rule_replacements(target: Path, rule: SyncRule) -> None:
     if not rule.replacements:
         return
+    candidates = _text_candidate_paths(target, rule)
+    relative_candidates = {
+        path.relative_to(target) if target.is_dir() else Path(path.name)
+        for path in candidates
+    }
+    _validate_replacement_excluded_candidates(
+        rule,
+        relative_candidates,
+        surface="staged target",
+    )
     found: dict[int, int] = {}
-    for path in _text_candidate_paths(target, rule):
+    for path in candidates:
         relative = path.relative_to(target) if target.is_dir() else Path(path.name)
+        if relative in rule.replacement_excluded_paths:
+            continue
         for index, count in _apply_replacements(
             path,
             relative,
@@ -3131,15 +3203,16 @@ def _apply_regular_file_overlay_rule_to_bytes(
         text = data.decode("utf-8")
     except UnicodeDecodeError:
         return data
-    for index, replacement in enumerate(rule.replacements):
-        if replacement.path is not None and replacement.path != relative:
-            continue
-        if replacement.old not in text:
-            continue
-        found_replacements[index] = (
-            found_replacements.get(index, 0) + text.count(replacement.old)
-        )
-        text = text.replace(replacement.old, replacement.new)
+    if relative not in rule.replacement_excluded_paths:
+        for index, replacement in enumerate(rule.replacements):
+            if replacement.path is not None and replacement.path != relative:
+                continue
+            if replacement.old not in text:
+                continue
+            found_replacements[index] = (
+                found_replacements.get(index, 0) + text.count(replacement.old)
+            )
+            text = text.replace(replacement.old, replacement.new)
     for residual in rule.forbidden_residuals:
         if residual in text:
             raise SyncError(
@@ -3228,6 +3301,20 @@ def _copy_regular_file_overlay_public_source_to_prepared(
             source_root.descriptor,
             label="initial public source",
             ignored_names=ignored_names,
+        )
+        replacement_candidates = {
+            Path(*entry.relative_parts)
+            for entry in source_manifest.entries
+            if entry.kind == "file"
+            and _is_text_candidate(
+                Path(*entry.relative_parts),
+                rule.text_extensions,
+            )
+        }
+        _validate_replacement_excluded_candidates(
+            rule,
+            replacement_candidates,
+            surface="public source",
         )
         if _overlay_file_identity(source_root_metadata) != source_manifest.root_identity:
             raise SyncError("regular-file overlay public source root changed")
@@ -4554,6 +4641,7 @@ def sync_sources(
     repo_root = repo_root.resolve()
     source_root = source_root.resolve()
     _validate_regular_file_overlay_targets(rules)
+    _validate_replacement_excluded_paths(rules)
     secure_rule_count = sum(bool(rule.regular_file_overlays) for rule in rules)
     if secure_rule_count > 1:
         raise SyncError("private overlay sync permits exactly one secure rule")
