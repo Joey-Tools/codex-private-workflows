@@ -16,25 +16,27 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, BinaryIO, Mapping
 
-from review_runtime.claude_capabilities import (
+sys.dont_write_bytecode = True
+
+from review_runtime.claude_capabilities import (  # noqa: E402
     CLAUDE_REQUIRED_OPTIONS,
     ClaudeCapabilities,
 )
-from review_runtime.claude_linux import (
+from review_runtime.claude_linux import (  # noqa: E402
     SANDBOX_WORKSPACE as CLAUDE_LINUX_SANDBOX_WORKSPACE,
 )
-from review_runtime.claude_provenance import (
+from review_runtime.claude_provenance import (  # noqa: E402
     CLAUDE_RELEASE_KEY_FINGERPRINT,
     CLAUDE_SUPPORTED_PLATFORM_BINARIES,
     VerifiedClaudeExecutable,
     release_artifact_urls,
 )
-from review_runtime.claude_version_policy import (
+from review_runtime.claude_version_policy import (  # noqa: E402
     CLAUDE_COMPATIBILITY_SPEC,
     ClaudeVersionPolicyError,
     parse_compatible_release_version,
 )
-from review_runtime import claude_stream_contract
+from review_runtime import claude_stream_contract  # noqa: E402
 
 
 CLAUDE_CODE_VERSION_CONTRACT = {
@@ -155,6 +157,7 @@ TERMINAL_OPTIONAL_FIELDS = frozenset(
         "errors",
         "api_error_status",
         "permission_denials",
+        "fast_mode_disabled_reason",
     )
 )
 EXTENDED_TERMINAL_FIELDS = frozenset(
@@ -186,7 +189,9 @@ INIT_REQUIRED_FIELDS = frozenset(
         "apiKeySource",
     )
 )
-INIT_OPTIONAL_FIELDS = frozenset(("session_id",))
+INIT_OPTIONAL_FIELDS = frozenset(
+    ("session_id", "capabilities", "fast_mode_disabled_reason")
+)
 EXTENDED_INIT_REQUIRED_FIELDS = frozenset(
     (
         "output_style",
@@ -200,6 +205,33 @@ EXTENDED_INIT_REQUIRED_FIELDS = frozenset(
 )
 EXPECTED_AGENTS = ("claude", "Explore", "general-purpose", "Plan")
 EXPECTED_CAPABILITIES = ("interrupt_receipt_v1", "msg_lifecycle_v1")
+EXPECTED_CAPABILITY_SEQUENCES = (
+    EXPECTED_CAPABILITIES,
+    (
+        "interrupt_receipt_v1",
+        "interrupt_cancel_queued_v1",
+        "msg_lifecycle_v1",
+    ),
+)
+EXPECTED_FAST_MODE_DISABLED_REASON = "sdk_opt_in_required"
+COMPATIBLE_INIT_OPTIONAL_CONTRACTS = {
+    "capabilities": {
+        "rule": "one_of_exact_ordered_arrays",
+        "values": [list(values) for values in EXPECTED_CAPABILITY_SEQUENCES],
+        "failure": "inconclusive",
+    },
+    "fast_mode_disabled_reason": {
+        "rule": "constant",
+        "value": EXPECTED_FAST_MODE_DISABLED_REASON,
+        "malformed_failure": "inconclusive",
+        "mismatch_failure": "inconclusive",
+    },
+}
+COMPATIBLE_TERMINAL_OPTIONAL_CONTRACTS = {
+    "fast_mode_disabled_reason": COMPATIBLE_INIT_OPTIONAL_CONTRACTS[
+        "fast_mode_disabled_reason"
+    ]
+}
 INIT_PROFILE_CONTRACT = {
     "selector": "claude_code_version",
     "variants": {
@@ -229,12 +261,15 @@ INIT_PROFILE_CONTRACT = {
                     "failure": "inconclusive",
                 },
                 "capabilities": {
-                    "rule": "exact_ordered_array",
-                    "values": list(EXPECTED_CAPABILITIES),
+                    "rule": "one_of_exact_ordered_arrays",
+                    "values": [
+                        list(values) for values in EXPECTED_CAPABILITY_SEQUENCES
+                    ],
                     "failure": "inconclusive",
                 },
                 "analytics_disabled": {
-                    "rule": "boolean",
+                    "rule": "constant",
+                    "value": True,
                     "failure": "inconclusive",
                 },
                 "product_feedback_disabled": {
@@ -290,7 +325,20 @@ ASSISTANT_MESSAGE_FIELDS = frozenset(
         "usage",
     )
 )
-EXTENDED_ASSISTANT_MESSAGE_REQUIRED_FIELDS = frozenset(("diagnostics",))
+ASSISTANT_DIAGNOSTICS_CACHE_MISS_UNAVAILABLE = {
+    "cache_miss_reason": {"type": "unavailable"}
+}
+ASSISTANT_DIAGNOSTICS_CONTRACT = {
+    "rule": "null_or_exact_object",
+    "object": ASSISTANT_DIAGNOSTICS_CACHE_MISS_UNAVAILABLE,
+    "failure": "inconclusive",
+}
+ASSISTANT_MESSAGE_PROFILE_OPTIONAL_FIELD_CONTRACTS = {
+    "legacy-base": {},
+    "extended-2x": {
+        "diagnostics": ASSISTANT_DIAGNOSTICS_CONTRACT,
+    },
+}
 ASSISTANT_CONTENT_BLOCK_FIELDS = {
     "thinking": frozenset(("type", "signature", "thinking")),
     "text": frozenset(("type", "text")),
@@ -439,6 +487,9 @@ INTERMEDIATE_EVENT_CONTRACT = {
                         "rule": "closed_object",
                         "required_fields": sorted(ASSISTANT_MESSAGE_FIELDS),
                         "optional_fields": [],
+                        "profile_optional_field_contracts": (
+                            ASSISTANT_MESSAGE_PROFILE_OPTIONAL_FIELD_CONTRACTS
+                        ),
                         "additional_fields": False,
                         "fixed_values": {
                             "context_management": None,
@@ -541,10 +592,6 @@ INTERMEDIATE_EVENT_CONTRACT = {
                 "maximum_exclusive": "2.1.216",
             },
             "event_contract": "reviewed-2x",
-            "assistant_message_profile": {
-                "additional_required_fields": [],
-                "field_contracts": {},
-            },
         },
         "extended-2x": {
             "version_range": {
@@ -552,14 +599,6 @@ INTERMEDIATE_EVENT_CONTRACT = {
                 "maximum_exclusive": "3.0.0",
             },
             "event_contract": "reviewed-2x",
-            "assistant_message_profile": {
-                "additional_required_fields": sorted(
-                    EXTENDED_ASSISTANT_MESSAGE_REQUIRED_FIELDS
-                ),
-                "field_contracts": {
-                    "diagnostics": {"rule": "null"},
-                },
-            },
         },
     },
 }
@@ -839,6 +878,7 @@ def _load_bound_stream_contract(
             "legacy-base": ">=2.1.211,<2.1.216",
             "extended-2x": ">=2.1.216,<3.0.0",
         },
+        "version_adaptations": claude_stream_contract.VERSION_ADAPTATIONS,
         "launch_profiles": ["helper-darwin", "helper-linux", "named-direct"],
         "fail_closed_surfaces": [
             "stream_envelope",
@@ -1078,7 +1118,8 @@ def _load_contract_with_binding() -> tuple[
         "session_id": {
             "rule": "nonempty_string",
             "failure": "inconclusive",
-        }
+        },
+        **COMPATIBLE_INIT_OPTIONAL_CONTRACTS,
     }
     if (
         init_contract.get("optional_field_contracts")
@@ -1143,6 +1184,7 @@ def _load_contract_with_binding() -> tuple[
             "failure": "classify",
         },
         "permission_denials": {"rule": "empty_array", "failure": "blocked"},
+        **COMPATIBLE_TERMINAL_OPTIONAL_CONTRACTS,
     }
     if optional_contracts != expected_terminal_optional_contracts:
         raise _ContractError("terminal optional contracts do not match the validator")
@@ -1795,6 +1837,88 @@ def _validate_exact_string(
         evidence.blocked.add(f"init.{field_name}.mismatch")
 
 
+def _version_optional_contracts(
+    version: str,
+    surface: str,
+) -> Mapping[str, Mapping[str, Any]]:
+    adaptation = claude_stream_contract.version_adaptation(version)
+    if adaptation is None:
+        return {}
+    return adaptation[surface]["optional_field_contracts"]
+
+
+def _record_optional_contract_failure(
+    evidence: _Evidence,
+    classification: str,
+    reason: str,
+) -> None:
+    if classification == "blocked":
+        evidence.blocked.add(reason)
+    else:
+        evidence.inconclusive.add(reason)
+
+
+def _validate_optional_contract_fields(
+    event: Mapping[str, Any],
+    *,
+    prefix: str,
+    contracts: Mapping[str, Mapping[str, Any]],
+    evidence: _Evidence,
+) -> None:
+    for field_name, field_contract in contracts.items():
+        if field_name not in event:
+            continue
+        value = event[field_name]
+        rule = field_contract["rule"]
+        malformed = False
+        mismatch = False
+        if rule == "duplicate_free_exact_set":
+            malformed = (
+                type(value) is not list
+                or any(type(item) is not str or not item.strip() for item in value)
+                or len(value) != len(set(value))
+            )
+            if not malformed:
+                mismatch = frozenset(value) != frozenset(field_contract["values"])
+        elif rule == "one_of_exact_ordered_arrays":
+            malformed = type(value) is not list or any(
+                type(item) is not str for item in value
+            )
+            if not malformed:
+                accepted = tuple(
+                    tuple(sequence) for sequence in field_contract["values"]
+                )
+                mismatch = tuple(value) not in accepted
+        elif rule == "boolean":
+            malformed = type(value) is not bool
+        elif rule == "null":
+            malformed = value is not None
+        elif rule == "constant":
+            expected = field_contract["value"]
+            malformed = type(value) is not type(expected)
+            mismatch = not malformed and value != expected
+        elif rule == "nonempty_string":
+            malformed = type(value) is not str or not value.strip()
+        elif rule == "nonnegative_finite_number":
+            malformed = not _is_nonnegative_finite_number(value)
+        else:  # The bound stream profile should make this unreachable.
+            evidence.inconclusive.add("validator.optional-field-contract-invalid")
+            continue
+
+        if malformed:
+            _record_optional_contract_failure(
+                evidence,
+                field_contract.get("malformed_failure", field_contract.get("failure")),
+                f"{prefix}.{field_name}.malformed",
+            )
+        elif mismatch:
+            _record_optional_contract_failure(
+                evidence,
+                field_contract.get("mismatch_failure", field_contract.get("failure")),
+                f"{prefix}.{field_name}.mismatch",
+            )
+
+
 def _validate_profile_exact_string(
     event: Mapping[str, Any],
     field_name: str,
@@ -1825,17 +1949,20 @@ def _validate_profile_exact_array(
         evidence.inconclusive.add(f"init.{field_name}.mismatch")
 
 
-def _validate_extended_init(event: Mapping[str, Any], evidence: _Evidence) -> None:
+def _validate_extended_init(
+    event: Mapping[str, Any],
+    *,
+    evidence: _Evidence,
+) -> None:
     _validate_profile_exact_string(event, "output_style", "default", evidence)
     _validate_profile_exact_array(event, "agents", EXPECTED_AGENTS, evidence)
-    _validate_profile_exact_array(
-        event, "capabilities", EXPECTED_CAPABILITIES, evidence
-    )
 
     if "analytics_disabled" in event:
         value = event["analytics_disabled"]
         if type(value) is not bool:
             evidence.inconclusive.add("init.analytics_disabled.malformed")
+        elif value is not True:
+            evidence.inconclusive.add("init.analytics_disabled.mismatch")
 
     if "product_feedback_disabled" in event:
         value = event["product_feedback_disabled"]
@@ -1860,6 +1987,10 @@ def _validate_init(
     launch_profile: str,
     evidence: _Evidence,
 ) -> None:
+    adaptation_contracts = _version_optional_contracts(
+        claude_code_version,
+        "init_event",
+    )
     profile_name = _init_profile_name(claude_code_version)
     if profile_name is None:
         evidence.inconclusive.add("validator.claude-code-version-invalid")
@@ -1868,7 +1999,9 @@ def _validate_init(
         EXTENDED_INIT_REQUIRED_FIELDS if profile_name == "extended-2x" else frozenset()
     )
     required_fields = INIT_REQUIRED_FIELDS | profile_fields
-    allowed_fields = required_fields | INIT_OPTIONAL_FIELDS
+    allowed_fields = (
+        required_fields | INIT_OPTIONAL_FIELDS | frozenset(adaptation_contracts)
+    )
     if frozenset(event) - allowed_fields:
         evidence.inconclusive.add("init.unknown-field")
     missing = required_fields - frozenset(event)
@@ -1917,9 +2050,24 @@ def _validate_init(
         value = event["session_id"]
         if type(value) is not str or not value.strip():
             evidence.inconclusive.add("init.session_id.malformed")
+    _validate_optional_contract_fields(
+        event,
+        prefix="init",
+        contracts=COMPATIBLE_INIT_OPTIONAL_CONTRACTS,
+        evidence=evidence,
+    )
+    _validate_optional_contract_fields(
+        event,
+        prefix="init",
+        contracts=adaptation_contracts,
+        evidence=evidence,
+    )
 
     if profile_name == "extended-2x":
-        _validate_extended_init(event, evidence)
+        _validate_extended_init(
+            event,
+            evidence=evidence,
+        )
 
 
 def _validate_closed_object(
@@ -2546,12 +2694,13 @@ def _validate_assistant_event(
     if "message" not in event:
         return
     message_label = f"{label}.message"
-    message_required_fields = ASSISTANT_MESSAGE_FIELDS
-    if profile_name == "extended-2x":
-        message_required_fields |= EXTENDED_ASSISTANT_MESSAGE_REQUIRED_FIELDS
+    optional_field_contracts = ASSISTANT_MESSAGE_PROFILE_OPTIONAL_FIELD_CONTRACTS[
+        profile_name
+    ]
     message = _validate_closed_object(
         event["message"],
-        required_fields=message_required_fields,
+        required_fields=ASSISTANT_MESSAGE_FIELDS,
+        optional_fields=frozenset(optional_field_contracts),
         label=message_label,
         evidence=evidence,
     )
@@ -2566,10 +2715,16 @@ def _validate_assistant_event(
         _validate_intermediate_null(
             message, field_name, label=message_label, evidence=evidence
         )
-    if profile_name == "extended-2x":
-        _validate_intermediate_null(
-            message, "diagnostics", label=message_label, evidence=evidence
-        )
+    if "diagnostics" in optional_field_contracts:
+        diagnostics = message.get("diagnostics")
+        if diagnostics is not None and not (
+            type(diagnostics) is dict
+            and diagnostics == ASSISTANT_DIAGNOSTICS_CACHE_MISS_UNAVAILABLE
+            and type(diagnostics.get("cache_miss_reason")) is dict
+        ):
+            evidence.inconclusive.add(
+                "intermediate.assistant.message.diagnostics.unsupported"
+            )
     _validate_intermediate_exact_value(
         message, "type", "message", label=message_label, evidence=evidence
     )
@@ -3119,6 +3274,10 @@ def _validate_terminal(
     contract: Mapping[str, Any],
     evidence: _Evidence,
 ) -> str | None:
+    adaptation_contracts = _version_optional_contracts(
+        claude_code_version,
+        "terminal_result",
+    )
     profile_name = _init_profile_name(claude_code_version)
     profile_fields = (
         EXTENDED_TERMINAL_FIELDS if profile_name == "extended-2x" else frozenset()
@@ -3126,7 +3285,9 @@ def _validate_terminal(
     allowed_fields = (
         TERMINAL_REQUIRED_FIELDS
         | TERMINAL_VARIANT_FIELDS
-        | (TERMINAL_OPTIONAL_FIELDS | profile_fields)
+        | TERMINAL_OPTIONAL_FIELDS
+        | frozenset(adaptation_contracts)
+        | profile_fields
     )
     if frozenset(event) - allowed_fields:
         evidence.inconclusive.add("terminal.unknown-field")
@@ -3188,6 +3349,18 @@ def _validate_terminal(
             evidence.inconclusive.add("terminal.result.malformed")
 
     _validate_optional_terminal_fields(event, evidence)
+    _validate_optional_contract_fields(
+        event,
+        prefix="terminal",
+        contracts=COMPATIBLE_TERMINAL_OPTIONAL_CONTRACTS,
+        evidence=evidence,
+    )
+    _validate_optional_contract_fields(
+        event,
+        prefix="terminal",
+        contracts=adaptation_contracts,
+        evidence=evidence,
+    )
     messages = _collect_error_messages(event, evidence)
     if success_claim and messages:
         evidence.inconclusive.add("terminal.success-with-error")
