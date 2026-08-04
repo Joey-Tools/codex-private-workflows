@@ -13,6 +13,20 @@ Use this when Joey asks for a daily work-report draft instead of a direct Apple 
 - Under each top-level bucket, prefer indented numbered sub-items with one or two concise lines.
 - Do not flatten the bucket label into prose such as `1. HDR-streaming` followed by free-standing paragraphs.
 
+## Bucket Identity And Mapping
+
+Resolve every project bucket with this precedence:
+
+1. Apply an explicit repository-to-bucket mapping or exception from the skill.
+2. Preserve an unambiguous repository-specific mapping already established in the matching note or a prior accepted report.
+3. Otherwise, use the canonical repository basename as `#<repo-basename>` when it is a stable project tag.
+4. If the relationship is still unclear, surface it outside the draft as needing scope confirmation.
+
+Do not use fuzzy product-name or abbreviation matching to choose a bucket. In particular:
+
+- Map the exact `webex-message-archiver` repository to `#webex-message-archiver`.
+- Use `#WME` only when the note or work evidence explicitly identifies WME; never infer it from the word `Webex`.
+
 ## Preferred Tone
 
 - Concise, report-ready, and easy to paste.
@@ -26,7 +40,7 @@ Use this when Joey asks for a daily work-report draft instead of a direct Apple 
 - The draft should usually capture the main project buckets, the user-visible outcome, and one or two concrete work themes.
 - Prefer about `2-4` top-level buckets for an ordinary day unless the evidence clearly justifies more.
 - Collapse repeated review/re-run/recheck loops into one concise line unless the distinction matters.
-- Prefer project grouping such as `#HDR-streaming`, `#Miku-bot`, `#GitHub-agent`, `#Codex-maintenance`, `#WME`, or another known report bucket from Joey's mapping.
+- Prefer project grouping such as `#HDR-streaming`, `#Miku-bot`, `#GitHub-agent`, `#Codex-maintenance`, `#webex-message-archiver`, or another known report bucket from Joey's mapping.
 
 ## Empty Or Weak-Evidence Days
 
