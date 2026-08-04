@@ -12,6 +12,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shlex
 import shutil
 import stat
 import sys
@@ -6386,22 +6387,144 @@ class PrivateOverlaySyncTests(unittest.TestCase):
         )
 
     def test_python_workflows_disable_bytecode_before_runtime_imports(self) -> None:
+        def assert_bytecode_guard_contract(workflow: str) -> None:
+            preamble, separator, jobs = workflow.partition("\njobs:\n")
+            self.assertEqual(separator, "\njobs:\n")
+            self.assertIn(
+                '\nenv:\n  PYTHONDONTWRITEBYTECODE: "1"\n',
+                preamble,
+            )
+            self.assertEqual(preamble.count("PYTHONDONTWRITEBYTECODE"), 1)
+
+            job_lines = jobs.splitlines()
+            for line_index, line in enumerate(job_lines):
+                if "PYTHONDONTWRITEBYTECODE" not in line:
+                    continue
+                self.assertEqual(line.count("PYTHONDONTWRITEBYTECODE"), 1)
+                self.assertRegex(
+                    line.strip(),
+                    r"\bPYTHONDONTWRITEBYTECODE=1\s*\\$",
+                )
+                command_start = line_index
+                while (
+                    command_start > 0
+                    and job_lines[command_start - 1].rstrip().endswith("\\")
+                ):
+                    command_start -= 1
+                command_context = "\n".join(
+                    job_lines[command_start : line_index + 1]
+                )
+                variable_index = command_context.rfind("PYTHONDONTWRITEBYTECODE")
+                env_index = command_context.rfind(
+                    "/usr/bin/env -i", 0, variable_index
+                )
+                self.assertGreaterEqual(env_index, 0)
+                env_arguments = command_context[
+                    env_index + len("/usr/bin/env -i") : variable_index
+                ]
+                self.assertNotRegex(env_arguments, r"[;&|]")
+                try:
+                    argument_tokens = shlex.split(
+                        env_arguments.replace("\\\n", " ")
+                    )
+                except ValueError as error:
+                    self.fail(f"invalid env -i argument quoting: {error}")
+                for argument in argument_tokens:
+                    self.assertRegex(argument, r"^[A-Z_][A-Z0-9_]*=.+$")
+
         workflow_paths = (
             REPO_ROOT / ".github" / "workflows" / "ci.yml",
             REPO_ROOT / ".github" / "workflows" / "release.yml",
             REPO_ROOT / ".github" / "workflows" / "scheduled-sync-release.yml",
         )
+        workflow_cases = [
+            (workflow_path.name, workflow_path.read_text(encoding="utf-8"))
+            for workflow_path in workflow_paths
+        ]
+        workflow_cases.append(
+            (
+                "scrubbed-child-multiline-environment",
+                r"""name: Synthetic
 
-        for workflow_path in workflow_paths:
-            with self.subTest(workflow=workflow_path.name):
-                workflow = workflow_path.read_text(encoding="utf-8")
-                preamble, separator, _jobs = workflow.partition("\njobs:\n")
-                self.assertEqual(separator, "\njobs:\n")
-                self.assertIn(
-                    '\nenv:\n  PYTHONDONTWRITEBYTECODE: "1"\n',
-                    preamble,
-                )
-                self.assertEqual(workflow.count("PYTHONDONTWRITEBYTECODE"), 1)
+env:
+  PYTHONDONTWRITEBYTECODE: "1"
+
+jobs:
+  test:
+    steps:
+      - run: |
+          /usr/bin/env -i \
+            HOME=/var/empty \
+            PYTHONDONTWRITEBYTECODE=1 \
+            python3 -I -B -S test.py
+""",
+            )
+        )
+        workflow_cases.append(
+            (
+                "scrubbed-child-inline-environment",
+                r"""name: Synthetic
+
+env:
+  PYTHONDONTWRITEBYTECODE: "1"
+
+jobs:
+  test:
+    steps:
+      - run: |
+          /usr/bin/env -i PYTHONDONTWRITEBYTECODE=1 \
+            python3 -I -B -S test.py
+""",
+            )
+        )
+
+        for workflow_name, workflow in workflow_cases:
+            with self.subTest(workflow=workflow_name):
+                assert_bytecode_guard_contract(workflow)
+
+        invalid_job_bodies = {
+            "job-env-override": """  test:
+    env:
+      PYTHONDONTWRITEBYTECODE: "0"
+""",
+            "unisolated-command-override": r"""  test:
+    steps:
+      - run: |
+          PYTHONDONTWRITEBYTECODE=1 \
+            python3 -I -B -S test.py
+""",
+            "separated-from-scrubbed-command": r"""  test:
+    steps:
+      - run: |
+          /usr/bin/env -i true; PYTHONDONTWRITEBYTECODE=1 \
+            python3 -I -B -S test.py
+""",
+            "duplicate-on-admitted-line": r"""  test:
+    steps:
+      - run: |
+          /usr/bin/env -i PYTHONDONTWRITEBYTECODE=0 PYTHONDONTWRITEBYTECODE=1 \
+            python3 -I -B -S test.py
+""",
+            "duplicate-across-separated-continuations": r"""  test:
+    steps:
+      - run: |
+          /usr/bin/env -i \
+            PYTHONDONTWRITEBYTECODE=1 \
+            true; PYTHONDONTWRITEBYTECODE=1 \
+            python3 -I -B -S test.py
+""",
+        }
+        for case_name, jobs in invalid_job_bodies.items():
+            with self.subTest(rejected=case_name):
+                workflow = """name: Synthetic
+
+env:
+  PYTHONDONTWRITEBYTECODE: "1"
+
+jobs:
+""" + jobs
+                with self.assertRaises(AssertionError):
+                    assert_bytecode_guard_contract(workflow)
 
     def test_release_workflows_use_vm_backed_runners(self) -> None:
         workflows = {
