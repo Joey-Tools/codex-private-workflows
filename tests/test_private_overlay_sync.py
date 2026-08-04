@@ -1050,7 +1050,7 @@ class PrivateOverlaySyncTests(unittest.TestCase):
         source.write_text(
             "\n".join(
                 [
-                    "Maintain repository project journals and their optional local tooling.",
+                    "description: Maintain repository project journals and their optional local tooling.",
                     "Find repositories recently touched by Codex sessions.",
                     "Use this when converting existing repositories.",
                     "Do not batch-install hooks across repositories.",
@@ -1082,7 +1082,7 @@ class PrivateOverlaySyncTests(unittest.TestCase):
         )
         text = target.read_text(encoding="utf-8")
         self.assertIn(
-            "Maintain Joey repo project journals and their optional local tooling.",
+            "description: Maintain Joey repo project journals and their optional local tooling.",
             text,
         )
         self.assertIn("Find Joey repos recently touched by Codex sessions.", text)
@@ -1108,7 +1108,49 @@ class PrivateOverlaySyncTests(unittest.TestCase):
         source.write_text(
             "\n".join(
                 [
-                    "Archive repository project journals.",
+                    "description: Archive repository project journals.",
+                    "Find repositories recently touched by Codex sessions.",
+                    "Use this when converting existing repositories.",
+                    "Do not batch-install hooks across repositories.",
+                    "",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        script = source.parent / "scripts" / "project_journal.py"
+        script.parent.mkdir()
+        script.write_text(
+            '"""Manage cross-repo project journal indexes for Codex workflows."""\n',
+            encoding="utf-8",
+        )
+        references = source.parent / "references"
+        references.mkdir()
+        (references / "wording-history.md").write_text(
+            "Previous frontmatter: description: Maintain repository project journals.\n",
+            encoding="utf-8",
+        )
+        rule = next(
+            rule
+            for rule in SYNC_MODULE.SYNC_RULES
+            if rule.target == Path("personal_codex/skills/project-journal")
+        )
+
+        with self.assertRaisesRegex(
+            SYNC_MODULE.SyncError,
+            "description: Maintain repository project journals",
+        ):
+            SYNC_MODULE.sync_sources(self.repo_root, self.source_root, (rule,))
+
+    def test_project_journal_sync_rule_rejects_duplicate_frontmatter_anchor(
+        self,
+    ) -> None:
+        source = self.source_root / "codex-project-journal" / "SKILL.md"
+        source.parent.mkdir(parents=True)
+        source.write_text(
+            "\n".join(
+                [
+                    "description: Maintain repository project journals.",
+                    "description: Maintain repository project journals again.",
                     "Find repositories recently touched by Codex sessions.",
                     "Use this when converting existing repositories.",
                     "Do not batch-install hooks across repositories.",
@@ -1131,7 +1173,7 @@ class PrivateOverlaySyncTests(unittest.TestCase):
 
         with self.assertRaisesRegex(
             SYNC_MODULE.SyncError,
-            "Maintain repository project journals",
+            "required replacement count mismatch",
         ):
             SYNC_MODULE.sync_sources(self.repo_root, self.source_root, (rule,))
 
@@ -1526,6 +1568,67 @@ class PrivateOverlaySyncTests(unittest.TestCase):
             (self.repo_root / plain_target / "SKILL.md").read_text(encoding="utf-8"),
             "replace-new\n",
         )
+
+    def test_secure_replacements_enforce_scoped_exact_counts(self) -> None:
+        cases = (
+            (
+                "cross-file-bait",
+                "description: Archive repository project journals.\n",
+                "Previous frontmatter: description: Maintain repository project journals.\n",
+            ),
+            (
+                "duplicate-anchor",
+                "description: Maintain repository project journals.\n"
+                "description: Maintain repository project journals again.\n",
+                "",
+            ),
+        )
+        for name, skill_text, reference_text in cases:
+            with self.subTest(name=name):
+                repo = f"secure-{name}-repo"
+                source = self.source_root / repo / "skill"
+                source.mkdir(parents=True)
+                (source / "SKILL.md").write_text(skill_text, encoding="utf-8")
+                (source / "reference.md").write_text(
+                    reference_text,
+                    encoding="utf-8",
+                )
+                (source / "catalog.json").write_bytes(b"public\n")
+                private = self.repo_root / "private" / f"{name}.json"
+                private.parent.mkdir(exist_ok=True)
+                private.write_bytes(b"private\n")
+                target = Path("personal_codex/skills") / name
+                rule = SYNC_MODULE.SyncRule(
+                    repo=repo,
+                    source=Path("skill"),
+                    target=target,
+                    replacements=(
+                        SYNC_MODULE.Replacement(
+                            "description: Maintain repository project journals",
+                            "description: Maintain Joey repo project journals",
+                            path=Path("SKILL.md"),
+                            required_count=1,
+                        ),
+                    ),
+                    regular_file_overlays=(
+                        SYNC_MODULE.RegularFileOverlay(
+                            source=Path("private") / f"{name}.json",
+                            target=Path("catalog.json"),
+                        ),
+                    ),
+                )
+
+                with self.assertRaisesRegex(
+                    SYNC_MODULE.SyncError,
+                    "required replacement count mismatch",
+                ):
+                    SYNC_MODULE.sync_sources(
+                        self.repo_root,
+                        self.source_root,
+                        (rule,),
+                    )
+
+                self.assertFalse((self.repo_root / target).exists())
 
     def test_regular_file_overlay_repo_swap_after_source_read_blocks_write(
         self,

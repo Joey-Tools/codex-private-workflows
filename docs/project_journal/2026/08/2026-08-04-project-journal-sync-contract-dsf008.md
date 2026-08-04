@@ -20,9 +20,10 @@ superseded_by:
 
 - The public project-journal description now starts with `Maintain repository project journals` instead of `Manage repository project journals`.
 - The public workflow removed the old `For repositories` policy sentence, so the private rule no longer requires or recreates it.
+- The description personalization is bound to `SKILL.md` and requires exactly one source anchor, so matching historical wording in another file cannot mask frontmatter drift.
 - The remaining project-journal personalizations stay required and continue to fail closed on unreviewed source drift.
-- Focused project-journal sync coverage includes both the current source contract and a frontmatter-drift rejection.
-- The repository's complete 1,330-test suite passes with the final implementation.
+- Focused project-journal sync coverage includes the current source contract, a cross-file bait regression, and a duplicate-anchor rejection.
+- The repository's complete 1,332-test suite passes with the final implementation.
 
 ## Next Steps
 
