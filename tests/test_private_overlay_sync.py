@@ -6391,17 +6391,37 @@ class PrivateOverlaySyncTests(unittest.TestCase):
             REPO_ROOT / ".github" / "workflows" / "release.yml",
             REPO_ROOT / ".github" / "workflows" / "scheduled-sync-release.yml",
         )
+        workflow_cases = [
+            (workflow_path.name, workflow_path.read_text(encoding="utf-8"))
+            for workflow_path in workflow_paths
+        ]
+        workflow_cases.append(
+            (
+                "scrubbed-child-environment",
+                """name: Synthetic
 
-        for workflow_path in workflow_paths:
-            with self.subTest(workflow=workflow_path.name):
-                workflow = workflow_path.read_text(encoding="utf-8")
+env:
+  PYTHONDONTWRITEBYTECODE: "1"
+
+jobs:
+  test:
+    steps:
+      - run: /usr/bin/env -i PYTHONDONTWRITEBYTECODE=1 python3 -I -B -S test.py
+""",
+            )
+        )
+
+        for workflow_name, workflow in workflow_cases:
+            with self.subTest(workflow=workflow_name):
                 preamble, separator, _jobs = workflow.partition("\njobs:\n")
                 self.assertEqual(separator, "\njobs:\n")
                 self.assertIn(
                     '\nenv:\n  PYTHONDONTWRITEBYTECODE: "1"\n',
                     preamble,
                 )
-                self.assertEqual(workflow.count("PYTHONDONTWRITEBYTECODE"), 1)
+                # Scrubbed child environments may need to reintroduce this
+                # variable explicitly; only the workflow-global guard is unique.
+                self.assertEqual(preamble.count("PYTHONDONTWRITEBYTECODE"), 1)
 
     def test_release_workflows_use_vm_backed_runners(self) -> None:
         workflows = {
