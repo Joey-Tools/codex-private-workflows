@@ -655,6 +655,43 @@ class PrivateOverlaySyncTests(unittest.TestCase):
             target.read_text(encoding="utf-8"), "Use this when Joey asks.\n"
         )
 
+    def test_private_ci_workflow_sync_rule_is_unique_and_byte_exact(self) -> None:
+        canonical_source = Path(
+            "skills/review-orchestration-playbook/tests/fixtures/ci/private.yml"
+        )
+        private_target = Path(".github/workflows/ci.yml")
+        source_keys = [
+            (rule.repo, rule.source) for rule in SYNC_MODULE.SYNC_RULES
+        ]
+        targets = [rule.target for rule in SYNC_MODULE.SYNC_RULES]
+        rules = [
+            rule
+            for rule in SYNC_MODULE.SYNC_RULES
+            if rule.source == canonical_source or rule.target == private_target
+        ]
+
+        self.assertEqual(len(source_keys), len(set(source_keys)))
+        self.assertEqual(len(targets), len(set(targets)))
+        self.assertEqual(len(rules), 1)
+        rule = rules[0]
+        self.assertEqual(rule.repo, "codex-review-workflows")
+        self.assertEqual(rule.source, canonical_source)
+        self.assertEqual(rule.target, private_target)
+        self.assertFalse(rule.replacements)
+        self.assertFalse(rule.regular_file_overlays)
+
+        payload = (
+            b"name: Private CI\n"
+            b"# Preserve canonical fixture bytes without text transforms.\n"
+        )
+        source = self.source_root / rule.repo / rule.source
+        source.parent.mkdir(parents=True)
+        source.write_bytes(payload)
+
+        SYNC_MODULE.sync_sources(self.repo_root, self.source_root, (rule,))
+
+        self.assertEqual((self.repo_root / rule.target).read_bytes(), payload)
+
     def test_validator_sync_rule_replaces_legacy_mutable_release_identity(
         self,
     ) -> None:
@@ -6165,6 +6202,43 @@ class PrivateOverlaySyncTests(unittest.TestCase):
         self.assertEqual(checked_out_repos, sync_rule_repos)
         self.assertEqual(checked_out_paths, sync_rule_repos)
 
+    def test_live_private_ci_workflow_matches_synced_fixture_bytes(self) -> None:
+        workflow = REPO_ROOT / ".github" / "workflows" / "ci.yml"
+        fixture = (
+            REPO_ROOT
+            / "personal_codex"
+            / "skills"
+            / "review-orchestration-playbook"
+            / "tests"
+            / "fixtures"
+            / "ci"
+            / "private.yml"
+        )
+
+        self.assertEqual(workflow.read_bytes(), fixture.read_bytes())
+
+    def test_scheduled_workflow_tracks_generated_github_files(self) -> None:
+        workflow = (
+            REPO_ROOT / ".github" / "workflows" / "scheduled-sync-release.yml"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn(
+            "git status --porcelain -- .github scripts tests personal_codex .agents",
+            workflow,
+        )
+        self.assertIn(
+            "git add .github scripts tests personal_codex .agents",
+            workflow,
+        )
+        self.assertNotIn(
+            "git status --porcelain -- scripts tests personal_codex .agents",
+            workflow,
+        )
+        self.assertNotIn(
+            "git add scripts tests personal_codex .agents",
+            workflow,
+        )
+
     def test_python_workflows_disable_bytecode_before_runtime_imports(self) -> None:
         workflow_paths = (
             REPO_ROOT / ".github" / "workflows" / "ci.yml",
@@ -6212,6 +6286,44 @@ class PrivateOverlaySyncTests(unittest.TestCase):
                     job.group("body"),
                 )
                 self.assertEqual(runners, ["ubuntu-latest"])
+
+    def test_full_canonical_suite_jobs_use_python_313_with_bounded_timeout(
+        self,
+    ) -> None:
+        scheduled = (
+            REPO_ROOT / ".github" / "workflows" / "scheduled-sync-release.yml"
+        ).read_text(encoding="utf-8")
+        release = (REPO_ROOT / ".github" / "workflows" / "release.yml").read_text(
+            encoding="utf-8"
+        )
+
+        scheduled_job = re.search(
+            r"(?ms)^  sync-release:\n(?P<body>.*?)(?=^  [-a-zA-Z0-9_]+:\n|\Z)",
+            scheduled,
+        )
+        release_job = re.search(
+            r"(?ms)^  release:\n(?P<body>.*?)(?=^  [-a-zA-Z0-9_]+:\n|\Z)",
+            release,
+        )
+        publish_job = re.search(
+            r"(?ms)^  publish:\n(?P<body>.*?)(?=^  [-a-zA-Z0-9_]+:\n|\Z)",
+            release,
+        )
+        self.assertIsNotNone(scheduled_job)
+        self.assertIsNotNone(release_job)
+        self.assertIsNotNone(publish_job)
+
+        scheduled_body = scheduled_job.group("body")
+        release_body = release_job.group("body")
+        publish_body = publish_job.group("body")
+        self.assertIn("timeout-minutes: 30", scheduled_body)
+        self.assertNotIn("timeout-minutes: 15", scheduled_body)
+        self.assertIn('python-version: "3.13"', scheduled_body)
+        self.assertNotIn('python-version: "3.x"', scheduled_body)
+        self.assertIn('python-version: "3.13"', release_body)
+        self.assertNotIn('python-version: "3.x"', release_body)
+        self.assertIn('python-version: "3.x"', publish_body)
+        self.assertNotIn('python-version: "3.13"', publish_body)
 
     def test_release_publish_steps_use_separate_immutable_releases_token(
         self,

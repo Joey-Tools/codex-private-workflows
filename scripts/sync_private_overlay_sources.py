@@ -457,6 +457,11 @@ SYNC_RULES = (
     ),
     _rule(
         "codex-review-workflows",
+        "skills/review-orchestration-playbook/tests/fixtures/ci/private.yml",
+        ".github/workflows/ci.yml",
+    ),
+    _rule(
+        "codex-review-workflows",
         "skills/review-orchestration-playbook",
         "personal_codex/skills/review-orchestration-playbook",
         common_joey_text=True,

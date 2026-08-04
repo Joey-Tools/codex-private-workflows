@@ -85,6 +85,9 @@ release workflow. If a run detects sync changes, it does not attempt to repair a
 incomplete release from the pre-sync SHA after mutating the checkout; release repair
 is reserved for runs whose sync working tree remains unchanged. Immediately before
 building, the workflow rechecks both `HEAD` and the complete Git working-tree state.
+The canonical review skill's `tests/fixtures/ci/private.yml` materializes the live
+private CI workflow byte-for-byte; scheduled sync tracks and stages `.github`, and
+the scheduled and release full-suite jobs run on Python 3.13.
 
 The sync PR step requires a `PRIVATE_OVERLAY_SYNC_PR_TOKEN` secret with repository
 contents, pull-request, and issues write access. The workflow uses that token for
