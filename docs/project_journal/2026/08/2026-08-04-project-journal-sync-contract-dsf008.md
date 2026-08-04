@@ -1,11 +1,11 @@
 ---
 id: 20260804-dsf008
 title: Project Journal Private Sync Contract Repair
-status: active
+status: completed
 created: 2026-08-04
 updated: 2026-08-04
 branch: codex/fix-project-journal-sync-contract
-pr: null
+pr: https://github.com/Joey-Tools/codex-private-workflows/pull/141
 supersedes: []
 superseded_by:
 ---
@@ -22,17 +22,17 @@ superseded_by:
 - The public workflow removed the old `For repositories` policy sentence, so the private rule no longer requires or recreates it.
 - The remaining project-journal personalizations stay required and continue to fail closed on unreviewed source drift.
 - Focused project-journal sync coverage includes both the current source contract and a frontmatter-drift rejection.
+- The repository's complete 1,330-test suite passes with the final implementation.
 
 ## Next Steps
 
-- Complete the local delivery gate and independent review.
-- Merge the repair PR.
-- Rerun the scheduled private overlay sync and release workflow.
+- None.
 
 ## Evidence
 
 - https://github.com/Joey-Tools/codex-private-workflows/actions/runs/30897370215
 - https://github.com/Joey-Tools/codex-project-journal/commit/4f53fd1bf9ba0a7c85db8d183016210d3d0089e5
 - https://github.com/Joey-Tools/codex-review-workflows/pull/88
+- https://github.com/Joey-Tools/codex-private-workflows/pull/141
 - `scripts/sync_private_overlay_sources.py`
 - `tests/test_private_overlay_sync.py`
