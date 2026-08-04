@@ -692,6 +692,60 @@ class PrivateOverlaySyncTests(unittest.TestCase):
 
         self.assertEqual((self.repo_root / rule.target).read_bytes(), payload)
 
+    def test_review_sync_preserves_private_ci_fixture_replacement_bytes(
+        self,
+    ) -> None:
+        fixture_relative = Path("tests/fixtures/ci/private.yml")
+        ci_rule = next(
+            rule
+            for rule in SYNC_MODULE.SYNC_RULES
+            if rule.target == Path(".github/workflows/ci.yml")
+        )
+        review_rule = next(
+            rule
+            for rule in SYNC_MODULE.SYNC_RULES
+            if rule.target == SYNC_MODULE.CANONICAL_REVIEW_TARGET
+        )
+        self.assertEqual(
+            review_rule.replacement_excluded_paths,
+            (fixture_relative,),
+        )
+
+        source = self.source_root / review_rule.repo / review_rule.source
+        for relative in SYNC_MODULE.CANONICAL_REVIEW_REQUIRED_FILES:
+            path = source / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("public\n", encoding="utf-8")
+        (source / "SKILL.md").write_text(
+            "Use this when the user asks.\n",
+            encoding="utf-8",
+        )
+        fixture_payload = (
+            b"name: Private CI\n"
+            b"# Keep the user and user-specific profile bytes canonical.\n"
+        )
+        (source / fixture_relative).write_bytes(fixture_payload)
+
+        private_catalog = self.repo_root / review_rule.regular_file_overlays[0].source
+        private_catalog.parent.mkdir(parents=True)
+        private_catalog.write_bytes(b'{"pool":"private"}\n')
+
+        SYNC_MODULE.sync_sources(
+            self.repo_root,
+            self.source_root,
+            (review_rule, ci_rule),
+        )
+
+        live_ci = self.repo_root / ci_rule.target
+        nested_fixture = self.repo_root / review_rule.target / fixture_relative
+        synced_skill = self.repo_root / review_rule.target / "SKILL.md"
+        self.assertEqual(live_ci.read_bytes(), fixture_payload)
+        self.assertEqual(nested_fixture.read_bytes(), fixture_payload)
+        self.assertEqual(
+            synced_skill.read_text(encoding="utf-8"),
+            "Use this when Joey asks.\n",
+        )
+
     def test_validator_sync_rule_replaces_legacy_mutable_release_identity(
         self,
     ) -> None:
@@ -1295,6 +1349,94 @@ class PrivateOverlaySyncTests(unittest.TestCase):
 
         with self.assertRaisesRegex(SYNC_MODULE.SyncError, "required replacement"):
             SYNC_MODULE.sync_sources(self.repo_root, self.source_root, (rule,))
+
+    def test_replacement_excluded_paths_reject_unsafe_and_ambiguous_rules(
+        self,
+    ) -> None:
+        replacement = SYNC_MODULE.Replacement(
+            "public",
+            "private",
+            required=False,
+        )
+        path_scoped_replacement = SYNC_MODULE.Replacement(
+            "public",
+            "private",
+            path=Path("private.yml"),
+        )
+        cases = (
+            ("require replacements", (), (Path("private.yml"),)),
+            ("unsafe", (replacement,), (Path("."),)),
+            (
+                "duplicate",
+                (replacement,),
+                (Path("private.yml"), Path("private.yml")),
+            ),
+            (
+                "conflicts with path-scoped",
+                (path_scoped_replacement,),
+                (Path("private.yml"),),
+            ),
+        )
+
+        for error, replacements, excluded_paths in cases:
+            with self.subTest(error=error):
+                rule = SYNC_MODULE.SyncRule(
+                    repo="example-repo",
+                    source=Path("skill"),
+                    target=Path("personal_codex/skills/example"),
+                    replacements=replacements,
+                    replacement_excluded_paths=excluded_paths,
+                )
+                with self.assertRaisesRegex(SYNC_MODULE.SyncError, error):
+                    SYNC_MODULE.sync_sources(
+                        self.repo_root,
+                        self.source_root,
+                        (rule,),
+                    )
+
+    def test_replacement_excluded_path_must_name_a_text_candidate(self) -> None:
+        source = self.source_root / "example-repo" / "skill"
+        source.mkdir(parents=True)
+        (source / "SKILL.md").write_text("public\n", encoding="utf-8")
+        rule = SYNC_MODULE.SyncRule(
+            repo="example-repo",
+            source=Path("skill"),
+            target=Path("personal_codex/skills/example"),
+            replacements=(
+                SYNC_MODULE.Replacement("public", "private", required=False),
+            ),
+            replacement_excluded_paths=(Path("missing.yml"),),
+        )
+
+        with self.assertRaisesRegex(
+            SYNC_MODULE.SyncError,
+            "missing or not a text candidate",
+        ):
+            SYNC_MODULE.sync_sources(self.repo_root, self.source_root, (rule,))
+
+        self.assertFalse((self.repo_root / rule.target).exists())
+
+    def test_replacement_exclusion_does_not_bypass_forbidden_residuals(
+        self,
+    ) -> None:
+        source = self.source_root / "example-repo" / "skill"
+        source.mkdir(parents=True)
+        (source / "private.yml").write_text("public-token\n", encoding="utf-8")
+        rule = SYNC_MODULE.SyncRule(
+            repo="example-repo",
+            source=Path("skill"),
+            target=Path("personal_codex/skills/example"),
+            replacements=(
+                SYNC_MODULE.Replacement("public", "private", required=False),
+            ),
+            forbidden_residuals=("public-token",),
+            replacement_excluded_paths=(Path("private.yml"),),
+        )
+
+        with self.assertRaisesRegex(SYNC_MODULE.SyncError, "forbidden residual"):
+            SYNC_MODULE.sync_sources(self.repo_root, self.source_root, (rule,))
+
+        self.assertFalse((self.repo_root / rule.target).exists())
 
     def test_failed_replacement_leaves_existing_target_unchanged(self) -> None:
         source = self.source_root / "example-repo" / "skill" / "SKILL.md"
@@ -5640,6 +5782,10 @@ class PrivateOverlaySyncTests(unittest.TestCase):
             )
         )
         self.assertEqual(
+            rule.replacement_excluded_paths,
+            (Path("tests/fixtures/ci/private.yml"),),
+        )
+        self.assertEqual(
             rule.regular_file_overlays,
             (
                 SYNC_MODULE.RegularFileOverlay(
@@ -6638,6 +6784,46 @@ class PrivateOverlaySyncTests(unittest.TestCase):
         self.assertIn("PRIVATE_OVERLAY_SYNC_PR_TOKEN", readme)
         self.assertIn("contents, pull-request, and issues write access", readme)
         self.assertIn("codex-automation", readme)
+
+    def test_readme_documents_canonical_source_trust_boundary(self) -> None:
+        readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
+        normalized_readme = re.sub(r"\s+", " ", readme)
+
+        self.assertIn(
+            "`Joey-Tools/codex-review-workflows` default branch as its executable "
+            "canonical-source trust root",
+            normalized_readme,
+        )
+        self.assertIn(
+            "untrusted requires separate SHA-promotion or allowlist hardening",
+            normalized_readme,
+        )
+        self.assertIn(
+            "The current generated PR workflow declares only `contents: read` and "
+            "contains no `secrets.*` references",
+            normalized_readme,
+        )
+
+        ci_workflow = (REPO_ROOT / ".github/workflows/ci.yml").read_text(
+            encoding="utf-8"
+        )
+        private_fixture = (
+            REPO_ROOT
+            / "personal_codex"
+            / "skills"
+            / "review-orchestration-playbook"
+            / "tests"
+            / "fixtures"
+            / "ci"
+            / "private.yml"
+        ).read_text(
+            encoding="utf-8",
+        )
+        self.assertEqual(ci_workflow, private_fixture)
+        preamble, separator, _jobs = ci_workflow.partition("\njobs:\n")
+        self.assertEqual(separator, "\njobs:\n")
+        self.assertIn("permissions:\n  contents: read", preamble)
+        self.assertNotIn("secrets.", ci_workflow)
 
     def test_readme_documents_immutable_releases_token_permissions(self) -> None:
         readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")

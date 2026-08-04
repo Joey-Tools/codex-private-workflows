@@ -88,6 +88,10 @@ building, the workflow rechecks both `HEAD` and the complete Git working-tree st
 The canonical review skill's `tests/fixtures/ci/private.yml` materializes the live
 private CI workflow byte-for-byte; scheduled sync tracks and stages `.github`, and
 the scheduled and release full-suite jobs run on Python 3.13.
+This pipeline treats the `Joey-Tools/codex-review-workflows` default branch as its
+executable canonical-source trust root; treating it as untrusted requires separate
+SHA-promotion or allowlist hardening. The current generated PR workflow declares
+only `contents: read` and contains no `secrets.*` references.
 
 The sync PR step requires a `PRIVATE_OVERLAY_SYNC_PR_TOKEN` secret with repository
 contents, pull-request, and issues write access. The workflow uses that token for
