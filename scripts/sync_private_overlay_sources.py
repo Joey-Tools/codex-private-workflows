@@ -1173,6 +1173,25 @@ def _private_bug_triage_is_allowed_dynamic_reflection_call(node: ast.Call) -> bo
     )
 
 
+def _private_bug_triage_is_allowed_direct_reflection_call(
+    node: ast.Call,
+    policy_sensitive_builtins: frozenset[str],
+) -> bool:
+    if (
+        not isinstance(node.func, ast.Name)
+        or node.func.id not in {"delattr", "getattr", "setattr"}
+    ):
+        return False
+    if _private_bug_triage_is_allowed_dynamic_reflection_call(node):
+        return True
+    return (
+        len(node.args) >= 2
+        and isinstance(node.args[1], ast.Constant)
+        and isinstance(node.args[1].value, str)
+        and node.args[1].value not in policy_sensitive_builtins
+    )
+
+
 def _private_bug_triage_validate_no_policy_mutation(
     tree: ast.Module,
     allowed_target_ids: set[int],
@@ -1186,6 +1205,15 @@ def _private_bug_triage_validate_no_policy_mutation(
     bounded_reflection_calls = frozenset(
         {"delattr", "getattr", "setattr"}
     )
+    policy_sensitive_builtins = forbidden_dynamic_calls | bounded_reflection_calls
+    allowed_reflection_name_load_ids = {
+        id(node.func)
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and _private_bug_triage_is_allowed_direct_reflection_call(
+            node, policy_sensitive_builtins
+        )
+    }
     for node in ast.walk(tree):
         if (
             isinstance(node, ast.Name)
@@ -1234,6 +1262,23 @@ def _private_bug_triage_validate_no_policy_mutation(
             node.name.split(".", 1)[0] in reserved or node.asname in reserved
         ):
             raise SyncError("private bug-triage policy forbids imported policy names")
+        if isinstance(node, ast.Import) and any(
+            alias.name.split(".", 1)[0] == "builtins" for alias in node.names
+        ):
+            raise SyncError(
+                "private bug-triage policy forbids importing the builtins module"
+            )
+        if (
+            isinstance(node, ast.ImportFrom)
+            and node.module == "builtins"
+            and any(
+                alias.name == "*" or alias.name in policy_sensitive_builtins
+                for alias in node.names
+            )
+        ):
+            raise SyncError(
+                "private bug-triage policy forbids importing policy-sensitive builtins"
+            )
         if isinstance(node, ast.ExceptHandler) and node.name in reserved:
             raise SyncError("private bug-triage policy forbids exception-name shadowing")
         if isinstance(node, (ast.MatchAs, ast.MatchStar)) and node.name in reserved:
@@ -1255,10 +1300,51 @@ def _private_bug_triage_validate_no_policy_mutation(
                 raise SyncError(
                     f"private bug-triage policy forbids dynamic builtin reference {node.id}"
                 )
+            if (
+                isinstance(node, ast.Name)
+                and node.id in bounded_reflection_calls
+                and isinstance(node.ctx, ast.Load)
+                and id(node) not in allowed_reflection_name_load_ids
+            ):
+                raise SyncError(
+                    f"private bug-triage policy forbids unapproved reflection builtin reference {node.id}"
+                )
+            if (
+                isinstance(node, ast.Name)
+                and node.id in {"builtins", "__builtins__"}
+                and isinstance(node.ctx, ast.Load)
+            ):
+                raise SyncError(
+                    f"private bug-triage policy forbids builtin namespace reference {node.id}"
+                )
             continue
         if isinstance(node.func, ast.Name) and node.func.id in forbidden_dynamic_calls:
             raise SyncError(
                 f"private bug-triage policy forbids dynamic call {node.func.id}()"
+            )
+        if (
+            isinstance(node.func, ast.Attribute)
+            and (
+                node.func.attr in bounded_reflection_calls
+                or (
+                    node.func.attr in forbidden_dynamic_calls
+                    and isinstance(node.func.value, ast.Name)
+                    and node.func.value.id in {"builtins", "__builtins__"}
+                )
+            )
+        ):
+            raise SyncError(
+                "private bug-triage policy forbids qualified dynamic/reflection builtin calls"
+            )
+        if (
+            isinstance(node.func, ast.Name)
+            and node.func.id in bounded_reflection_calls
+            and len(node.args) >= 2
+            and isinstance(node.args[1], ast.Constant)
+            and node.args[1].value in policy_sensitive_builtins
+        ):
+            raise SyncError(
+                "private bug-triage policy forbids reflection builtin acquisition"
             )
         if (
             isinstance(node.func, ast.Name)

@@ -1322,6 +1322,83 @@ class PrivateOverlaySyncTests(unittest.TestCase):
         ):
             SYNC_MODULE.sync_sources(self.repo_root, self.source_root, (rule,))
 
+    def test_bug_triage_sync_rejects_imported_reflection_alias(self) -> None:
+        rule, _source, _interface = self._write_current_bug_triage_source(
+            appended_script=(
+                "\nfrom builtins import setattr as mutate\n"
+                "policy_name = 'ALLOWED_' + 'HOSTS'\n"
+                "mutate(sys.modules[__name__], policy_name, frozenset())\n"
+            )
+        )
+
+        with self.assertRaisesRegex(
+            SYNC_MODULE.SyncError,
+            "forbids importing policy-sensitive builtins",
+        ):
+            SYNC_MODULE.sync_sources(self.repo_root, self.source_root, (rule,))
+
+    def test_bug_triage_sync_rejects_qualified_reflection_builtin(self) -> None:
+        rule, _source, _interface = self._write_current_bug_triage_source(
+            appended_script=(
+                "\npolicy_name = 'ALLOWED_' + 'HOSTS'\n"
+                "sys.modules['builtins'].setattr(\n"
+                "    sys.modules[__name__], policy_name, frozenset()\n"
+                ")\n"
+            )
+        )
+
+        with self.assertRaisesRegex(
+            SYNC_MODULE.SyncError,
+            "forbids qualified dynamic/reflection builtin calls",
+        ):
+            SYNC_MODULE.sync_sources(self.repo_root, self.source_root, (rule,))
+
+    def test_bug_triage_sync_rejects_direct_reflection_builtin_alias(self) -> None:
+        rule, _source, _interface = self._write_current_bug_triage_source(
+            appended_script=(
+                "\nmutate = setattr\n"
+                "policy_name = 'ALLOWED_' + 'HOSTS'\n"
+                "mutate(sys.modules[__name__], policy_name, frozenset())\n"
+            )
+        )
+
+        with self.assertRaisesRegex(
+            SYNC_MODULE.SyncError,
+            "forbids unapproved reflection builtin reference setattr",
+        ):
+            SYNC_MODULE.sync_sources(self.repo_root, self.source_root, (rule,))
+
+    def test_bug_triage_sync_rejects_getattr_builtin_acquisition(self) -> None:
+        rule, _source, _interface = self._write_current_bug_triage_source(
+            appended_script=(
+                "\nbuiltin_module = sys.modules['builtins']\n"
+                "mutate = getattr(builtin_module, 'setattr')\n"
+                "policy_name = 'ALLOWED_' + 'HOSTS'\n"
+                "mutate(sys.modules[__name__], policy_name, frozenset())\n"
+            )
+        )
+
+        with self.assertRaisesRegex(
+            SYNC_MODULE.SyncError,
+            "forbids reflection builtin acquisition",
+        ):
+            SYNC_MODULE.sync_sources(self.repo_root, self.source_root, (rule,))
+
+    def test_bug_triage_sync_rejects_builtin_namespace_subscript(self) -> None:
+        rule, _source, _interface = self._write_current_bug_triage_source(
+            appended_script=(
+                "\nmutate = __builtins__['setattr']\n"
+                "policy_name = 'ALLOWED_' + 'HOSTS'\n"
+                "mutate(sys.modules[__name__], policy_name, frozenset())\n"
+            )
+        )
+
+        with self.assertRaisesRegex(
+            SYNC_MODULE.SyncError,
+            "forbids builtin namespace reference __builtins__",
+        ):
+            SYNC_MODULE.sync_sources(self.repo_root, self.source_root, (rule,))
+
     def test_bug_triage_sync_rejects_pattern_capture_rebinding(self) -> None:
         rule, _source, _interface = self._write_current_bug_triage_source(
             appended_script=(
