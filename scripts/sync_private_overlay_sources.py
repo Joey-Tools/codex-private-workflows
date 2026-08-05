@@ -127,6 +127,99 @@ PRIVATE_LEGACY_MUTABLE_RELEASE_BLOCK = '''_LEGACY_MUTABLE_RELEASES = {
 }'''
 
 
+PUBLIC_BUG_TRIAGE_DESCRIPTION = (
+    "description: Optionally transport and inspect allowlisted Jenkins-style HTTPS "
+    "console, API, and ZIP artifacts with bounded authentication, redirects, output, "
+    "extraction, and wall time. Use when a task has an exact remote artifact URL or a "
+    "local ZIP and needs a public-safe probe, fetch, member listing, text view, or "
+    "single-member extraction before diagnosis."
+)
+
+
+PRIVATE_BUG_TRIAGE_DESCRIPTION = (
+    "description: Transport and inspect allowlisted Cisco Jenkins HTTPS console, API, "
+    "and ZIP artifacts with bounded authentication, redirects, output, extraction, "
+    "and wall time. Use when Joey has an exact remote artifact URL or a local ZIP and "
+    "needs a private fixed-profile probe, fetch, member listing, text view, or "
+    "single-member extraction before diagnosis."
+)
+
+
+PUBLIC_BUG_TRIAGE_SCOPE = (
+    "This optional public skill supplies one canonical artifact transport helper. It "
+    "does not define a generic root-cause method, GitHub Actions triage, tracker "
+    "lookup, remote process diagnosis, or private host policy. Use the relevant forge "
+    "or tracker skill for those tasks, and use ordinary evidence-based reasoning after "
+    "the requested artifact is available."
+)
+
+
+PRIVATE_BUG_TRIAGE_SCOPE = (
+    "This private skill supplies one canonical artifact transport helper for Joey's "
+    "fixed Cisco Jenkins policy. It does not define a generic root-cause method, GitHub "
+    "Actions triage, tracker lookup, or remote process diagnosis. "
+    "Use the relevant forge skill or "
+    "[$cisco-trackers-lookup](../cisco-trackers-lookup/SKILL.md) for those tasks, and "
+    "use ordinary evidence-based reasoning after the requested artifact is available."
+)
+
+
+PUBLIC_BUG_TRIAGE_CONFIGURATION = (
+    "The helper is `scripts/jenkins_artifact_probe.py`. Its public configuration is "
+    "deliberately synthetic and fail-closed. A private installation may specialize "
+    "fixed source constants through its own release process; callers cannot widen "
+    "hosts, auth profiles, deadlines, or resource ceilings at runtime."
+)
+
+
+PRIVATE_BUG_TRIAGE_CONFIGURATION = (
+    "The helper is `scripts/jenkins_artifact_probe.py`. Its private configuration is "
+    "fixed and fail-closed by this release process; callers cannot widen hosts, auth "
+    "profiles, deadlines, or resource ceilings at runtime."
+)
+
+
+PUBLIC_BUG_TRIAGE_RECIPES_SCOPE = (
+    "These recipes use the optional public helper as the canonical transport boundary. "
+    "The public host and job names are synthetic. Run the installed helper directly; "
+    "avoid wrapping authenticated calls in a broad shell command."
+)
+
+
+PRIVATE_BUG_TRIAGE_RECIPES_SCOPE = (
+    "These recipes use the private helper as the canonical transport boundary. The "
+    "allowed host is fixed by the private release, and job names are examples. Run the "
+    "installed helper directly; avoid wrapping authenticated calls in a broad shell "
+    "command."
+)
+
+
+PUBLIC_BUG_TRIAGE_CONFIG_BLOCK = '''DEFAULT_ALLOWED_HOSTS = frozenset({"jenkins.example.com"})
+AUTH_PROFILES = {
+    "default": (
+        "JENKINS_ARTIFACT_USER",
+        "JENKINS_ARTIFACT_TOKEN",
+    ),
+}'''
+
+
+PRIVATE_BUG_TRIAGE_CONFIG_BLOCK = '''ALLOWED_HOSTS = frozenset({"engci-private-sjc.cisco.com"})
+AUTH_PROFILES = {
+    "jenkins_mbpm2_codex": (
+        "Jenkins_mbpM2_codex_username",
+        "Jenkins_mbpM2_codex_token",
+    ),
+    "jenkins_webex_teams": (
+        "Jenkins_webex_teams_username",
+        "Jenkins_webex_teams_token",
+    ),
+    "wme_jenkins_jobs_artifact": (
+        "wme_jenkins_jobs_artifact_user",
+        "wme_jenkins_jobs_artifact_token",
+    ),
+}'''
+
+
 def _rule(
     repo: str,
     source: str,
@@ -225,39 +318,52 @@ SYNC_RULES = (
         "personal_codex/skills/bug-triage-playbook",
         (
             Replacement(
-                "tracker issue metadata or forge PR/commit metadata",
-                "Cisco Jira issue metadata or Cisco GHE PR/commit metadata",
+                PUBLIC_BUG_TRIAGE_DESCRIPTION,
+                PRIVATE_BUG_TRIAGE_DESCRIPTION,
+                path=Path("SKILL.md"),
+                required_count=1,
             ),
             Replacement(
-                "fetch that tracker metadata first with a tracker-specific lookup skill",
-                "fetch that tracker metadata first with [$cisco-trackers-lookup](../cisco-trackers-lookup/SKILL.md)",
+                PUBLIC_BUG_TRIAGE_SCOPE,
+                PRIVATE_BUG_TRIAGE_SCOPE,
+                path=Path("SKILL.md"),
+                required_count=1,
             ),
             Replacement(
-                "remote URL subcommands only allow `https://jenkins.example.com/...`",
-                "remote URL subcommands only allow `https://engci-private-sjc.cisco.com/...`",
+                PUBLIC_BUG_TRIAGE_CONFIGURATION,
+                PRIVATE_BUG_TRIAGE_CONFIGURATION,
+                path=Path("SKILL.md"),
+                required_count=1,
             ),
             Replacement(
-                "`cisco-trackers-lookup` already covers that read-only tracker step.",
-                "`cisco-trackers-lookup` already covers that read-only tracker step.",
-                required=False,
+                PUBLIC_BUG_TRIAGE_CONFIG_BLOCK,
+                PRIVATE_BUG_TRIAGE_CONFIG_BLOCK,
+                path=Path("scripts/jenkins_artifact_probe.py"),
+                required_count=1,
             ),
             Replacement(
-                "tracker metadata lookup into this skill when `cisco-trackers-lookup`",
-                "Cisco Jira / Cisco GHE metadata lookup into this skill when `cisco-trackers-lookup`",
-            ),
-            Replacement("jenkins.example.com", "engci-private-sjc.cisco.com"),
-            Replacement("JENKINS_ARTIFACT_USER", "wme_jenkins_jobs_artifact_user"),
-            Replacement("JENKINS_ARTIFACT_TOKEN", "wme_jenkins_jobs_artifact_token"),
-            Replacement(
-                "--auth-profile default", "--auth-profile wme_jenkins_jobs_artifact"
+                "if parsed.hostname.lower() not in DEFAULT_ALLOWED_HOSTS:",
+                "if parsed.hostname.lower() not in ALLOWED_HOSTS:",
+                path=Path("scripts/jenkins_artifact_probe.py"),
+                required_count=1,
             ),
             Replacement(
-                'DEFAULT_ALLOWED_HOSTS = frozenset({"engci-private-sjc.cisco.com"})\nAUTH_PROFILES = {\n    "default": (\n        "wme_jenkins_jobs_artifact_user",\n        "wme_jenkins_jobs_artifact_token",\n    ),\n}\n\n\ndef _allowed_hosts() -> frozenset[str]:\n    raw_hosts = os.getenv("JENKINS_ARTIFACT_ALLOWED_HOSTS")\n    if not raw_hosts:\n        return DEFAULT_ALLOWED_HOSTS\n    hosts = frozenset(host.strip() for host in raw_hosts.split(",") if host.strip())\n    return hosts or DEFAULT_ALLOWED_HOSTS',
-                'ALLOWED_HOSTS = frozenset({"engci-private-sjc.cisco.com"})\nAUTH_PROFILES = {\n    "jenkins_mbpm2_codex": (\n        "Jenkins_mbpM2_codex_username",\n        "Jenkins_mbpM2_codex_token",\n    ),\n    "jenkins_webex_teams": (\n        "Jenkins_webex_teams_username",\n        "Jenkins_webex_teams_token",\n    ),\n    "wme_jenkins_jobs_artifact": (\n        "wme_jenkins_jobs_artifact_user",\n        "wme_jenkins_jobs_artifact_token",\n    ),\n}',
+                PUBLIC_BUG_TRIAGE_RECIPES_SCOPE,
+                PRIVATE_BUG_TRIAGE_RECIPES_SCOPE,
+                path=Path("references/jenkins-artifact-recipes.md"),
+                required_count=1,
             ),
             Replacement(
-                "if parsed.hostname not in _allowed_hosts():",
-                "if parsed.hostname not in ALLOWED_HOSTS:",
+                "jenkins.example.com",
+                "engci-private-sjc.cisco.com",
+                path=Path("references/jenkins-artifact-recipes.md"),
+                required_count=3,
+            ),
+            Replacement(
+                "--auth-profile default",
+                "--auth-profile wme_jenkins_jobs_artifact",
+                path=Path("references/jenkins-artifact-recipes.md"),
+                required_count=3,
             ),
         ),
         common_joey_text=True,
@@ -267,7 +373,16 @@ SYNC_RULES = (
             "JENKINS_ARTIFACT_TOKEN",
             "--auth-profile default",
             "DEFAULT_ALLOWED_HOSTS",
-            "_allowed_hosts()",
+            "_allowed_hosts",
+            "optional public skill",
+            "public-safe",
+            "public configuration",
+            "deliberately synthetic",
+            "A private installation may specialize",
+            "relevant forge or tracker skill",
+            "optional public helper",
+            "The public host",
+            "private host policy",
         ),
     ),
     _rule(

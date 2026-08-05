@@ -638,6 +638,98 @@ class PrivateOverlaySyncTests(unittest.TestCase):
         )
         return rule, target
 
+    def _write_current_bug_triage_source(
+        self,
+        *,
+        host_condition: str = (
+            "if parsed.hostname.lower() not in DEFAULT_ALLOWED_HOSTS:"
+        ),
+        duplicate_recipes_scope: bool = False,
+    ):
+        source = (
+            self.source_root
+            / "codex-debug-triage"
+            / "skills"
+            / "bug-triage-playbook"
+        )
+        scripts = source / "scripts"
+        references = source / "references"
+        agents = source / "agents"
+        scripts.mkdir(parents=True)
+        references.mkdir()
+        agents.mkdir()
+
+        (source / "SKILL.md").write_text(
+            "---\n"
+            "name: bug-triage-playbook\n"
+            "description: Optionally transport and inspect allowlisted Jenkins-style HTTPS console, API, and ZIP artifacts with bounded authentication, redirects, output, extraction, and wall time. Use when a task has an exact remote artifact URL or a local ZIP and needs a public-safe probe, fetch, member listing, text view, or single-member extraction before diagnosis.\n"
+            "---\n\n"
+            "# Bounded Artifact Transport\n\n"
+            "## Scope\n\n"
+            "This optional public skill supplies one canonical artifact transport helper. It does not define a generic root-cause method, GitHub Actions triage, tracker lookup, remote process diagnosis, or private host policy. Use the relevant forge or tracker skill for those tasks, and use ordinary evidence-based reasoning after the requested artifact is available.\n\n"
+            "The helper is `scripts/jenkins_artifact_probe.py`. Its public configuration is deliberately synthetic and fail-closed. A private installation may specialize fixed source constants through its own release process; callers cannot widen hosts, auth profiles, deadlines, or resource ceilings at runtime.\n",
+            encoding="utf-8",
+        )
+        interface = (
+            'interface:\n'
+            '  display_name: "Bounded Artifact Transport"\n'
+            '  short_description: "Load and route bounded Jenkins-style artifact transport."\n'
+            '  default_prompt: "Use $bug-triage-playbook only to route an exact remote artifact URL or local ZIP through the bounded transport helper, then return the artifact evidence to the task\'s primary diagnostic workflow."\n'
+        )
+        (agents / "openai.yaml").write_text(interface, encoding="utf-8")
+        recipes_scope = (
+            "These recipes use the optional public helper as the canonical transport boundary. "
+            "The public host and job names are synthetic. Run the installed helper directly; "
+            "avoid wrapping authenticated calls in a broad shell command."
+        )
+        if duplicate_recipes_scope:
+            recipes_scope = f"{recipes_scope}\n\n{recipes_scope}"
+        (references / "jenkins-artifact-recipes.md").write_text(
+            "# Bounded Jenkins-Style Artifact Recipes\n\n"
+            f"{recipes_scope}\n\n"
+            "```bash\n"
+            "helper=example\n"
+            "python3 \"$helper\" probe-url \\\n"
+            "  'https://jenkins.example.com/job/example/42/api/json' \\\n"
+            "  --auth-profile default\n"
+            "python3 \"$helper\" show-url \\\n"
+            "  'https://jenkins.example.com/job/example/42/consoleText' \\\n"
+            "  --auth-profile default\n"
+            "python3 \"$helper\" fetch-url \\\n"
+            "  'https://jenkins.example.com/job/example/42/artifact/logs.zip' \\\n"
+            "  --auth-profile default\n"
+            "```\n",
+            encoding="utf-8",
+        )
+
+        config_block = (
+            'DEFAULT_ALLOWED_HOSTS = frozenset({"jenkins.example.com"})\n'
+            'AUTH_PROFILES = {\n'
+            '    "default": (\n'
+            '        "JENKINS_ARTIFACT_USER",\n'
+            '        "JENKINS_ARTIFACT_TOKEN",\n'
+            '    ),\n'
+            '}\n'
+        )
+        (scripts / "jenkins_artifact_probe.py").write_text(
+            "import urllib.parse\n\n"
+            f"{config_block}\n"
+            "def _ensure_allowed_url(url: str) -> urllib.parse.ParseResult:\n"
+            "    parsed = urllib.parse.urlparse(url)\n"
+            "    if parsed.hostname is None:\n"
+            "        raise ValueError(\"URL must include a host\")\n"
+            f"    {host_condition}\n"
+            "        raise ValueError(\"host not allowed: {}\".format(parsed.hostname))\n"
+            "    return parsed\n",
+            encoding="utf-8",
+        )
+        rule = next(
+            rule
+            for rule in SYNC_MODULE.SYNC_RULES
+            if rule.target == Path("personal_codex/skills/bug-triage-playbook")
+        )
+        return rule, source, interface
+
     def test_sync_rule_copies_and_transforms_text(self) -> None:
         source = self.source_root / "example-repo" / "skill" / "SKILL.md"
         source.parent.mkdir(parents=True)
@@ -954,6 +1046,137 @@ class PrivateOverlaySyncTests(unittest.TestCase):
             target.read_text(encoding="utf-8"),
             "Use this when Joey asks.\nState the core Joey-visible behavior.\n",
         )
+
+    def test_bug_triage_sync_rule_builds_current_private_transport_variant(
+        self,
+    ) -> None:
+        rule, _source, interface = self._write_current_bug_triage_source()
+        target = self.repo_root / rule.target
+        stale_reference = target / "references" / "triage-report.md"
+        stale_reference.parent.mkdir(parents=True)
+        stale_reference.write_text("retired generic triage template\n", encoding="utf-8")
+
+        SYNC_MODULE.sync_sources(self.repo_root, self.source_root, (rule,))
+
+        self.assertFalse(stale_reference.exists())
+        self.assertEqual(
+            (target / "agents/openai.yaml").read_text(encoding="utf-8"),
+            interface,
+        )
+        skill = (target / "SKILL.md").read_text(encoding="utf-8")
+        self.assertIn(
+            "description: Transport and inspect allowlisted Cisco Jenkins HTTPS",
+            skill,
+        )
+        self.assertIn(
+            "This private skill supplies one canonical artifact transport helper",
+            skill,
+        )
+        self.assertIn(
+            "[$cisco-trackers-lookup](../cisco-trackers-lookup/SKILL.md)",
+            skill,
+        )
+        self.assertIn(
+            "Its private configuration is fixed and fail-closed by this release process",
+            skill,
+        )
+        self.assertNotIn("private host policy", skill)
+
+        recipes = (target / "references/jenkins-artifact-recipes.md").read_text(
+            encoding="utf-8"
+        )
+        self.assertEqual(recipes.count("engci-private-sjc.cisco.com"), 3)
+        self.assertEqual(recipes.count("--auth-profile wme_jenkins_jobs_artifact"), 3)
+        self.assertIn(
+            "The allowed host is fixed by the private release, and job names are examples",
+            recipes,
+        )
+
+        module_name = f"synced_bug_triage_probe_{id(self)}"
+        probe = load_module(
+            module_name,
+            target / "scripts/jenkins_artifact_probe.py",
+        )
+        self.addCleanup(sys.modules.pop, module_name, None)
+        self.assertEqual(
+            probe.ALLOWED_HOSTS,
+            frozenset({"engci-private-sjc.cisco.com"}),
+        )
+        self.assertFalse(hasattr(probe, "DEFAULT_ALLOWED_HOSTS"))
+        self.assertEqual(
+            probe.AUTH_PROFILES,
+            {
+                "jenkins_mbpm2_codex": (
+                    "Jenkins_mbpM2_codex_username",
+                    "Jenkins_mbpM2_codex_token",
+                ),
+                "jenkins_webex_teams": (
+                    "Jenkins_webex_teams_username",
+                    "Jenkins_webex_teams_token",
+                ),
+                "wme_jenkins_jobs_artifact": (
+                    "wme_jenkins_jobs_artifact_user",
+                    "wme_jenkins_jobs_artifact_token",
+                ),
+            },
+        )
+        probe._ensure_allowed_url("https://ENGCI-PRIVATE-SJC.CISCO.COM/job/example")
+        with self.assertRaisesRegex(ValueError, "host not allowed"):
+            probe._ensure_allowed_url("https://jenkins.example.com/job/example")
+
+        generated_text = "\n".join(
+            path.read_text(encoding="utf-8")
+            for path in sorted(target.rglob("*"))
+            if path.is_file() and path.suffix in {".md", ".py", ".yaml"}
+        )
+        for residual in rule.forbidden_residuals:
+            with self.subTest(residual=residual):
+                self.assertNotIn(residual, generated_text)
+
+        specific_replacements = rule.replacements[
+            : -len(SYNC_MODULE.COMMON_JOEY_TEXT_REPLACEMENTS)
+        ]
+        self.assertTrue(specific_replacements)
+        self.assertTrue(
+            all(
+                replacement.required and replacement.required_count is not None
+                for replacement in specific_replacements
+            )
+        )
+        obsolete_anchors = {
+            "tracker issue metadata or forge PR/commit metadata",
+            "fetch that tracker metadata first with a tracker-specific lookup skill",
+            "if parsed.hostname not in _allowed_hosts():",
+        }
+        self.assertTrue(
+            obsolete_anchors.isdisjoint(
+                replacement.old for replacement in specific_replacements
+            )
+        )
+
+    def test_bug_triage_sync_rule_rejects_missing_current_host_anchor(self) -> None:
+        rule, _source, _interface = self._write_current_bug_triage_source(
+            host_condition="if parsed.hostname not in DEFAULT_ALLOWED_HOSTS:"
+        )
+
+        with self.assertRaisesRegex(
+            SYNC_MODULE.SyncError,
+            r"parsed\.hostname\.lower.*\(0 != 1\)",
+        ):
+            SYNC_MODULE.sync_sources(self.repo_root, self.source_root, (rule,))
+
+    def test_bug_triage_sync_rule_rejects_duplicate_current_recipes_anchor(
+        self,
+    ) -> None:
+        rule, _source, _interface = self._write_current_bug_triage_source(
+            duplicate_recipes_scope=True
+        )
+
+        with self.assertRaisesRegex(
+            SYNC_MODULE.SyncError,
+            r"optional public helper.*\(2 != 1\)",
+        ):
+            SYNC_MODULE.sync_sources(self.repo_root, self.source_root, (rule,))
 
     def test_synthetic_token_fixture_sync_rule_copies_templates(self) -> None:
         source = (
@@ -6808,6 +7031,24 @@ jobs:
         )
         self.assertIn(
             "do not rely on a global copy under `~/.codex/skills`",
+            agents,
+        )
+
+    def test_personal_agents_scopes_bug_triage_to_artifact_transport(self) -> None:
+        agents = (REPO_ROOT / "personal_codex" / "AGENTS.md").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn(
+            "Use `$bug-triage-playbook` only to route an exact remote artifact URL or local ZIP",
+            agents,
+        )
+        self.assertIn(
+            "ordinary regression and root-cause analysis on evidence-based reasoning",
+            agents,
+        )
+        self.assertNotIn(
+            "Use `$bug-triage-playbook` for log-driven debugging, regression analysis",
             agents,
         )
 
