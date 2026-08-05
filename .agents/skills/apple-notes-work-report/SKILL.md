@@ -35,7 +35,7 @@ It covers read-only auditing, evidence collection from `~/.codex`, two-tier back
 ## Preferred Access Path
 
 - Prefer `Notes.app` AppleScript for reading and writing note content.
-- When available, prefer the repo-local wrapper `bash scripts/apple_notes_helper.sh` for folder-level AppleScript preflight, `Work Report` note readback by title prefix, DB authorization probe, copy-to-`/tmp`, merged-analysis DB creation, and hashtag readback. Earlier Codex-hosted failures suggested a wrapped-`osascript` caveat, but a later user-side probe plus an escalated wrapper run showed that this is host-context-specific rather than a universal scripting limit.
+- When available, prefer the canonical toolkit wrapper for folder-level AppleScript preflight, `Work Report` note readback by title prefix, DB authorization probe, copy-to-`/tmp`, merged-analysis DB creation, and hashtag readback. From `codex-workspace`, first resolve it with `toolkit_root="$(python3 scripts/codex_workspace.py repo-path --repo codex-apple-notes-toolkit --strict)"`, then run `bash "$toolkit_root/scripts/apple_notes_helper.sh" ...`. Earlier Codex-hosted failures suggested a wrapped-`osascript` caveat, but a later user-side probe plus an escalated wrapper run showed that this is host-context-specific rather than a universal scripting limit.
 - Do not assume direct access to the Apple Notes container database will work; macOS privacy protections may block it even when normal shell reads succeed elsewhere.
 - If the user names a specific folder, verify that folder exists first. If not specified, confirm the exact folder before editing.
 - Treat AppleScript note exports as incomplete for hashtag fidelity.
@@ -51,7 +51,7 @@ It covers read-only auditing, evidence collection from `~/.codex`, two-tier back
 ## Audit Workflow
 
 1. Export the candidate notes from the target Apple Notes folder.
-- If the target is a daily `Work Report` note and the title prefix is already known, prefer `bash scripts/apple_notes_helper.sh show-note-prefix --folder "Work Report" --prefix YYYY.MM.DD` before falling back to ad hoc inline AppleScript.
+- If the target is a daily `Work Report` note and the title prefix is already known, resolve the toolkit from `codex-workspace` with `toolkit_root="$(python3 scripts/codex_workspace.py repo-path --repo codex-apple-notes-toolkit --strict)"`, then prefer `bash "$toolkit_root/scripts/apple_notes_helper.sh" show-note-prefix --folder "Work Report" --prefix YYYY.MM.DD` before falling back to ad hoc inline AppleScript.
 2. Collect evidence for the same date range from `~/.codex`, but for daily report audits or drafts run `$remote-host-context` preflight first and merge any matching remote rollout evidence before deciding coverage is complete.
 3. If a relevant remote rollout fails to copy because `remote_codex_probe.py fetch-rollout` hits the helper size limit, do not stop at that first failure.
 - Use `session-meta` to bracket the same-day activity for that repo/path.

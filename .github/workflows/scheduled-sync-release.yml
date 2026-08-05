@@ -117,14 +117,6 @@ jobs:
           path: .source/codex-project-journal
           persist-credentials: false
 
-      - name: Check out codex-waited-delivery
-        if: steps.cooldown.outputs.run == 'true'
-        uses: actions/checkout@v4
-        with:
-          repository: Joey-Tools/codex-waited-delivery
-          path: .source/codex-waited-delivery
-          persist-credentials: false
-
       - name: Sync private overlay sources
         if: steps.cooldown.outputs.run == 'true'
         run: python3 scripts/sync_private_overlay_sources.py --source-root .source
@@ -184,13 +176,6 @@ jobs:
         run: |
           python3 -m unittest discover \
             -s personal_codex/skills/review-orchestration-playbook/tests \
-            -p 'test_*.py'
-
-      - name: Verify waited-delivery review contract
-        if: steps.changes.outputs.changed == 'true' || steps.current-release.outputs.complete == 'false'
-        run: |
-          python3 -m unittest discover \
-            -s personal_codex/skills/waited-delivery/tests \
             -p 'test_*.py'
 
       - name: Open synced overlay pull request
@@ -258,7 +243,6 @@ jobs:
           - python3 -m py_compile scripts/codex_personal_sync.py scripts/build_personal_codex_package.py scripts/validate_sync_manifest_changes.py scripts/private_overlay_release.py scripts/sync_private_overlay_sources.py tests/test_package_builder_safety.py tests/test_personal_sync_reconciliation_safety.py tests/test_private_overlay_package.py tests/test_private_overlay_sync.py tests/test_release_manifest_baseline.py tests/test_sync_manifest_changes.py
           - python3 -m unittest discover -s tests
           - python3 -m unittest discover -s personal_codex/skills/review-orchestration-playbook/tests -p 'test_*.py'
-          - python3 -m unittest discover -s personal_codex/skills/waited-delivery/tests -p 'test_*.py'
           EOF
 
           pr_url="$(gh api --method GET "repos/$GITHUB_REPOSITORY/pulls" \
