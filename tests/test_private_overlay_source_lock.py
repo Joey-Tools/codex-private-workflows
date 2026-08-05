@@ -366,8 +366,87 @@ class CheckoutVerifierTests(unittest.TestCase):
             tree=self._git_stdout(checkout, "rev-parse", "HEAD^{tree}"),
         )
 
+    def _homebrew_git_fixture(self, *, executable_mode: int = 0o755) -> Path:
+        prefix = self.root / "homebrew"
+        bin_directory = prefix / "bin"
+        cellar_directory = prefix / "Cellar" / "git" / "2.54.0" / "bin"
+        bin_directory.mkdir(parents=True, mode=0o775)
+        cellar_directory.mkdir(parents=True, mode=0o755)
+        (prefix / "Cellar").chmod(0o775)
+        bin_directory.chmod(0o775)
+        executable = cellar_directory / "git"
+        shutil.copyfile(self.git_path, executable)
+        executable.chmod(executable_mode)
+        entry = bin_directory / "git"
+        try:
+            entry.symlink_to("../Cellar/git/2.54.0/bin/git")
+        except OSError as error:
+            self.skipTest(f"platform cannot create the Git symlink fixture: {error}")
+        return entry
+
     def test_accepts_six_complete_clean_detached_checkouts(self) -> None:
         SOURCE_LOCK.verify_checkouts(self.source_root, self.source_lock)
+
+    def test_macos_uses_fixed_system_git_instead_of_homebrew_symlink(self) -> None:
+        entry = self._homebrew_git_fixture()
+
+        with (
+            mock.patch.object(SOURCE_LOCK.sys, "platform", "darwin"),
+            mock.patch.object(SOURCE_LOCK.shutil, "which", return_value=str(entry)),
+        ):
+            trusted = SOURCE_LOCK._trusted_git_path()
+            self.assertEqual(trusted.path, Path("/usr/bin/git"))
+            SOURCE_LOCK.verify_checkouts(self.source_root, self.source_lock)
+
+    def test_non_macos_rejects_homebrew_symlink_instead_of_broadening_policy(
+        self,
+    ) -> None:
+        entry = self._homebrew_git_fixture()
+
+        with (
+            mock.patch.object(SOURCE_LOCK.sys, "platform", "linux"),
+            mock.patch.object(SOURCE_LOCK.shutil, "which", return_value=str(entry)),
+            self.assertRaisesRegex(
+                SOURCE_LOCK.SourceLockError,
+                "Git executable ancestor is group- or world-writable",
+            ),
+        ):
+            SOURCE_LOCK._trusted_git_path()
+
+    def test_rejects_git_under_world_writable_ancestor(self) -> None:
+        entry = self._homebrew_git_fixture()
+        (self.root / "homebrew" / "Cellar").chmod(0o777)
+
+        with self.assertRaisesRegex(
+            SOURCE_LOCK.SourceLockError,
+            "Git executable ancestor is group- or world-writable",
+        ):
+            SOURCE_LOCK._bind_trusted_git_path(
+                entry.parent.parent / "Cellar" / "git" / "2.54.0" / "bin" / "git",
+                require_root_owner=False,
+            )
+
+    def test_rejects_bound_git_executable_replacement(self) -> None:
+        entry = self._homebrew_git_fixture()
+        (self.root / "homebrew" / "Cellar").chmod(0o755)
+        executable = (
+            entry.parent.parent / "Cellar" / "git" / "2.54.0" / "bin" / "git"
+        )
+
+        trusted = SOURCE_LOCK._bind_trusted_git_path(
+            executable,
+            require_root_owner=False,
+        )
+        replacement = trusted.path.with_name("git-replacement")
+        shutil.copyfile(self.git_path, replacement)
+        replacement.chmod(0o755)
+        os.replace(replacement, trusted.path)
+
+        with self.assertRaisesRegex(
+            SOURCE_LOCK.SourceLockError,
+            "Git executable identity or access policy changed",
+        ):
+            SOURCE_LOCK._revalidate_trusted_git(trusted)
 
     def test_locked_file_manifest_and_blob_are_exact(self) -> None:
         checkout = self._checkout(1)

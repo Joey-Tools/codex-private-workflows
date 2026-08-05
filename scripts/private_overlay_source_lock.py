@@ -92,6 +92,25 @@ class LockedSourceManifest:
     entries: tuple[LockedSourceEntry, ...]
 
 
+@dataclass(frozen=True)
+class _GitPathBinding:
+    path: Path
+    device: int
+    inode: int
+    owner: int
+    group: int
+    mode: int
+    file_type: int
+
+
+@dataclass(frozen=True)
+class _TrustedGitExecutable:
+    path: Path
+    binding: _GitPathBinding
+    chain: tuple[_GitPathBinding, ...]
+    require_root_owner: bool
+
+
 def _reject_duplicate_keys(pairs: list[tuple[str, object]]) -> dict:
     result: dict[str, object] = {}
     for key, value in pairs:
@@ -427,14 +446,14 @@ def _git_environment() -> dict[str, str]:
 
 
 def _git(
-    git_path: Path,
+    git_path: _TrustedGitExecutable,
     checkout: Path,
     *args: str,
     expected_codes: tuple[int, ...] = (0,),
     discard_stdout: bool = False,
 ) -> subprocess.CompletedProcess[bytes]:
     command = [
-        str(git_path),
+        str(git_path.path),
         "-c",
         "core.fsmonitor=false",
         "-c",
@@ -443,6 +462,7 @@ def _git(
         str(checkout),
         *args,
     ]
+    _revalidate_trusted_git(git_path)
     try:
         process = subprocess.Popen(
             command,
@@ -528,6 +548,7 @@ def _git(
         bytes(stdout),
         bytes(stderr),
     )
+    _revalidate_trusted_git(git_path)
     if completed.returncode not in expected_codes:
         detail = completed.stderr[:MAX_GIT_OUTPUT_BYTES].decode(
             "utf-8", errors="replace"
@@ -549,18 +570,160 @@ def _single_line(completed: subprocess.CompletedProcess[bytes], *, label: str) -
     return lines[0]
 
 
-def _trusted_git_path() -> Path:
-    candidate = shutil.which("git")
-    if candidate is None:
-        raise SourceLockError("Git executable is unavailable")
-    path = Path(candidate)
+def _git_component_binding(
+    path: Path,
+    *,
+    final: bool,
+    require_root_owner: bool,
+) -> _GitPathBinding:
     try:
         metadata = path.lstat()
     except OSError as error:
-        raise SourceLockError(f"cannot inspect Git executable: {error}") from error
-    if not stat.S_ISREG(metadata.st_mode) or path.is_symlink():
-        raise SourceLockError("Git executable must be a regular non-symlink file")
-    return path.resolve()
+        raise SourceLockError(f"cannot inspect Git executable path: {error}") from error
+    expected_type = stat.S_IFREG if final else stat.S_IFDIR
+    if stat.S_IFMT(metadata.st_mode) != expected_type or stat.S_ISLNK(metadata.st_mode):
+        label = "file" if final else "ancestor"
+        raise SourceLockError(f"Git executable {label} has an unsafe type")
+    owner = metadata.st_uid
+    accepted_owners = {0} if require_root_owner else {0, os.geteuid()}
+    if owner not in accepted_owners:
+        raise SourceLockError("Git executable path has an untrusted owner")
+    mode = stat.S_IMODE(metadata.st_mode)
+    if mode & 0o022:
+        label = "file" if final else "ancestor"
+        raise SourceLockError(f"Git executable {label} is group- or world-writable")
+    if final and mode & 0o111 == 0:
+        raise SourceLockError("Git executable is not executable")
+    return _GitPathBinding(
+        path=path,
+        device=metadata.st_dev,
+        inode=metadata.st_ino,
+        owner=owner,
+        group=metadata.st_gid,
+        mode=mode,
+        file_type=stat.S_IFMT(metadata.st_mode),
+    )
+
+
+def _revalidate_git_component(
+    binding: _GitPathBinding,
+    *,
+    require_root_owner: bool,
+) -> None:
+    current = _git_component_binding(
+        binding.path,
+        final=binding.file_type == stat.S_IFREG,
+        require_root_owner=require_root_owner,
+    )
+    if current != binding:
+        raise SourceLockError("Git executable identity or access policy changed")
+
+
+def _bind_trusted_git_path(
+    candidate: Path,
+    *,
+    require_root_owner: bool,
+) -> _TrustedGitExecutable:
+    candidate = _absolute_lexical(candidate)
+    chain: list[_GitPathBinding] = []
+    current = Path(candidate.anchor)
+    chain.append(
+        _git_component_binding(
+            current,
+            final=False,
+            require_root_owner=require_root_owner,
+        )
+    )
+    for component in candidate.parts[1:-1]:
+        current /= component
+        chain.append(
+            _git_component_binding(
+                current,
+                final=False,
+                require_root_owner=require_root_owner,
+            )
+        )
+    final_binding = _git_component_binding(
+        candidate,
+        final=True,
+        require_root_owner=require_root_owner,
+    )
+    chain.append(final_binding)
+    flags = os.O_RDONLY | getattr(os, "O_NONBLOCK", 0)
+    for required_flag in ("O_CLOEXEC", "O_NOFOLLOW"):
+        if not hasattr(os, required_flag):
+            raise SourceLockError(f"platform lacks required flag: {required_flag}")
+        flags |= getattr(os, required_flag)
+    try:
+        descriptor = os.open(candidate, flags)
+    except OSError as error:
+        raise SourceLockError(f"cannot open Git executable: {error}") from error
+    try:
+        opened = os.fstat(descriptor)
+        opened_identity = (
+            opened.st_dev,
+            opened.st_ino,
+            opened.st_uid,
+            opened.st_gid,
+            stat.S_IMODE(opened.st_mode),
+        )
+        expected_identity = (
+            final_binding.device,
+            final_binding.inode,
+            final_binding.owner,
+            final_binding.group,
+            final_binding.mode,
+        )
+        if not stat.S_ISREG(opened.st_mode) or opened_identity != expected_identity:
+            raise SourceLockError("Git executable identity or access policy changed")
+        for binding in chain:
+            _revalidate_git_component(
+                binding,
+                require_root_owner=require_root_owner,
+            )
+    finally:
+        os.close(descriptor)
+    return _TrustedGitExecutable(
+        path=candidate,
+        binding=final_binding,
+        chain=tuple(chain),
+        require_root_owner=require_root_owner,
+    )
+
+
+def _revalidate_trusted_git(git_path: _TrustedGitExecutable) -> None:
+    for binding in git_path.chain:
+        _revalidate_git_component(
+            binding,
+            require_root_owner=git_path.require_root_owner,
+        )
+    current = _git_component_binding(
+        git_path.path,
+        final=True,
+        require_root_owner=git_path.require_root_owner,
+    )
+    if current != git_path.binding:
+        raise SourceLockError("Git executable identity or access policy changed")
+
+
+def _trusted_git_path() -> _TrustedGitExecutable:
+    # On macOS, PATH commonly selects a mutable Homebrew convenience symlink.
+    # Source-lock custody instead declares the sealed root-owned system Git as
+    # its fixed trust root and executes this exact non-symlink path. Its entire
+    # root-owned, non-writable ancestor chain excludes an untrusted replacement
+    # between the final identity check and exec.
+    if sys.platform == "darwin":
+        return _bind_trusted_git_path(
+            Path("/usr/bin/git"),
+            require_root_owner=True,
+        )
+    candidate = shutil.which("git")
+    if candidate is None:
+        raise SourceLockError("Git executable is unavailable")
+    return _bind_trusted_git_path(
+        Path(candidate),
+        require_root_owner=False,
+    )
 
 
 def _directory_binding(path: Path, *, label: str) -> tuple[int, int, int, int]:
@@ -599,7 +762,10 @@ def _git_path_from_output(checkout: Path, output: str) -> Path:
     return _absolute_lexical(candidate)
 
 
-def _reject_promisor_or_alternate_state(git_path: Path, checkout: Path) -> None:
+def _reject_promisor_or_alternate_state(
+    git_path: _TrustedGitExecutable,
+    checkout: Path,
+) -> None:
     partial_config = _git(
         git_path,
         checkout,
@@ -739,7 +905,10 @@ def _reject_promisor_or_alternate_state(git_path: Path, checkout: Path) -> None:
         ) from error
 
 
-def _validate_tracked_modes_and_index_flags(git_path: Path, checkout: Path) -> None:
+def _validate_tracked_modes_and_index_flags(
+    git_path: _TrustedGitExecutable,
+    checkout: Path,
+) -> None:
     staged = _git(git_path, checkout, "ls-files", "--stage", "-z").stdout
     for flag in ("-v", "-f"):
         output = _git(git_path, checkout, "ls-files", flag, "-z").stdout
@@ -1029,7 +1198,7 @@ def read_locked_source_blob(checkout: Path, object_id: str) -> bytes:
 
 
 def _verify_checkout(
-    git_path: Path,
+    git_path: _TrustedGitExecutable,
     checkout: Path,
     *,
     name: str,
