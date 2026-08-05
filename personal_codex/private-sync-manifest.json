@@ -2,7 +2,8 @@
   "version": 1,
   "owner": "private",
   "base_release": {
-    "repo": "Joey-Tools/codex-toolbox"
+    "repo": "Joey-Tools/codex-toolbox",
+    "sha": "20f37f4703715393480d550086980bb1fa44c7b3"
   },
   "links": [
     {

@@ -24,6 +24,7 @@ from unittest import mock
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SYNC_SCRIPT = REPO_ROOT / "scripts" / "sync_private_overlay_sources.py"
+SOURCE_LOCK_SCRIPT = REPO_ROOT / "scripts" / "private_overlay_source_lock.py"
 RELEASE_SCRIPT = REPO_ROOT / "scripts" / "private_overlay_release.py"
 RUNTIME_SCRIPT = REPO_ROOT / "scripts" / "codex_personal_sync.py"
 REVIEW_RUNTIME_ROOT = (
@@ -47,6 +48,9 @@ def load_module(name: str, path: Path):
 
 
 SYNC_MODULE = load_module("sync_private_overlay_sources", SYNC_SCRIPT)
+SOURCE_LOCK_MODULE = load_module(
+    "private_overlay_source_lock_sync_tests", SOURCE_LOCK_SCRIPT
+)
 RELEASE_MODULE = load_module("private_overlay_release", RELEASE_SCRIPT)
 RUNTIME_MODULE = load_module("codex_personal_sync_private_overlay_sync", RUNTIME_SCRIPT)
 
@@ -108,10 +112,14 @@ class PrivateOverlaySyncTests(unittest.TestCase):
     def _private_release_expectation(
         *,
         base_release_repo: str = "Joey-Tools/codex-toolbox",
+        base_release_sha: str | None = (
+            RELEASE_MODULE.REQUIRED_PUBLIC_BASE_RELEASE_SHA
+        ),
     ):
         manifest_data = SimpleNamespace(
             entries=[mock.Mock(owner="private", target=Path("skills/private"))],
             base_release_repo=base_release_repo,
+            base_release_sha=base_release_sha,
         )
         return (({}, manifest_data, "digest"), (1, 2))
 
@@ -178,7 +186,9 @@ class PrivateOverlaySyncTests(unittest.TestCase):
 
         self.assertEqual(len(destinations), 2)
         self.assertNotEqual(destinations[0], destinations[1])
-        self.assertTrue(all(not destination.parent.exists() for destination in destinations))
+        self.assertTrue(
+            all(not destination.parent.exists() for destination in destinations)
+        )
         for capability in [*archive_workspaces, *read_workspaces]:
             with self.assertRaises(OSError) as closed:
                 os.fstat(capability.fd)
@@ -206,18 +216,14 @@ class PrivateOverlaySyncTests(unittest.TestCase):
             self.assertEqual(workspace.path, destination.parent)
             self.assertEqual(read_workspace.path, Path(os.path.abspath(dist)))
             release_root = destination / f"personal-codex-{sha}"
-            manifest_path = (
-                release_root / "personal_codex" / "sync-manifest.json"
-            )
+            manifest_path = release_root / "personal_codex" / "sync-manifest.json"
             manifest_path.parent.mkdir(parents=True)
             manifest_path.write_text(
                 json.dumps(
                     {
                         "version": 1,
                         "owner": "private",
-                        "base_release": {
-                            "repo": "Joey-Tools/codex-toolbox"
-                        },
+                        "base_release": {"repo": "Joey-Tools/codex-toolbox"},
                     }
                 ),
                 encoding="utf-8",
@@ -249,6 +255,52 @@ class PrivateOverlaySyncTests(unittest.TestCase):
 
         validate_release_tree.assert_not_called()
 
+    def test_verify_package_requires_exact_public_base_release_sha(self) -> None:
+        sha = "7" * 40
+        dist = self.root / "dist"
+        dist.mkdir()
+
+        for base_release_sha in (None, "f" * 40):
+            with self.subTest(base_release_sha=base_release_sha):
+                expectation = self._private_release_expectation(
+                    base_release_sha=base_release_sha,
+                )
+                with (
+                    mock.patch.object(
+                        RELEASE_MODULE,
+                        "_load_sync_module",
+                        return_value=RUNTIME_MODULE,
+                    ),
+                    mock.patch.object(
+                        RUNTIME_MODULE,
+                        "verify_and_extract_archive",
+                        return_value=(
+                            self.root / f"personal-codex-{sha}",
+                            expectation,
+                        ),
+                    ),
+                    self.assertRaisesRegex(
+                        RELEASE_MODULE.ReleaseError,
+                        "exact public base release SHA",
+                    ),
+                ):
+                    RELEASE_MODULE.verify_package(self.repo_root, sha, dist)
+
+    def test_release_verifier_base_identity_matches_private_manifest(self) -> None:
+        manifest = json.loads(
+            (REPO_ROOT / "personal_codex" / "private-sync-manifest.json").read_text(
+                encoding="utf-8"
+            )
+        )
+
+        self.assertEqual(
+            manifest["base_release"],
+            {
+                "repo": RELEASE_MODULE.REQUIRED_PUBLIC_BASE_RELEASE_REPO,
+                "sha": RELEASE_MODULE.REQUIRED_PUBLIC_BASE_RELEASE_SHA,
+            },
+        )
+
     def test_verify_package_cleanup_error_does_not_mask_primary_error(
         self,
     ) -> None:
@@ -266,9 +318,7 @@ class PrivateOverlaySyncTests(unittest.TestCase):
             mock.patch.object(
                 RUNTIME_MODULE,
                 "verify_and_extract_archive",
-                side_effect=RELEASE_MODULE.ReleaseError(
-                    "primary verification failure"
-                ),
+                side_effect=RELEASE_MODULE.ReleaseError("primary verification failure"),
             ),
             mock.patch.object(
                 RUNTIME_MODULE,
@@ -295,10 +345,7 @@ class PrivateOverlaySyncTests(unittest.TestCase):
                     replacement_kind=replacement_kind,
                     asset_role=asset_role,
                 ):
-                    case_root = (
-                        self.root
-                        / f"replace-{replacement_kind}-{asset_role}"
-                    )
+                    case_root = self.root / f"replace-{replacement_kind}-{asset_role}"
                     self._assert_verify_package_rejects_bound_replacement(
                         case_root,
                         sha,
@@ -330,13 +377,9 @@ class PrivateOverlaySyncTests(unittest.TestCase):
         captured_read_workspace: list[object] = []
         replaced = False
         trigger_description = (
-            "checksum file"
-            if asset_role == "checksum"
-            else "compressed archive"
+            "checksum file" if asset_role == "checksum" else "compressed archive"
         )
-        real_open_bounded_regular_file = (
-            RUNTIME_MODULE._open_bounded_regular_file
-        )
+        real_open_bounded_regular_file = RUNTIME_MODULE._open_bounded_regular_file
 
         def open_after_replacement(
             path: Path,
@@ -661,9 +704,7 @@ class PrivateOverlaySyncTests(unittest.TestCase):
             "skills/review-orchestration-playbook/tests/fixtures/ci/private.yml"
         )
         private_target = Path(".github/workflows/ci.yml")
-        source_keys = [
-            (rule.repo, rule.source) for rule in SYNC_MODULE.SYNC_RULES
-        ]
+        source_keys = [(rule.repo, rule.source) for rule in SYNC_MODULE.SYNC_RULES]
         targets = [rule.target for rule in SYNC_MODULE.SYNC_RULES]
         rules = [
             rule
@@ -693,6 +734,32 @@ class PrivateOverlaySyncTests(unittest.TestCase):
 
         self.assertEqual((self.repo_root / rule.target).read_bytes(), payload)
 
+    def test_toolbox_generated_surface_and_receipt_rules_are_complete(self) -> None:
+        generated_paths = {
+            Path("scripts/codex_personal_sync.py"),
+            Path("tests/test_codex_personal_sync.py"),
+            Path("schema/sync-manifest.schema.json"),
+            Path("tests/test_personal_sync_reconciliation_safety.py"),
+            Path("tests/test_release_retention.py"),
+            Path("tests/test_scheduler_doctor.py"),
+        }
+        receipt_contract_paths = {
+            Path("generated-sync-source-lock.json"),
+            Path("scripts/verify_generated_sync_source_lock.py"),
+            Path("tests/test_generated_sync_source_lock.py"),
+        }
+        toolbox_rules = {
+            (rule.source, rule.target)
+            for rule in SYNC_MODULE.SYNC_RULES
+            if rule.repo == "codex-toolbox"
+        }
+
+        self.assertTrue(
+            {
+                (path, path) for path in generated_paths | receipt_contract_paths
+            }.issubset(toolbox_rules)
+        )
+
     def test_review_sync_preserves_private_ci_fixture_replacement_bytes(
         self,
     ) -> None:
@@ -717,6 +784,15 @@ class PrivateOverlaySyncTests(unittest.TestCase):
             path = source / relative
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text("public\n", encoding="utf-8")
+        canonical_tool_prefix = "TOOL_REL=skills/review-orchestration-playbook/scripts/"
+        for relative in (
+            Path("references/pr-readiness.md"),
+            Path("tests/test_contracts.py"),
+        ):
+            (source / relative).write_text(
+                f"{canonical_tool_prefix}independent_codex_pr_review\n",
+                encoding="utf-8",
+            )
         (source / "SKILL.md").write_text(
             "Use this when the user asks.\n",
             encoding="utf-8",
@@ -863,8 +939,17 @@ class PrivateOverlaySyncTests(unittest.TestCase):
             Path("references/claude-2.1.212-stream-schema.json"),
             Path("references/claude-stream-compatibility.json"),
             Path("references/claude-stream-schema.json"),
+            Path("scripts/build_claude_keychain_broker_macos.sh"),
+            Path("scripts/install_claude_keychain_broker_macos.sh"),
+            Path("scripts/independent_codex_pr_review/independent-codex-pr-review"),
+            Path("scripts/independent_codex_pr_review/review_supervisor/supervisor.py"),
+            Path(
+                "scripts/independent_codex_pr_review/"
+                "tests/run_required_no_child_profile.py"
+            ),
             Path("scripts/named_claude_preflight"),
             Path("scripts/named_lane_guard"),
+            Path("scripts/review_runtime/claude_keychain_broker"),
             Path("scripts/review_runtime/claude_stream_contract.py"),
             Path("scripts/review_runtime/claude_version_policy.py"),
             Path("scripts/review_runtime/fd_exec.py"),
@@ -879,6 +964,7 @@ class PrivateOverlaySyncTests(unittest.TestCase):
             Path("tests/test_named_claude_preflight.py"),
             Path("tests/test_named_lane.py"),
             Path("tests/test_review_result.py"),
+            Path("tests/test_installer.py"),
             Path("tests/test_validate_claude_stream.py"),
         )
         self.assertTrue(
@@ -905,6 +991,79 @@ class PrivateOverlaySyncTests(unittest.TestCase):
                     re.escape(f"missing required file: {missing}"),
                 ):
                     SYNC_MODULE._validate_canonical_review_target_contents(target)
+
+    def test_private_review_sync_rewrites_trusted_mac_gate_path(self) -> None:
+        review_root = REPO_ROOT / SYNC_MODULE.CANONICAL_REVIEW_TARGET
+        private_prefix = (
+            "TOOL_REL=personal_codex/skills/review-orchestration-playbook/scripts/"
+        )
+        canonical_prefix = "TOOL_REL=skills/review-orchestration-playbook/scripts/"
+
+        for relative in (
+            Path("references/pr-readiness.md"),
+            Path("tests/test_contracts.py"),
+        ):
+            with self.subTest(relative=relative):
+                text = (review_root / relative).read_text(encoding="utf-8")
+                self.assertIn(private_prefix, text)
+                self.assertNotIn(canonical_prefix, text)
+
+    def test_independent_supervisor_sync_uses_exact_file_inventory(self) -> None:
+        review_root = REPO_ROOT / SYNC_MODULE.CANONICAL_REVIEW_TARGET
+        supervisor_root = review_root / SYNC_MODULE.INDEPENDENT_CODEX_REVIEW_ROOT
+        actual = {
+            path.relative_to(supervisor_root)
+            for path in supervisor_root.rglob("*")
+            if path.is_file() and path.name != "__pycache__" and path.suffix != ".pyc"
+        }
+        self.assertEqual(
+            set(SYNC_MODULE.INDEPENDENT_CODEX_REVIEW_REQUIRED_FILES),
+            actual,
+        )
+
+        target = self.repo_root / "canonical-review-exact-inventory"
+        for relative in SYNC_MODULE.CANONICAL_REVIEW_REQUIRED_FILES:
+            path = target / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("canonical\n", encoding="utf-8")
+        unexpected = (
+            target
+            / SYNC_MODULE.INDEPENDENT_CODEX_REVIEW_ROOT
+            / "review_supervisor/unreviewed.py"
+        )
+        unexpected.write_text("unexpected\n", encoding="utf-8")
+
+        with self.assertRaisesRegex(
+            SYNC_MODULE.SyncError,
+            "exact tree inventory mismatch",
+        ):
+            SYNC_MODULE._validate_canonical_review_target_contents(target)
+
+    def test_sync_rejects_ignored_upstream_independent_supervisor_file(
+        self,
+    ) -> None:
+        rule, target = self._create_canonical_regular_file_overlay_rule()
+        unexpected = (
+            self.source_root
+            / rule.repo
+            / rule.source
+            / SYNC_MODULE.INDEPENDENT_CODEX_REVIEW_ROOT
+            / ".github"
+            / "unreviewed.yml"
+        )
+        unexpected.parent.mkdir()
+        unexpected.write_text("unreviewed\n", encoding="utf-8")
+
+        with self.assertRaisesRegex(
+            SYNC_MODULE.SyncError,
+            "raw exact tree inventory mismatch.*unexpected=.github",
+        ):
+            SYNC_MODULE.sync_sources(self.repo_root, self.source_root, (rule,))
+
+        self.assertEqual(
+            (target / "old-marker").read_text(encoding="utf-8"),
+            "old\n",
+        )
 
     def test_sync_rejects_retired_review_reference_outside_canonical_target(
         self,
@@ -1114,12 +1273,9 @@ class PrivateOverlaySyncTests(unittest.TestCase):
         synced_probe = (target / "scripts/remote_codex_probe.py").read_text(
             encoding="utf-8"
         )
-        synced_interface = (target / "agents/openai.yaml").read_text(
-            encoding="utf-8"
-        )
+        synced_interface = (target / "agents/openai.yaml").read_text(encoding="utf-8")
         self.assertIn(
-            "Use only when the user explicitly invokes "
-            "$codex-session-retrospective.",
+            "Use only when the user explicitly invokes $codex-session-retrospective.",
             synced_skill,
         )
         self.assertIn(
@@ -1663,12 +1819,228 @@ class PrivateOverlaySyncTests(unittest.TestCase):
             [call.args[2] for call in public_copy_mock.call_args_list],
         )
 
+    def _assert_plain_source_copy_race_fails_closed(
+        self,
+        *,
+        directory_rule: bool,
+    ) -> None:
+        repository = "plain-directory-race" if directory_rule else "plain-file-race"
+        source_repository = self.source_root / repository
+        source_repository.mkdir(parents=True)
+        if directory_rule:
+            source = source_repository / "skill"
+            source.mkdir()
+            payload = source / "payload.txt"
+            target_relative = Path("synced/plain-directory-race")
+            target = self.repo_root / target_relative
+            target.mkdir(parents=True)
+            (target / "old-marker.txt").write_bytes(b"old target\n")
+        else:
+            source = source_repository / "payload.txt"
+            payload = source
+            target_relative = Path("synced/plain-file-race.txt")
+            target = self.repo_root / target_relative
+            target.parent.mkdir(parents=True)
+            target.write_bytes(b"old target\n")
+        trusted = b"trusted source bytes\n"
+        injected = b"injected source bytes\n"
+        payload.write_bytes(trusted)
+        payload.chmod(0o644)
+        rule = SYNC_MODULE.SyncRule(
+            repo=repository,
+            source=source.relative_to(source_repository),
+            target=target_relative,
+        )
+        locked_blob_id = "b" * 40
+        locked_manifest = SimpleNamespace(
+            root_kind="tree" if directory_rule else "file",
+            root_mode=0o040000 if directory_rule else 0o644,
+            root_object_id="a" * 40 if directory_rule else locked_blob_id,
+            entries=(
+                SimpleNamespace(
+                    relative=Path("payload.txt"),
+                    kind="file",
+                    mode=0o644,
+                    object_id=locked_blob_id,
+                ),
+            )
+            if directory_rule
+            else (),
+        )
+        source_lock = SimpleNamespace(
+            pins=(SimpleNamespace(name=repository, sha="c" * 40),),
+        )
+        source_lock_error = type("SourceLockError", (RuntimeError,), {})
+        verification_count = 0
+
+        def verify_locked_source(_root, _source_lock, **_kwargs):
+            nonlocal verification_count
+            verification_count += 1
+            self.assertEqual(payload.read_bytes(), trusted)
+
+        def load_locked_source_manifest(
+            checkout,
+            commit,
+            locked_path,
+            *,
+            exclude_names,
+            exclude_suffixes,
+        ):
+            self.assertEqual(checkout, source_repository)
+            self.assertEqual(commit, "c" * 40)
+            self.assertEqual(locked_path, rule.source)
+            self.assertIsInstance(exclude_names, tuple)
+            self.assertIsInstance(exclude_suffixes, tuple)
+            return locked_manifest
+
+        def read_locked_source_blob(checkout, object_id):
+            self.assertEqual(checkout, source_repository)
+            self.assertEqual(object_id, locked_blob_id)
+            return trusted
+
+        source_lock_module = SimpleNamespace(
+            SourceLockError=source_lock_error,
+            load_source_lock=mock.Mock(return_value=source_lock),
+            load_locked_source_manifest=mock.Mock(
+                side_effect=load_locked_source_manifest,
+            ),
+            read_locked_source_blob=mock.Mock(
+                side_effect=read_locked_source_blob,
+            ),
+            validate_base_release_binding=mock.Mock(),
+            validate_generated_provenance=mock.Mock(),
+            verify_checkouts=mock.Mock(side_effect=verify_locked_source),
+        )
+        real_sync_sources = SYNC_MODULE.sync_sources
+        copy_triggered = False
+
+        def sync_only_test_rule(repo_root, source_root, *, locked_sources):
+            return real_sync_sources(
+                repo_root,
+                source_root,
+                (rule,),
+                locked_sources=locked_sources,
+            )
+
+        if directory_rule:
+            real_copy = SYNC_MODULE.shutil.copytree
+
+            def copy_with_transient_source(source_path, destination, *args, **kwargs):
+                nonlocal copy_triggered
+                if Path(source_path) == source:
+                    self.assertFalse(copy_triggered)
+                    copy_triggered = True
+                    payload.write_bytes(injected)
+                    try:
+                        return real_copy(source_path, destination, *args, **kwargs)
+                    finally:
+                        payload.write_bytes(trusted)
+
+        else:
+            real_copy = SYNC_MODULE.shutil.copy2
+
+            def copy_with_transient_source(source_path, destination, *args, **kwargs):
+                nonlocal copy_triggered
+                if Path(source_path) == source:
+                    self.assertFalse(copy_triggered)
+                    copy_triggered = True
+                    payload.write_bytes(injected)
+                    try:
+                        return real_copy(source_path, destination, *args, **kwargs)
+                    finally:
+                        payload.write_bytes(trusted)
+                return real_copy(source_path, destination, *args, **kwargs)
+
+        copy_name = "copytree" if directory_rule else "copy2"
+        errors = io.StringIO()
+        with (
+            mock.patch.object(
+                SYNC_MODULE,
+                "_load_source_lock_module",
+                return_value=source_lock_module,
+            ),
+            mock.patch.object(SYNC_MODULE, "SYNC_RULES", (rule,)),
+            mock.patch.object(
+                SYNC_MODULE,
+                "sync_sources",
+                side_effect=sync_only_test_rule,
+            ),
+            mock.patch.object(
+                SYNC_MODULE.shutil,
+                copy_name,
+                side_effect=copy_with_transient_source,
+            ),
+            contextlib.redirect_stdout(io.StringIO()),
+            contextlib.redirect_stderr(errors),
+        ):
+            result = SYNC_MODULE.main(
+                [
+                    "--repo-root",
+                    str(self.repo_root),
+                    "--source-root",
+                    str(self.source_root),
+                ]
+            )
+
+        self.assertFalse(copy_triggered)
+        self.assertEqual(result, 0, errors.getvalue())
+        self.assertEqual(payload.read_bytes(), trusted)
+        self.assertEqual(verification_count, 2)
+        if directory_rule:
+            self.assertEqual(
+                sorted(path.name for path in target.iterdir()),
+                ["payload.txt"],
+            )
+            self.assertEqual(
+                (target / "payload.txt").read_bytes(),
+                trusted,
+            )
+        else:
+            self.assertEqual(target.read_bytes(), trusted)
+        for installed in target.rglob("*") if target.is_dir() else (target,):
+            if installed.is_file():
+                self.assertNotIn(injected, installed.read_bytes())
+
+    def test_plain_file_sync_ignores_transient_legacy_copy_injection(
+        self,
+    ) -> None:
+        self._assert_plain_source_copy_race_fails_closed(directory_rule=False)
+
+    def test_plain_directory_sync_ignores_transient_legacy_copy_injection(
+        self,
+    ) -> None:
+        self._assert_plain_source_copy_race_fails_closed(directory_rule=True)
+
     def test_sync_main_reports_repo_recovery_and_external_retention(self) -> None:
         repo_recovery = self.repo_root / ".codex-tmp/private-overlay-recovery/run"
         external_retained = self.external_prepared_parent / ".skill.prepared.example"
         output = io.StringIO()
+        source_names = tuple(
+            dict.fromkeys(rule.repo for rule in SYNC_MODULE.SYNC_RULES)
+        )
+        source_lock = SimpleNamespace(
+            pins=tuple(
+                SimpleNamespace(name=name, sha=f"{index + 1:040x}")
+                for index, name in enumerate(source_names)
+            ),
+        )
+        source_lock_error = type("SourceLockError", (RuntimeError,), {})
+        source_lock_module = SimpleNamespace(
+            SourceLockError=source_lock_error,
+            load_source_lock=mock.Mock(return_value=source_lock),
+            validate_base_release_binding=mock.Mock(),
+            validate_generated_provenance=mock.Mock(),
+            verify_checkouts=mock.Mock(),
+            load_locked_source_manifest=mock.Mock(return_value=object()),
+            read_locked_source_blob=mock.Mock(),
+        )
 
         with (
+            mock.patch.object(
+                SYNC_MODULE,
+                "_load_source_lock_module",
+                return_value=source_lock_module,
+            ),
             mock.patch.object(
                 SYNC_MODULE,
                 "sync_sources",
@@ -1694,6 +2066,60 @@ class PrivateOverlaySyncTests(unittest.TestCase):
                 f"external prepared tree retained: {external_retained}",
             ],
         )
+        source_lock_module.load_source_lock.assert_called_once_with(self.repo_root)
+        source_lock_module.validate_base_release_binding.assert_called_once_with(
+            self.repo_root,
+            source_lock,
+        )
+        self.assertEqual(source_lock_module.verify_checkouts.call_count, 2)
+        source_lock_module.validate_generated_provenance.assert_called_once_with(
+            self.repo_root,
+            source_lock,
+            toolbox_checkout=self.source_root / "codex-toolbox",
+            require_private_receipt=False,
+        )
+
+    def test_sync_main_preserves_lexical_source_root_for_preflight(self) -> None:
+        source_link = self.root / "source-link"
+        source_link.symlink_to(self.source_root, target_is_directory=True)
+        source_lock = SimpleNamespace(
+            pins=(SimpleNamespace(name="codex-toolbox"),),
+        )
+        source_lock_error = type("SourceLockError", (RuntimeError,), {})
+
+        def reject_symlink(path, _source_lock, **_kwargs):
+            self.assertEqual(path, source_link)
+            self.assertTrue(path.is_symlink())
+            raise source_lock_error("source root must be a non-symlink directory")
+
+        source_lock_module = SimpleNamespace(
+            SourceLockError=source_lock_error,
+            load_source_lock=mock.Mock(return_value=source_lock),
+            validate_base_release_binding=mock.Mock(),
+            validate_generated_provenance=mock.Mock(),
+            verify_checkouts=mock.Mock(side_effect=reject_symlink),
+        )
+
+        with (
+            mock.patch.object(
+                SYNC_MODULE,
+                "_load_source_lock_module",
+                return_value=source_lock_module,
+            ),
+            mock.patch.object(SYNC_MODULE, "sync_sources") as sync_sources,
+            contextlib.redirect_stderr(io.StringIO()),
+        ):
+            result = SYNC_MODULE.main(
+                [
+                    "--repo-root",
+                    str(self.repo_root),
+                    "--source-root",
+                    str(source_link),
+                ]
+            )
+
+        self.assertEqual(result, 1)
+        sync_sources.assert_not_called()
 
     def test_secure_replacements_bypass_plain_path_helpers(self) -> None:
         secure_source = self.source_root / "secure-replacement-repo" / "skill"
@@ -1777,6 +2203,26 @@ class PrivateOverlaySyncTests(unittest.TestCase):
             (self.repo_root / plain_target / "SKILL.md").read_text(encoding="utf-8"),
             "replace-new\n",
         )
+
+    def test_plain_staging_normalizes_git_style_public_modes(self) -> None:
+        source = self.root / "mode-source"
+        source.mkdir(mode=0o700)
+        regular = source / "regular.txt"
+        executable = source / "run-tool"
+        nested = source / "nested"
+        nested.mkdir(mode=0o700)
+        regular.write_text("regular\n", encoding="utf-8")
+        executable.write_text("#!/bin/sh\n", encoding="utf-8")
+        regular.chmod(0o600)
+        executable.chmod(0o700)
+        staging = self.root / "mode-staging"
+
+        SYNC_MODULE._copy_source_to_staging(source, staging)
+
+        self.assertEqual(stat.S_IMODE(staging.stat().st_mode), 0o755)
+        self.assertEqual(stat.S_IMODE((staging / "nested").stat().st_mode), 0o755)
+        self.assertEqual(stat.S_IMODE((staging / "regular.txt").stat().st_mode), 0o644)
+        self.assertEqual(stat.S_IMODE((staging / "run-tool").stat().st_mode), 0o755)
 
     def test_secure_replacements_enforce_scoped_exact_counts(self) -> None:
         cases = (
@@ -2865,8 +3311,7 @@ class PrivateOverlaySyncTests(unittest.TestCase):
             nonlocal swapped_during_validation
             if surface == "staged target" and relative == Path("README.md"):
                 recovery_root = (
-                    self.repo_root
-                    / SYNC_MODULE.REGULAR_FILE_OVERLAY_RECOVERY_ROOT
+                    self.repo_root / SYNC_MODULE.REGULAR_FILE_OVERLAY_RECOVERY_ROOT
                 )
                 scopes = list(recovery_root.iterdir())
                 self.assertEqual(len(scopes), 1)
@@ -2937,10 +3382,7 @@ class PrivateOverlaySyncTests(unittest.TestCase):
 
         def validate_with_decoy(data, relative, policy_target, *, surface):
             nonlocal swapped_during_validation
-            if (
-                surface == "prepared public source"
-                and relative == Path("SKILL.md")
-            ):
+            if surface == "prepared public source" and relative == Path("SKILL.md"):
                 saved = source.with_name(f".{source.name}.expected")
                 source.rename(saved)
                 shutil.copytree(saved, source)
@@ -3041,8 +3483,7 @@ class PrivateOverlaySyncTests(unittest.TestCase):
             (set(SYNC_MODULE.os.supports_dir_fd) - {real_stat}) | {stat_mock}
         )
         supports_follow_symlinks = frozenset(
-            (set(SYNC_MODULE.os.supports_follow_symlinks) - {real_stat})
-            | {stat_mock}
+            (set(SYNC_MODULE.os.supports_follow_symlinks) - {real_stat}) | {stat_mock}
         )
 
         try:
@@ -3241,8 +3682,7 @@ class PrivateOverlaySyncTests(unittest.TestCase):
             (set(SYNC_MODULE.os.supports_dir_fd) - {real_stat}) | {stat_mock}
         )
         supports_follow_symlinks = frozenset(
-            (set(SYNC_MODULE.os.supports_follow_symlinks) - {real_stat})
-            | {stat_mock}
+            (set(SYNC_MODULE.os.supports_follow_symlinks) - {real_stat}) | {stat_mock}
         )
 
         with (
@@ -3612,8 +4052,7 @@ class PrivateOverlaySyncTests(unittest.TestCase):
             ):
                 with self.assertRaisesRegex(
                     SYNC_MODULE.SyncError,
-                    "injected public-copy failure.*"
-                    "external prepared tree retained at",
+                    "injected public-copy failure.*external prepared tree retained at",
                 ):
                     SYNC_MODULE.sync_sources(
                         self.repo_root,
@@ -5715,8 +6154,7 @@ class PrivateOverlaySyncTests(unittest.TestCase):
         retained = list(recovery_root.iterdir())
         self.assertEqual(len(retained), 1)
         self.assertIn(
-            "regular-file overlay recovery scope may be retained at "
-            f"{retained[0]}",
+            f"regular-file overlay recovery scope may be retained at {retained[0]}",
             errors.getvalue(),
         )
         self.assertIn("external prepared tree retained at", errors.getvalue())
@@ -5800,7 +6238,17 @@ class PrivateOverlaySyncTests(unittest.TestCase):
             for rule in SYNC_MODULE.SYNC_RULES
             if rule.target == SYNC_MODULE.CANONICAL_REVIEW_TARGET
         )
-        self.assertEqual(rule.replacements, SYNC_MODULE.COMMON_JOEY_TEXT_REPLACEMENTS)
+        self.assertEqual(
+            rule.replacements,
+            (
+                SYNC_MODULE.Replacement(
+                    "TOOL_REL=skills/review-orchestration-playbook/scripts/",
+                    "TOOL_REL=personal_codex/skills/"
+                    "review-orchestration-playbook/scripts/",
+                ),
+            )
+            + SYNC_MODULE.COMMON_JOEY_TEXT_REPLACEMENTS,
+        )
         obsolete_layout_replacements = {
             "REPO_ROOT = SKILL_ROOT.parents[1]",
             "(REPO_ROOT / relative).exists()",
@@ -6399,11 +6847,13 @@ class PrivateOverlaySyncTests(unittest.TestCase):
         ).read_text(encoding="utf-8")
 
         self.assertIn(
-            "git status --porcelain -- .github scripts tests personal_codex .agents",
+            "git status --porcelain -- .github scripts tests schema "
+            "personal_codex .agents generated-sync-source-lock.json",
             workflow,
         )
         self.assertIn(
-            "git add .github scripts tests personal_codex .agents",
+            "git add .github scripts tests schema personal_codex .agents "
+            "generated-sync-source-lock.json",
             workflow,
         )
         self.assertNotIn(
@@ -6414,6 +6864,81 @@ class PrivateOverlaySyncTests(unittest.TestCase):
             "git add scripts tests personal_codex .agents",
             workflow,
         )
+
+    def test_toolbox_generated_receipt_matches_private_mirror(self) -> None:
+        receipt = json.loads(
+            (REPO_ROOT / "generated-sync-source-lock.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual(
+            receipt["canonical_commit"],
+            "e57140e16a68db24dbdd883de665283538234730",
+        )
+        self.assertEqual(receipt["mirror"], "toolbox")
+        self.assertEqual(
+            receipt["mirror_repository"],
+            "Joey-Tools/codex-toolbox",
+        )
+        expected_paths = {
+            "scripts/codex_personal_sync.py",
+            "tests/test_codex_personal_sync.py",
+            "schema/sync-manifest.schema.json",
+            "tests/test_personal_sync_reconciliation_safety.py",
+            "tests/test_release_retention.py",
+            "tests/test_scheduler_doctor.py",
+        }
+        self.assertEqual(
+            {entry["target_path"] for entry in receipt["files"]},
+            expected_paths,
+        )
+        for entry in receipt["files"]:
+            target = REPO_ROOT / entry["target_path"]
+            self.assertTrue(target.is_file())
+            self.assertEqual(
+                f"{stat.S_IMODE(target.stat().st_mode):04o}",
+                entry["mode"],
+            )
+            self.assertEqual(
+                hashlib.sha256(target.read_bytes()).hexdigest(),
+                entry["sha256"],
+            )
+        for relative in (
+            "scripts/verify_generated_sync_source_lock.py",
+            "tests/test_generated_sync_source_lock.py",
+        ):
+            self.assertTrue((REPO_ROOT / relative).is_file())
+
+    def test_synced_bug_triage_transport_uses_fixed_private_policy(self) -> None:
+        skill_root = REPO_ROOT / "personal_codex/skills/bug-triage-playbook"
+        skill = (skill_root / "SKILL.md").read_text(encoding="utf-8")
+        recipes = (skill_root / "references/jenkins-artifact-recipes.md").read_text(
+            encoding="utf-8"
+        )
+        helper = (skill_root / "scripts/jenkins_artifact_probe.py").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn("This private skill supplies", skill)
+        self.assertIn("private configuration is deliberately fixed", skill)
+        self.assertIn("engci-private-sjc.cisco.com", recipes)
+        self.assertIn("--auth-profile wme_jenkins_jobs_artifact", recipes)
+        self.assertIn(
+            'ALLOWED_HOSTS = frozenset({"engci-private-sjc.cisco.com"})',
+            helper,
+        )
+        self.assertIn('"jenkins_mbpm2_codex"', helper)
+        self.assertIn('"jenkins_webex_teams"', helper)
+        self.assertIn('"wme_jenkins_jobs_artifact"', helper)
+        for residual in (
+            "jenkins.example.com",
+            "JENKINS_ARTIFACT_USER",
+            "JENKINS_ARTIFACT_TOKEN",
+            "--auth-profile default",
+            "DEFAULT_ALLOWED_HOSTS",
+        ):
+            with self.subTest(residual=residual):
+                self.assertNotIn(residual, skill)
+                self.assertNotIn(residual, recipes)
+                self.assertNotIn(residual, helper)
 
     def test_python_workflows_disable_bytecode_before_runtime_imports(self) -> None:
         def assert_bytecode_guard_contract(workflow: str) -> None:
@@ -6435,27 +6960,20 @@ class PrivateOverlaySyncTests(unittest.TestCase):
                     r"\bPYTHONDONTWRITEBYTECODE=1\s*\\$",
                 )
                 command_start = line_index
-                while (
-                    command_start > 0
-                    and job_lines[command_start - 1].rstrip().endswith("\\")
-                ):
+                while command_start > 0 and job_lines[
+                    command_start - 1
+                ].rstrip().endswith("\\"):
                     command_start -= 1
-                command_context = "\n".join(
-                    job_lines[command_start : line_index + 1]
-                )
+                command_context = "\n".join(job_lines[command_start : line_index + 1])
                 variable_index = command_context.rfind("PYTHONDONTWRITEBYTECODE")
-                env_index = command_context.rfind(
-                    "/usr/bin/env -i", 0, variable_index
-                )
+                env_index = command_context.rfind("/usr/bin/env -i", 0, variable_index)
                 self.assertGreaterEqual(env_index, 0)
                 env_arguments = command_context[
                     env_index + len("/usr/bin/env -i") : variable_index
                 ]
                 self.assertNotRegex(env_arguments, r"[;&|]")
                 try:
-                    argument_tokens = shlex.split(
-                        env_arguments.replace("\\\n", " ")
-                    )
+                    argument_tokens = shlex.split(env_arguments.replace("\\\n", " "))
                 except ValueError as error:
                     self.fail(f"invalid env -i argument quoting: {error}")
                 for argument in argument_tokens:
@@ -6545,13 +7063,16 @@ jobs:
         }
         for case_name, jobs in invalid_job_bodies.items():
             with self.subTest(rejected=case_name):
-                workflow = """name: Synthetic
+                workflow = (
+                    """name: Synthetic
 
 env:
   PYTHONDONTWRITEBYTECODE: "1"
 
 jobs:
-""" + jobs
+"""
+                    + jobs
+                )
                 with self.assertRaises(AssertionError):
                     assert_bytecode_guard_contract(workflow)
 
@@ -6620,8 +7141,8 @@ jobs:
         self.assertNotIn('python-version: "3.x"', scheduled_body)
         self.assertIn('python-version: "3.13"', release_body)
         self.assertNotIn('python-version: "3.x"', release_body)
-        self.assertIn('python-version: "3.x"', publish_body)
-        self.assertNotIn('python-version: "3.13"', publish_body)
+        self.assertIn('python-version: "3.13"', publish_body)
+        self.assertNotIn('python-version: "3.x"', publish_body)
 
     def test_release_publish_steps_use_separate_immutable_releases_token(
         self,
@@ -6736,6 +7257,34 @@ jobs:
         self.assertIn('test "$PYTHON_39_RESULT" = "success"', workflow)
         self.assertIn('test "$PLATFORM_SAFETY_RESULT" = "success"', workflow)
 
+    def test_python_workflows_disable_implicit_bytecode(self) -> None:
+        workflow_paths = (
+            REPO_ROOT / ".github" / "workflows" / "ci.yml",
+            REPO_ROOT / ".github" / "workflows" / "release.yml",
+            REPO_ROOT / ".github" / "workflows" / "scheduled-sync-release.yml",
+        )
+
+        for workflow_path in workflow_paths:
+            with self.subTest(workflow=workflow_path.name):
+                workflow = workflow_path.read_text(encoding="utf-8")
+                workflow_preamble, separator, _jobs = workflow.partition("\njobs:\n")
+                self.assertEqual(separator, "\njobs:\n")
+                self.assertIn(
+                    '\nenv:\n  PYTHONDONTWRITEBYTECODE: "1"\n',
+                    workflow_preamble,
+                )
+                self.assertNotIn("python3 -m py_compile", workflow)
+                self.assertNotIn("python3 -m compileall", workflow)
+                self.assertIn("Require source-only Python tree", workflow)
+
+        readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
+        self.assertIn("python3 -B -c 'import pathlib, sys;", readme)
+        self.assertIn(
+            "PYTHONDONTWRITEBYTECODE=1 python3 -B -m unittest discover -s tests",
+            readme,
+        )
+        self.assertNotIn("python3 -m py_compile", readme)
+
     def test_manifest_canonical_skills_are_backed_by_sync_rules(self) -> None:
         manifest = json.loads(
             (REPO_ROOT / "personal_codex" / "private-sync-manifest.json").read_text(
@@ -6759,9 +7308,7 @@ jobs:
         all_manifest_targets = {link["target"] for link in manifest["links"]}
         sync_targets = {str(rule.target) for rule in SYNC_MODULE.SYNC_RULES}
         retired_targets = {str(path) for path in SYNC_MODULE.RETIRED_TARGETS}
-        removed_by_target = {
-            link["target"]: link for link in manifest["removed_links"]
-        }
+        removed_by_target = {link["target"]: link for link in manifest["removed_links"]}
 
         self.assertEqual(
             manifest_sources - private_only_sources, manifest_sources & sync_targets
@@ -6830,7 +7377,9 @@ jobs:
         )
 
         self.assertIn("polling with `wait_agent`", agents)
-        self.assertIn("omit `timeout_ms` to use the `30000` millisecond default", agents)
+        self.assertIn(
+            "omit `timeout_ms` to use the `30000` millisecond default", agents
+        )
         self.assertIn("supported `10000`–`3600000` millisecond range", agents)
         self.assertIn("`30000`–`60000` for ordinary or reviewer polling", agents)
         self.assertIn("longer single waits are valid", agents)
@@ -6874,9 +7423,7 @@ jobs:
                 self.assertNotIn(retired, agents)
 
     def test_codex_review_gate_is_compatibility_status_only(self) -> None:
-        workflow_path = (
-            REPO_ROOT / ".github" / "workflows" / "codex-review-gate.yml"
-        )
+        workflow_path = REPO_ROOT / ".github" / "workflows" / "codex-review-gate.yml"
         canonical_fixture = (
             REPO_ROOT
             / "personal_codex"
@@ -6974,6 +7521,68 @@ jobs:
         self.assertIn('git push --force-with-lease="$remote_ref:$remote_sha"', workflow)
         self.assertNotIn('git ls-remote --heads origin "$branch"', workflow)
 
+    def test_scheduled_workflow_freezes_and_revalidates_five_sources(self) -> None:
+        workflow = (
+            REPO_ROOT / ".github" / "workflows" / "scheduled-sync-release.yml"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn(
+            "python3 scripts/private_overlay_source_lock.py emit-github-outputs",
+            workflow,
+        )
+        self.assertIn(
+            "ref: ${{ steps.source-lock.outputs.codex_toolbox_sha }}",
+            workflow,
+        )
+        self.assertEqual(workflow.count("fetch-depth: 0"), 6)
+        self.assertIn("Detach dynamic source checkouts", workflow)
+        self.assertEqual(
+            workflow.count("checkout --detach --no-recurse-submodules HEAD"), 1
+        )
+        self.assertIn("refresh-non-toolbox-pins", workflow)
+        self.assertEqual(workflow.count("verify-checkouts"), 2)
+        refresh = workflow.index("- name: Refresh non-toolbox source pins")
+        preflight = workflow.index("- name: Verify source checkouts before sync")
+        sync = workflow.index("- name: Sync private overlay sources")
+        postflight = workflow.index("- name: Verify source checkouts after sync")
+        self.assertLess(refresh, preflight)
+        self.assertLess(preflight, sync)
+        self.assertLess(sync, postflight)
+        self.assertIn("private-overlay-source-lock.json)", workflow)
+        self.assertIn("private-overlay-source-lock.json\n", workflow)
+        self.assertIn("steps.refreshed-lock.outputs.source_lock_sha256", workflow)
+        for name, _repository in (
+            ("codex_toolbox", "Joey-Tools/codex-toolbox"),
+            ("codex_debug_triage", "Joey-Tools/codex-debug-triage"),
+            ("codex_review_workflows", "Joey-Tools/codex-review-workflows"),
+            ("codex_workflow_hygiene", "Joey-Tools/codex-workflow-hygiene"),
+            ("codex_project_journal", "Joey-Tools/codex-project-journal"),
+        ):
+            with self.subTest(source=name):
+                self.assertIn(f"steps.refreshed-lock.outputs.{name}_sha", workflow)
+                self.assertIn(f"steps.refreshed-lock.outputs.{name}_tree", workflow)
+
+    def test_source_lock_inventory_matches_every_sync_rule_repository(self) -> None:
+        source_lock = SOURCE_LOCK_MODULE.load_source_lock(REPO_ROOT)
+        locked_repositories = tuple(pin.name for pin in source_lock.pins)
+        rule_repositories = tuple(
+            dict.fromkeys(rule.repo for rule in SYNC_MODULE.SYNC_RULES)
+        )
+
+        self.assertEqual(len(locked_repositories), len(rule_repositories))
+        self.assertEqual(frozenset(locked_repositories), frozenset(rule_repositories))
+
+    @unittest.skipUnless(sys.platform == "darwin", "macOS-only Git trust root")
+    def test_macos_source_lock_binds_actual_command_line_tools_git(self) -> None:
+        trusted = SOURCE_LOCK_MODULE._trusted_git_path()
+
+        self.assertEqual(
+            trusted.path,
+            Path("/Library/Developer/CommandLineTools/usr/bin/git"),
+        )
+        self.assertNotEqual(trusted.path, Path("/usr/bin/git"))
+        SOURCE_LOCK_MODULE._revalidate_trusted_git(trusted)
+
     def test_scheduled_workflow_skips_unchanged_sync_branch(self) -> None:
         workflow = (
             REPO_ROOT / ".github" / "workflows" / "scheduled-sync-release.yml"
@@ -7003,15 +7612,11 @@ jobs:
         readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
         normalized_readme = re.sub(r"\s+", " ", readme)
 
-        self.assertIn(
-            "`Joey-Tools/codex-review-workflows` default branch as its executable "
-            "canonical-source trust root",
-            normalized_readme,
-        )
-        self.assertIn(
-            "untrusted requires separate SHA-promotion or allowlist hardening",
-            normalized_readme,
-        )
+        self.assertIn("`private-overlay-source-lock.json`", normalized_readme)
+        self.assertIn("exact immutable base release SHA", normalized_readme)
+        self.assertIn("frozen into the candidate lock", normalized_readme)
+        self.assertIn("verified against the candidate lock", normalized_readme)
+        self.assertIn("exact review-workflow SHA and tree", normalized_readme)
         self.assertIn(
             "The current generated PR workflow declares only `contents: read` and "
             "contains no `secrets.*` references",
@@ -7071,12 +7676,17 @@ jobs:
             workflow,
         )
         for step_name in (
+            "Load frozen source identities",
             "Check out codex-toolbox",
             "Check out codex-debug-triage",
             "Check out codex-review-workflows",
             "Check out codex-workflow-hygiene",
             "Check out codex-project-journal",
+            "Detach dynamic source checkouts",
+            "Refresh non-toolbox source pins",
+            "Verify source checkouts before sync",
             "Sync private overlay sources",
+            "Verify source checkouts after sync",
             "Detect sync changes",
         ):
             with self.subTest(cooldown_step=step_name):
@@ -7266,10 +7876,7 @@ class PrivateOverlayReleaseTests(unittest.TestCase):
             ]
         return {
             "id": release_id,
-            "tag_name": (
-                "personal-codex-20260522-100000-"
-                f"{sha[:tag_suffix_length]}"
-            ),
+            "tag_name": (f"personal-codex-20260522-100000-{sha[:tag_suffix_length]}"),
             "target_commitish": sha,
             "draft": draft,
             "prerelease": prerelease,
@@ -7316,8 +7923,7 @@ class PrivateOverlayReleaseTests(unittest.TestCase):
         self.assertEqual(len(requests), 2)
         capability_request, release_request = requests
         capability_headers = {
-            name.lower(): value
-            for name, value in capability_request.header_items()
+            name.lower(): value for name, value in capability_request.header_items()
         }
         release_headers = {
             name.lower(): value for name, value in release_request.header_items()
@@ -7501,9 +8107,7 @@ class PrivateOverlayReleaseTests(unittest.TestCase):
             ),
             mock.patch.object(RELEASE_MODULE, "request_json") as request_json,
         ):
-            self.assertFalse(
-                RELEASE_MODULE.release_complete("owner/repo", "a" * 40)
-            )
+            self.assertFalse(RELEASE_MODULE.release_complete("owner/repo", "a" * 40))
 
         request_json.assert_not_called()
 
@@ -7523,9 +8127,7 @@ class PrivateOverlayReleaseTests(unittest.TestCase):
                 }
             ],
         )
-        incomplete["tag_name"] = (
-            f"personal-codex-20260522-100001-{sha[:7]}"
-        )
+        incomplete["tag_name"] = f"personal-codex-20260522-100001-{sha[:7]}"
         expected_names = RELEASE_MODULE._expected_asset_names(sha)
 
         for candidates in ([complete, incomplete], [incomplete, complete]):
@@ -7550,9 +8152,7 @@ class PrivateOverlayReleaseTests(unittest.TestCase):
                     "iter_releases",
                     return_value=iter(candidates),
                 ):
-                    self.assertFalse(
-                        RELEASE_MODULE.release_complete("owner/repo", sha)
-                    )
+                    self.assertFalse(RELEASE_MODULE.release_complete("owner/repo", sha))
 
     def test_multiple_incomplete_published_releases_fail_closed(self) -> None:
         sha = "a" * 40
@@ -7560,9 +8160,7 @@ class PrivateOverlayReleaseTests(unittest.TestCase):
             self._release_candidate(sha, release_id=10, assets=[]),
             self._release_candidate(sha, release_id=20, assets=[]),
         ]
-        candidates[1]["tag_name"] = (
-            f"personal-codex-20260522-100001-{sha[:7]}"
-        )
+        candidates[1]["tag_name"] = f"personal-codex-20260522-100001-{sha[:7]}"
         expected_names = RELEASE_MODULE._expected_asset_names(sha)
 
         with (
@@ -7577,9 +8175,7 @@ class PrivateOverlayReleaseTests(unittest.TestCase):
                 "multiple incomplete",
             ),
         ):
-            RELEASE_MODULE.create_or_find_release(
-                "owner/repo", sha, expected_names
-            )
+            RELEASE_MODULE.create_or_find_release("owner/repo", sha, expected_names)
         request_json.assert_not_called()
 
         with (
@@ -7599,9 +8195,7 @@ class PrivateOverlayReleaseTests(unittest.TestCase):
             self._release_candidate(sha, release_id=10),
             self._release_candidate(sha, release_id=20),
         ]
-        candidates[1]["tag_name"] = (
-            f"personal-codex-20260522-100001-{sha[:8]}"
-        )
+        candidates[1]["tag_name"] = f"personal-codex-20260522-100001-{sha[:8]}"
 
         with mock.patch.object(
             RELEASE_MODULE,
@@ -7615,12 +8209,10 @@ class PrivateOverlayReleaseTests(unittest.TestCase):
             "iter_releases",
             return_value=iter(candidates),
         ):
-            _selected, _uploaded_names, done = (
-                RELEASE_MODULE.create_or_find_release(
-                    "owner/repo",
-                    sha,
-                    RELEASE_MODULE._expected_asset_names(sha),
-                )
+            _selected, _uploaded_names, done = RELEASE_MODULE.create_or_find_release(
+                "owner/repo",
+                sha,
+                RELEASE_MODULE._expected_asset_names(sha),
             )
         self.assertTrue(done)
 
@@ -7753,9 +8345,7 @@ class PrivateOverlayReleaseTests(unittest.TestCase):
             self._release_candidate(sha, release_id=10, draft=True),
             self._release_candidate(sha, release_id=20, draft=True),
         ]
-        drafts[1]["tag_name"] = (
-            f"personal-codex-20260522-100001-{sha[:7]}"
-        )
+        drafts[1]["tag_name"] = f"personal-codex-20260522-100001-{sha[:7]}"
 
         with (
             mock.patch.object(
@@ -7790,12 +8380,10 @@ class PrivateOverlayReleaseTests(unittest.TestCase):
             "iter_releases",
             return_value=iter(candidates),
         ):
-            selected, _uploaded_names, done = (
-                RELEASE_MODULE.create_or_find_release(
-                    "owner/repo",
-                    sha,
-                    RELEASE_MODULE._expected_asset_names(sha),
-                )
+            selected, _uploaded_names, done = RELEASE_MODULE.create_or_find_release(
+                "owner/repo",
+                sha,
+                RELEASE_MODULE._expected_asset_names(sha),
             )
         self.assertIs(selected, complete)
         self.assertTrue(done)
@@ -7898,12 +8486,10 @@ class PrivateOverlayReleaseTests(unittest.TestCase):
                 return_value=IMMUTABLE_RELEASES_READ_TOKEN_FIXTURE,
             ),
         ):
-            selected, _uploaded_names, done = (
-                RELEASE_MODULE.create_or_find_release(
-                    "owner/repo",
-                    sha,
-                    RELEASE_MODULE._expected_asset_names(sha),
-                )
+            selected, _uploaded_names, done = RELEASE_MODULE.create_or_find_release(
+                "owner/repo",
+                sha,
+                RELEASE_MODULE._expected_asset_names(sha),
             )
 
         self.assertFalse(done)
@@ -7968,9 +8554,7 @@ class PrivateOverlayReleaseTests(unittest.TestCase):
 
         wrong_prefix = f"{sha[:7]}f"
         candidate = self._release_candidate(sha)
-        candidate["tag_name"] = (
-            f"personal-codex-20260522-100000-{wrong_prefix}"
-        )
+        candidate["tag_name"] = f"personal-codex-20260522-100000-{wrong_prefix}"
         with (
             mock.patch.object(
                 RELEASE_MODULE,
@@ -8579,9 +9163,9 @@ class PrivateOverlayReleaseTests(unittest.TestCase):
                 if asset_name == archive_name:
                     (dist / checksum_name).write_bytes(b"changed after snapshot")
                 return io.BytesIO(
-                    json.dumps(
-                        {"name": asset_name, "state": "uploaded"}
-                    ).encode("utf-8")
+                    json.dumps({"name": asset_name, "state": "uploaded"}).encode(
+                        "utf-8"
+                    )
                 )
 
             with (
@@ -8723,9 +9307,9 @@ class PrivateOverlayReleaseTests(unittest.TestCase):
             def fake_urlopen(request, timeout=30):
                 asset_name = request.full_url.rpartition("?name=")[2]
                 return io.BytesIO(
-                    json.dumps(
-                        {"name": asset_name, "state": "uploaded"}
-                    ).encode("utf-8")
+                    json.dumps({"name": asset_name, "state": "uploaded"}).encode(
+                        "utf-8"
+                    )
                 )
 
             with (
@@ -8777,9 +9361,7 @@ class PrivateOverlayReleaseTests(unittest.TestCase):
                 IMMUTABLE_RELEASES_READ_TOKEN_FIXTURE,
             ],
         )
-        self.assertFalse(
-            any(request["method"] == "PATCH" for request in requests)
-        )
+        self.assertFalse(any(request["method"] == "PATCH" for request in requests))
         self.assertEqual(urlopen.call_count, 2)
 
     def test_publish_existing_draft_rejects_flag_drift_before_patch(self) -> None:
@@ -8806,9 +9388,9 @@ class PrivateOverlayReleaseTests(unittest.TestCase):
             def fake_urlopen(request, timeout=30):
                 asset_name = request.full_url.rpartition("?name=")[2]
                 return io.BytesIO(
-                    json.dumps(
-                        {"name": asset_name, "state": "uploaded"}
-                    ).encode("utf-8")
+                    json.dumps({"name": asset_name, "state": "uploaded"}).encode(
+                        "utf-8"
+                    )
                 )
 
             with (
@@ -8877,9 +9459,9 @@ class PrivateOverlayReleaseTests(unittest.TestCase):
             def fake_urlopen(request, timeout=30):
                 asset_name = request.full_url.rpartition("?name=")[2]
                 return io.BytesIO(
-                    json.dumps(
-                        {"name": asset_name, "state": "uploaded"}
-                    ).encode("utf-8")
+                    json.dumps({"name": asset_name, "state": "uploaded"}).encode(
+                        "utf-8"
+                    )
                 )
 
             with (
@@ -9193,9 +9775,9 @@ class PrivateOverlayReleaseTests(unittest.TestCase):
                     return False
 
                 def read(self) -> bytes:
-                    return json.dumps(
-                        {"name": self.name, "state": "uploaded"}
-                    ).encode("utf-8")
+                    return json.dumps({"name": self.name, "state": "uploaded"}).encode(
+                        "utf-8"
+                    )
 
             def fake_urlopen(request, timeout=30):
                 uploads.append(request.full_url)
@@ -9475,9 +10057,9 @@ class PrivateOverlayReleaseTests(unittest.TestCase):
             def fake_urlopen(request, timeout=30):
                 asset_name = request.full_url.rpartition("?name=")[2]
                 return io.BytesIO(
-                    json.dumps(
-                        {"name": asset_name, "state": "uploaded"}
-                    ).encode("utf-8")
+                    json.dumps({"name": asset_name, "state": "uploaded"}).encode(
+                        "utf-8"
+                    )
                 )
 
             with (
@@ -9730,9 +10312,7 @@ class PrivateOverlayReleaseTests(unittest.TestCase):
                     "iter_releases",
                     return_value=iter([release]),
                 ):
-                    self.assertFalse(
-                        RELEASE_MODULE.release_complete("owner/repo", sha)
-                    )
+                    self.assertFalse(RELEASE_MODULE.release_complete("owner/repo", sha))
 
         with mock.patch.object(
             RELEASE_MODULE, "iter_releases", return_value=iter([draft_release])

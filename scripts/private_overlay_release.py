@@ -32,6 +32,8 @@ MAX_RELEASE_ASSET_BYTES = 64 * 1024 * 1024
 RELEASE_ASSET_READ_CHUNK_BYTES = 1024 * 1024
 DEFAULT_GITHUB_API_VERSION = "2022-11-28"
 IMMUTABLE_RELEASES_API_VERSION = "2026-03-10"
+REQUIRED_PUBLIC_BASE_RELEASE_REPO = "Joey-Tools/codex-toolbox"
+REQUIRED_PUBLIC_BASE_RELEASE_SHA = "20f37f4703715393480d550086980bb1fa44c7b3"
 
 
 class ReleaseError(RuntimeError):
@@ -509,9 +511,19 @@ def verify_package(repo_root: Path, sha: str, dist: Path) -> None:
                 raise ReleaseError(
                     "release manifest must contain only private-owned entries"
                 )
-            if manifest_data.base_release_repo != "Joey-Tools/codex-toolbox":
+            if (
+                manifest_data.base_release_repo
+                != REQUIRED_PUBLIC_BASE_RELEASE_REPO
+            ):
                 raise ReleaseError(
                     "release manifest must declare the public base release repo"
+                )
+            if (
+                manifest_data.base_release_sha
+                != REQUIRED_PUBLIC_BASE_RELEASE_SHA
+            ):
+                raise ReleaseError(
+                    "release manifest must declare the exact public base release SHA"
                 )
             if "bin/codex-personal-sync" in targets:
                 raise ReleaseError(

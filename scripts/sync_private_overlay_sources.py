@@ -8,6 +8,7 @@ import ctypes
 from dataclasses import dataclass, field
 import errno
 import hashlib
+import importlib.util
 import os
 from pathlib import Path
 import secrets
@@ -17,8 +18,28 @@ import sys
 import tempfile
 
 
+SOURCE_LOCK_SCRIPT = Path(__file__).resolve().parent / "private_overlay_source_lock.py"
+
+
 class SyncError(RuntimeError):
     pass
+
+
+def _load_source_lock_module():
+    specification = importlib.util.spec_from_file_location(
+        "private_overlay_source_lock_for_sync",
+        SOURCE_LOCK_SCRIPT,
+    )
+    if specification is None or specification.loader is None:
+        raise SyncError("cannot load the private overlay source-lock verifier")
+    module = importlib.util.module_from_spec(specification)
+    sys.modules[specification.name] = module
+    try:
+        specification.loader.exec_module(module)
+    except Exception as error:
+        sys.modules.pop(specification.name, None)
+        raise SyncError(f"cannot load source-lock verifier: {error}") from error
+    return module
 
 
 def _base_exception_note_method(error: BaseException):
@@ -67,6 +88,13 @@ class SyncRule:
     replacement_excluded_paths: tuple[Path, ...] = ()
 
 
+@dataclass(frozen=True)
+class _LockedRuleSource:
+    checkout: Path
+    manifest: object
+    read_blob: Callable[[Path, str], bytes]
+
+
 def _path(raw: str) -> Path:
     path = Path(raw)
     if path.is_absolute() or ".." in path.parts:
@@ -85,7 +113,7 @@ COMMON_JOEY_TEXT_REPLACEMENTS = (
 )
 
 
-PUBLIC_LEGACY_MUTABLE_RELEASE_BLOCK = '''_LEGACY_MUTABLE_RELEASES = {
+PUBLIC_LEGACY_MUTABLE_RELEASE_BLOCK = """_LEGACY_MUTABLE_RELEASES = {
     "Joey-Tools/codex-toolbox": _LegacyMutableRelease(
         release_id=325822894,
         tag_name="personal-codex-20260520-100331-8de1857",
@@ -103,10 +131,10 @@ PUBLIC_LEGACY_MUTABLE_RELEASE_BLOCK = '''_LEGACY_MUTABLE_RELEASES = {
             "340b4e8c32731974ff4747e3797d4805"
         ),
     ),
-}'''
+}"""
 
 
-PRIVATE_LEGACY_MUTABLE_RELEASE_BLOCK = '''_LEGACY_MUTABLE_RELEASES = {
+PRIVATE_LEGACY_MUTABLE_RELEASE_BLOCK = """_LEGACY_MUTABLE_RELEASES = {
     "Joey-Tools/codex-private-workflows": _LegacyMutableRelease(
         release_id=325865586,
         tag_name="personal-codex-20260520-104847-4e5ca3f",
@@ -124,7 +152,7 @@ PRIVATE_LEGACY_MUTABLE_RELEASE_BLOCK = '''_LEGACY_MUTABLE_RELEASES = {
             "c405edc0940da69f95875dbf2a50bed4"
         ),
     ),
-}'''
+}"""
 
 
 def _rule(
@@ -160,6 +188,16 @@ SYNC_RULES = (
         "codex-toolbox",
         "scripts/codex_personal_sync.py",
         "scripts/codex_personal_sync.py",
+    ),
+    _rule(
+        "codex-toolbox",
+        "tests/test_codex_personal_sync.py",
+        "tests/test_codex_personal_sync.py",
+    ),
+    _rule(
+        "codex-toolbox",
+        "schema/sync-manifest.schema.json",
+        "schema/sync-manifest.schema.json",
     ),
     _rule(
         "codex-toolbox",
@@ -208,6 +246,31 @@ SYNC_RULES = (
         "tests/test_personal_sync_reconciliation_safety.py",
     ),
     _rule(
+        "codex-toolbox",
+        "tests/test_release_retention.py",
+        "tests/test_release_retention.py",
+    ),
+    _rule(
+        "codex-toolbox",
+        "tests/test_scheduler_doctor.py",
+        "tests/test_scheduler_doctor.py",
+    ),
+    _rule(
+        "codex-toolbox",
+        "generated-sync-source-lock.json",
+        "generated-sync-source-lock.json",
+    ),
+    _rule(
+        "codex-toolbox",
+        "scripts/verify_generated_sync_source_lock.py",
+        "scripts/verify_generated_sync_source_lock.py",
+    ),
+    _rule(
+        "codex-toolbox",
+        "tests/test_generated_sync_source_lock.py",
+        "tests/test_generated_sync_source_lock.py",
+    ),
+    _rule(
         "codex-review-workflows",
         "agents/reviewer.toml",
         "personal_codex/agents/reviewer.toml",
@@ -224,40 +287,49 @@ SYNC_RULES = (
         "skills/bug-triage-playbook",
         "personal_codex/skills/bug-triage-playbook",
         (
+            Replacement("needs a public-safe probe", "needs a private probe"),
             Replacement(
-                "tracker issue metadata or forge PR/commit metadata",
-                "Cisco Jira issue metadata or Cisco GHE PR/commit metadata",
+                "This optional public skill supplies one canonical artifact "
+                "transport helper.",
+                "This private skill supplies one canonical artifact transport helper.",
             ),
             Replacement(
-                "fetch that tracker metadata first with a tracker-specific lookup skill",
-                "fetch that tracker metadata first with [$cisco-trackers-lookup](../cisco-trackers-lookup/SKILL.md)",
+                "Its public configuration is deliberately synthetic and fail-closed. "
+                "A private installation may specialize fixed source constants through "
+                "its own release process;",
+                "Its private configuration is deliberately fixed and fail-closed;",
             ),
             Replacement(
-                "remote URL subcommands only allow `https://jenkins.example.com/...`",
-                "remote URL subcommands only allow `https://engci-private-sjc.cisco.com/...`",
-            ),
-            Replacement(
-                "`cisco-trackers-lookup` already covers that read-only tracker step.",
-                "`cisco-trackers-lookup` already covers that read-only tracker step.",
-                required=False,
-            ),
-            Replacement(
-                "tracker metadata lookup into this skill when `cisco-trackers-lookup`",
-                "Cisco Jira / Cisco GHE metadata lookup into this skill when `cisco-trackers-lookup`",
+                'DEFAULT_ALLOWED_HOSTS = frozenset({"jenkins.example.com"})\n'
+                "AUTH_PROFILES = {\n"
+                '    "default": (\n'
+                '        "JENKINS_ARTIFACT_USER",\n'
+                '        "JENKINS_ARTIFACT_TOKEN",\n'
+                "    ),\n"
+                "}",
+                'ALLOWED_HOSTS = frozenset({"engci-private-sjc.cisco.com"})\n'
+                "AUTH_PROFILES = {\n"
+                '    "jenkins_mbpm2_codex": (\n'
+                '        "Jenkins_mbpM2_codex_username",\n'
+                '        "Jenkins_mbpM2_codex_token",\n'
+                "    ),\n"
+                '    "jenkins_webex_teams": (\n'
+                '        "Jenkins_webex_teams_username",\n'
+                '        "Jenkins_webex_teams_token",\n'
+                "    ),\n"
+                '    "wme_jenkins_jobs_artifact": (\n'
+                '        "wme_jenkins_jobs_artifact_user",\n'
+                '        "wme_jenkins_jobs_artifact_token",\n'
+                "    ),\n"
+                "}",
             ),
             Replacement("jenkins.example.com", "engci-private-sjc.cisco.com"),
-            Replacement("JENKINS_ARTIFACT_USER", "wme_jenkins_jobs_artifact_user"),
-            Replacement("JENKINS_ARTIFACT_TOKEN", "wme_jenkins_jobs_artifact_token"),
             Replacement(
                 "--auth-profile default", "--auth-profile wme_jenkins_jobs_artifact"
             ),
             Replacement(
-                'DEFAULT_ALLOWED_HOSTS = frozenset({"engci-private-sjc.cisco.com"})\nAUTH_PROFILES = {\n    "default": (\n        "wme_jenkins_jobs_artifact_user",\n        "wme_jenkins_jobs_artifact_token",\n    ),\n}\n\n\ndef _allowed_hosts() -> frozenset[str]:\n    raw_hosts = os.getenv("JENKINS_ARTIFACT_ALLOWED_HOSTS")\n    if not raw_hosts:\n        return DEFAULT_ALLOWED_HOSTS\n    hosts = frozenset(host.strip() for host in raw_hosts.split(",") if host.strip())\n    return hosts or DEFAULT_ALLOWED_HOSTS',
-                'ALLOWED_HOSTS = frozenset({"engci-private-sjc.cisco.com"})\nAUTH_PROFILES = {\n    "jenkins_mbpm2_codex": (\n        "Jenkins_mbpM2_codex_username",\n        "Jenkins_mbpM2_codex_token",\n    ),\n    "jenkins_webex_teams": (\n        "Jenkins_webex_teams_username",\n        "Jenkins_webex_teams_token",\n    ),\n    "wme_jenkins_jobs_artifact": (\n        "wme_jenkins_jobs_artifact_user",\n        "wme_jenkins_jobs_artifact_token",\n    ),\n}',
-            ),
-            Replacement(
-                "if parsed.hostname not in _allowed_hosts():",
-                "if parsed.hostname not in ALLOWED_HOSTS:",
+                "if parsed.hostname.lower() not in DEFAULT_ALLOWED_HOSTS:",
+                "if parsed.hostname.lower() not in ALLOWED_HOSTS:",
             ),
         ),
         common_joey_text=True,
@@ -469,6 +541,12 @@ SYNC_RULES = (
         "codex-review-workflows",
         "skills/review-orchestration-playbook",
         "personal_codex/skills/review-orchestration-playbook",
+        (
+            Replacement(
+                "TOOL_REL=skills/review-orchestration-playbook/scripts/",
+                "TOOL_REL=personal_codex/skills/review-orchestration-playbook/scripts/",
+            ),
+        ),
         common_joey_text=True,
         replacement_excluded_paths=("tests/fixtures/ci/private.yml",),
         regular_file_overlays=(
@@ -501,6 +579,99 @@ RETIRED_TARGETS = tuple(
 )
 
 CANONICAL_REVIEW_TARGET = _path("personal_codex/skills/review-orchestration-playbook")
+INDEPENDENT_CODEX_REVIEW_ROOT = _path("scripts/independent_codex_pr_review")
+INDEPENDENT_CODEX_REVIEW_REQUIRED_FILES = tuple(
+    _path(path)
+    for path in (
+        ".gitignore",
+        "ACCOUNT_LOCAL_RETENTION_V1",
+        "README.md",
+        "independent-codex-pr-review",
+        "review_supervisor/__init__.py",
+        "review_supervisor/appserver_protocol.py",
+        "review_supervisor/appserver_runtime.py",
+        "review_supervisor/auth_carrier.py",
+        "review_supervisor/auth_refresh.py",
+        "review_supervisor/checkout.py",
+        "review_supervisor/cli.py",
+        "review_supervisor/codex_executable.py",
+        "review_supervisor/constants.py",
+        "review_supervisor/custody.py",
+        "review_supervisor/direct_gate.py",
+        "review_supervisor/errors.py",
+        "review_supervisor/evidence.py",
+        "review_supervisor/final_transport.py",
+        "review_supervisor/frozen_source.py",
+        "review_supervisor/gitraw.py",
+        "review_supervisor/ledger.py",
+        "review_supervisor/legacy_retention.py",
+        "review_supervisor/lfs.py",
+        "review_supervisor/logs.py",
+        "review_supervisor/models.py",
+        "review_supervisor/no_child_profile.py",
+        "review_supervisor/process.py",
+        "review_supervisor/prompt.py",
+        "review_supervisor/recovery_cleanup.py",
+        "review_supervisor/review_execution.py",
+        "review_supervisor/runtime.py",
+        "review_supervisor/secureio.py",
+        "review_supervisor/settlement_state.py",
+        "review_supervisor/signal_relay.py",
+        "review_supervisor/supervisor.py",
+        "review_supervisor/wire.py",
+        "tests/__init__.py",
+        "tests/async_fd_custody.py",
+        "tests/readonly_child_isolation.sb",
+        "tests/readonly_no_child_contract.py",
+        "tests/run_hosted_no_child_fail_closed.py",
+        "tests/run_readonly_no_child_supervisor.py",
+        "tests/run_readonly_install_deterministic_supervisor.py",
+        "tests/run_required_deterministic_supervisor.py",
+        "tests/run_required_no_child_profile.py",
+        "tests/support.py",
+        "tests/synthetic_fixtures.py",
+        "tests/test_appserver_protocol.py",
+        "tests/test_appserver_runtime.py",
+        "tests/test_async_fd_custody.py",
+        "tests/test_auth_carrier.py",
+        "tests/test_auth_refresh.py",
+        "tests/test_checkout.py",
+        "tests/test_cli.py",
+        "tests/test_codex_executable.py",
+        "tests/test_custody.py",
+        "tests/test_direct_gate.py",
+        "tests/test_evidence.py",
+        "tests/test_frozen_source.py",
+        "tests/test_git_checkout.py",
+        "tests/test_ledger.py",
+        "tests/test_lfs.py",
+        "tests/test_logs.py",
+        "tests/test_no_child_profile.py",
+        "tests/test_prompt.py",
+        "tests/test_readonly_install_runner.py",
+        "tests/test_recovery_cleanup.py",
+        "tests/test_review_execution.py",
+        "tests/test_runtime_helpers.py",
+        "tests/test_runtime_process.py",
+        "tests/test_runtime_root_custody.py",
+        "tests/test_secureio.py",
+        "tests/test_settlement_state.py",
+        "tests/test_signal_relay.py",
+        "tests/test_supervisor.py",
+        "tests/test_wire.py",
+        "tests/trusted_mac_gate.py",
+        "trusted_mac_gate_sources.index",
+    )
+)
+INDEPENDENT_CODEX_REVIEW_REQUIRED_FILE_PARTS = frozenset(
+    relative.parts for relative in INDEPENDENT_CODEX_REVIEW_REQUIRED_FILES
+)
+INDEPENDENT_CODEX_REVIEW_REQUIRED_DIRECTORY_PARTS = frozenset(
+    parent.parts
+    for relative in INDEPENDENT_CODEX_REVIEW_REQUIRED_FILES
+    for parent in relative.parents
+    if parent != Path(".")
+)
 CANONICAL_REVIEW_REQUIRED_FILES = tuple(
     _path(path)
     for path in (
@@ -520,6 +691,8 @@ CANONICAL_REVIEW_REQUIRED_FILES = tuple(
         "references/review-lane-contracts.md",
         "references/review-prompt-templates.md",
         "references/synthetic-token-fixtures.md",
+        "scripts/build_claude_keychain_broker_macos.sh",
+        "scripts/install_claude_keychain_broker_macos.sh",
         "scripts/isolated_review",
         "scripts/named_claude_preflight",
         "scripts/named_lane_guard",
@@ -527,6 +700,7 @@ CANONICAL_REVIEW_REQUIRED_FILES = tuple(
         "scripts/review_runtime/__init__.py",
         "scripts/review_runtime/claude_capabilities.py",
         "scripts/review_runtime/claude_code_release.asc",
+        "scripts/review_runtime/claude_keychain_broker",
         "scripts/review_runtime/claude_keychain_broker.c",
         "scripts/review_runtime/claude_linux.py",
         "scripts/review_runtime/claude_linux_launcher.c",
@@ -554,6 +728,7 @@ CANONICAL_REVIEW_REQUIRED_FILES = tuple(
         "tests/test_cli.py",
         "tests/test_common.py",
         "tests/test_contracts.py",
+        "tests/test_installer.py",
         "tests/fixtures/ci/canonical.yml",
         "tests/fixtures/ci/private.yml",
         "tests/fixtures/compat/codex-review-gate.yml",
@@ -567,6 +742,9 @@ CANONICAL_REVIEW_REQUIRED_FILES = tuple(
         "tests/test_validate_claude_stream.py",
         "tests/test_workspace.py",
     )
+) + tuple(
+    INDEPENDENT_CODEX_REVIEW_ROOT / relative
+    for relative in INDEPENDENT_CODEX_REVIEW_REQUIRED_FILES
 )
 RETIRED_REVIEW_REFERENCES = (
     "pr-readiness-review-workflow",
@@ -615,6 +793,23 @@ def _reject_unignored_symlinks(path: Path, ignored_names: frozenset[str]) -> Non
                 continue
             if child.is_symlink():
                 raise SyncError(f"refusing to sync nested symlink: {child}")
+
+
+def _normalize_public_staging_modes(staging: Path) -> None:
+    def normalize(candidate: Path) -> None:
+        metadata = candidate.lstat()
+        if stat.S_ISDIR(metadata.st_mode):
+            candidate.chmod(0o755)
+        elif stat.S_ISREG(metadata.st_mode):
+            executable = bool(metadata.st_mode & 0o111)
+            candidate.chmod(0o755 if executable else 0o644)
+        else:
+            raise SyncError(f"unsupported staged public source type: {candidate}")
+
+    normalize(staging)
+    if staging.is_dir():
+        for candidate in staging.rglob("*"):
+            normalize(candidate)
 
 
 def _ensure_safe_target(repo_root: Path, target: Path) -> None:
@@ -687,10 +882,12 @@ def _copy_source_to_staging(
                 name for name in names if _is_ignored_name(name, ignored_names)
             ],
         )
+        _normalize_public_staging_modes(staging)
         return
     if source.is_file():
         staging.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(source, staging)
+        _normalize_public_staging_modes(staging)
         return
     raise SyncError(f"unsupported source type: {source}")
 
@@ -727,14 +924,91 @@ def _remove_retired_targets(repo_root: Path) -> None:
             target.unlink()
 
 
+def _require_retired_targets_absent(
+    stack: contextlib.ExitStack,
+    repo_binding: _PinnedRegularFileOverlayDirectory,
+) -> None:
+    for relative in RETIRED_TARGETS:
+        chain = _pin_or_create_regular_file_overlay_descendant_chain(
+            stack,
+            repo_binding,
+            relative.parent,
+            label="retired target parent",
+        )
+        parent = chain[-1]
+        if _regular_file_overlay_entry_exists(parent.descriptor, relative.name):
+            raise SyncError(
+                "locked sync requires retired target to be removed by an explicit "
+                f"migration: {relative}"
+            )
+
+
+def _validate_canonical_review_exact_tree_inventories(
+    file_parts: set[tuple[str, ...]],
+    *,
+    surface: str,
+) -> None:
+    prefix = INDEPENDENT_CODEX_REVIEW_ROOT.parts
+    actual = {
+        parts[len(prefix) :]
+        for parts in file_parts
+        if parts[: len(prefix)] == prefix and len(parts) > len(prefix)
+    }
+    expected = {relative.parts for relative in INDEPENDENT_CODEX_REVIEW_REQUIRED_FILES}
+    if actual == expected:
+        return
+
+    missing = sorted("/".join(parts) for parts in expected - actual)
+    unexpected = sorted("/".join(parts) for parts in actual - expected)
+    raise SyncError(
+        "canonical review exact tree inventory mismatch at "
+        f"{surface}: missing={missing}; unexpected={unexpected}"
+    )
+
+
+def _validate_canonical_review_raw_tree_entry(
+    relative_parts: tuple[str, ...],
+    *,
+    surface: str,
+) -> None:
+    prefix = INDEPENDENT_CODEX_REVIEW_ROOT.parts
+    if relative_parts[: len(prefix)] != prefix or len(relative_parts) <= len(prefix):
+        return
+    independent_relative = relative_parts[len(prefix) :]
+    if (
+        independent_relative in INDEPENDENT_CODEX_REVIEW_REQUIRED_FILE_PARTS
+        or independent_relative in INDEPENDENT_CODEX_REVIEW_REQUIRED_DIRECTORY_PARTS
+    ):
+        return
+    unexpected = "/".join(independent_relative)
+    raise SyncError(
+        "canonical review raw exact tree inventory mismatch at "
+        f"{surface}: unexpected={unexpected}"
+    )
+
+
 def _validate_canonical_review_target_contents(target: Path) -> None:
     if not target.exists():
         return
+    for path in target.rglob("*"):
+        _validate_canonical_review_raw_tree_entry(
+            path.relative_to(target).parts,
+            surface=str(target),
+        )
     for relative in CANONICAL_REVIEW_REQUIRED_FILES:
         if not (target / relative).is_file():
             raise SyncError(
                 f"canonical review target missing required file: {relative}"
             )
+    file_parts = {
+        path.relative_to(target).parts
+        for path in target.rglob("*")
+        if path.is_file() and not _is_ignored_relative(path, target, EXCLUDED_NAMES)
+    }
+    _validate_canonical_review_exact_tree_inventories(
+        file_parts,
+        surface=str(target),
+    )
     for path in sorted(target.rglob("*.md")):
         text = path.read_text(encoding="utf-8")
         for reference in RETIRED_REVIEW_REFERENCES:
@@ -1448,6 +1722,7 @@ def _capture_regular_file_overlay_tree_manifest(
     *,
     label: str,
     ignored_names: frozenset[str] = frozenset(),
+    raw_entry_validator: Callable[[tuple[str, ...]], None] | None = None,
 ) -> _RegularFileOverlayTreeManifest:
     if os.scandir not in os.supports_fd:
         raise SyncError(
@@ -1493,6 +1768,9 @@ def _capture_regular_file_overlay_tree_manifest(
         )
         scanned_entries += len(initial_names)
         for name in initial_names:
+            child_parts = (*relative_parts, name)
+            if raw_entry_validator is not None:
+                raw_entry_validator(child_parts)
             if _is_ignored_name(name, ignored_names):
                 continue
             if len(entries) >= MAX_REGULAR_FILE_OVERLAY_TREE_ENTRIES:
@@ -1500,7 +1778,6 @@ def _capture_regular_file_overlay_tree_manifest(
                     f"regular-file overlay {label} tree exceeds "
                     f"{MAX_REGULAR_FILE_OVERLAY_TREE_ENTRIES} entries"
                 )
-            child_parts = (*relative_parts, name)
             child_label = "/".join(child_parts)
             try:
                 named_before = os.stat(
@@ -2610,19 +2887,39 @@ def _replace_target_with_regular_file_overlays(
     bindings: tuple[_PinnedRegularFileOverlayTarget, ...],
     *,
     staging_scope: _RegularFileOverlayStagingScope,
+    candidate_root: _PinnedRegularFileOverlayDirectory | None = None,
+    candidate_manifest: _RegularFileOverlayTreeManifest | None = None,
 ) -> Path | None:
-    if not bindings:
-        raise SyncError("secure regular-file overlay install requires a binding")
     primitive = _load_regular_file_overlay_noreplace_primitive()
-    expected_root_identity = bindings[0].chain.identities[0]
-    expected_tree_manifest = bindings[0].tree_manifest
-    if any(
-        binding.chain.root != staging
-        or binding.chain.identities[0] != expected_root_identity
-        or binding.tree_manifest != expected_tree_manifest
-        for binding in bindings
-    ):
-        raise SyncError("regular-file overlay staging bindings disagree")
+    if bindings:
+        expected_root_identity = bindings[0].chain.identities[0]
+        expected_tree_manifest = bindings[0].tree_manifest
+        if any(
+            binding.chain.root != staging
+            or binding.chain.identities[0] != expected_root_identity
+            or binding.tree_manifest != expected_tree_manifest
+            for binding in bindings
+        ):
+            raise SyncError("regular-file overlay staging bindings disagree")
+        if (
+            candidate_root is not None
+            and candidate_root.identity != expected_root_identity
+        ):
+            raise SyncError("regular-file overlay candidate root binding disagrees")
+        if (
+            candidate_manifest is not None
+            and candidate_manifest != expected_tree_manifest
+        ):
+            raise SyncError("regular-file overlay candidate manifest disagrees")
+    elif candidate_root is not None and candidate_manifest is not None:
+        if candidate_root.path != staging:
+            raise SyncError("regular-file overlay candidate root path disagrees")
+        expected_root_identity = candidate_root.identity
+        expected_tree_manifest = candidate_manifest
+    else:
+        raise SyncError(
+            "secure regular-file overlay install requires a bound candidate"
+        )
     if (
         staging.parent != staging_scope.path
         or target.parent != staging_scope.target_parent.path
@@ -3080,9 +3377,7 @@ def _create_external_prepared_regular_file_overlay_container(
                 f"{parent.path / candidate_name}"
             )
             if isinstance(exc, Exception):
-                raise SyncError(
-                    f"{type(exc).__name__}: {exc}; {detail}"
-                ) from exc
+                raise SyncError(f"{type(exc).__name__}: {exc}; {detail}") from exc
             _attach_base_exception_detail(exc, detail)
             raise
         container_name = candidate_name
@@ -3110,22 +3405,18 @@ def _create_external_prepared_regular_file_overlay_container(
             path=container_path,
             label="external prepared container",
         )
-        if (
-            _overlay_file_identity(os.fstat(container.descriptor))
-            != _overlay_file_identity(created)
-        ):
+        if _overlay_file_identity(
+            os.fstat(container.descriptor)
+        ) != _overlay_file_identity(created):
             raise SyncError(
-                "external prepared container changed after descriptor-relative "
-                "creation"
+                "external prepared container changed after descriptor-relative creation"
             )
     except BaseException as exc:
         detail = f"external prepared tree retained at {container_path}"
         if isinstance(exc, SyncError):
             raise SyncError(f"{exc}; {detail}") from exc
         if isinstance(exc, Exception):
-            raise SyncError(
-                f"{type(exc).__name__}: {exc}; {detail}"
-            ) from exc
+            raise SyncError(f"{type(exc).__name__}: {exc}; {detail}") from exc
         _attach_base_exception_detail(exc, detail)
         raise
     return parent, container
@@ -3180,9 +3471,7 @@ def _require_regular_file_overlay_manifest_entry(
             f"regular-file overlay {label} gained an unregistered entry: {relative}"
         )
     if entry.kind != kind:
-        raise SyncError(
-            f"regular-file overlay {label} entry type changed: {relative}"
-        )
+        raise SyncError(f"regular-file overlay {label} entry type changed: {relative}")
     return entry
 
 
@@ -3204,15 +3493,13 @@ def _apply_regular_file_overlay_rule_to_bytes(
                 continue
             if replacement.old not in text:
                 continue
-            found_replacements[index] = (
-                found_replacements.get(index, 0) + text.count(replacement.old)
+            found_replacements[index] = found_replacements.get(index, 0) + text.count(
+                replacement.old
             )
             text = text.replace(replacement.old, replacement.new)
     for residual in rule.forbidden_residuals:
         if residual in text:
-            raise SyncError(
-                f"forbidden residual {residual!r} remains in {relative}"
-            )
+            raise SyncError(f"forbidden residual {residual!r} remains in {relative}")
     return text.encode("utf-8")
 
 
@@ -3248,17 +3535,17 @@ def _validate_regular_file_overlay_required_manifest_paths(
 ) -> None:
     if target != CANONICAL_REVIEW_TARGET:
         return
-    files = {
-        entry.relative_parts
-        for entry in manifest.entries
-        if entry.kind == "file"
-    }
+    files = {entry.relative_parts for entry in manifest.entries if entry.kind == "file"}
     for relative in CANONICAL_REVIEW_REQUIRED_FILES:
         if relative.parts not in files:
             raise SyncError(
                 "canonical review target missing required file at "
                 f"{surface}: {relative}"
             )
+    _validate_canonical_review_exact_tree_inventories(
+        files,
+        surface=surface,
+    )
 
 
 def _copy_regular_file_overlay_public_source_to_prepared(
@@ -3267,8 +3554,19 @@ def _copy_regular_file_overlay_public_source_to_prepared(
     *,
     prepared_root: _PinnedRegularFileOverlayDirectory,
     rule: SyncRule,
+    locked_source: _LockedRuleSource | None = None,
 ) -> _RegularFileOverlayTreeManifest:
     ignored_names = EXCLUDED_NAMES | frozenset(rule.exclude_names)
+    raw_entry_validator: Callable[[tuple[str, ...]], None] | None = None
+    if rule.target == CANONICAL_REVIEW_TARGET:
+
+        def validate_raw_entry(relative_parts: tuple[str, ...]) -> None:
+            _validate_canonical_review_raw_tree_entry(
+                relative_parts,
+                surface="public source",
+            )
+
+        raw_entry_validator = validate_raw_entry
     nonblocking = getattr(os, "O_NONBLOCK", None)
     if nonblocking is None:
         raise SyncError(
@@ -3296,7 +3594,27 @@ def _copy_regular_file_overlay_public_source_to_prepared(
             source_root.descriptor,
             label="initial public source",
             ignored_names=ignored_names,
+            raw_entry_validator=raw_entry_validator,
         )
+        locked_entries: dict[tuple[str, ...], object] = {}
+        if locked_source is not None:
+            if getattr(locked_source.manifest, "root_kind", None) != "tree":
+                raise SyncError("locked directory source manifest kind differs")
+            locked_entries = {
+                entry.relative.parts: entry
+                for entry in getattr(locked_source.manifest, "entries", ())
+            }
+            physical_kinds = {
+                entry.relative_parts: entry.kind for entry in source_manifest.entries
+            }
+            locked_kinds = {
+                parts: getattr(entry, "kind", None)
+                for parts, entry in locked_entries.items()
+            }
+            if physical_kinds != locked_kinds:
+                raise SyncError(
+                    "physical source inventory differs from the locked Git tree"
+                )
         replacement_candidates = {
             Path(*entry.relative_parts)
             for entry in source_manifest.entries
@@ -3311,7 +3629,10 @@ def _copy_regular_file_overlay_public_source_to_prepared(
             replacement_candidates,
             surface="public source",
         )
-        if _overlay_file_identity(source_root_metadata) != source_manifest.root_identity:
+        if (
+            _overlay_file_identity(source_root_metadata)
+            != source_manifest.root_identity
+        ):
             raise SyncError("regular-file overlay public source root changed")
         expected_entries = _regular_file_overlay_manifest_index(
             source_manifest,
@@ -3352,9 +3673,11 @@ def _copy_regular_file_overlay_public_source_to_prepared(
             )
             budget.scanned_entries += len(names)
             for name in names:
+                child_relative = relative / name
+                if raw_entry_validator is not None:
+                    raw_entry_validator(child_relative.parts)
                 if _is_ignored_name(name, ignored_names):
                     continue
-                child_relative = relative / name
                 if len(child_relative.parts) > MAX_REGULAR_FILE_OVERLAY_TREE_DEPTH:
                     raise SyncError(
                         "regular-file overlay public source tree depth exceeds "
@@ -3534,6 +3857,23 @@ def _copy_regular_file_overlay_public_source_to_prepared(
                             "regular-file overlay public source file changed while "
                             f"copying: {child_relative}"
                         )
+                    if locked_source is not None:
+                        locked_entry = locked_entries.get(child_relative.parts)
+                        if (
+                            locked_entry is None
+                            or getattr(locked_entry, "kind", None) != "file"
+                            or stat.S_IMODE(source_opened.st_mode)
+                            != getattr(locked_entry, "mode", None)
+                            or source_data
+                            != locked_source.read_blob(
+                                locked_source.checkout,
+                                getattr(locked_entry, "object_id", ""),
+                            )
+                        ):
+                            raise SyncError(
+                                "physical source file differs from the locked Git "
+                                f"blob: {child_relative}"
+                            )
                     output_data = _apply_regular_file_overlay_rule_to_bytes(
                         source_data,
                         child_relative,
@@ -3581,8 +3921,7 @@ def _copy_regular_file_overlay_public_source_to_prepared(
                         destination_before.st_size != len(output_data)
                         or _overlay_file_content_identity(destination_after)
                         != _overlay_file_content_identity(destination_before)
-                        or destination_digest
-                        != hashlib.sha256(output_data).hexdigest()
+                        or destination_digest != hashlib.sha256(output_data).hexdigest()
                     ):
                         raise SyncError(
                             "regular-file overlay public source file changed while "
@@ -3637,6 +3976,7 @@ def _copy_regular_file_overlay_public_source_to_prepared(
             source_root.descriptor,
             label="final public source",
             ignored_names=ignored_names,
+            raw_entry_validator=raw_entry_validator,
         )
         if final_source_manifest != source_manifest:
             raise SyncError(
@@ -3730,8 +4070,7 @@ def _read_expected_prepared_regular_file_overlay_file(
         if (
             _overlay_file_identity(opened_source) != expected.identity
             or opened_source.st_size != expected.size
-            or opened_content_identity
-            != _overlay_file_content_identity(source_before)
+            or opened_content_identity != _overlay_file_content_identity(source_before)
         ):
             raise SyncError(f"prepared overlay source changed while opening: {source}")
         source_data = _read_regular_file_overlay_descriptor(
@@ -3755,8 +4094,7 @@ def _read_expected_prepared_regular_file_overlay_file(
         if (
             len(source_data) != expected.size
             or source_digest != expected.sha256
-            or _overlay_file_content_identity(source_after)
-            != opened_content_identity
+            or _overlay_file_content_identity(source_after) != opened_content_identity
             or _overlay_file_content_identity(source_named_after)
             != opened_content_identity
         ):
@@ -3780,13 +4118,11 @@ def _copy_prepared_regular_file_overlay_file(
     manifest_builder: _RegularFileOverlayManifestBuilder,
 ) -> None:
     copy_budget.reserve_bytes(expected.size, label="prepared target")
-    source_data, source_metadata = (
-        _read_expected_prepared_regular_file_overlay_file(
-            source_parent,
-            source_name,
-            relative=relative,
-            expected=expected,
-        )
+    source_data, source_metadata = _read_expected_prepared_regular_file_overlay_file(
+        source_parent,
+        source_name,
+        relative=relative,
+        expected=expected,
     )
     _validate_regular_file_overlay_policy_bytes(
         source_data,
@@ -3946,9 +4282,7 @@ def _copy_prepared_regular_file_overlay_directory(
 ) -> None:
     child_names = _bounded_regular_file_overlay_tree_names(
         source.descriptor,
-        maximum=(
-            MAX_REGULAR_FILE_OVERLAY_TREE_ENTRIES - copy_budget.scanned_entries
-        ),
+        maximum=(MAX_REGULAR_FILE_OVERLAY_TREE_ENTRIES - copy_budget.scanned_entries),
         label="prepared source",
     )
     copy_budget.scanned_entries += len(child_names)
@@ -4157,7 +4491,10 @@ def _copy_prepared_regular_file_overlay_staging(
     elif source_root.path != source:
         raise SyncError("validated external prepared source path mismatch")
     source_metadata = os.fstat(source_root.descriptor)
-    if _overlay_file_identity(source_metadata) != expected_source_manifest.root_identity:
+    if (
+        _overlay_file_identity(source_metadata)
+        != expected_source_manifest.root_identity
+    ):
         raise SyncError(
             "regular-file overlay validated external prepared source root changed"
         )
@@ -4284,7 +4621,9 @@ def _regular_file_overlay_recovery_scope_detail(
             "regular-file overlay recovery scope pathname binding is unknown; "
             f"last-known path {scope.path} is untrusted"
         )
-    return f"regular-file overlay recovery scope retained for inspection at {scope.path}"
+    return (
+        f"regular-file overlay recovery scope retained for inspection at {scope.path}"
+    )
 
 
 @contextlib.contextmanager
@@ -4444,11 +4783,189 @@ def _regular_file_overlay_staging_directory(
                 raise SyncError(_regular_file_overlay_recovery_scope_detail(scope))
 
 
+def _write_all(descriptor: int, payload: bytes, *, label: str) -> None:
+    view = memoryview(payload)
+    written = 0
+    while written < len(view):
+        try:
+            count = os.write(descriptor, view[written:])
+        except OSError as exc:
+            raise SyncError(f"cannot write {label}: {exc}") from exc
+        if count <= 0:
+            raise SyncError(f"cannot make progress while writing {label}")
+        written += count
+
+
+def _assert_bound_plain_file(
+    parent_descriptor: int,
+    name: str,
+    pinned: _PinnedRegularFileOverlayEntry,
+    expected: bytes,
+    expected_mode: int,
+    *,
+    label: str,
+) -> None:
+    _assert_regular_file_overlay_entry_binding(
+        parent_descriptor,
+        pinned,
+        label=label,
+        name=name,
+    )
+    before = os.fstat(pinned.descriptor)
+    _validate_overlay_regular_file(before, label=label, path=Path(name))
+    if stat.S_IMODE(before.st_mode) != expected_mode or before.st_size != len(expected):
+        raise SyncError(f"{label} mode or size differs from the locked output")
+    payload = _read_regular_file_overlay_descriptor(
+        pinned.descriptor,
+        byte_limit=len(expected),
+    )
+    after = os.fstat(pinned.descriptor)
+    try:
+        named_after = os.stat(name, dir_fd=parent_descriptor, follow_symlinks=False)
+    except OSError as exc:
+        raise SyncError(f"cannot revalidate {label}: {exc}") from exc
+    if (
+        payload != expected
+        or _overlay_file_content_identity(after)
+        != _overlay_file_content_identity(before)
+        or _overlay_file_content_identity(named_after)
+        != _overlay_file_content_identity(after)
+    ):
+        raise SyncError(f"{label} bytes or binding changed")
+
+
+def _install_locked_plain_file(
+    repo_binding: _PinnedRegularFileOverlayDirectory,
+    target: Path,
+    rule: SyncRule,
+    locked_source: _LockedRuleSource,
+) -> Path | None:
+    manifest = locked_source.manifest
+    if getattr(manifest, "root_kind", None) != "file":
+        raise SyncError(f"locked plain-file source kind differs: {rule.source}")
+    source_data = locked_source.read_blob(
+        locked_source.checkout,
+        getattr(manifest, "root_object_id", ""),
+    )
+    found_replacements: dict[int, int] = {}
+    output_data = _apply_regular_file_overlay_rule_to_bytes(
+        source_data,
+        Path(target.name),
+        rule,
+        found_replacements,
+    )
+    _validate_replacement_counts(rule, found_replacements)
+    _validate_regular_file_overlay_policy_bytes(
+        output_data,
+        Path(target.name),
+        rule.target,
+        surface="locked staged source",
+    )
+    expected_mode = getattr(manifest, "root_mode", None)
+    if expected_mode not in {0o644, 0o755}:
+        raise SyncError(f"locked plain-file source mode differs: {rule.source}")
+
+    with _regular_file_overlay_staging_directory(
+        repo_binding,
+        rule.target,
+    ) as staging_scope:
+        staging = staging_scope.path / target.name
+        create_flags = (
+            os.O_RDWR
+            | os.O_CREAT
+            | os.O_EXCL
+            | os.O_NOFOLLOW
+            | getattr(os, "O_CLOEXEC", 0)
+        )
+        try:
+            descriptor = os.open(
+                staging.name,
+                create_flags,
+                0o600,
+                dir_fd=staging_scope.container.descriptor,
+            )
+        except OSError as exc:
+            raise SyncError(f"cannot create locked plain-file staging: {exc}") from exc
+        try:
+            _write_all(descriptor, output_data, label="locked plain-file staging")
+            os.fchmod(descriptor, expected_mode)
+            os.fsync(descriptor)
+        except BaseException:
+            os.close(descriptor)
+            raise
+        else:
+            os.close(descriptor)
+
+        with contextlib.ExitStack() as stack:
+            candidate = _pin_regular_file_overlay_entry(
+                stack,
+                staging_scope.container.descriptor,
+                staging.name,
+                label="locked plain-file candidate",
+            )
+            _assert_regular_file_overlay_scope_binding(
+                staging_scope,
+                operation="locked plain-file install preparation",
+            )
+            _assert_regular_file_overlay_retained_entries(
+                staging_scope,
+                exact_names={staging.name},
+            )
+            _assert_bound_plain_file(
+                staging_scope.container.descriptor,
+                staging.name,
+                candidate,
+                output_data,
+                expected_mode,
+                label="locked plain-file candidate",
+            )
+            try:
+                os.replace(
+                    staging.name,
+                    target.name,
+                    src_dir_fd=staging_scope.container.descriptor,
+                    dst_dir_fd=staging_scope.target_parent.descriptor,
+                )
+            except OSError as exc:
+                raise SyncError(
+                    f"cannot install locked plain-file candidate: {exc}"
+                ) from exc
+            _assert_bound_plain_file(
+                staging_scope.target_parent.descriptor,
+                target.name,
+                candidate,
+                output_data,
+                expected_mode,
+                label="installed locked plain file",
+            )
+            _assert_regular_file_overlay_directory_binding(
+                staging_scope.target_parent,
+                label="target parent",
+            )
+            _assert_regular_file_overlay_retained_entries(
+                staging_scope,
+                exact_names=set(),
+            )
+        staging_scope.completed = True
+        try:
+            os.rmdir(
+                staging_scope.container.path.name,
+                dir_fd=staging_scope.recovery_root.descriptor,
+            )
+        except OSError as exc:
+            raise SyncError(
+                "installed locked plain file but cannot remove its empty staging "
+                f"container: {exc}"
+            ) from exc
+    return None
+
+
 def _sync_sources_with_repo_binding(
     repo_root: Path,
     source_root: Path,
     rules: tuple[SyncRule, ...],
     repo_binding: _PinnedRegularFileOverlayDirectory | None,
+    locked_sources: dict[tuple[str, Path], _LockedRuleSource] | None = None,
 ) -> tuple[Path, ...]:
     recovery_paths: list[Path] = []
     for rule in rules:
@@ -4460,13 +4977,38 @@ def _sync_sources_with_repo_binding(
         source_repo_root = source_root / rule.repo
         source = source_repo_root / rule.source
         target = repo_root / rule.target
+        locked_source = (
+            None
+            if locked_sources is None
+            else locked_sources.get((rule.repo, rule.source))
+        )
         if not source.exists():
             raise SyncError(f"sync source missing for {rule.repo}: {source}")
         _ensure_safe_source(source_repo_root, source)
         _ensure_safe_target(repo_root, target)
-        if rule.regular_file_overlays:
+        if (
+            locked_source is not None
+            and getattr(locked_source.manifest, "root_kind", None) == "file"
+        ):
+            if repo_binding is None:
+                raise SyncError("locked plain-file sync requires a pinned repository")
+            recovery_path = _install_locked_plain_file(
+                repo_binding,
+                target,
+                rule,
+                locked_source,
+            )
+            if recovery_path is not None:
+                recovery_paths.append(recovery_path)
+            continue
+        if rule.regular_file_overlays or locked_source is not None:
             if repo_binding is None:
                 raise SyncError("secure sync requires a pinned repository root")
+            if (
+                locked_source is not None
+                and getattr(locked_source.manifest, "root_kind", None) != "tree"
+            ):
+                raise SyncError(f"locked directory source kind differs: {rule.source}")
             with contextlib.ExitStack() as prepared_stack:
                 prepared_parent, prepared_container = (
                     _create_external_prepared_regular_file_overlay_container(
@@ -4510,12 +5052,16 @@ def _sync_sources_with_repo_binding(
                             "initial external prepared root is not empty; retaining "
                             f"last-known path {prepared_directory}"
                         )
+                    copy_keywords = {}
+                    if locked_source is not None:
+                        copy_keywords["locked_source"] = locked_source
                     prepared_source_manifest = (
                         _copy_regular_file_overlay_public_source_to_prepared(
                             source,
                             prepared,
                             prepared_root=prepared_root,
                             rule=rule,
+                            **copy_keywords,
                         )
                     )
                     prepared_root = _PinnedRegularFileOverlayDirectory(
@@ -4586,21 +5132,19 @@ def _sync_sources_with_repo_binding(
                                 prepared_source_manifest,
                                 label="retained external prepared source",
                             )
-                            recovery_path = (
-                                _replace_target_with_regular_file_overlays(
-                                    target,
-                                    staging,
-                                    bindings,
-                                    staging_scope=staging_scope,
-                                )
+                            recovery_path = _replace_target_with_regular_file_overlays(
+                                target,
+                                staging,
+                                bindings,
+                                staging_scope=staging_scope,
+                                candidate_root=candidate.root,
+                                candidate_manifest=candidate.manifest,
                             )
                     if recovery_path is not None:
                         recovery_paths.append(recovery_path)
                     recovery_paths.append(prepared_directory)
                 except BaseException as primary_error:
-                    detail = (
-                        f"external prepared tree retained at {prepared_directory}"
-                    )
+                    detail = f"external prepared tree retained at {prepared_directory}"
                     if isinstance(primary_error, SyncError):
                         if detail not in str(primary_error):
                             raise SyncError(
@@ -4608,8 +5152,7 @@ def _sync_sources_with_repo_binding(
                             ) from primary_error
                     elif isinstance(primary_error, Exception):
                         raise SyncError(
-                            f"{type(primary_error).__name__}: {primary_error}; "
-                            f"{detail}"
+                            f"{type(primary_error).__name__}: {primary_error}; {detail}"
                         ) from primary_error
                     else:
                         _attach_base_exception_detail(primary_error, detail)
@@ -4631,7 +5174,11 @@ def _sync_sources_with_repo_binding(
 
 
 def sync_sources(
-    repo_root: Path, source_root: Path, rules: tuple[SyncRule, ...] = SYNC_RULES
+    repo_root: Path,
+    source_root: Path,
+    rules: tuple[SyncRule, ...] = SYNC_RULES,
+    *,
+    locked_sources: dict[tuple[str, Path], _LockedRuleSource] | None = None,
 ) -> tuple[Path, ...]:
     repo_root = repo_root.resolve()
     source_root = source_root.resolve()
@@ -4640,12 +5187,38 @@ def sync_sources(
     secure_rule_count = sum(bool(rule.regular_file_overlays) for rule in rules)
     if secure_rule_count > 1:
         raise SyncError("private overlay sync permits exactly one secure rule")
+    if locked_sources is not None:
+        expected_keys = {(rule.repo, rule.source) for rule in rules}
+        if set(locked_sources) != expected_keys:
+            raise SyncError("locked source manifests do not match the sync rules")
+        with contextlib.ExitStack() as stack:
+            repo_binding = _pin_regular_file_overlay_directory(
+                stack,
+                repo_root,
+                label="repository root",
+            )
+            _require_retired_targets_absent(stack, repo_binding)
+            recovery_paths = _sync_sources_with_repo_binding(
+                repo_root,
+                source_root,
+                rules,
+                repo_binding,
+                locked_sources,
+            )
+            _validate_canonical_review_target(repo_root)
+            _validate_no_retired_review_references(repo_root)
+            _assert_regular_file_overlay_directory_binding(
+                repo_binding,
+                label="repository root",
+            )
+        return recovery_paths
     plain_rules = tuple(rule for rule in rules if not rule.regular_file_overlays)
     secure_rules = tuple(rule for rule in rules if rule.regular_file_overlays)
     recovery_paths = _sync_sources_with_repo_binding(
         repo_root,
         source_root,
         plain_rules,
+        None,
         None,
     )
     _remove_retired_targets(repo_root)
@@ -4668,6 +5241,7 @@ def sync_sources(
                 source_root,
                 secure_rules,
                 repo_binding,
+                None,
             )
     else:
         _validate_canonical_review_target(repo_root)
@@ -4686,13 +5260,55 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    repo_root = Path(args.repo_root).resolve()
+    repo_root = Path(os.path.abspath(args.repo_root))
+    source_root = Path(os.path.abspath(args.source_root))
+    source_lock_module = _load_source_lock_module()
     try:
+        source_lock = source_lock_module.load_source_lock(repo_root)
+        source_lock_module.validate_base_release_binding(repo_root, source_lock)
+        source_lock_module.verify_checkouts(source_root, source_lock)
+        source_lock_module.validate_generated_provenance(
+            repo_root,
+            source_lock,
+            toolbox_checkout=source_root / source_lock.pins[0].name,
+            require_private_receipt=False,
+        )
+        pins_by_name = {pin.name: pin for pin in source_lock.pins}
+        locked_sources: dict[tuple[str, Path], _LockedRuleSource] = {}
+        for rule in SYNC_RULES:
+            pin = pins_by_name.get(rule.repo)
+            if pin is None:
+                raise SyncError(f"source lock is missing sync repository: {rule.repo}")
+            key = (rule.repo, rule.source)
+            if key in locked_sources:
+                raise SyncError(
+                    f"duplicate locked sync source: {rule.repo}:{rule.source}"
+                )
+            checkout = source_root / rule.repo
+            locked_sources[key] = _LockedRuleSource(
+                checkout=checkout,
+                manifest=source_lock_module.load_locked_source_manifest(
+                    checkout,
+                    pin.sha,
+                    rule.source,
+                    exclude_names=tuple(
+                        sorted(EXCLUDED_NAMES | frozenset(rule.exclude_names))
+                    ),
+                    exclude_suffixes=EXCLUDED_SUFFIXES,
+                ),
+                read_blob=source_lock_module.read_locked_source_blob,
+            )
         recovery_paths = sync_sources(
             repo_root,
-            Path(args.source_root).resolve(),
+            source_root,
+            locked_sources=locked_sources,
         )
-    except SyncError as error:
+        source_lock_module.verify_checkouts(
+            source_root,
+            source_lock,
+            repo_root=repo_root,
+        )
+    except (SyncError, source_lock_module.SourceLockError) as error:
         print(f"error: {error}", file=sys.stderr)
         return 1
     for recovery_path in recovery_paths:
