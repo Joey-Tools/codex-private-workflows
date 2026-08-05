@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import hashlib
 import inspect
 import json
@@ -23,7 +24,9 @@ SKILL_SCOPE_ROOT = SKILL_ROOT.parents[1]
 SCRIPTS = SKILL_ROOT / "scripts"
 RUNTIME = SCRIPTS / "review_runtime"
 sys.path.insert(0, str(SCRIPTS))
+sys.path.insert(0, str(SCRIPTS / "independent_codex_pr_review"))
 
+from review_supervisor import constants as independent_constants  # noqa: E402
 from review_runtime import (  # noqa: E402
     claude_capabilities,
     claude_linux,
@@ -82,6 +85,12 @@ REPOSITORY_POLICY_SCOPE_BY_PROFILE = {
     "canonical": pathlib.Path("."),
     "private": pathlib.Path("personal_codex"),
 }
+
+
+def _has_python_shebang(path: pathlib.Path) -> bool:
+    with path.open("rb") as handle:
+        first_line = handle.readline(256)
+    return first_line.startswith(b"#!") and b"python" in first_line.lower()
 
 
 def _ci_contract_context(skill_root: pathlib.Path) -> tuple[pathlib.Path, str]:
@@ -443,8 +452,7 @@ class RepositoryContractTest(unittest.TestCase):
 
         runtime = (RUNTIME / "workspace.py").read_text(encoding="utf-8")
         self.assertIn(
-            "MAX_SECRET_UNEXTRACTABLE_CONTAINER_IDENTITIES = "
-            "MAX_SNAPSHOT_ENTRIES",
+            "MAX_SECRET_UNEXTRACTABLE_CONTAINER_IDENTITIES = MAX_SNAPSHOT_ENTRIES",
             runtime,
         )
         self.assertIn(
@@ -610,6 +618,25 @@ class RepositoryContractTest(unittest.TestCase):
             "supplied-diff-private-git",
         )
         self.assertFalse(providers.NAMED_LANE_ELIGIBLE)
+        self.assertEqual(
+            independent_constants.LOW_LEVEL_HELPER_REVIEW_CONTRACT,
+            "supplied-diff-no-git",
+        )
+        self.assertFalse(independent_constants.NAMED_LANE_ELIGIBLE)
+        independent_readme = (
+            SCRIPTS / "independent_codex_pr_review" / "README.md"
+        ).read_text(encoding="utf-8")
+        helper_contract = (SKILL_ROOT / "references/helper-contract.md").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("review_contract: supplied-diff-no-git", independent_readme)
+        self.assertIn("No findings.", independent_readme)
+        self.assertIn(
+            "review_contract: supplied-diff-private-git",
+            helper_contract,
+        )
+        for contract_text in (independent_readme, helper_contract):
+            self.assertIn("named_lane_eligible: false", contract_text)
         for candidate in (
             SKILL_ROOT / "SKILL.md",
             SKILL_ROOT / "references/helper-contract.md",
@@ -746,9 +773,11 @@ class RepositoryContractTest(unittest.TestCase):
         pwd_home_source = inspect.getsource(providers._claude_pwd_home)
         select_source = inspect.getsource(providers._select_claude_macos_credential)
         validate_source = inspect.getsource(providers._validate_claude_local_credential)
-        macos_runtime_source = inspect.getsource(
-            providers._claude_keychain_runtime
-        ) + inspect.getsource(providers._claude_keychain_runtime_coordinated)
+        macos_runtime_source = (
+            inspect.getsource(providers._claude_keychain_runtime)
+            + inspect.getsource(providers._claude_keychain_runtime_coordinated)
+            + inspect.getsource(providers._claude_keychain_runtime_selected)
+        )
         macos_persist_source = inspect.getsource(
             providers._persist_claude_macos_refreshed_credential
         ) + inspect.getsource(providers._persist_claude_macos_refreshed_credential_impl)
@@ -953,7 +982,7 @@ class RepositoryContractTest(unittest.TestCase):
         self.assertIn("refresh_lock_protocol", linux_write_source)
         self.assertIn("_certified_claude_refresh_lock_protocol", attempt_source)
         self.assertIn(
-            "authentication_source = _claude_authentication_source(env)",
+            "authentication_source = _claude_authentication_source(attempt_env)",
             attempt_source,
         )
         self.assertIn('authentication_source != "local-login"', attempt_source)
@@ -1474,6 +1503,29 @@ class RepositoryContractTest(unittest.TestCase):
             with self.subTest(profile=profile):
                 self.assertTrue((CI_FIXTURE_ROOT / f"{profile}.yml").is_file())
 
+    def test_reviewed_ci_snapshots_use_source_only_python_checks(self) -> None:
+        expected_cache_guards = {"canonical": 3, "private": 5}
+        for profile, guard_count in expected_cache_guards.items():
+            with self.subTest(profile=profile):
+                workflow = (CI_FIXTURE_ROOT / f"{profile}.yml").read_text(
+                    encoding="utf-8"
+                )
+                self.assertIn('PYTHONDONTWRITEBYTECODE: "1"', workflow)
+                self.assertNotIn("python3 -m py_compile", workflow)
+                self.assertNotIn("python3 -m compileall", workflow)
+                self.assertIn(
+                    'compile(pathlib.Path(path).read_bytes(), path, "exec")',
+                    workflow,
+                )
+                self.assertIn(
+                    'compile(path.read_bytes(), str(path), "exec")',
+                    workflow,
+                )
+                self.assertEqual(
+                    workflow.count("- name: Require source-only Python tree"),
+                    guard_count,
+                )
+
     def test_claude_auth_policy_files_match_distribution_profile(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             repo_root = pathlib.Path(temp_dir)
@@ -1515,14 +1567,24 @@ class RepositoryContractTest(unittest.TestCase):
             """  test:
     name: test
     if: ${{ always() }}
-    needs: platform_tests
+    needs:
+      - platform_tests
+      - broker_reproducibility
+      - independent_supervisor_tests
+      - readonly_install_supervisor_tests
     runs-on: ubuntu-latest
     steps:
       - name: Require every platform test to pass
         env:
           PLATFORM_TESTS_RESULT: ${{ needs.platform_tests.result }}
+          BROKER_REPRODUCIBILITY_RESULT: ${{ needs.broker_reproducibility.result }}
+          INDEPENDENT_SUPERVISOR_RESULT: ${{ needs.independent_supervisor_tests.result }}
+          READONLY_INSTALL_SUPERVISOR_RESULT: ${{ needs.readonly_install_supervisor_tests.result }}
         run: |
           test "$PLATFORM_TESTS_RESULT" = "success"
+          test "$BROKER_REPRODUCIBILITY_RESULT" = "success"
+          test "$INDEPENDENT_SUPERVISOR_RESULT" = "success"
+          test "$READONLY_INSTALL_SUPERVISOR_RESULT" = "success"
 """,
             canonical,
         )
@@ -1534,6 +1596,9 @@ class RepositoryContractTest(unittest.TestCase):
       - platform_tests
       - python-39-compatibility
       - platform-safety
+      - broker_reproducibility
+      - independent_supervisor_tests
+      - readonly_install_supervisor_tests
     runs-on: ubuntu-latest
     steps:
       - name: Require every platform test to pass
@@ -1541,12 +1606,2714 @@ class RepositoryContractTest(unittest.TestCase):
           PLATFORM_TESTS_RESULT: ${{ needs.platform_tests.result }}
           PYTHON_39_RESULT: ${{ needs.python-39-compatibility.result }}
           PLATFORM_SAFETY_RESULT: ${{ needs.platform-safety.result }}
+          BROKER_REPRODUCIBILITY_RESULT: ${{ needs.broker_reproducibility.result }}
+          INDEPENDENT_SUPERVISOR_RESULT: ${{ needs.independent_supervisor_tests.result }}
+          READONLY_INSTALL_SUPERVISOR_RESULT: ${{ needs.readonly_install_supervisor_tests.result }}
         run: |
           test "$PLATFORM_TESTS_RESULT" = "success"
           test "$PYTHON_39_RESULT" = "success"
           test "$PLATFORM_SAFETY_RESULT" = "success"
+          test "$BROKER_REPRODUCIBILITY_RESULT" = "success"
+          test "$INDEPENDENT_SUPERVISOR_RESULT" = "success"
+          test "$READONLY_INSTALL_SUPERVISOR_RESULT" = "success"
 """,
             private,
+        )
+
+    def test_completed_trust_port_journal_uses_current_claude_range(self) -> None:
+        if CI_PROFILE != "canonical":
+            self.skipTest("completed canonical project journal is not mirrored")
+        journal = (
+            REPO_ROOT
+            / "docs/project_journal/2026/07/"
+            / "2026-07-16-review-helper-trust-port-821601.md"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("`>=2.1.211,<3.0.0`", journal)
+        self.assertNotIn(">=2.1.187", journal)
+
+    def test_runtime_state_journal_matches_deterministic_identity(self) -> None:
+        if CI_PROFILE != "canonical":
+            self.skipTest("canonical project journal is not mirrored")
+        runner_path = (
+            SCRIPTS / "independent_codex_pr_review/tests/"
+            "run_required_deterministic_supervisor.py"
+        )
+        assignments: dict[str, object] = {}
+        for statement in ast.parse(runner_path.read_text(encoding="utf-8")).body:
+            if (
+                isinstance(statement, ast.Assign)
+                and len(statement.targets) == 1
+                and isinstance(statement.targets[0], ast.Name)
+                and statement.targets[0].id
+                in {"EXPECTED_TEST_COUNT", "EXPECTED_TEST_ID_SHA256"}
+            ):
+                assignments[statement.targets[0].id] = ast.literal_eval(statement.value)
+
+        expected_count = assignments["EXPECTED_TEST_COUNT"]
+        expected_sha256 = assignments["EXPECTED_TEST_ID_SHA256"]
+        self.assertIsInstance(expected_count, int)
+        self.assertIsInstance(expected_sha256, str)
+        journal = (
+            REPO_ROOT
+            / "docs/project_journal/2026/07/"
+            / "2026-07-27-review-runtime-state-root-rsr001.md"
+        ).read_text(encoding="utf-8")
+        self.assertIn(
+            f"passed {expected_count}/{expected_count}",
+            journal,
+        )
+        self.assertIn(
+            f"reviewed {expected_count}-test selected identity",
+            journal,
+        )
+        self.assertIn(f"`{expected_sha256}`", journal)
+
+    def test_broker_reproducibility_never_runs_checkout_code_as_root(self) -> None:
+        script = (SCRIPTS / "build_claude_keychain_broker_macos.sh").read_text(
+            encoding="utf-8"
+        )
+        for profile in ("canonical", "private"):
+            workflow = (CI_FIXTURE_ROOT / f"{profile}.yml").read_text(encoding="utf-8")
+            start = workflow.index("  broker_reproducibility:")
+            end = workflow.index("\n  independent_supervisor_tests:", start)
+            broker_job = workflow[start:end]
+            with self.subTest(profile=profile):
+                self.assertNotIn("sudo", broker_job)
+                self.assertNotIn("/private/var/root", broker_job)
+                self.assertIn("--check", broker_job)
+                self.assertIn("runs-on: macos-26", broker_job)
+
+        self.assertNotIn("require_root_sealed", script)
+        self.assertNotIn("EUID", script)
+        self.assertNotIn("--output", script)
+        self.assertIn("not a security boundary", script)
+        self.assertIn("byte-reproducible", script)
+        self.assertIn(
+            "digest does not match the reviewed pin "
+            "(expected=$expected actual=$actual)",
+            script,
+        )
+        self.assertIn("verified %s sha256=%s", script)
+        self.assertIn("select_hosted_codesign_sha256", script)
+        self.assertIn('EXPECTED_HOSTED_OS_VERSION="26.5.2"', script)
+        self.assertIn('EXPECTED_HOSTED_OS_BUILD="25F84"', script)
+        self.assertIn('EXPECTED_HOSTED_LEGACY_OS_VERSION="26.4"', script)
+        self.assertIn('EXPECTED_HOSTED_LEGACY_OS_BUILD="25E246"', script)
+        self.assertIn(
+            "hosted runner OS version/build is not reviewed",
+            script,
+        )
+        for mode in ("DEVELOPER", "HOSTED"):
+            for tool in (
+                "CLANG",
+                "LD",
+                "LIPO",
+                "VTOOL",
+                "CODESIGN_ALLOCATE",
+                "CODESIGN",
+            ):
+                self.assertIn(f'EXPECTED_{mode}_{tool}_SHA256="', script)
+        self.assertIn('if [[ "$mode" == "hosted-check" ]]', script)
+        self.assertIn("initialize_expected_tool_digests", script)
+
+    def test_hosted_codesign_pin_journal_records_both_runner_generations(
+        self,
+    ) -> None:
+        if CI_PROFILE != "canonical":
+            self.skipTest("canonical project journal is not mirrored")
+        journal = (
+            REPO_ROOT
+            / "docs/project_journal/2026/07/"
+            / "2026-07-30-hosted-broker-codesign-pin-hbp001.md"
+        ).read_text(encoding="utf-8")
+        for evidence in (
+            "macOS 26.4 build `25E246`",
+            "06eacc36d43376972d3bca0a2137ea4efd6d0fe27de8a7af0e6b11d599e8f337",
+            "macOS 26.5.2 build `25F84`",
+            "214d455584d19abc0d74d02b9cbc7d3da6bdcb0596c235e6156dd9ed2f4e1ba7",
+            "90814780194",
+            "8290e4be7387a0df83cd1559e86afd880464f269450573d012795761fe298f16",
+        ):
+            self.assertIn(evidence, journal)
+
+    def test_readonly_supervisor_journal_is_recovery_pointer(self) -> None:
+        if CI_PROFILE != "canonical":
+            self.skipTest("canonical project journal is not mirrored")
+        project_state = (REPO_ROOT / "docs/PROJECT_STATE.md").read_text(
+            encoding="utf-8"
+        )
+        journal = (
+            REPO_ROOT
+            / "docs/project_journal/2026/07/"
+            / "2026-07-30-readonly-supervisor-scratch-rss001.md"
+        ).read_text(encoding="utf-8")
+        self.assertIn(
+            "Latest workstream: "
+            "`docs/project_journal/2026/07/"
+            "2026-07-30-readonly-supervisor-scratch-rss001.md`",
+            project_state,
+        )
+        for evidence in (
+            "read-only installed releases",
+            "untrusted `01777` ancestors",
+            "ordinary deterministic suite passed 619/619",
+            '"release_tree_immutable":true',
+            '"runtime_residue":[]',
+        ):
+            self.assertIn(evidence, journal)
+
+    def test_independent_supervisor_ci_separates_hosted_and_live_gates(self) -> None:
+        live_runner = (
+            SCRIPTS
+            / "independent_codex_pr_review/tests/run_required_no_child_profile.py"
+        ).read_text(encoding="utf-8")
+        deterministic_runner = (
+            SCRIPTS / "independent_codex_pr_review/tests/"
+            "run_required_deterministic_supervisor.py"
+        ).read_text(encoding="utf-8")
+        readonly_install_runner = (
+            SCRIPTS / "independent_codex_pr_review/tests/"
+            "run_readonly_install_deterministic_supervisor.py"
+        ).read_text(encoding="utf-8")
+        readonly_install_tests = (
+            SCRIPTS / "independent_codex_pr_review/tests/"
+            "test_readonly_install_runner.py"
+        ).read_text(encoding="utf-8")
+        source_binding_integration_tests = readonly_install_tests.split(
+            "class SourceCheckoutBindingIntegrationTests", 1
+        )[1].split("\nclass TrustedMacGateBootstrapTests", 1)[0]
+        trusted_mac_gate = (
+            SCRIPTS / "independent_codex_pr_review/tests/trusted_mac_gate.py"
+        ).read_text(encoding="utf-8")
+        readonly_support = (
+            SCRIPTS / "independent_codex_pr_review/tests/support.py"
+        ).read_text(encoding="utf-8")
+        readonly_no_child_contract = (
+            SCRIPTS / "independent_codex_pr_review/tests/readonly_no_child_contract.py"
+        ).read_text(encoding="utf-8")
+        readonly_no_child_runner = (
+            SCRIPTS / "independent_codex_pr_review/tests/"
+            "run_readonly_no_child_supervisor.py"
+        ).read_text(encoding="utf-8")
+        hosted_probe = (
+            SCRIPTS / "independent_codex_pr_review/tests/"
+            "run_hosted_no_child_fail_closed.py"
+        ).read_text(encoding="utf-8")
+        pr_readiness = (SKILL_ROOT / "references/pr-readiness.md").read_text(
+            encoding="utf-8"
+        )
+        helper_contract = (SKILL_ROOT / "references/helper-contract.md").read_text(
+            encoding="utf-8"
+        )
+        for runner in (live_runner, deterministic_runner):
+            self.assertIn("result.skipped,", runner)
+            self.assertIn("result.wasSuccessful()", runner)
+            self.assertIn("result.testsRun !=", runner)
+            self.assertIn("result.expectedFailures", runner)
+            self.assertIn("result.unexpectedSuccesses", runner)
+        self.assertIn("NoChildProfileDarwinIntegrationTests", live_runner)
+        self.assertIn("CodexExecutableAuthenticationTests", live_runner)
+        self.assertIn("REQUIRE_LIVE_NO_CHILD_PROFILE_ENV", live_runner)
+        self.assertNotIn("GITHUB_HOSTED_RUNTIME_PIN", live_runner)
+        for contract in (
+            '"hosted-readonly":',
+            '"live": "tests.run_required_no_child_profile"',
+            '"readonly": "tests.run_readonly_install_deterministic_supervisor"',
+            "not sys.flags.isolated",
+            "not sys.flags.ignore_environment",
+            "not sys.flags.no_site",
+            "not sys.flags.no_user_site",
+            "not sys.dont_write_bytecode",
+            '__file__ != "<stdin>"',
+            "trusted gate must be executed from bounded trusted stdin",
+            "os.environ.clear()",
+            "class _ClosedSourceFinder",
+            "os.O_DIRECTORY | os.O_NOFOLLOW",
+            "trusted gate source contains a substitute",
+            "trusted gate source maps duplicate module",
+            "trusted gate source manifest digest mismatch",
+            "trusted gate source contains an unexpected file",
+            "trusted gate source is missing exact manifest entries",
+            "hashlib.sha256(payload).hexdigest() != expected.sha256",
+            "budget.consume_source(opened.st_size, probe_bytes=1)",
+            "opened.st_nlink",
+            "def _validate_bound_git_toolchain(",
+            'HOSTED_GIT_BINDING_PROFILE = "hosted-git-toolchain-v2-external-tmp-custody"',
+            'TRUSTED_MAC_GIT_BINDING_PROFILE = "trusted-mac-git-toolchain-tmp-custody-v3"',
+            '"schema": "trusted-git-tmpdir-custody-v1"',
+            '"physical_chain": _directory_chain_records(closed)',
+            "GIT_TMPDIR_CUSTODY_DEPTH_LIMIT = 64",
+            "def _open_directory_chain(",
+            "dir_fd=descriptors[-1]",
+            "metadata.st_uid not in {0, os.getuid()}",
+            "metadata.st_uid == 0 and mode & stat.S_ISVTX",
+            "PERMITTED_GIT_DIRECTORY_ANCESTOR_XATTRS",
+            'b"com.apple.rootless"',
+            "_validate_trusted_git_tmpdir(",
+            "_measure_hosted_git_toolchain(arguments)",
+            "def _raise_preserving_secondary_failures(",
+            'setattr(primary, "codex_secondary_failures", secondary_failures)',
+            'context="trusted Git post-measurement custody also failed"',
+            'b"hosted-git-toolchain-v2\\0"',
+            '"schema": "hosted-git-toolchain-receipt-v2"',
+            'b"trusted-mac-bound-git-profile-v3\\0"',
+            '"CODEX_REVIEW_BOUND_GIT_DEVELOPER_DIR"',
+            '"CODEX_REVIEW_BOUND_GIT_EXECUTABLE"',
+            '"CODEX_REVIEW_BOUND_GIT_EXEC_PATH"',
+            '"CODEX_REVIEW_BOUND_GIT_RECEIPT_SHA256"',
+            '"CODEX_REVIEW_BOUND_GIT_TMPDIR"',
+            'environment["CODEX_REVIEW_TEST_RUNTIME_PARENT"]',
+        ):
+            self.assertIn(contract, trusted_mac_gate)
+        for support_contract in (
+            "allow_sticky_writable_ancestors: bool",
+            "self.allow_sticky_writable_ancestors",
+            "allow_sticky_writable_ancestors=True",
+            "_require_owned_private_parent_policy(policy, path=canonical)",
+        ):
+            self.assertIn(support_contract, readonly_support)
+        support_tree = ast.parse(readonly_support)
+        readonly_runner_tree = ast.parse(readonly_install_runner)
+
+        def module_function(
+            tree: ast.Module,
+            name: str,
+        ) -> ast.FunctionDef:
+            matches = [
+                statement
+                for statement in tree.body
+                if isinstance(statement, ast.FunctionDef)
+                and statement.name == name
+            ]
+            self.assertEqual(len(matches), 1)
+            return matches[0]
+
+        def calls_named(node: ast.AST, name: str) -> list[ast.Call]:
+            return [
+                candidate
+                for candidate in ast.walk(node)
+                if isinstance(candidate, ast.Call)
+                and isinstance(candidate.func, ast.Name)
+                and candidate.func.id == name
+            ]
+
+        private_creation = module_function(
+            support_tree,
+            "_create_bound_owned_private_directory",
+        )
+        private_creation_defaults = {
+            argument.arg: default
+            for argument, default in zip(
+                private_creation.args.kwonlyargs,
+                private_creation.args.kw_defaults,
+            )
+        }
+        sticky_default = private_creation_defaults[
+            "allow_sticky_writable_ancestors"
+        ]
+        self.assertIsInstance(sticky_default, ast.Constant)
+        self.assertIsNone(sticky_default.value)
+        for propagation_target in (
+            "_open_directory_parent",
+            "open_absolute_directory_chain",
+            "_DirectoryParentBinding",
+        ):
+            propagation_calls = calls_named(private_creation, propagation_target)
+            self.assertEqual(len(propagation_calls), 1)
+            sticky_keywords = [
+                keyword
+                for keyword in propagation_calls[0].keywords
+                if keyword.arg == "allow_sticky_writable_ancestors"
+            ]
+            self.assertEqual(len(sticky_keywords), 1)
+            self.assertIsInstance(sticky_keywords[0].value, ast.Name)
+            self.assertEqual(
+                sticky_keywords[0].value.id,
+                "allow_sticky_writable_ancestors",
+            )
+
+        runtime_creation_wrapper = module_function(
+            support_tree,
+            "_create_bound_owned_private_runtime_directory",
+        )
+        wrapped_creation_calls = calls_named(
+            runtime_creation_wrapper,
+            "_create_bound_owned_private_directory",
+        )
+        self.assertEqual(len(wrapped_creation_calls), 2)
+        wrapped_sticky_keywords = [
+            keyword
+            for call in wrapped_creation_calls
+            for keyword in call.keywords
+            if keyword.arg == "allow_sticky_writable_ancestors"
+        ]
+        self.assertEqual(len(wrapped_sticky_keywords), 1)
+        self.assertIsInstance(wrapped_sticky_keywords[0].value, ast.Constant)
+        self.assertIs(wrapped_sticky_keywords[0].value.value, True)
+        self.assertEqual(
+            len(
+                calls_named(
+                    runtime_creation_wrapper,
+                    "_runtime_parent_creation_allows_sticky_writable_ancestors",
+                )
+            ),
+            1,
+        )
+        initialization = module_function(
+            support_tree,
+            "_initialize_process_runtime_root_core",
+        )
+        self.assertEqual(
+            len(
+                calls_named(
+                    initialization,
+                    "_create_bound_owned_private_runtime_directory",
+                )
+            ),
+            1,
+        )
+        self.assertEqual(
+            len(
+                calls_named(
+                    readonly_runner_tree,
+                    "_create_bound_owned_private_runtime_directory",
+                )
+            ),
+            2,
+        )
+        runner_runtime_creation_wrapper = module_function(
+            readonly_runner_tree,
+            "_create_bound_owned_private_runtime_directory",
+        )
+        self.assertEqual(
+            len(
+                calls_named(
+                    runner_runtime_creation_wrapper,
+                    "_private_runtime_parent",
+                )
+            ),
+            1,
+        )
+        self.assertEqual(
+            len(
+                calls_named(
+                    runner_runtime_creation_wrapper,
+                    "_runtime_parent_creation_allows_sticky_writable_ancestors",
+                )
+            ),
+            1,
+        )
+        runner_wrapped_creation_calls = calls_named(
+            runner_runtime_creation_wrapper,
+            "_create_bound_owned_private_directory",
+        )
+        self.assertEqual(len(runner_wrapped_creation_calls), 2)
+        runner_wrapped_sticky_keywords = [
+            keyword
+            for call in runner_wrapped_creation_calls
+            for keyword in call.keywords
+            if keyword.arg == "allow_sticky_writable_ancestors"
+        ]
+        self.assertEqual(len(runner_wrapped_sticky_keywords), 1)
+        self.assertIsInstance(
+            runner_wrapped_sticky_keywords[0].value,
+            ast.Constant,
+        )
+        self.assertIs(runner_wrapped_sticky_keywords[0].value.value, True)
+        for removed_probe_contract in (
+            "version_sha256",
+            "--build-options",
+            "def _git_version_receipt(",
+            "GIT_VERSION_PROBE_",
+            "proc_listpgrppids",
+            "subprocess.Popen(",
+            "signal.pthread_sigmask(",
+        ):
+            self.assertNotIn(removed_probe_contract, trusted_mac_gate)
+        tmpdir_binding_source = trusted_mac_gate.split("def _tmpdir_stat_binding(", 1)[
+            1
+        ].split("def _require_candidate_readonly_physical_chain(", 1)[0]
+        for benign_child_churn_signal in (
+            "st_nlink",
+            "st_size",
+            "st_mtime",
+            "st_ctime",
+        ):
+            self.assertNotIn(benign_child_churn_signal, tmpdir_binding_source)
+        self.assertEqual(
+            trusted_mac_gate.count("current /= component"),
+            1,
+        )
+        self.assertEqual(
+            trusted_mac_gate.count("resolved_metadata = resolved.lstat()"),
+            1,
+        )
+        self.assertNotIn("sys.path.insert", trusted_mac_gate)
+        for contract in (
+            "TREE_SNAPSHOT_ENTRY_OBSERVATION_LIMIT",
+            "tree snapshot exceeds its entry-observation bound",
+            "time.monotonic() >= self.deadline",
+            "source_binding.source_entries",
+            "class SourceTreeBinding:",
+            "_copy_bound_source_tree(",
+            "_copy_bound_tree(",
+            "destination_group_gid=destination_group_gid",
+            "destination_group_gid = install_container_binding.policy.gid",
+            "bounded source copy changed the expected destination group",
+            "_bind_source_checkout(\n        source_root,\n        budget=active_budget,",
+        ):
+            self.assertIn(contract, readonly_install_runner)
+        self.assertNotIn("shutil.copytree(", readonly_install_runner)
+        self.assertNotIn("_align_created_directory_group", readonly_install_runner)
+        for regression_contract in (
+            "synthetic post-measurement custody drift",
+            "ambient repository fallback ran",
+            "unsafe writable ancestor",
+            "retained-policy-parent",
+            'self.assertNotIn("version_sha256", parsed_receipt)',
+            'exec_path / "added-helper"',
+        ):
+            self.assertIn(regression_contract, readonly_install_tests)
+        for contract in (
+            "runner.selected_git_executable()",
+            "runner.bound_git_environment(",
+            "runner.run_bounded(",
+            "timeout=10",
+            "if returncode != 0 or stderr:",
+        ):
+            self.assertIn(contract, source_binding_integration_tests)
+        self.assertNotIn('"/usr/bin/git"', source_binding_integration_tests)
+        self.assertNotIn("subprocess.run(", source_binding_integration_tests)
+        self.assertIn("expected_count != 13", live_runner)
+        self.assertIn("len(REQUIRED_TEST_KEYS) != expected_count", live_runner)
+        self.assertIn("EXPECTED_TEST_COUNT = 847", deterministic_runner)
+        self.assertIn("EXPECTED_TEST_ID_SHA256 =", deterministic_runner)
+        self.assertIn("selected_identity_sha256 !=", deterministic_runner)
+        self.assertIn("excluded_keys != REQUIRED_TEST_KEYS", deterministic_runner)
+        self.assertIn("if duplicate_keys:", deterministic_runner)
+        self.assertIn("expected_discovered_count", deterministic_runner)
+        self.assertIn("_test_key", deterministic_runner)
+        for contract in (
+            'READONLY_INSTALL_PARENT = pathlib.Path("/private/tmp")',
+            "CODEX_REVIEW_TEST_RUNTIME_PARENT",
+            "class TreeEntrySnapshot:",
+            "device=final_descriptor.st_dev",
+            "inode=final_descriptor.st_ino",
+            'flags=getattr(final_descriptor, "st_flags", 0)',
+            "link_count=link_count",
+            "initial.st_nlink != 1",
+            "_xattr_snapshot(descriptor, budget=budget)",
+            "_acl_entries(descriptor)",
+            "_tree_snapshot_once(\n        root,",
+            "_tree_property_unchanged(before, after)",
+            "_set_tree_read_only(installed_root)",
+            "run_bounded(",
+            "CHILD_STDOUT_LIMIT_BYTES",
+            "CHILD_STDERR_LIMIT_BYTES",
+            "ChildProcessClosureUnproven",
+            '"child_process_closure": child_process_closure',
+            '"primary_failure": (',
+            '"primary_status": primary_status',
+            '"release_tree_immutable": release_tree_immutable',
+            '"release_tree_property": "object-identity-content-access-policy"',
+            '"cleanup_status": "incomplete" if cleanup_failures else "complete"',
+            '"cleanup_guarantee": CLEANUP_GUARANTEE',
+            '"creation_origin_guarantee": CREATION_ORIGIN_GUARANTEE',
+            '"creation_origin_proven": False',
+            '"retained_paths": retained_paths',
+            '"source_head_bound": source_head_bound',
+            '"source_head_subtree_manifest_sha256": (',
+            '"source_manifest_sha256": source_manifest_sha256',
+            "_validate_source_git_configuration(source_root)",
+            "_validate_source_index_flags(repo_root, relative_path)",
+            "_verify_source_snapshot_matches_head(",
+            "inspect_repository(",
+            "enumerate_tree(repository, head_sha)",
+            "with CatFileBatch(repository) as batch:",
+            "_bind_source_checkout(",
+            "_copy_bound_source(",
+            "os.link(probe,hardlink_probe)",
+            "_run_no_child_test_suite(",
+            "_run_bounded_child(",
+            "_freeze_lifecycle_terminal_signal(lifecycle_fence)",
+            "_publish_terminal_output(",
+            '"tests.run_required_deterministic_supervisor"',
+        ):
+            self.assertIn(contract, readonly_install_runner)
+        for excluded_signal in (
+            "link_count=metadata.st_nlink",
+            "size=metadata.st_size",
+            "mtime_ns=metadata.st_mtime_ns",
+            "ctime_ns=metadata.st_ctime_ns",
+        ):
+            self.assertNotIn(excluded_signal, readonly_install_runner)
+        self.assertNotIn("ignore_errors=True", readonly_install_runner)
+        self.assertLess(
+            readonly_install_runner.index("cleanup_failures = tuple("),
+            readonly_install_runner.rindex("_publish_terminal_output("),
+        )
+        for completion_contract in (
+            "EXPECTED_TEST_COUNT = 275",
+            "EXPECTED_TEST_ID_SHA256 =",
+            '"status": "complete"',
+            '"tests_run": EXPECTED_TEST_COUNT',
+        ):
+            self.assertIn(completion_contract, readonly_no_child_contract)
+        for completion_contract in (
+            "SUCCESS_RECORD",
+            "selected_identity_sha256",
+            "result.wasSuccessful()",
+            "result.testsRun != EXPECTED_TEST_COUNT",
+            "result.skipped",
+        ):
+            self.assertIn(completion_contract, readonly_no_child_runner)
+        for contract in (
+            "return-before-ownership publisher",
+            "launch `CALL`-to-caller-`STORE`",
+            "pending custody containing the random name",
+            "`mkdir` syscall-result boundary",
+            "callee-return-to-caller-`STORE` interruption window",
+            "manifest `CALL`-to-`STORE` boundary",
+            "executable custody, and typed recovery evidence",
+            "Process evidence protects ownership and closure",
+            "Timestamp, link-count, and unrelated child-entry churn",
+            "explicit result-owner contract implemented by the real",
+            "only the caller settles the",
+            "closure recovery owner then holds the exact lease",
+            "`CustodiedManifestResultOwner.retained` becomes true only after",
+            "protects descriptor object identity and close",
+            "different reused object",
+            "never retries the close",
+        ):
+            self.assertIn(contract, helper_contract)
+        for contract in (
+            'platform.machine() != "arm64"',
+            "_select_hosted_runtime_profile(observed_runtime)",
+            "_matches_hosted_fail_closed_observations(evidence)",
+            "blockers == expected_blockers",
+            "len(blockers) == len(evidence.blockers)",
+            '"reviewed_fail_closed_signature": signature_matches',
+            '"runtime_profile": runtime_profile',
+            "if evidence.compatible or evidence.production_capable",
+        ):
+            self.assertIn(contract, hosted_probe)
+        self.assertNotIn("sandbox_apply", hosted_probe)
+        for requirement in (
+            "operator-enforced exact-head gate",
+            "thirteen tests, zero skips",
+            "Any push invalidates that evidence",
+            "neither Hosted CI's blocker-signature probe nor its "
+            "isolated-account read-only",
+            "TRUSTED_PYTHON=/absolute/path/to/parent-validated/python3.13",
+            "TRUSTED_GIT=/absolute/path/to/parent-validated/git",
+            "TRUSTED_GIT_EXEC_PATH=/absolute/path/to/parent-validated/git-core",
+            "CONTROL_ROOT=/absolute/path/to/parent-validated/"
+            "absent-owner-private-control-root",
+            "SOURCE_OBJECTS=/absolute/path/to/parent-validated-common-git-objects",
+            "TOOL_REL=personal_codex/skills/review-orchestration-playbook/scripts/"
+            "independent_codex_pr_review",
+            'TOOL_ROOT="$REPO_ROOT/$TOOL_REL"',
+            '[[ "$CONTROL_ROOT" != /* || "$SOURCE_OBJECTS" != /* ]]',
+            '[[ "$CONTROL_ROOT" == *:* || "$SOURCE_OBJECTS" == *:* ]]',
+            '[[ "$CONTROL_PARENT_UID" != "$CONTROL_UID" ]]',
+            '[[ "$CONTROL_PARENT_MODE" != "700" ]]',
+            '[[ "$CONTROL_PARENT_FLAGS" != "0" ]]',
+            "(( (8#$SOURCE_OBJECTS_MODE & 0022) != 0 ))",
+            '[[ -e "$CONTROL_ROOT" || -L "$CONTROL_ROOT" ]]',
+            'GIT_ALTERNATE_OBJECT_DIRECTORIES="$SOURCE_OBJECTS"',
+            'GIT_DIR="$CONTROL_GIT"',
+            "GIT_NO_LAZY_FETCH=1",
+            "GIT_PROTOCOL_FROM_USER=0",
+            "GIT_TERMINAL_PROMPT=0",
+            "GIT_ASKPASS=/usr/bin/false",
+            "-c credential.helper= -c protocol.ext.allow=never",
+            "-c protocol.file.allow=never -c protocol.git.allow=never",
+            "-c protocol.http.allow=never -c protocol.https.allow=never",
+            "CONTROL_CONFIG_SHA256",
+            "SOURCE_OBJECTS_BINDING",
+            "SOURCE_OBJECTS_ACL_VIOLATION",
+            '[[ -e "$SOURCE_OBJECTS/info/alternates" ]]',
+            '[[ -e "$SOURCE_OBJECTS/info/http-alternates" ]]',
+            '"$SOURCE_OBJECTS/pack/"*.promisor',
+            "TRUSTED_GIT_BINDING",
+            "TRUSTED_GIT_SHA256",
+            "TRUSTED_GIT_DEVELOPER_DIR_BINDING",
+            "TRUSTED_GIT_EXEC_PATH_BINDING",
+            "CONTROL_TMP_BINDING",
+            "measure_trusted_git_directory_custody()",
+            "CONTROL_PARENT_CUSTODY_RECEIPT",
+            "TRUSTED_GIT_TMPDIR_CUSTODY_RECEIPT",
+            "--trusted-git-tmpdir-receipt",
+            '"schema":"trusted-git-tmpdir-custody-v1"',
+            "measure_trusted_git_toolchain()",
+            "TRUSTED_GIT_TOOLCHAIN_RECEIPT_SHA256",
+            '"schema":"hosted-git-toolchain-receipt-v2"',
+            "verify_trusted_git_bootstrap_custody 'before gate execution'",
+            "verify_trusted_git_bootstrap_custody 'after gate execution'",
+            "verify_trusted_git_bootstrap_structure "
+            "\\\n  'before directory receipt issuance'",
+            'if ! CONTROL_PARENT_CUSTODY_RECEIPT="$(',
+            'if ! TRUSTED_GIT_TMPDIR_CUSTODY_RECEIPT="$(',
+            'if ! trusted_git cat-file blob "$GATE_SPEC" \\',
+            "trusted live gate failed",
+            "trusted readonly gate failed",
+            "root-owned sticky directory",
+            "com.apple.rootless",
+            "independent canonical `CONTROL_PARENT` and TMPDIR full-chain",
+            "canonical v2 toolchain receipt",
+            "fresh, non-executing measurement",
+            "version/capability evidence",
+            "The Python receipt and remeasurement logic never executes "
+            "the measured Git",
+            "The surrounding operator may use that already bound executable",
+            "/usr/bin/env -i LANG=C LC_ALL=C PATH=/usr/bin:/bin",
+            'GATE_SPEC="$HEAD_SHA:$TOOL_REL/tests/trusted_mac_gate.py"',
+            'SOURCE_MANIFEST_PATH="$TOOL_ROOT/trusted_mac_gate_sources.index"',
+            'SOURCE_MANIFEST_SPEC="$HEAD_SHA:$TOOL_REL/trusted_mac_gate_sources.index"',
+            'trusted_git cat-file blob "$GATE_SPEC"',
+            'if ! GATE_SIZE="$(trusted_git cat-file -s "$GATE_SPEC")"; then',
+            'if ! GATE_SHA256_RECORD="$(\n  trusted_git cat-file blob',
+            "unable to hash trusted gate blob",
+            'if [[ ! "$GATE_SIZE" =~ ^[[:digit:]]+$ ]]',
+            "GATE_SIZE < 1 || GATE_SIZE > 131072",
+            'if [[ ! "$GATE_SHA256" =~ ^[[:xdigit:]]{64}$ ]]',
+            '"$TRUSTED_PYTHON" -I -B -S - "$TOOL_ROOT" \\',
+            '"$SOURCE_MANIFEST_PATH" "$SOURCE_MANIFEST_SHA256" live',
+            "no-group-write/no-other-write",
+            "interpreter, Developer directory, Git executable/exec-path absolute",
+            "HEAD_SHA=<full-head-sha>",
+            '"$SOURCE_MANIFEST_PATH" "$SOURCE_MANIFEST_SHA256" readonly "$HEAD_SHA" \\',
+            '"$CONTROL_TMP" "$TRUSTED_GIT_DEVELOPER_DIR" "$TRUSTED_GIT" \\',
+            '"$TRUSTED_GIT_SHA256" "$TRUSTED_GIT_EXEC_PATH" \\',
+            '"$TRUSTED_GIT_TOOLCHAIN_RECEIPT" \\',
+            '"$TRUSTED_GIT_TMPDIR_CUSTODY_RECEIPT"',
+            "This candidate gate and its receipts are implementation/self-test "
+            "evidence only; formal named-review lanes remain controlled by an "
+            "independently trusted prior bundle.",
+            "source_head_bound == true",
+            "source_head_subtree_manifest_sha256",
+            "production no-child proof",
+        ):
+            self.assertIn(requirement, pr_readiness)
+        self.assertGreater(
+            pr_readiness.index(
+                "verify_trusted_git_bootstrap_custody 'after gate execution'"
+            ),
+            pr_readiness.index(
+                '"$SOURCE_MANIFEST_PATH" "$SOURCE_MANIFEST_SHA256" readonly "$HEAD_SHA" \\'
+            ),
+        )
+        self.assertNotIn(
+            '"$SOURCE_MANIFEST_PATH" "$SOURCE_MANIFEST_SHA256" readonly "$HEAD_SHA"\n',
+            pr_readiness,
+        )
+        self.assertNotIn(
+            '"$TRUSTED_GIT_EXEC_PATH" \\\n      "$TRUSTED_GIT_TOOLCHAIN_RECEIPT"\n',
+            pr_readiness,
+        )
+        for unsafe_gate_check in (
+            '[[ "$GATE_SIZE" =~ ^[[:digit:]]+$ ]] &&',
+            '[[ "$GATE_SHA256" =~ ^[[:xdigit:]]{64}$ ]]\nset -o pipefail',
+        ):
+            self.assertNotIn(unsafe_gate_check, pr_readiness)
+
+        installed_readme = (
+            SCRIPTS / "independent_codex_pr_review/README.md"
+        ).read_text(encoding="utf-8")
+        for manifest_stream_contract in (
+            "stream_manifest_gate()",
+            'SOURCE_MANIFEST="$TOOL_ROOT/trusted_mac_gate_sources.index"',
+            "SOURCE_MANIFEST_SHA256=<manifest-bound-sha256>",
+            '"$TRUSTED_PYTHON" -I -B -S -c',
+            "os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK",
+            "opened.st_nlink != 1",
+            "opened.st_size > limit",
+            "identity(opened) != identity(closed)",
+            "hashlib.sha256(data).hexdigest() != expected_digest",
+            "written = os.write(1, view)",
+            "stream_manifest_gate \\\n    | /usr/bin/env -i",
+            "TRUSTED_GIT_CONTROL_PARENT=/absolute/path/to/owner-private-control-parent",
+            'TRUSTED_GIT_CONTROL_PARENT_CUSTODY_RECEIPT="$(',
+            'TRUSTED_GIT_TMPDIR_CUSTODY_RECEIPT="$(',
+            'TRUSTED_GIT_TOOLCHAIN_RECEIPT="$(',
+            "measure_trusted_git_directory_custody()",
+            "verify_trusted_git_directory_custody()",
+            "if ! verify_trusted_git_directory_custody; then",
+            "if ! stream_manifest_gate",
+            "if ! PYTHONDONTWRITEBYTECODE=1",
+            "--hosted-git-receipt",
+            "--trusted-git-tmpdir-receipt",
+            '"$SOURCE_MANIFEST" "$SOURCE_MANIFEST_SHA256" readonly "$HEAD_SHA" \\',
+            '"$TRUSTED_GIT_TMPDIR" "$TRUSTED_GIT_DEVELOPER_DIR" "$TRUSTED_GIT" \\',
+            '"$TRUSTED_GIT_TOOLCHAIN_RECEIPT" \\',
+            '"$TRUSTED_GIT_TMPDIR_CUSTODY_RECEIPT"',
+            "This candidate gate and its receipts are implementation/self-test "
+            "evidence only; formal named-review lanes remain controlled by an "
+            "independently trusted prior bundle.",
+            "descriptor 只读取一次",
+            "完整 root-to-target chain",
+            "com.apple.rootless",
+            "Readonly v3 entry",
+            "非执行方式重新读取 physical Git bytes",
+            "canonical v2 toolchain receipt",
+            "并列的外部 receipt",
+            "receipt issuance 与 child validation 均不执行 Git",
+            "CODEX_REVIEW_TEST_RUNTIME_PARENT",
+        ):
+            self.assertIn(manifest_stream_contract, installed_readme)
+
+        def guarded_block(source: str, marker: str, occurrence: int = 0) -> str:
+            offset = 0
+            start = -1
+            for _ in range(occurrence + 1):
+                start = source.index(marker, offset)
+                offset = start + len(marker)
+            end = source.index("\nfi", start) + len("\nfi")
+            return source[start:end]
+
+        guarded_failures = (
+            (pr_readiness, 'if ! CONTROL_PARENT_CUSTODY_RECEIPT="$(', 0),
+            (pr_readiness, 'if ! TRUSTED_GIT_TMPDIR_CUSTODY_RECEIPT="$(', 0),
+            (
+                pr_readiness,
+                "if ! verify_trusted_git_bootstrap_custody "
+                "'before gate execution'; then",
+                0,
+            ),
+            (pr_readiness, 'if ! trusted_git cat-file blob "$GATE_SPEC" \\', 0),
+            (pr_readiness, 'if ! trusted_git cat-file blob "$GATE_SPEC" \\', 1),
+            (
+                pr_readiness,
+                "if ! verify_trusted_git_bootstrap_custody "
+                "'after gate execution'; then",
+                0,
+            ),
+            (
+                installed_readme,
+                'if ! TRUSTED_GIT_CONTROL_PARENT_CUSTODY_RECEIPT="$(',
+                0,
+            ),
+            (
+                installed_readme,
+                'if ! TRUSTED_GIT_TMPDIR_CUSTODY_RECEIPT="$(',
+                0,
+            ),
+            (installed_readme, "if ! stream_manifest_gate \\", 0),
+            (installed_readme, "if ! stream_manifest_gate \\", 1),
+            (
+                installed_readme,
+                'if ! PYTHONDONTWRITEBYTECODE=1 "$TRUSTED_PYTHON" -B \\',
+                1,
+            ),
+        )
+        for source, marker, occurrence in guarded_failures:
+            guard = guarded_block(source, marker, occurrence)
+            injected = subprocess.run(
+                [
+                    "/bin/bash",
+                    "-c",
+                    "set -o pipefail\n" + guard + "\nprintf guarded-tail-reached\n",
+                ],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+                timeout=5,
+                env={"LANG": "C", "LC_ALL": "C", "PATH": "/usr/bin:/bin"},
+            )
+            self.assertEqual(injected.returncode, 1, marker)
+            self.assertNotIn(b"guarded-tail-reached", injected.stdout, marker)
+
+        self.assertNotIn('/bin/cat "$GATE_SOURCE"', installed_readme)
+        self.assertNotIn(
+            '"$SOURCE_MANIFEST" "$SOURCE_MANIFEST_SHA256" readonly "$HEAD_SHA"\n',
+            installed_readme,
+        )
+        self.assertNotIn(
+            '"$TRUSTED_GIT_EXEC_PATH" \\\n  "$TRUSTED_GIT_TOOLCHAIN_RECEIPT"\n',
+            installed_readme,
+        )
+
+        stream_start = '"$TRUSTED_PYTHON" -I -B -S -c \'\n'
+        stream_end = '\n\' "$GATE_SOURCE" "$GATE_SOURCE_SHA256"'
+        self.assertEqual(installed_readme.count(stream_start), 1)
+        stream_source = installed_readme.split(stream_start, 1)[1].split(stream_end, 1)[
+            0
+        ]
+        with tempfile.TemporaryDirectory() as raw_root:
+            root = pathlib.Path(raw_root)
+            gate = root / "trusted_mac_gate.py"
+            gate_bytes = b"print('manifest-bound gate')\n"
+            gate.write_bytes(gate_bytes)
+            gate_digest = hashlib.sha256(gate_bytes).hexdigest()
+
+            accepted = subprocess.run(
+                [
+                    sys.executable,
+                    "-I",
+                    "-B",
+                    "-S",
+                    "-c",
+                    stream_source,
+                    str(gate),
+                    gate_digest,
+                ],
+                check=False,
+                capture_output=True,
+                timeout=5,
+            )
+            self.assertEqual(accepted.returncode, 0, accepted.stderr)
+            self.assertEqual(accepted.stdout, gate_bytes)
+
+            rejected_inputs: list[tuple[str, pathlib.Path, str]] = [
+                ("digest", gate, "0" * 64),
+            ]
+            oversized = root / "oversized.py"
+            oversized.write_bytes(b"x" * 131073)
+            rejected_inputs.append(
+                (
+                    "oversized",
+                    oversized,
+                    hashlib.sha256(oversized.read_bytes()).hexdigest(),
+                )
+            )
+            symlink = root / "symlink.py"
+            symlink.symlink_to(gate.name)
+            rejected_inputs.append(("symlink", symlink, gate_digest))
+            hardlink = root / "hardlink.py"
+            os.link(gate, hardlink)
+            rejected_inputs.append(("hardlink", gate, gate_digest))
+            fifo = root / "fifo.py"
+            os.mkfifo(fifo)
+            rejected_inputs.append(("fifo", fifo, gate_digest))
+
+            for scope, candidate, digest in rejected_inputs:
+                with self.subTest(scope=scope):
+                    rejected = subprocess.run(
+                        [
+                            sys.executable,
+                            "-I",
+                            "-B",
+                            "-S",
+                            "-c",
+                            stream_source,
+                            str(candidate),
+                            digest,
+                        ],
+                        check=False,
+                        capture_output=True,
+                        timeout=5,
+                    )
+                    self.assertNotEqual(rejected.returncode, 0)
+                    self.assertEqual(rejected.stdout, b"")
+        integration_test = (
+            SCRIPTS / "independent_codex_pr_review/tests/test_no_child_profile.py"
+        ).read_text(encoding="utf-8")
+        production_profile = (
+            SCRIPTS
+            / "independent_codex_pr_review/review_supervisor/no_child_profile.py"
+        ).read_text(encoding="utf-8")
+        for hosted_profile in (
+            "github-macos-26-arm64-26.4-25E246",
+            "github-macos-26-arm64-26.5.2-25F84",
+        ):
+            self.assertIn(hosted_profile, integration_test)
+            self.assertNotIn(hosted_profile, production_profile)
+        self.assertNotIn("25E246", production_profile)
+        self.assertIn("(deny file-link)", production_profile)
+
+        profile_contracts = {
+            "canonical": (
+                "test",
+                "skills/review-orchestration-playbook",
+            ),
+            "private": (
+                "python-39-compatibility",
+                "personal_codex/skills/review-orchestration-playbook",
+            ),
+        }
+        for profile, (next_job, skill_root) in profile_contracts.items():
+            workflow = (CI_FIXTURE_ROOT / f"{profile}.yml").read_text(encoding="utf-8")
+            start = workflow.index("  independent_supervisor_tests:")
+            readonly_start = workflow.index(
+                "\n  readonly_install_supervisor_tests:",
+                start,
+            )
+            end = workflow.index(f"\n  {next_job}:", readonly_start)
+            supervisor_job = workflow[start:readonly_start]
+            readonly_job = workflow[readonly_start + 1 : end]
+            with self.subTest(profile=profile):
+                self.assertIn("runs-on: macos-26", supervisor_job)
+                self.assertIn("timeout-minutes: 15", supervisor_job)
+                self.assertIn(
+                    """      - name: Report hosted no-child runtime fingerprint
+        run: |
+          /usr/bin/sw_vers -productVersion
+          /usr/bin/sw_vers -buildVersion
+          /usr/bin/uname -r
+          /usr/bin/uname -m
+          /usr/bin/shasum -a 256 /usr/bin/sandbox-exec
+""",
+                    supervisor_job,
+                )
+                self.assertIn(
+                    f"""      - name: Match hosted no-child blocker signature
+        working-directory: {skill_root}/scripts/independent_codex_pr_review
+        env:
+          CODEX_REVIEW_RUNNER_ENVIRONMENT: ${{{{ runner.environment }}}}
+          CODEX_REVIEW_RUNNER_ARCH: ${{{{ runner.arch }}}}
+        run: |
+          python3 -m tests.run_hosted_no_child_fail_closed
+      - name: Run deterministic independent supervisor tests
+        working-directory: {skill_root}/scripts/independent_codex_pr_review
+        env:
+          CODEX_REVIEW_TEST_RUNTIME_PARENT: ${{{{ runner.temp }}}}
+        run: |
+          python3 -m tests.run_required_deterministic_supervisor
+""",
+                    supervisor_job,
+                )
+                self.assertIn(
+                    f"""      - name: Verify installed release tree remains immutable
+        working-directory: {skill_root}/tests
+        run: |
+          python3 -m unittest -v test_contracts.RepositoryContractTest.test_installed_supervisor_preflight_keeps_release_tree_immutable
+""",
+                    supervisor_job,
+                )
+                self.assertNotIn(
+                    "tests.run_readonly_install_deterministic_supervisor",
+                    supervisor_job,
+                )
+                self.assertNotIn("tests.run_required_no_child_profile", supervisor_job)
+                self.assertNotIn(
+                    "CODEX_REVIEW_REQUIRE_LIVE_NO_CHILD_PROFILE",
+                    supervisor_job,
+                )
+                self.assertIn("runs-on: macos-26", readonly_job)
+                self.assertIn("timeout-minutes: 20", readonly_job)
+                self.assertIn(
+                    "Run deterministic supervisor from read-only install",
+                    readonly_job,
+                )
+                self.assertIn(
+                    f"REVIEW_SOURCE_RELATIVE: "
+                    f"{skill_root}/scripts/independent_codex_pr_review",
+                    readonly_job,
+                )
+                self.assertIn(
+                    """      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+          ref: ${{ github.sha }}
+""",
+                    readonly_job,
+                )
+                for requirement in (
+                    "/usr/bin/sudo /usr/bin/mktemp -d "
+                    "/private/codex-review-readonly.XXXXXX",
+                    '/usr/bin/sudo /bin/chmod -N "$isolated_root"',
+                    '/usr/bin/sudo /usr/sbin/chown "$review_user:$review_group"',
+                    '/usr/bin/sudo /usr/bin/ditto "$source_review_root" '
+                    '"$isolated_source"',
+                    "run_review_user /usr/bin/sandbox-exec -f",
+                    '/bin/cat "$isolated_source/tests/trusted_mac_gate.py"',
+                    '"$isolated_python" -I -B -S - "$isolated_source"',
+                    '"$gate_manifest" "$gate_manifest_digest" hosted-readonly',
+                    '"$isolated_root/payload/runtime" "$isolated_root/payload"',
+                    'checkout_git_objects="$checkout_git_dir/objects"',
+                    'checkout_head_sha="$(/bin/cat "$checkout_head_file")"',
+                    'checkout_git_control="$checkout_bootstrap_root/repository.git"',
+                    "probe_checkout_git_source_acl()",
+                    "probe_checkout_git_escape_metadata()",
+                    '[[ -e "$checkout_git_objects/info/alternates" ]]',
+                    '[[ -e "$checkout_git_objects/info/http-alternates" ]]',
+                    '"$checkout_git_objects/pack/"*.promisor',
+                    "bootstrap_checkout_git init --bare -q",
+                    'GIT_ALTERNATE_OBJECT_DIRECTORIES="$checkout_git_objects"',
+                    'GIT_DIR="$checkout_git_control"',
+                    "GIT_NO_LAZY_FETCH=1",
+                    "GIT_PROTOCOL_FROM_USER=0",
+                    "GIT_TERMINAL_PROMPT=0",
+                    "GIT_ASKPASS=/usr/bin/false",
+                    "-c credential.helper=",
+                    "-c protocol.ext.allow=never",
+                    "-c protocol.file.allow=never",
+                    "-c protocol.http.allow=never",
+                    "Isolated Git bootstrap custody changed before object reads",
+                    "Isolated Git bootstrap custody changed during object reads",
+                    'gate_spec="$checkout_head_sha:$REVIEW_SOURCE_RELATIVE/'
+                    'tests/trusted_mac_gate.py"',
+                ):
+                    self.assertIn(requirement, readonly_job)
+                for ambient_import_contract in (
+                    'PYTHONPATH="$isolated_source"',
+                    '"$isolated_python" -P -B -m',
+                    "CODEX_REVIEW_TEST_RUNTIME_PARENT=",
+                    "LOGNAME=nobody",
+                    "USER=nobody",
+                    "sudo -u nobody",
+                    "chown nobody:nobody",
+                ):
+                    self.assertNotIn(ambient_import_contract, readonly_job)
+                trusted_git_start = readonly_job.index("trusted_checkout_git() {")
+                trusted_git_end = readonly_job.index("\n          }", trusted_git_start)
+                trusted_git = readonly_job[trusted_git_start:trusted_git_end]
+                self.assertIn(
+                    '"$direct_git" --no-pager --no-replace-objects', trusted_git
+                )
+                self.assertNotIn('-C "$checkout_root"', trusted_git)
+                self.assertNotIn("HOME=/", trusted_git)
+                first_object_query = readonly_job.index(
+                    'trusted_checkout_git cat-file -s "$gate_spec"'
+                )
+                for custody_anchor in (
+                    "prequery_direct_git_binding=",
+                    "prequery_checkout_git_objects_binding=",
+                    "prequery_checkout_git_control_binding=",
+                    "prequery_checkout_git_config_digest=",
+                    "prequery_checkout_git_source_acl_violation=",
+                    "prequery_checkout_git_control_acl_violation=",
+                    "prequery_checkout_git_escape_metadata=",
+                ):
+                    self.assertLess(
+                        readonly_job.index(custody_anchor),
+                        first_object_query,
+                    )
+                last_object_query = readonly_job.rindex(
+                    'trusted_checkout_git cat-file blob "$gate_manifest_spec"'
+                )
+                for postquery_anchor in (
+                    "current_checkout_git_source_acl_violation=",
+                    "current_checkout_git_control_acl_violation=",
+                    "current_checkout_git_escape_metadata=",
+                ):
+                    self.assertGreater(
+                        readonly_job.index(postquery_anchor),
+                        last_object_query,
+                    )
+                self.assertNotIn('gate_spec="HEAD:', readonly_job)
+                self.assertIn("if: always()", readonly_job)
+
+    def test_trusted_git_bootstrap_missing_promisor_blob_does_not_start_helper(
+        self,
+    ) -> None:
+        selected_git = shutil.which("git")
+        if selected_git is None:
+            self.skipTest("Git is unavailable")
+        git_executable = pathlib.Path(selected_git).resolve(strict=True)
+        version = subprocess.run(
+            [str(git_executable), "--version"],
+            check=False,
+            capture_output=True,
+            timeout=5,
+        )
+        self.assertEqual(version.returncode, 0, version.stderr)
+        version_fields = version.stdout.decode("ascii", errors="strict").split()
+        if len(version_fields) < 3:
+            self.fail(f"malformed Git version output: {version.stdout!r}")
+        try:
+            version_numbers = tuple(
+                int(field) for field in version_fields[2].split(".")[:2]
+            )
+        except ValueError as error:
+            self.fail(f"malformed Git version output: {version.stdout!r}: {error}")
+        if version_numbers < (2, 45):
+            self.skipTest("Git 2.45 or newer is required for GIT_NO_LAZY_FETCH")
+
+        exec_path_result = subprocess.run(
+            [str(git_executable), "--exec-path"],
+            check=False,
+            capture_output=True,
+            timeout=5,
+        )
+        self.assertEqual(exec_path_result.returncode, 0, exec_path_result.stderr)
+        git_exec_path = pathlib.Path(
+            exec_path_result.stdout.decode("utf-8", errors="strict").strip()
+        ).resolve(strict=True)
+        self.assertTrue(git_exec_path.is_dir())
+
+        with tempfile.TemporaryDirectory(prefix="trusted-git-promisor-") as raw_root:
+            root = pathlib.Path(raw_root)
+            home = root / "home"
+            hooks = root / "hooks"
+            template = root / "template"
+            temp = root / "tmp"
+            for directory in (home, hooks, template, temp):
+                directory.mkdir(mode=0o700)
+            base_env = {
+                "GIT_ASKPASS": "/usr/bin/false",
+                "GIT_ATTR_NOSYSTEM": "1",
+                "GIT_CONFIG_GLOBAL": os.devnull,
+                "GIT_CONFIG_NOSYSTEM": "1",
+                "GIT_CONFIG_SYSTEM": os.devnull,
+                "GIT_EXEC_PATH": str(git_exec_path),
+                "GIT_NO_REPLACE_OBJECTS": "1",
+                "GIT_OPTIONAL_LOCKS": "0",
+                "GIT_PAGER": "cat",
+                "GIT_TERMINAL_PROMPT": "0",
+                "HOME": str(home),
+                "LANG": "C",
+                "LC_ALL": "C",
+                "PAGER": "cat",
+                "PATH": "/usr/bin:/bin",
+                "TMPDIR": str(temp),
+            }
+
+            def run_git(
+                *arguments: str,
+                env: dict[str, str] | None = None,
+            ) -> subprocess.CompletedProcess[bytes]:
+                return subprocess.run(
+                    [str(git_executable), *arguments],
+                    env=base_env if env is None else env,
+                    check=False,
+                    capture_output=True,
+                    timeout=10,
+                )
+
+            source = root / "source"
+            source.mkdir(mode=0o700)
+            initialized = run_git(
+                "-C",
+                str(source),
+                "init",
+                "-q",
+                f"--template={template}",
+            )
+            self.assertEqual(initialized.returncode, 0, initialized.stderr)
+            (source / "payload.txt").write_text("payload\n", encoding="utf-8")
+            added = run_git("-C", str(source), "add", "payload.txt")
+            self.assertEqual(added.returncode, 0, added.stderr)
+            committed = run_git(
+                "-C",
+                str(source),
+                "-c",
+                "user.name=Contract Test",
+                "-c",
+                "user.email=contract@example.invalid",
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "--no-gpg-sign",
+                "-qm",
+                "fixture",
+            )
+            self.assertEqual(committed.returncode, 0, committed.stderr)
+            head_result = run_git(
+                "-C",
+                str(source),
+                "rev-parse",
+                "--verify",
+                "HEAD^{commit}",
+            )
+            self.assertEqual(head_result.returncode, 0, head_result.stderr)
+            head_sha = head_result.stdout.decode("ascii", errors="strict").strip()
+            self.assertEqual(len(head_sha), 40)
+            blob_result = run_git(
+                "-C",
+                str(source),
+                "rev-parse",
+                "--verify",
+                "HEAD:payload.txt",
+            )
+            self.assertEqual(blob_result.returncode, 0, blob_result.stderr)
+            blob_sha = blob_result.stdout.decode("ascii", errors="strict").strip()
+            loose_blob = source / ".git" / "objects" / blob_sha[:2] / blob_sha[2:]
+            self.assertTrue(loose_blob.is_file())
+
+            helper = root / "remote-helper"
+            marker = root / "remote-helper-started"
+            helper.write_text(
+                "#!/bin/sh\n/usr/bin/printf '%s\\n' invoked > \"$1\"\nexit 1\n",
+                encoding="ascii",
+            )
+            helper.chmod(0o700)
+            for key, value in (
+                ("core.repositoryFormatVersion", "1"),
+                ("extensions.partialClone", "origin"),
+                ("remote.origin.url", f"ext::{helper} {marker}"),
+                ("remote.origin.promisor", "true"),
+                ("remote.origin.partialclonefilter", "blob:none"),
+                ("protocol.ext.allow", "always"),
+            ):
+                configured = run_git(
+                    "-C",
+                    str(source),
+                    "config",
+                    "--local",
+                    key,
+                    value,
+                )
+                self.assertEqual(configured.returncode, 0, configured.stderr)
+            loose_blob.unlink()
+            self.assertFalse(loose_blob.exists())
+
+            control = root / "control.git"
+            control_initialized = run_git(
+                "init",
+                "--bare",
+                "-q",
+                f"--template={template}",
+                str(control),
+            )
+            self.assertEqual(
+                control_initialized.returncode,
+                0,
+                control_initialized.stderr,
+            )
+            safe_env = dict(base_env)
+            safe_env.update(
+                {
+                    "GIT_ALTERNATE_OBJECT_DIRECTORIES": str(
+                        source / ".git" / "objects"
+                    ),
+                    "GIT_DIR": str(control),
+                    "GIT_NO_LAZY_FETCH": "1",
+                    "GIT_PROTOCOL_FROM_USER": "0",
+                }
+            )
+            safe_prefix = (
+                "--no-pager",
+                "--no-replace-objects",
+                "-c",
+                "core.commitGraph=false",
+                "-c",
+                "core.multiPackIndex=false",
+                "-c",
+                "core.fsmonitor=false",
+                "-c",
+                f"core.hooksPath={hooks}",
+                "-c",
+                "core.attributesFile=/dev/null",
+                "-c",
+                "maintenance.auto=false",
+                "-c",
+                "credential.helper=",
+                "-c",
+                "protocol.ext.allow=never",
+                "-c",
+                "protocol.file.allow=never",
+                "-c",
+                "protocol.git.allow=never",
+                "-c",
+                "protocol.http.allow=never",
+                "-c",
+                "protocol.https.allow=never",
+                "-c",
+                "protocol.ssh.allow=never",
+            )
+
+            def object_inventory(
+                object_root: pathlib.Path,
+            ) -> tuple[tuple[str, ...], ...]:
+                inventory: list[tuple[str, ...]] = []
+                for path in sorted(object_root.rglob("*")):
+                    relative = path.relative_to(object_root).as_posix()
+                    self.assertFalse(path.is_symlink(), relative)
+                    if path.is_dir():
+                        inventory.append((relative, "directory"))
+                        continue
+                    content = path.read_bytes()
+                    inventory.append(
+                        (
+                            relative,
+                            "regular",
+                            str(len(content)),
+                            hashlib.sha256(content).hexdigest(),
+                        )
+                    )
+                return tuple(inventory)
+
+            source_objects = source / ".git" / "objects"
+            control_objects = control / "objects"
+            source_inventory_before = object_inventory(source_objects)
+            control_inventory_before = object_inventory(control_objects)
+            safe_existing = run_git(
+                *safe_prefix,
+                "cat-file",
+                "-t",
+                head_sha,
+                env=safe_env,
+            )
+            self.assertEqual(safe_existing.returncode, 0, safe_existing.stderr)
+            self.assertEqual(safe_existing.stdout, b"commit\n")
+            self.assertFalse(marker.exists())
+
+            safe = run_git(
+                *safe_prefix,
+                "cat-file",
+                "blob",
+                f"{head_sha}:payload.txt",
+                env=safe_env,
+            )
+            self.assertNotEqual(safe.returncode, 0)
+            self.assertEqual(safe.stdout, b"")
+            self.assertFalse(marker.exists())
+            self.assertFalse(loose_blob.exists())
+            self.assertEqual(object_inventory(source_objects), source_inventory_before)
+            self.assertEqual(
+                object_inventory(control_objects), control_inventory_before
+            )
+
+            unsafe_env = dict(base_env)
+            unsafe_env["GIT_PROTOCOL_FROM_USER"] = "1"
+            unsafe = run_git(
+                "--no-pager",
+                "--no-replace-objects",
+                "-C",
+                str(source),
+                "cat-file",
+                "blob",
+                f"{head_sha}:payload.txt",
+                env=unsafe_env,
+            )
+            self.assertNotEqual(unsafe.returncode, 0)
+            self.assertEqual(unsafe.stdout, b"")
+            self.assertEqual(marker.read_text(encoding="ascii"), "invoked\n")
+            self.assertFalse(loose_blob.exists())
+
+    def test_readonly_ci_deletes_only_a_proven_root_owned_outer_root(self) -> None:
+        profile_contracts = {
+            "canonical": "test",
+            "private": "python-39-compatibility",
+        }
+        for profile, next_job in profile_contracts.items():
+            workflow = (CI_FIXTURE_ROOT / f"{profile}.yml").read_text(encoding="utf-8")
+            start = workflow.index("  readonly_install_supervisor_tests:")
+            end = workflow.index(f"\n  {next_job}:", start)
+            readonly_job = workflow[start:end]
+            with self.subTest(profile=profile):
+                create_index = readonly_job.index(
+                    'isolated_root="$(/usr/bin/sudo /usr/bin/mktemp -d '
+                    '/private/codex-review-readonly.XXXXXX)"'
+                )
+                recovery_index = readonly_job.index(
+                    'echo "Read-only isolation recovery root: $isolated_root"'
+                )
+                path_guard_index = readonly_job.index(
+                    '[[ ! "$isolated_root" =~ '
+                    "^/private/codex-review-readonly\\.[[:alnum:]]{6}$ ]]"
+                )
+                acl_clear_index = readonly_job.index(
+                    '/usr/bin/sudo /bin/chmod -N "$isolated_root"'
+                )
+                identity_index = readonly_job.index(
+                    'isolated_object_id="$(/usr/bin/sudo /usr/bin/stat '
+                    '-f \'%d:%i\' "$isolated_root")"'
+                )
+                payload_index = readonly_job.index(
+                    "/usr/bin/sudo /usr/sbin/chown "
+                    '"$review_user:$review_group" '
+                    '"$isolated_root/payload"'
+                )
+                immutable_index = readonly_job.index(
+                    '/usr/bin/sudo /usr/bin/chflags uchg "$isolated_root"'
+                )
+                summary_create_index = readonly_job.index(
+                    'summary_file="$(/usr/bin/mktemp '
+                    '"$RUNNER_TEMP/codex-review-readonly-summary.XXXXXX")"'
+                )
+                summary_recovery_index = readonly_job.index(
+                    'echo "Read-only supervisor summary file '
+                    '(retained on failure): $summary_file"'
+                )
+                summary_validation_index = readonly_job.index(
+                    '/bin/test -f "$summary_file"'
+                )
+                launch_index = readonly_job.index(
+                    "run_review_user /usr/bin/sandbox-exec -f"
+                )
+                runner_failure_index = readonly_job.index(
+                    "if (( runner_status != 0 )); then"
+                )
+                isolated_parser = (
+                    '"$isolated_python" -I -B -S -c \'import json, pathlib, sys;'
+                )
+                parser_index = readonly_job.index(isolated_parser)
+                evidence_index = readonly_job.index(
+                    'expected = {"child_process_closure": "proven"'
+                )
+                evidence_failure_index = readonly_job.index(
+                    "if (( summary_status != 0 )); then"
+                )
+                revalidation_index = readonly_job.index(
+                    'current_object_id="$(/usr/bin/sudo /usr/bin/stat '
+                    '-f \'%d:%i\' "$isolated_root")"'
+                )
+                clear_immutable_index = readonly_job.index(
+                    '/usr/bin/sudo /usr/bin/chflags nouchg "$isolated_root"'
+                )
+                deletion = '/usr/bin/sudo /bin/rm -rf "$isolated_root"'
+                delete_index = readonly_job.index(deletion)
+                final_summary_index = readonly_job.index(
+                    'final_summary_object_id="$(/usr/bin/stat -f '
+                    '\'%d:%i\' "$summary_file")"'
+                )
+                summary_deletion = '/bin/rm "$summary_file"'
+                summary_delete_index = readonly_job.index(summary_deletion)
+
+                self.assertLess(create_index, recovery_index)
+                self.assertLess(recovery_index, path_guard_index)
+                self.assertLess(path_guard_index, acl_clear_index)
+                self.assertLess(acl_clear_index, identity_index)
+                self.assertLess(identity_index, payload_index)
+                self.assertLess(payload_index, immutable_index)
+                self.assertLess(immutable_index, summary_create_index)
+                self.assertLess(summary_create_index, summary_recovery_index)
+                self.assertLess(summary_recovery_index, summary_validation_index)
+                self.assertLess(summary_validation_index, launch_index)
+                self.assertLess(launch_index, runner_failure_index)
+                self.assertLess(runner_failure_index, parser_index)
+                self.assertLess(parser_index, evidence_index)
+                self.assertLess(evidence_index, evidence_failure_index)
+                self.assertLess(evidence_failure_index, revalidation_index)
+                self.assertLess(revalidation_index, clear_immutable_index)
+                self.assertLess(clear_immutable_index, delete_index)
+                self.assertLess(delete_index, final_summary_index)
+                self.assertLess(final_summary_index, summary_delete_index)
+                self.assertEqual(readonly_job.count(deletion), 1)
+                self.assertEqual(readonly_job.count(summary_deletion), 1)
+                self.assertEqual(readonly_job.count(isolated_parser), 1)
+                self.assertIn(
+                    'summary_file="$(/usr/bin/mktemp '
+                    '"$RUNNER_TEMP/codex-review-readonly-summary.XXXXXX")"\n'
+                    '          echo "Read-only supervisor summary file '
+                    '(retained on failure): $summary_file"\n'
+                    '          /bin/test -f "$summary_file"',
+                    readonly_job,
+                )
+                self.assertNotIn(
+                    '"$isolated_python" -B -c \'import json, pathlib, sys;',
+                    readonly_job,
+                )
+                self.assertNotIn('/bin/cat "$summary_file"', readonly_job)
+                self.assertEqual(
+                    readonly_job.count('/bin/test -f "$summary_file"'),
+                    2,
+                )
+                self.assertEqual(
+                    readonly_job.count('/bin/test ! -L "$summary_file"'),
+                    1,
+                )
+                self.assertEqual(
+                    readonly_job.count('/bin/test -L "$summary_file"'),
+                    2,
+                )
+
+                self.assertNotIn(
+                    '/usr/sbin/chown nobody:nobody "$isolated_root"\n',
+                    readonly_job,
+                )
+                for protection in (
+                    '/usr/bin/sudo /bin/test ! -L "$isolated_root"',
+                    "test \"$(/usr/bin/sudo /usr/bin/stat -f '%u' "
+                    '"$isolated_root")" = "0"',
+                    "test \"$(/usr/bin/sudo /usr/bin/stat -f '%u:%Lp' "
+                    '"$isolated_root")" = "0:755"',
+                    "run_review_user /bin/test ! -w /private",
+                    'run_review_user /bin/test ! -w "$isolated_root"',
+                    'run_review_user /bin/test ! -w "$RUNNER_TEMP"',
+                    "(( (isolated_flags & 2) == 2 ))",
+                    "set -o pipefail",
+                    '| /usr/bin/tee "$summary_file" >/dev/null || runner_status=$?',
+                    '[[ "$current_summary_object_id" != "$summary_object_id" ]]',
+                    '[[ "$current_object_id" != "$isolated_object_id" ]]',
+                    "[[ \"$(/usr/bin/sudo /usr/bin/stat -f '%Lp' "
+                    '"$isolated_root")" != "755" ]]',
+                    "[[ \"$(/usr/bin/sudo /usr/bin/stat -f '%f' "
+                    '"$isolated_root")" != "$isolated_flags" ]]',
+                    '[[ "$post_clear_object_id" != "$isolated_object_id" ]]',
+                    "[[ \"$(/usr/bin/sudo /usr/bin/stat -f '%u:%Lp' "
+                    '"$isolated_root")" != "0:755" ]]',
+                    "if (( root_cleanup_status != 0 ))",
+                    '[[ "$final_summary_object_id" != "$summary_object_id" ]]',
+                    "if (( summary_cleanup_status != 0 ))",
+                    "object_pairs_hook=reject_duplicates",
+                    'ValueError("duplicate JSON key")',
+                    "set(payload) == set(expected)",
+                    "type(payload[key]) is not type(value)",
+                    "type(source_manifest) is str",
+                    "len(source_manifest) == 64",
+                    'character in "0123456789abcdef"',
+                    'expected["source_manifest_sha256"] = source_manifest',
+                    '"source_manifest_sha256_contract"',
+                    "else print(json.dumps(payload, ensure_ascii=True, "
+                    'sort_keys=True, separators=(",", ":")))',
+                ):
+                    self.assertIn(protection, readonly_job)
+                for evidence in (
+                    '"cleanup_failures": []',
+                    '"cleanup_guarantee": "custodied-manifest-quarantine-'
+                    'descriptor-revalidation-same-uid-final-rename-unlink-host-tcb"',
+                    '"cleanup_status": "complete"',
+                    '"creation_origin_guarantee": "best-effort-128-bit-leaf-'
+                    'immediate-nofollow-open-same-uid-host-tcb"',
+                    '"creation_origin_proven": False',
+                    '"install_parent_is_sticky_world_writable": True',
+                    '"no_child_runtime_profile": None',
+                    '"primary_failure": None',
+                    '"primary_status": "complete"',
+                    '"release_tree_immutable": True',
+                    '"release_tree_property": "object-identity-content-access-policy"',
+                    '"retained_paths": []',
+                    '"returncode": 0',
+                    '"runtime_residue": []',
+                    '"secondary_failures": []',
+                    '"signal_number": None',
+                    '"source_head_bound": False',
+                    '"source_head_sha": None',
+                    '"source_head_subtree_manifest_sha256": None',
+                    '"timed_out": False',
+                ):
+                    self.assertIn(evidence, readonly_job)
+                parser_source = (
+                    "import json, pathlib, sys;"
+                    + readonly_job.split(
+                        isolated_parser,
+                        1,
+                    )[1].split("' \\\n", 1)[0]
+                )
+                expected_source = parser_source.split("expected = ", 1)[1].split(
+                    "; source_manifest =",
+                    1,
+                )[0]
+                valid_payload = ast.literal_eval(expected_source)
+                valid_payload["source_manifest_sha256"] = "a" * 64
+                manifest_cases = (
+                    ("valid", valid_payload, 0),
+                    (
+                        "missing",
+                        {
+                            key: value
+                            for key, value in valid_payload.items()
+                            if key != "source_manifest_sha256"
+                        },
+                        1,
+                    ),
+                    ("null", valid_payload | {"source_manifest_sha256": None}, 1),
+                    ("short", valid_payload | {"source_manifest_sha256": "a" * 63}, 1),
+                    (
+                        "uppercase",
+                        valid_payload | {"source_manifest_sha256": "A" * 64},
+                        1,
+                    ),
+                    (
+                        "nonhex",
+                        valid_payload | {"source_manifest_sha256": "g" * 64},
+                        1,
+                    ),
+                    (
+                        "sentinel",
+                        valid_payload
+                        | {"source_manifest_sha256": "LEAK_SENTINEL_DO_NOT_PRINT"},
+                        1,
+                    ),
+                )
+                with tempfile.TemporaryDirectory() as temporary:
+                    summary = pathlib.Path(temporary) / "summary.json"
+                    for label, payload, expected_status in manifest_cases:
+                        with self.subTest(profile=profile, manifest=label):
+                            summary.write_text(
+                                json.dumps(
+                                    payload,
+                                    ensure_ascii=True,
+                                    sort_keys=True,
+                                    separators=(",", ":"),
+                                )
+                                + "\n",
+                                encoding="ascii",
+                            )
+                            completed = subprocess.run(
+                                (
+                                    sys.executable,
+                                    "-I",
+                                    "-B",
+                                    "-S",
+                                    "-c",
+                                    parser_source,
+                                    str(summary),
+                                ),
+                                cwd=temporary,
+                                env={
+                                    "LANG": "C",
+                                    "LC_ALL": "C",
+                                    "PATH": "/usr/bin:/bin",
+                                },
+                                stdin=subprocess.DEVNULL,
+                                stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE,
+                                timeout=5,
+                                check=False,
+                            )
+                            self.assertEqual(
+                                completed.returncode,
+                                expected_status,
+                                completed.stderr.decode("utf-8", "replace"),
+                            )
+                            if expected_status:
+                                self.assertEqual(completed.stdout, b"")
+                                self.assertIn(
+                                    b"source_manifest_sha256",
+                                    completed.stderr,
+                                )
+                            else:
+                                self.assertEqual(
+                                    completed.stdout,
+                                    (
+                                        json.dumps(
+                                            payload,
+                                            ensure_ascii=True,
+                                            sort_keys=True,
+                                            separators=(",", ":"),
+                                        )
+                                        + "\n"
+                                    ).encode("ascii"),
+                                )
+                                self.assertEqual(completed.stderr, b"")
+                            if label == "sentinel":
+                                self.assertNotIn(
+                                    b"LEAK_SENTINEL_DO_NOT_PRINT",
+                                    completed.stdout + completed.stderr,
+                                )
+                self.assertGreaterEqual(
+                    readonly_job.count("retained at $isolated_root"), 3
+                )
+
+    def test_readonly_ci_uses_a_receipt_bound_ephemeral_account(self) -> None:
+        profile_contracts = {
+            "canonical": "test",
+            "private": "python-39-compatibility",
+        }
+        for profile, next_job in profile_contracts.items():
+            workflow = (CI_FIXTURE_ROOT / f"{profile}.yml").read_text(encoding="utf-8")
+            start = workflow.index("  readonly_install_supervisor_tests:")
+            end = workflow.index(f"\n  {next_job}:", start)
+            readonly_job = workflow[start:end]
+            with self.subTest(profile=profile):
+                account_generation = readonly_job.index(
+                    'review_user_guid="$(/usr/bin/uuidgen)"'
+                )
+                cleanup_trap = readonly_job.index("trap cleanup_review_account EXIT")
+                group_creation = readonly_job.index(
+                    '/usr/bin/sudo /usr/bin/dscl . -create "$review_group_path"'
+                )
+                user_creation = readonly_job.index(
+                    '/usr/bin/sudo /usr/bin/dscl . -create "$review_user_path"'
+                )
+                account_validation = readonly_job.index(
+                    "if ! verify_review_account; then", user_creation
+                )
+                payload_ownership = readonly_job.index(
+                    "/usr/bin/sudo /usr/sbin/chown "
+                    '"$review_user:$review_group" "$isolated_root/payload"'
+                )
+                prelaunch_validation = readonly_job.index(
+                    'echo "::error::Ephemeral review account changed before launch;'
+                )
+                launch = readonly_job.index(
+                    'run_review_user /usr/bin/sandbox-exec -f "$review_profile"'
+                )
+                postrun_validation = readonly_job.index(
+                    "review_account_postrun_status=0"
+                )
+                runner_failure = readonly_job.index("if (( runner_status != 0 )); then")
+                account_failure = readonly_job.index(
+                    "if (( review_account_postrun_status != 0 )); then"
+                )
+
+                self.assertLess(account_generation, cleanup_trap)
+                self.assertLess(cleanup_trap, group_creation)
+                self.assertLess(group_creation, user_creation)
+                self.assertLess(user_creation, account_validation)
+                self.assertLess(account_validation, payload_ownership)
+                self.assertLess(payload_ownership, prelaunch_validation)
+                self.assertLess(prelaunch_validation, launch)
+                self.assertLess(launch, postrun_validation)
+                self.assertLess(postrun_validation, runner_failure)
+                self.assertLess(runner_failure, account_failure)
+
+                for contract in (
+                    'review_group_guid="$(/usr/bin/uuidgen)"',
+                    'review_user="codexreview${review_account_suffix}"',
+                    'review_group="$review_user"',
+                    'review_user_path="/Users/$review_user"',
+                    'review_group_path="/Groups/$review_group"',
+                    '/usr/bin/dscacheutil -q user -a name "$review_user"',
+                    '/usr/bin/dscacheutil -q group -a name "$review_group"',
+                    "/usr/bin/sudo /usr/bin/dscl . -list /Users",
+                    "/usr/bin/sudo /usr/bin/dscl . -list /Groups",
+                    "/usr/bin/sudo /usr/bin/dscl . -list /Users UniqueID",
+                    "/usr/bin/sudo /usr/bin/dscl . -list /Groups PrimaryGroupID",
+                    "Ephemeral review account directory inventory is unavailable",
+                    "review_id_start=$((50000 + (16#$review_id_prefix % 10000)))",
+                    "review_id_offset < 10000",
+                    '/usr/bin/dscacheutil -q user -a uid "$review_id_candidate"',
+                    '/usr/bin/dscacheutil -q group -a gid "$review_id_candidate"',
+                    "Ephemeral review account UID/GID lookup failed",
+                    "review_local_user_uid_match=",
+                    "review_local_group_gid_match=",
+                    "review_uid < 50000 || review_uid > 59999",
+                    'GeneratedUID "$review_group_guid"',
+                    'GeneratedUID "$review_user_guid"',
+                    'UniqueID "$review_uid"',
+                    'PrimaryGroupID "$review_gid"',
+                    "NFSHomeDirectory /var/empty",
+                    "UserShell /usr/bin/false",
+                    'AuthenticationAuthority ";DisabledUser;"',
+                    "Password '*'",
+                    "/usr/bin/sudo /usr/bin/dscacheutil -flushcache",
+                    "set_review_account_validation_failure() {",
+                    "report_review_account_validation_failure() {",
+                    "verify_review_scalar_record() {",
+                    "verify_review_record_attribute() {",
+                    '"::error::Ephemeral review account validation failed"',
+                    "Ephemeral review account validation diagnostics: reason=",
+                    "reason=$review_account_validation_reason",
+                    "expected=$review_account_validation_expected",
+                    "observed=$review_account_validation_observed",
+                    'user "$review_user_path" dsAttrTypeNative:IsHidden 1',
+                    '"$review_user_path" dsAttrTypeNative:IsHidden 1',
+                    '"policy.admin-group-present"',
+                    'review_admin_gid="$(/usr/bin/dscl . -read '
+                    "/Groups/admin PrimaryGroupID",
+                    '[[ " $account_groups " == *" $review_admin_gid "* ]]',
+                    '/usr/bin/sudo -u "$review_user" -g "$review_group" "$@"',
+                    "verify_review_cached_identity() {",
+                    '/usr/bin/dscacheutil -q user -a uid "$review_uid"',
+                    '/usr/bin/dscacheutil -q group -a gid "$review_gid"',
+                    "cached_user_names=",
+                    "cached_group_names=",
+                    '[[ "$cached_user_names" != "$review_user" ]]',
+                    '[[ "$cached_group_names" != "$review_group" ]]',
+                    "verify_review_cached_identity || return 1",
+                    "/bin/ps -axo ruid=,uid=,pid=",
+                    'if ! process_table="$(/bin/ps -axo ruid=,uid=,pid=)"; then',
+                    "(( ${#process_table} <= 1048576 )) || return 1",
+                    "'$1 == target_uid || $2 == target_uid {print $3}'",
+                    '<<< "$process_table"',
+                    "elif (( ${#diagnostic} > 4096 )); then",
+                    'diagnostic="${diagnostic:0:4096}"',
+                    'review_processes_preuse="$(review_account_processes)"',
+                    'if ! review_processes_prelaunch="$(review_account_processes)"; then',
+                    "Ephemeral review account process census failed before launch",
+                    'review_processes_postrun="$(review_account_processes)"',
+                    '[[ -n "$review_processes" ]]',
+                    "terminate_custodied_review_processes() {",
+                    "process_cleanup_proven=true",
+                    'run_review_user /bin/kill -TERM "$pid"',
+                    'run_review_user /bin/kill -KILL "$pid"',
+                    'review_process_diagnostics="$isolated_root/'
+                    'review-process-diagnostics.log"',
+                    '/usr/bin/sudo /bin/chmod 0600 "$review_process_diagnostics"',
+                    "current_bytes + record_bytes <= 1048576",
+                    '/usr/bin/sudo /usr/bin/tee -a "$review_process_diagnostics"',
+                    'direct_git="$DEVELOPER_DIR/usr/bin/git"',
+                    'direct_git_exec_path="$DEVELOPER_DIR/usr/libexec/git-core"',
+                    "measure_git_toolchain_for_review_account() {",
+                    "--hosted-git-receipt",
+                    '"$direct_git_exec_path" "$git_toolchain_measurement"',
+                    '"schema":"hosted-git-toolchain-receipt-v2"',
+                    "retained until runner disposal",
+                    '/usr/bin/sudo /usr/bin/dscl . -delete "$review_user_path"',
+                    '/usr/bin/sudo /usr/bin/dscl . -delete "$review_group_path"',
+                ):
+                    self.assertIn(contract, readonly_job)
+
+                self.assertNotIn(
+                    '/usr/bin/dscl . -create "$review_user_path" IsHidden 1',
+                    readonly_job,
+                )
+                self.assertNotIn('== "IsHidden: 1"', readonly_job)
+                self.assertNotIn("| /usr/bin/cut -c 1-4096", readonly_job)
+                report_start = readonly_job.index(
+                    "report_review_account_validation_failure() {"
+                )
+                report_end = readonly_job.index("\n          }\n", report_start)
+                report_body = readonly_job[report_start:report_end]
+                self.assertNotIn("echo ", report_body)
+                self.assertEqual(report_body.count("/usr/bin/printf '%s\\n'"), 2)
+
+                self.assertEqual(
+                    readonly_job.count(
+                        '/usr/bin/sudo /usr/bin/dscl . -delete "$review_user_path"'
+                    ),
+                    1,
+                )
+                self.assertEqual(
+                    readonly_job.count(
+                        '/usr/bin/sudo /usr/bin/dscl . -delete "$review_group_path"'
+                    ),
+                    1,
+                )
+                cleanup_start = readonly_job.index("cleanup_review_account() {")
+                cleanup_end = readonly_job.index(
+                    "trap cleanup_review_account EXIT", cleanup_start
+                )
+                cleanup_body = readonly_job[cleanup_start:cleanup_end]
+                self.assertLess(
+                    cleanup_body.index("terminate_custodied_review_processes"),
+                    cleanup_body.index(
+                        '/usr/bin/sudo /usr/bin/dscl . -delete "$review_user_path"'
+                    ),
+                )
+                self.assertLess(
+                    cleanup_body.index('[[ "$process_cleanup_proven" == "true" ]]'),
+                    cleanup_body.index(
+                        '/usr/bin/sudo /usr/bin/dscl . -delete "$review_user_path"'
+                    ),
+                )
+                self.assertLess(
+                    cleanup_body.index("if ! verify_review_account; then"),
+                    cleanup_body.index("report_review_account_validation_failure"),
+                )
+                self.assertLess(
+                    cleanup_body.index("report_review_account_validation_failure"),
+                    cleanup_body.index(
+                        '/usr/bin/sudo /usr/bin/dscl . -delete "$review_user_path"'
+                    ),
+                )
+                self.assertLess(
+                    cleanup_body.index("elif ! verify_review_group; then"),
+                    cleanup_body.index(
+                        "report_review_account_validation_failure",
+                        cleanup_body.index("elif ! verify_review_group; then"),
+                    ),
+                )
+                self.assertLess(
+                    cleanup_body.index(
+                        "report_review_account_validation_failure",
+                        cleanup_body.index("elif ! verify_review_group; then"),
+                    ),
+                    cleanup_body.index(
+                        '/usr/bin/sudo /usr/bin/dscl . -delete "$review_group_path"'
+                    ),
+                )
+                self.assertEqual(
+                    readonly_job.count("run_review_user /usr/bin/sandbox-exec"),
+                    1,
+                )
+                self.assertEqual(
+                    readonly_job.count(
+                        '/bin/cat "$isolated_source/tests/trusted_mac_gate.py"'
+                    ),
+                    2,
+                )
+                self.assertEqual(
+                    readonly_job.count("run_review_user /usr/bin/env -i"),
+                    1,
+                )
+                for prohibited_git_resolution in (
+                    "/usr/bin/xcrun",
+                    '"$direct_git" --exec-path',
+                    '"$direct_git" --version --build-options',
+                    "_trusted_git_measurement",
+                ):
+                    self.assertNotIn(prohibited_git_resolution, readonly_job)
+                for shared_account_use in (
+                    "sudo -u nobody",
+                    "chown nobody:nobody",
+                    "run_review_user /bin/cat",
+                ):
+                    self.assertNotIn(shared_account_use, readonly_job)
+
+                process_filter = "$1 == target_uid || $2 == target_uid {print $3}"
+                filtered = subprocess.run(
+                    [
+                        "/usr/bin/awk",
+                        "-v",
+                        "target_uid=50000",
+                        process_filter,
+                    ],
+                    input=(b"65534 65534 101\n50000 65534 202\n65534 50000 303\n"),
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    timeout=5,
+                    check=False,
+                )
+                self.assertEqual(filtered.returncode, 0, filtered.stderr)
+                self.assertEqual(filtered.stdout, b"202\n303\n")
+                self.assertEqual(filtered.stderr, b"")
+
+                shell_functions: dict[str, str] = {}
+                for function_name in (
+                    "set_review_account_validation_failure",
+                    "report_review_account_validation_failure",
+                    "verify_review_scalar_record",
+                ):
+                    name = function_name
+                    marker = f"          {name}() {{\n"
+                    function_start = readonly_job.index(marker)
+                    function_end = readonly_job.index(
+                        "\n          }\n", function_start
+                    ) + len("\n          }")
+                    shell_functions[name] = "\n".join(
+                        line[10:] if line.startswith("          ") else line
+                        for line in readonly_job[
+                            function_start:function_end
+                        ].splitlines()
+                    )
+
+                scalar_parser = subprocess.run(
+                    ["/bin/bash"],
+                    input=(
+                        "set -euo pipefail\n"
+                        + shell_functions["set_review_account_validation_failure"]
+                        + "\n"
+                        + shell_functions["report_review_account_validation_failure"]
+                        + "\n"
+                        + shell_functions["verify_review_scalar_record"]
+                        + "\n"
+                        + "verify_review_scalar_record user "
+                        + "dsAttrTypeNative:IsHidden 1 "
+                        + "'dsAttrTypeNative:IsHidden: 1'\n"
+                        + "printf 'accepted\\n'\n"
+                        + "for observed in 'IsHidden: 1' "
+                        + "'dsAttrTypeNative:IsHidden: YES' '' "
+                        + "$'dsAttrTypeNative:IsHidden: 1\\n"
+                        + "dsAttrTypeNative:IsHidden: 1'; do\n"
+                        + "  if verify_review_scalar_record user "
+                        + 'dsAttrTypeNative:IsHidden 1 "$observed"; then\n'
+                        + "    exit 12\n"
+                        + "  fi\n"
+                        + "  printf '%s\\n' \"$review_account_validation_reason\"\n"
+                        + "done\n"
+                        + "shopt -s xpg_echo\n"
+                        + "set_review_account_validation_failure "
+                        + "diagnostic.inject safe "
+                        + "$'line-one\\n::warning::injected'\n"
+                        + "report_review_account_validation_failure\n"
+                    ).encode("utf-8"),
+                    capture_output=True,
+                    timeout=5,
+                    check=False,
+                )
+                self.assertEqual(
+                    scalar_parser.returncode,
+                    0,
+                    scalar_parser.stderr.decode("utf-8", "replace"),
+                )
+                output_lines = scalar_parser.stdout.splitlines()
+                self.assertEqual(
+                    output_lines[:5],
+                    [
+                        b"accepted",
+                        b"user.dsAttrTypeNative:IsHidden.mismatch",
+                        b"user.dsAttrTypeNative:IsHidden.mismatch",
+                        b"user.dsAttrTypeNative:IsHidden.mismatch",
+                        b"user.dsAttrTypeNative:IsHidden.mismatch",
+                    ],
+                )
+                self.assertEqual(
+                    output_lines[5],
+                    b"::error::Ephemeral review account validation failed",
+                )
+                self.assertTrue(
+                    output_lines[6].startswith(
+                        b"Ephemeral review account validation diagnostics: "
+                    ),
+                    output_lines[6],
+                )
+                self.assertIn(b"diagnostic.inject", output_lines[6])
+                self.assertIn(b"\\n::warning::injected", output_lines[6])
+                self.assertEqual(len(output_lines), 7)
+                self.assertEqual(scalar_parser.stderr, b"")
+
+    def test_readonly_ci_binds_profile_and_denies_executable_setid_modes(
+        self,
+    ) -> None:
+        self._assert_readonly_ci_uses_a_sealed_uv_managed_runtime()
+        sandbox_profile = (
+            SCRIPTS / "independent_codex_pr_review/tests/readonly_child_isolation.sb"
+        ).read_text(encoding="utf-8")
+        self.assertEqual(
+            sandbox_profile.splitlines(),
+            [
+                "(version 1)",
+                "(allow default)",
+                "(deny job-creation)",
+                "(deny process-exec*",
+                "  (file-mode #o4000 #o2000))",
+            ],
+        )
+        self.assertNotIn("(literal ", sandbox_profile)
+
+        profile_contracts = {
+            "canonical": "test",
+            "private": "python-39-compatibility",
+        }
+        for profile, next_job in profile_contracts.items():
+            workflow = (CI_FIXTURE_ROOT / f"{profile}.yml").read_text(encoding="utf-8")
+            start = workflow.index("  readonly_install_supervisor_tests:")
+            end = workflow.index(f"\n  {next_job}:", start)
+            readonly_job = workflow[start:end]
+            with self.subTest(profile=profile):
+                runtime_postinstall_custody_index = readonly_job.index(
+                    "verify_runtime_custody post-install"
+                )
+                source_root_path_index = readonly_job.index(
+                    'source_review_root="$checkout_root/$REVIEW_SOURCE_RELATIVE"'
+                )
+                source_root_binding_index = readonly_job.index(
+                    'source_root_binding="$(/usr/bin/stat -f '
+                    '\'%d:%i:%p:%u:%g\' "$source_review_root")"'
+                )
+                source_profile_path_index = readonly_job.index(
+                    'source_review_profile="$source_review_root/tests/'
+                    'readonly_child_isolation.sb"'
+                )
+                source_copy_index = readonly_job.index(
+                    '/usr/bin/sudo /usr/bin/ditto "$source_review_root" '
+                    '"$isolated_source"'
+                )
+                source_postcopy_symlink_index = readonly_job.index(
+                    'source_tree_postcopy_symlink="$(/usr/bin/find '
+                    '"$source_review_root" -type l -print -quit)"'
+                )
+                isolated_postcopy_symlink_index = readonly_job.index(
+                    'isolated_tree_postcopy_symlink="$(/usr/bin/sudo '
+                    '/usr/bin/find "$isolated_source" -type l -print -quit)"'
+                )
+                source_custody_index = readonly_job.index(
+                    '/usr/bin/sudo /usr/sbin/chown -R root:wheel "$isolated_source"'
+                )
+                source_readonly_index = readonly_job.index(
+                    '/usr/bin/sudo /bin/chmod -R a+rX,a-w "$isolated_source"'
+                )
+                isolated_source_binding_index = readonly_job.index(
+                    'isolated_source_binding="$(/usr/bin/sudo /usr/bin/stat '
+                    '-f \'%d:%i:%u:%g:%Lp\' "$isolated_source")"'
+                )
+                isolated_root_traversal_index = readonly_job.index(
+                    '/usr/bin/sudo /bin/chmod 0755 "$isolated_root"'
+                )
+                account_source_probe_index = readonly_job.index(
+                    "run_review_user /bin/test -r "
+                    '"$isolated_source/tests/'
+                    'run_readonly_install_deterministic_supervisor.py"'
+                )
+                account_gate_probe_index = readonly_job.index(
+                    "run_review_user /bin/test -r "
+                    '"$isolated_source/tests/trusted_mac_gate.py"'
+                )
+                isolated_profile_path_index = readonly_job.index(
+                    'review_profile="$isolated_root/readonly_child_isolation.sb"'
+                )
+                profile_copy_index = readonly_job.index(
+                    '/usr/bin/sudo /bin/cp "$isolated_source_profile" "$review_profile"'
+                )
+                profile_binding_index = readonly_job.index(
+                    'profile_binding="$(/usr/bin/sudo /usr/bin/stat '
+                    '-f \'%d:%i:%u:%g:%Lp\' "$review_profile")"'
+                )
+                immutable_index = readonly_job.index(
+                    '/usr/bin/sudo /usr/bin/chflags uchg "$isolated_root"'
+                )
+                policy_index = readonly_job.index(
+                    "/usr/bin/grep -Fqx '(deny job-creation)'"
+                )
+                source_prelaunch_index = readonly_job.index(
+                    'source_profile_prelaunch_binding="$(/usr/bin/stat'
+                )
+                prelaunch_index = readonly_job.index(
+                    'profile_prelaunch_binding="$(/usr/bin/sudo /usr/bin/stat'
+                )
+                sandbox_index = readonly_job.index(
+                    "run_review_user /usr/bin/sandbox-exec "
+                    '-f "$review_profile" /usr/bin/env -i'
+                )
+                postrun_index = readonly_job.index(
+                    'profile_postrun_binding="$(/usr/bin/sudo /usr/bin/stat'
+                )
+
+                self.assertLess(
+                    runtime_postinstall_custody_index,
+                    source_root_path_index,
+                )
+                self.assertLess(source_root_path_index, source_root_binding_index)
+                self.assertLess(source_root_binding_index, source_profile_path_index)
+                self.assertLess(source_profile_path_index, source_copy_index)
+                self.assertLess(source_copy_index, source_postcopy_symlink_index)
+                self.assertLess(
+                    source_postcopy_symlink_index, isolated_postcopy_symlink_index
+                )
+                self.assertLess(isolated_postcopy_symlink_index, source_custody_index)
+                self.assertLess(source_custody_index, source_readonly_index)
+                self.assertLess(source_readonly_index, isolated_source_binding_index)
+                self.assertLess(
+                    isolated_source_binding_index, isolated_root_traversal_index
+                )
+                self.assertLess(
+                    isolated_root_traversal_index, account_source_probe_index
+                )
+                self.assertLess(isolated_root_traversal_index, account_gate_probe_index)
+                self.assertLess(account_source_probe_index, isolated_profile_path_index)
+                self.assertLess(account_gate_probe_index, isolated_profile_path_index)
+                self.assertLess(isolated_profile_path_index, profile_copy_index)
+                self.assertLess(profile_copy_index, profile_binding_index)
+                self.assertLess(profile_binding_index, immutable_index)
+                self.assertLess(immutable_index, policy_index)
+                self.assertLess(policy_index, source_prelaunch_index)
+                self.assertLess(source_prelaunch_index, prelaunch_index)
+                self.assertLess(prelaunch_index, sandbox_index)
+                self.assertLess(sandbox_index, postrun_index)
+                self.assertEqual(
+                    readonly_job.count("run_review_user /usr/bin/sandbox-exec"),
+                    1,
+                )
+                self.assertEqual(
+                    readonly_job.count("run_review_user /usr/bin/env -i"),
+                    1,
+                )
+                self.assertNotIn(
+                    "run_review_user /usr/bin/ditto",
+                    readonly_job,
+                )
+                self.assertNotIn(
+                    '/usr/bin/ditto "$REVIEW_SOURCE_RELATIVE"',
+                    readonly_job,
+                )
+                self.assertEqual(
+                    readonly_job.count(
+                        '/usr/bin/sudo /usr/sbin/chown "$review_user:$review_group"'
+                    ),
+                    1,
+                )
+                self.assertNotIn(
+                    '/usr/bin/sudo /usr/sbin/chown -R "$review_user:$review_group"',
+                    readonly_job,
+                )
+                self.assertEqual(
+                    readonly_job.count("'%d:%i:%p:%u:%g' \"$source_review_root\")"),
+                    4,
+                )
+                self.assertEqual(
+                    readonly_job.count(
+                        "/usr/bin/sudo /usr/bin/diff -qr "
+                        '"$source_review_root" "$isolated_source" >/dev/null'
+                    ),
+                    3,
+                )
+                self.assertEqual(
+                    readonly_job.count(
+                        '$(/usr/bin/find "$source_review_root" -type l -print -quit)'
+                    ),
+                    2,
+                )
+                self.assertEqual(
+                    readonly_job.count(
+                        '$(/usr/bin/sudo /usr/bin/find "$isolated_source" '
+                        "-type l -print -quit)"
+                    ),
+                    3,
+                )
+                for binding in (
+                    "verify_runtime_custody post-install",
+                    'source_review_root="$checkout_root/$REVIEW_SOURCE_RELATIVE"',
+                    'source_review_root_physical="$(cd "$source_review_root" '
+                    '&& pwd -P)"',
+                    '[[ "$source_review_root_physical" != "$source_review_root" ]]',
+                    '/bin/test -d "$source_review_root"',
+                    '/bin/test -L "$source_review_root"',
+                    "# Bind source object identity/access policy separately "
+                    "from copied content.",
+                    'source_root_binding="$(/usr/bin/stat -f '
+                    '\'%d:%i:%p:%u:%g\' "$source_review_root")"',
+                    'source_tree_symlink="$(/usr/bin/find "$source_review_root" '
+                    '-type l -print -quit)"',
+                    'isolated_source="$isolated_root/source"',
+                    '/usr/bin/sudo /bin/test ! -e "$isolated_source"',
+                    '/usr/bin/sudo /usr/bin/ditto "$source_review_root" '
+                    '"$isolated_source"',
+                    'source_tree_postcopy_symlink="$(/usr/bin/find '
+                    '"$source_review_root" -type l -print -quit)"',
+                    'isolated_tree_postcopy_symlink="$(/usr/bin/sudo '
+                    '/usr/bin/find "$isolated_source" -type l -print -quit)"',
+                    '[[ -n "$source_tree_postcopy_symlink" ]]',
+                    '[[ -n "$isolated_tree_postcopy_symlink" ]]',
+                    '[[ "$source_root_postcopy_binding" != "$source_root_binding" ]]',
+                    '[[ "$source_review_root_postcopy_physical" '
+                    '!= "$source_review_root" ]]',
+                    '/usr/bin/sudo /usr/bin/diff -qr "$source_review_root" '
+                    '"$isolated_source" >/dev/null',
+                    '/usr/bin/sudo /usr/sbin/chown -R root:wheel "$isolated_source"',
+                    '/usr/bin/sudo /bin/chmod -RN "$isolated_source"',
+                    '/usr/bin/sudo /bin/chmod -R a+rX,a-w "$isolated_source"',
+                    'isolated_source_binding="$(/usr/bin/sudo /usr/bin/stat '
+                    '-f \'%d:%i:%u:%g:%Lp\' "$isolated_source")"',
+                    "test \"$(/usr/bin/sudo /usr/bin/stat -f '%u:%g:%Lp' "
+                    '"$isolated_source")" = "0:0:555"',
+                    "run_review_user /bin/test -r "
+                    '"$isolated_source/tests/'
+                    'run_readonly_install_deterministic_supervisor.py"',
+                    "run_review_user /bin/test -r "
+                    '"$isolated_source/tests/trusted_mac_gate.py"',
+                    'run_review_user /bin/test ! -w "$isolated_source"',
+                    'gate_spec="$checkout_head_sha:$REVIEW_SOURCE_RELATIVE/tests/'
+                    'trusted_mac_gate.py"',
+                    'gate_size="$(trusted_checkout_git cat-file -s "$gate_spec")"',
+                    'gate_manifest="$isolated_source/trusted_mac_gate_sources.index"',
+                    'gate_manifest_spec="$checkout_head_sha:$REVIEW_SOURCE_RELATIVE/'
+                    'trusted_mac_gate_sources.index"',
+                    "gate_manifest_size > 1048576",
+                    "gate_size > 131072",
+                    '/bin/cat "$isolated_source/tests/trusted_mac_gate.py"',
+                    '"$isolated_python" -I -B -S - "$isolated_source"',
+                    '"$gate_manifest" "$gate_manifest_digest" hosted-readonly',
+                    '"$isolated_root/payload/runtime" "$isolated_root/payload"',
+                    '/bin/test -f "$source_review_profile"',
+                    '/bin/test ! -L "$source_review_profile"',
+                    'source_profile_binding="$(/usr/bin/stat -f '
+                    '\'%d:%i:%u:%g:%Lp:%z:%m\' "$source_review_profile")"',
+                    'review_profile="$isolated_root/readonly_child_isolation.sb"',
+                    '/usr/bin/sudo /bin/test ! -e "$review_profile"',
+                    '/usr/bin/sudo /bin/test ! -L "$review_profile"',
+                    'isolated_source_profile="$isolated_source/tests/'
+                    'readonly_child_isolation.sb"',
+                    '/usr/bin/sudo /bin/cp "$isolated_source_profile" '
+                    '"$review_profile"',
+                    '/usr/bin/sudo /usr/sbin/chown root:wheel "$review_profile"',
+                    '/usr/bin/sudo /bin/chmod -N "$review_profile"',
+                    '/usr/bin/sudo /bin/chmod 0444 "$review_profile"',
+                    '/usr/bin/sudo /bin/test -f "$review_profile"',
+                    '/usr/bin/sudo /usr/bin/cmp -s "$source_review_profile" '
+                    '"$review_profile"',
+                    '/usr/bin/sudo /usr/bin/cmp -s "$isolated_source_profile" '
+                    '"$review_profile"',
+                    "test \"$(/usr/bin/sudo /usr/bin/stat -f '%u:%g:%Lp' "
+                    '"$review_profile")" = "0:0:444"',
+                    '/bin/test ! -w "$review_profile"',
+                    'run_review_user /bin/test -r "$review_profile"',
+                    'run_review_user /bin/test ! -w "$review_profile"',
+                    '[[ "$source_profile_postcopy_binding" '
+                    '!= "$source_profile_binding" ]]',
+                    '[[ "$source_profile_prelaunch_binding" '
+                    '!= "$source_profile_binding" ]]',
+                    '[[ "$source_profile_postrun_binding" '
+                    '!= "$source_profile_binding" ]]',
+                    '[[ "$source_root_prelaunch_binding" != "$source_root_binding" ]]',
+                    '[[ "$source_root_postrun_binding" != "$source_root_binding" ]]',
+                    '[[ "$isolated_source_prelaunch_binding" '
+                    '!= "$isolated_source_binding" ]]',
+                    '[[ "$isolated_source_postrun_binding" '
+                    '!= "$isolated_source_binding" ]]',
+                    'isolated_tree_prelaunch_symlink="$(/usr/bin/sudo '
+                    '/usr/bin/find "$isolated_source" -type l -print -quit)"',
+                    '[[ -n "$isolated_tree_prelaunch_symlink" ]]',
+                    'isolated_tree_postrun_symlink="$(/usr/bin/sudo '
+                    '/usr/bin/find "$isolated_source" -type l -print -quit)"',
+                    '[[ -n "$isolated_tree_postrun_symlink" ]]',
+                    '[[ "$profile_prelaunch_binding" != "$profile_binding" ]]',
+                    '[[ "$profile_postrun_binding" != "$profile_binding" ]]',
+                ):
+                    self.assertIn(binding, readonly_job)
+                for prohibited_checkout_mutation in (
+                    '\n          review_profile="$checkout_root/',
+                    '/usr/sbin/chown root:wheel "$source_review_profile"',
+                    '/bin/chmod -N "$source_review_profile"',
+                    '/bin/chmod 0444 "$source_review_profile"',
+                    '/usr/bin/chflags uchg "$source_review_profile"',
+                    '/usr/bin/chflags uchg "$review_profile"',
+                    "profile_flags",
+                    "'%d:%i:%u:%g:%Lp:%f' \"$review_profile\"",
+                    'PYTHONPATH="$isolated_source"',
+                    '"$isolated_python" -P -B -m',
+                ):
+                    self.assertNotIn(prohibited_checkout_mutation, readonly_job)
+                for policy_contract in (
+                    "/usr/bin/grep -Fqx '(deny job-creation)'",
+                    "/usr/bin/grep -Fqx '(deny process-exec*'",
+                    "/usr/bin/grep -Fqx '  (file-mode #o4000 #o2000))'",
+                    "/usr/bin/grep -Fq '(literal '",
+                    "(( literal_profile_status != 1 ))",
+                ):
+                    self.assertIn(policy_contract, readonly_job)
+                for removed_inventory_contract in (
+                    "setuid_inventory",
+                    "setuid_find_status",
+                    "probe_nobody_executable",
+                    "access_probe_stderr",
+                    "profile_literal",
+                ):
+                    self.assertNotIn(removed_inventory_contract, readonly_job)
+
+    def test_readonly_uv_resolution_accepts_only_a_physical_leaf(self) -> None:
+        resolution_script = r"""
+trusted_uv_candidate="$UV_EXECUTABLE"
+trusted_uv=""
+if [[ "$trusted_uv_candidate" == /* ]] \
+  && ! /bin/test -L "$trusted_uv_candidate"; then
+  trusted_uv="$(cd "$(/usr/bin/dirname "$trusted_uv_candidate")" && pwd -P)/$(/usr/bin/basename "$trusted_uv_candidate")" \
+    || trusted_uv=""
+fi
+if [[ -z "$trusted_uv" ]] \
+  || ! /bin/test -f "$trusted_uv" \
+  || /bin/test -L "$trusted_uv" \
+  || [[ "$("$trusted_uv" self version --short)" != "0.11.18" ]]; then
+  exit 1
+fi
+printf '%s\n' "$trusted_uv"
+"""
+        with tempfile.TemporaryDirectory(prefix="physical-uv-") as raw_root:
+            root = pathlib.Path(raw_root)
+            physical_parent = root / "physical"
+            physical_bin = physical_parent / "bin"
+            physical_bin.mkdir(parents=True)
+            physical_uv = physical_bin / "uv"
+            physical_uv.write_text(
+                "#!/bin/sh\nprintf '0.11.18\\n'\n",
+                encoding="utf-8",
+            )
+            physical_uv.chmod(0o700)
+            logical_parent = root / "logical"
+            logical_parent.symlink_to(physical_parent, target_is_directory=True)
+
+            accepted = subprocess.run(
+                ["/bin/bash", "-c", resolution_script],
+                check=False,
+                capture_output=True,
+                env={"UV_EXECUTABLE": str(logical_parent / "bin" / "uv")},
+                text=True,
+            )
+            self.assertEqual(accepted.returncode, 0, accepted.stderr)
+            self.assertEqual(accepted.stdout, f"{physical_uv.resolve()}\n")
+
+            symlinked_leaf = physical_bin / "uv-link"
+            symlinked_leaf.symlink_to(physical_uv)
+            rejected = subprocess.run(
+                ["/bin/bash", "-c", resolution_script],
+                check=False,
+                capture_output=True,
+                env={"UV_EXECUTABLE": str(symlinked_leaf)},
+                text=True,
+            )
+            self.assertNotEqual(rejected.returncode, 0)
+
+    def _assert_readonly_ci_uses_a_sealed_uv_managed_runtime(self) -> None:
+        profile_contracts = {
+            "canonical": "test",
+            "private": "python-39-compatibility",
+        }
+        for profile, next_job in profile_contracts.items():
+            workflow = (CI_FIXTURE_ROOT / f"{profile}.yml").read_text(encoding="utf-8")
+            start = workflow.index("  readonly_install_supervisor_tests:")
+            end = workflow.index(f"\n  {next_job}:", start)
+            readonly_job = workflow[start:end]
+            with self.subTest(profile=profile):
+                action_index = readonly_job.index(
+                    "uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b"
+                )
+                root_mode_index = readonly_job.index(
+                    "test \"$(/usr/bin/sudo /usr/bin/stat -f '%Lp' "
+                    '"$isolated_root")" = "700"'
+                )
+                minimal_uv_environment_index = readonly_job.index(
+                    "/usr/bin/sudo /usr/bin/env -i"
+                )
+                uv_install_index = readonly_job.index(
+                    "run_trusted_uv python install 3.13.13"
+                )
+                staging_inventory_index = readonly_job.index(
+                    'staging_unexpected_entry="$(/usr/bin/sudo '
+                    '/usr/bin/find "$uv_staging_dir"'
+                )
+                relocation_index = readonly_job.index(
+                    '/usr/bin/sudo /bin/mv "$staged_runtime_root" "$runtime_root"'
+                )
+                staging_cleanup_index = readonly_job.index(
+                    '/usr/bin/sudo /bin/rmdir "$uv_staging_dir/.temp" "$uv_staging_dir"'
+                )
+                unique_root_index = readonly_job.index(
+                    'managed_python_unexpected_entry="$(/usr/bin/sudo '
+                    '/usr/bin/find "$managed_python_dir"'
+                )
+                interpreter_index = readonly_job.index(
+                    'isolated_python="$runtime_root/bin/python3.13"'
+                )
+                hardlink_index = readonly_job.index(
+                    'runtime_hardlink="$(/usr/bin/sudo /usr/bin/find '
+                    '"$runtime_root" -type f -links +1 -print -quit)"'
+                )
+                loader_index = readonly_job.index(
+                    'runtime_libraries="$(/usr/bin/sudo /usr/bin/otool -L '
+                )
+                symlink_index = readonly_job.index(
+                    'runtime_symlink_binding="$(compute_runtime_symlink_binding)"'
+                )
+                runtime_custody_index = readonly_job.index(
+                    '/usr/bin/sudo /usr/sbin/chown -R root:wheel "$managed_python_dir"'
+                )
+                runtime_acl_index = readonly_job.index(
+                    '/usr/bin/sudo /bin/chmod -RN "$managed_python_dir"'
+                )
+                runtime_xattr_index = readonly_job.index(
+                    '/usr/bin/sudo /usr/bin/xattr -cr "$managed_python_dir"'
+                )
+                runtime_readonly_index = readonly_job.index(
+                    '/usr/bin/sudo /bin/chmod -R a+rX,a-w "$managed_python_dir"'
+                )
+                tree_binding_index = readonly_job.index(
+                    'runtime_tree_binding="$(compute_runtime_tree_binding)"'
+                )
+                postinstall_index = readonly_job.index(
+                    "verify_runtime_custody post-install"
+                )
+                source_copy_index = readonly_job.index(
+                    '/usr/bin/sudo /usr/bin/ditto "$source_review_root" '
+                    '"$isolated_source"'
+                )
+                root_traversal_index = readonly_job.index(
+                    '/usr/bin/sudo /bin/chmod 0755 "$isolated_root"'
+                )
+                account_runtime_index = readonly_job.index(
+                    'run_review_user /bin/test -x "$isolated_python"'
+                )
+                prelaunch_index = readonly_job.index("verify_runtime_custody prelaunch")
+                sandbox_index = readonly_job.index(
+                    "run_review_user /usr/bin/sandbox-exec "
+                    '-f "$review_profile" /usr/bin/env -i'
+                )
+                postrun_index = readonly_job.index("verify_runtime_custody postrun")
+                source_postrun_index = readonly_job.index(
+                    'source_profile_postrun_binding="$(/usr/bin/stat'
+                )
+
+                self.assertLess(action_index, root_mode_index)
+                self.assertLess(root_mode_index, minimal_uv_environment_index)
+                self.assertLess(minimal_uv_environment_index, uv_install_index)
+                self.assertLess(uv_install_index, staging_inventory_index)
+                self.assertLess(staging_inventory_index, relocation_index)
+                self.assertLess(relocation_index, staging_cleanup_index)
+                self.assertLess(staging_cleanup_index, unique_root_index)
+                self.assertLess(unique_root_index, interpreter_index)
+                self.assertLess(interpreter_index, hardlink_index)
+                self.assertLess(hardlink_index, loader_index)
+                self.assertLess(loader_index, symlink_index)
+                self.assertLess(symlink_index, runtime_custody_index)
+                self.assertLess(runtime_custody_index, runtime_acl_index)
+                self.assertLess(runtime_acl_index, runtime_xattr_index)
+                self.assertLess(runtime_xattr_index, runtime_readonly_index)
+                self.assertLess(runtime_readonly_index, tree_binding_index)
+                self.assertLess(tree_binding_index, postinstall_index)
+                self.assertLess(postinstall_index, source_copy_index)
+                self.assertLess(source_copy_index, root_traversal_index)
+                self.assertLess(root_traversal_index, account_runtime_index)
+                self.assertLess(account_runtime_index, prelaunch_index)
+                self.assertLess(prelaunch_index, sandbox_index)
+                self.assertLess(sandbox_index, postrun_index)
+                self.assertLess(postrun_index, source_postrun_index)
+                self.assertIn(
+                    "          run_trusted_uv() {\n"
+                    "            /usr/bin/sudo /usr/bin/env -i \\\n"
+                    '              HOME="$uv_root_home" \\\n'
+                    "              LANG=C \\\n"
+                    "              LC_ALL=C \\\n"
+                    "              PATH=/usr/bin:/bin \\\n"
+                    '              TMPDIR="$uv_root_tmp" \\\n'
+                    '              "$trusted_uv" "$@"\n'
+                    "          }\n",
+                    readonly_job,
+                )
+
+                for contract in (
+                    "id: setup-uv",
+                    "uses: astral-sh/setup-uv@"
+                    "08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0",
+                    'version: "0.11.18"',
+                    "enable-cache: false",
+                    "UV_EXECUTABLE: ${{ steps.setup-uv.outputs.uv-path }}",
+                    'trusted_uv_candidate="$UV_EXECUTABLE"',
+                    '[[ "$trusted_uv_candidate" == /* ]]',
+                    '! /bin/test -L "$trusted_uv_candidate"',
+                    'dirname "$trusted_uv_candidate"',
+                    'basename "$trusted_uv_candidate"',
+                    '[[ -z "$trusted_uv" ]]',
+                    'uv_root_home="$isolated_root/uv-home"',
+                    '/usr/bin/sudo /bin/mkdir -m 0700 "$uv_root_home"',
+                    'stat -f \'%u\' "$uv_root_home")" = "0"',
+                    'stat -f \'%Lp\' "$uv_root_home")" = "700"',
+                    'uv_root_tmp="$uv_root_home/tmp"',
+                    '/usr/bin/sudo /bin/mkdir -m 0700 "$uv_root_tmp"',
+                    'stat -f \'%u\' "$uv_root_tmp")" = "0"',
+                    'stat -f \'%Lp\' "$uv_root_tmp")" = "700"',
+                    "run_trusted_uv() {",
+                    "/usr/bin/sudo /usr/bin/env -i",
+                    'HOME="$uv_root_home"',
+                    "LANG=C",
+                    "LC_ALL=C",
+                    "PATH=/usr/bin:/bin",
+                    'TMPDIR="$uv_root_tmp"',
+                    '"$trusted_uv" "$@"',
+                    '[[ "$(run_trusted_uv self version --short)" != "0.11.18" ]]',
+                    'trusted_uv_digest="$(/usr/bin/shasum -a 256 "$trusted_uv")"',
+                    'uv_staging_dir="$isolated_root/uv-managed-staging"',
+                    "run_trusted_uv python install 3.13.13",
+                    "--managed-python",
+                    '--install-dir "$uv_staging_dir"',
+                    "--no-bin",
+                    "--no-cache",
+                    "--no-progress",
+                    "--no-config",
+                    "staged_runtime_count != 1",
+                    "staged_runtime_alias_count != 1",
+                    "cpython-3.13-macos-aarch64-none",
+                    "cpython-3.13-macos-x86_64-none",
+                    "cpython-3.13.13-macos-aarch64-none",
+                    "cpython-3.13.13-macos-x86_64-none",
+                    'staged_runtime_alias_target="$(/usr/bin/sudo '
+                    '/usr/bin/readlink "$staged_runtime_alias")"',
+                    '! /usr/bin/sudo /bin/test -L "$staged_runtime_alias"',
+                    '[[ "$staged_runtime_alias_target" != "$staged_runtime_root" ]]',
+                    "staging_unexpected_entry",
+                    'staging_unexpected_entry="<unreadable>"',
+                    "staging_temp_entry",
+                    'staging_temp_entry="<unreadable>"',
+                    '"$uv_staging_dir/.lock"',
+                    'stat -f \'%z\' "$uv_staging_dir/.lock")" != "0"',
+                    '"$uv_staging_dir/.temp"',
+                    '"$uv_staging_dir/.gitignore"',
+                    'stat -f \'%z\' "$uv_staging_dir/.gitignore")" != "1"',
+                    'cat "$uv_staging_dir/.gitignore")" != "*"',
+                    '/usr/bin/sudo /bin/mv "$staged_runtime_root" "$runtime_root"',
+                    '/usr/bin/sudo /bin/rm "$staged_runtime_alias"',
+                    '"$uv_staging_dir/.lock" "$uv_staging_dir/.gitignore"',
+                    '/usr/bin/sudo /bin/rmdir "$uv_staging_dir/.temp" '
+                    '"$uv_staging_dir"',
+                    '/usr/bin/sudo /bin/test -e "$uv_staging_dir"',
+                    '/usr/bin/sudo /bin/test -L "$uv_staging_dir"',
+                    "managed_python_unexpected_entry",
+                    'managed_python_unexpected_entry="<unreadable>"',
+                    '! /usr/bin/sudo /bin/test -d "$runtime_root"',
+                    '/usr/bin/sudo /bin/test -L "$runtime_root"',
+                    "^cpython-3\\.13\\.13-macos-(aarch64|x86_64)-none$",
+                    'isolated_python="$runtime_root/bin/python3.13"',
+                    "[[ \"$(/usr/bin/sudo /usr/bin/stat -f '%HT:%l' "
+                    '"$isolated_python")" != "Regular File:1" ]]',
+                    'runtime_hardlink="$(/usr/bin/sudo /usr/bin/find '
+                    '"$runtime_root" -type f -links +1 -print -quit)"',
+                    'runtime_special="$(/usr/bin/sudo /usr/bin/find '
+                    '"$runtime_root" ! -type d ! -type f ! -type l '
+                    '-print -quit)"',
+                    '/usr/bin/sudo /usr/bin/otool -L "$isolated_python"',
+                    '$0 !~ "^/System/" && $0 !~ "^/usr/lib/"',
+                    'runtime_rpaths" != "@executable_path/../lib"',
+                    "path.resolve(strict=True)",
+                    "root not in target.parents",
+                    "os.readlink(path)",
+                    'runtime_identity" != "3.13.13|$isolated_python|'
+                    '$runtime_root|$runtime_root"',
+                    '/usr/bin/sudo /usr/sbin/chown -R root:wheel "$managed_python_dir"',
+                    '/usr/bin/sudo /bin/chmod -RN "$managed_python_dir"',
+                    '/usr/bin/sudo /usr/bin/xattr -cr "$managed_python_dir"',
+                    '/usr/bin/sudo /bin/chmod -R a+rX,a-w "$managed_python_dir"',
+                    "metadata.st_dev",
+                    "metadata.st_ino",
+                    "stat.S_IMODE(metadata.st_mode)",
+                    'getattr(metadata, "st_flags", 0)',
+                    "metadata.st_nlink",
+                    "hashlib.sha256(path.read_bytes()).digest()",
+                    "current_runtime_owner_violation",
+                    "current_runtime_write_violation",
+                    "current_runtime_read_violation",
+                    "current_runtime_traverse_violation",
+                    "current_runtime_xattr_violation",
+                    "current_runtime_acl_violation",
+                    "/usr/bin/sudo /usr/bin/codesign --verify --strict "
+                    '"$isolated_python"',
+                    'run_review_user /bin/test -x "$isolated_python"',
+                    '/bin/cat "$isolated_source/tests/trusted_mac_gate.py"',
+                    '"$isolated_python" -I -B -S - "$isolated_source"',
+                    '"$gate_manifest" "$gate_manifest_digest" hosted-readonly',
+                    '"$isolated_root/payload/runtime" "$isolated_root/payload"',
+                    '"$isolated_python" -I -B -S -c \'import json, pathlib, sys;',
+                    'if ! bytecode_artifact="$(/usr/bin/find .',
+                    "\\( -name __pycache__ -o -name '*.pyc' -o -name '*.pyo' \\)",
+                    "-name '*.pyc'",
+                    "-name '*.pyo'",
+                    "-print -quit",
+                    "Unable to inspect the checkout for Python bytecode artifacts",
+                    "Python bytecode artifact: $bytecode_artifact",
+                ):
+                    self.assertIn(contract, readonly_job)
+
+                for phase in ("post-install", "prelaunch", "postrun"):
+                    self.assertEqual(
+                        readonly_job.count(f"verify_runtime_custody {phase}"),
+                        1,
+                    )
+                self.assertEqual(
+                    readonly_job.count(
+                        '/usr/bin/sudo /bin/chmod 0755 "$isolated_root"'
+                    ),
+                    1,
+                )
+                self.assertEqual(
+                    readonly_job.count(
+                        '/usr/bin/sudo /usr/sbin/chown "$review_user:$review_group"'
+                    ),
+                    1,
+                )
+                for prohibited in (
+                    "actions/setup-python",
+                    "trusted_python",
+                    "command -v python3",
+                    "/usr/bin/python",
+                    "python3 -B -c",
+                    "PYTHONHOME",
+                    "/usr/bin/rsync",
+                    '/usr/bin/sudo "$trusted_uv"',
+                    '"$trusted_uv" --version',
+                    "stat -f '%u:%g:%Lp' \"$uv_root_home\"",
+                    "stat -f '%u:%g:%Lp' \"$uv_root_tmp\"",
+                    '/bin/rm -rf "$uv_staging_dir"',
+                    '"$isolated_python" -B -m '
+                    "tests.run_readonly_install_deterministic_supervisor",
+                    '"$isolated_python" -P -B -m',
+                    'PYTHONPATH="$isolated_source"',
+                    "-type d -name __pycache__",
+                    "-type f \\( -name '*.pyc'",
+                    'sh "$isolated_source"',
+                    '/usr/bin/sudo /bin/chmod 0711 "$managed_python_dir"',
+                    "/usr/bin/sudo /usr/sbin/chown "
+                    '"$review_user:$review_group" "$managed_python_dir"',
+                    "/usr/bin/sudo /usr/sbin/chown -R "
+                    '"$review_user:$review_group" "$runtime_root"',
+                ):
+                    self.assertNotIn(prohibited, readonly_job)
+
+    def test_independent_supervisor_remains_a_bounded_low_level_tool(self) -> None:
+        tool_root = SCRIPTS / "independent_codex_pr_review"
+        entrypoint = tool_root / "independent-codex-pr-review"
+        readme = (tool_root / "README.md").read_text(encoding="utf-8")
+        constants = (tool_root / "review_supervisor/constants.py").read_text(
+            encoding="utf-8"
+        )
+        workflow = (REPO_ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+
+        self.assertTrue(entrypoint.is_file())
+        self.assertTrue(entrypoint.stat().st_mode & 0o111)
+        self.assertEqual(
+            entrypoint.read_text(encoding="utf-8").splitlines()[0],
+            "#!/usr/bin/env python3.13",
+        )
+        self.assertIn('MODEL = "gpt-5.6-sol"', constants)
+        self.assertIn('REASONING_EFFORT = "xhigh"', constants)
+        self.assertIn("MAX_EVIDENCE_BUNDLE_BYTES", constants)
+        for anchor in (
+            "owner-only `CODEX_HOME`",
+            "bounded evidence bundle",
+            "app-server",
+            "sealed",
+            "settlement",
+        ):
+            self.assertIn(anchor, readme)
+        self.assertIn("independent_supervisor_tests", workflow)
+        self.assertIn('python-version: "3.13"', workflow)
+        self.assertIn(
+            "scripts/independent_codex_pr_review",
+            workflow,
         )
 
     def test_helper_declares_and_tests_its_minimum_python_runtime(self) -> None:
@@ -1972,9 +4739,7 @@ class RepositoryContractTest(unittest.TestCase):
             "delivery entrypoint": delivery,
         }
         if CI_PROFILE == "canonical":
-            documents["README"] = (REPO_ROOT / "README.md").read_text(
-                encoding="utf-8"
-            )
+            documents["README"] = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
 
         for name, content in documents.items():
             with self.subTest(document=name):
@@ -2052,9 +4817,7 @@ class RepositoryContractTest(unittest.TestCase):
         canonical = (SKILL_ROOT / "references/canonical-claude-lane.md").read_text(
             encoding="utf-8"
         )
-        runtime = (SCRIPTS / "review_runtime/named_lane.py").read_text(
-            encoding="utf-8"
-        )
+        runtime = (SCRIPTS / "review_runtime/named_lane.py").read_text(encoding="utf-8")
 
         self.assertIn("device, inode, file type, and owner", skill)
         self.assertIn("(st_dev, st_ino, file type, st_uid)", contracts)
@@ -2083,9 +4846,9 @@ class RepositoryContractTest(unittest.TestCase):
         self.assertIn("not a claim", contracts)
         self.assertIn("producer-output bound", canonical)
 
-        marker_binding = runtime.split(
-            "class _MaterializerSourceMarkerBinding:", 1
-        )[1].split("@dataclass", 1)[0]
+        marker_binding = runtime.split("class _MaterializerSourceMarkerBinding:", 1)[
+            1
+        ].split("@dataclass", 1)[0]
         for field in ("device", "inode", "file_type", "owner", "is_gitfile"):
             self.assertIn(f"{field}:", marker_binding)
         for excluded in ("mtime", "ctime", "nlink", "digest"):
@@ -2710,6 +5473,7 @@ class RepositoryContractTest(unittest.TestCase):
             "--strict-mcp-config",
             "--tools Read,Grep,Glob,Bash",
             "--disallowedTools Edit,Write,NotebookEdit,WebFetch,WebSearch,Task",
+            "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1",
             "disableBundledSkills: true",
             '"disableBundledSkills": true',
             "`--safe-mode` alone is not evidence that bundled skills are absent",
@@ -3105,6 +5869,8 @@ class RepositoryContractTest(unittest.TestCase):
             "defined once in",
             "claude_version_policy.py",
             "Claude Code `2.1.212` is the audited per-version stream-schema baseline, not a global eligibility pin.",
+            "adapts the baseline `claude_code_version` constant to the exact accepted preflight-selected version",
+            "exact-version additive metadata contracts",
             "selects a reviewed closed profile by the exact preflight version",
             "`legacy-base` for `>=2.1.211,<2.1.216`",
             "`extended-2x` for `>=2.1.216,<3.0.0`",
@@ -3237,6 +6003,7 @@ class RepositoryContractTest(unittest.TestCase):
                     "legacy-base": ">=2.1.211,<2.1.216",
                     "extended-2x": ">=2.1.216,<3.0.0",
                 },
+                "version_adaptations": (claude_stream_contract.VERSION_ADAPTATIONS),
                 "launch_profiles": [
                     "helper-darwin",
                     "helper-linux",
@@ -3449,7 +6216,8 @@ class RepositoryContractTest(unittest.TestCase):
                     "failure": "inconclusive",
                 },
                 "analytics_disabled": {
-                    "rule": "boolean",
+                    "rule": "constant",
+                    "value": True,
                     "failure": "inconclusive",
                 },
                 "product_feedback_disabled": {
@@ -3548,23 +6316,6 @@ class RepositoryContractTest(unittest.TestCase):
                 "accepted_values": ["ANTHROPIC_API_KEY", "none"],
                 "malformed_failure": "inconclusive",
                 "mismatch_failure": "blocked",
-            },
-        )
-        intermediate_profiles = schema["intermediate_events"]["profiles"]
-        self.assertEqual(
-            intermediate_profiles["legacy-base"]["assistant_message_profile"],
-            {
-                "additional_required_fields": [],
-                "field_contracts": {},
-            },
-        )
-        self.assertEqual(
-            intermediate_profiles["extended-2x"]["assistant_message_profile"],
-            {
-                "additional_required_fields": ["diagnostics"],
-                "field_contracts": {
-                    "diagnostics": {"rule": "null"},
-                },
             },
         )
         identities = schema["model_identity"]
@@ -4017,8 +6768,12 @@ class RepositoryContractTest(unittest.TestCase):
         ):
             self.assertIn(f"{binding}: bytes | None = None", validator)
         self.assertIn("bound_payloads = (", validator)
-        self.assertIn("if all(payload is None for payload in bound_payloads):", validator)
-        self.assertIn("elif any(payload is None for payload in bound_payloads):", validator)
+        self.assertIn(
+            "if all(payload is None for payload in bound_payloads):", validator
+        )
+        self.assertIn(
+            "elif any(payload is None for payload in bound_payloads):", validator
+        )
         self.assertIn("_load_bound_stream_contract(", validator)
 
         for anchor in (
@@ -4109,6 +6864,10 @@ class RepositoryContractTest(unittest.TestCase):
             manifest_paths,
             tuple(sorted(manifest_paths, key=lambda value: value.encode("utf-8"))),
         )
+        for relative_path in manifest_paths:
+            payload = (policy_scope_root / relative_path).read_bytes()
+            for marker in (b"<<<<<<< ", b"=======\n", b">>>>>>> "):
+                self.assertNotIn(marker, payload, relative_path)
         manifest_clause = (
             "; ".join(f"`{path}`" for path in manifest_paths[:-1])
             + f"; and `{manifest_paths[-1]}`."
@@ -5481,6 +8240,391 @@ class RepositoryContractTest(unittest.TestCase):
         )
         self.assertNotIn("render_success_envelope", cli_source)
 
+    def test_installed_bundle_entrypoints_do_not_create_bytecode(self) -> None:
+        independent_entrypoint = (
+            SCRIPTS / "independent_codex_pr_review" / "independent-codex-pr-review"
+        ).read_text(encoding="utf-8")
+        self.assertLess(
+            independent_entrypoint.index("if sys.version_info[:2] != (3, 13):"),
+            independent_entrypoint.index("from review_supervisor.cli import main"),
+        )
+        with tempfile.TemporaryDirectory(
+            prefix="review-installed-no-bytecode-"
+        ) as temporary:
+            copied_skill = pathlib.Path(temporary) / "review-orchestration-playbook"
+            shutil.copytree(
+                SKILL_ROOT,
+                copied_skill,
+                ignore=shutil.ignore_patterns("__pycache__", "*.pyc", "*.pyo"),
+            )
+            copied_scripts = copied_skill / "scripts"
+            environment = os.environ.copy()
+            environment.pop("PYTHONDONTWRITEBYTECODE", None)
+            environment.pop("PYTHONPYCACHEPREFIX", None)
+            environment.pop("PYTHONPATH", None)
+            entrypoints = {
+                copied_scripts / "isolated_review": 0,
+                copied_scripts / "named_claude_preflight": 2,
+                copied_scripts / "validate_claude_stream.py": 3,
+                copied_scripts
+                / "independent_codex_pr_review"
+                / "independent-codex-pr-review": 0,
+            }
+            discovered_entrypoints = {
+                path
+                for path in copied_scripts.rglob("*")
+                if path.is_file() and _has_python_shebang(path)
+            }
+            self.assertEqual(discovered_entrypoints, set(entrypoints))
+
+            for entrypoint, expected_returncode in entrypoints.items():
+                with self.subTest(entrypoint=entrypoint.name):
+                    completed = subprocess.run(
+                        (sys.executable, str(entrypoint), "--help"),
+                        cwd=copied_skill,
+                        env=environment,
+                        check=False,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        text=True,
+                        timeout=30,
+                    )
+                    requires_python_313 = (
+                        entrypoint.name == "independent-codex-pr-review"
+                    )
+                    if requires_python_313 and sys.version_info < (3, 13):
+                        self.assertNotEqual(completed.returncode, 0)
+                        self.assertIn(
+                            "Python 3.13 is required; running",
+                            completed.stderr,
+                        )
+                    else:
+                        self.assertEqual(
+                            completed.returncode,
+                            expected_returncode,
+                            completed.stderr,
+                        )
+                    bytecode = sorted(
+                        path.relative_to(copied_skill)
+                        for path in copied_skill.rglob("*")
+                        if path.name == "__pycache__" or path.suffix in {".pyc", ".pyo"}
+                    )
+                    self.assertEqual(bytecode, [])
+
+            import_probe = (
+                "import sys;"
+                f"sys.path.insert(0, {str(copied_scripts)!r});"
+                "import review_runtime;"
+                "sys.path.insert(0, "
+                f"{str(copied_scripts / 'independent_codex_pr_review')!r});"
+                "import review_supervisor"
+            )
+            imported = subprocess.run(
+                (sys.executable, "-B", "-c", import_probe),
+                cwd=copied_skill,
+                env=environment,
+                check=False,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=30,
+            )
+            self.assertEqual(imported.returncode, 0, imported.stderr)
+
+            bytecode = sorted(
+                path.relative_to(copied_skill)
+                for path in copied_skill.rglob("*")
+                if path.name == "__pycache__" or path.suffix in {".pyc", ".pyo"}
+            )
+            self.assertEqual(bytecode, [])
+
+    @unittest.skipIf(
+        sys.version_info < (3, 13),
+        "the independent supervisor requires Python 3.13",
+    )
+    def test_installed_supervisor_preflight_keeps_release_tree_immutable(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory(
+            prefix="review-installed-preflight-immutable-"
+        ) as temporary:
+            root = pathlib.Path(temporary)
+            release_skill = (
+                root
+                / "releases"
+                / ("b" * 40)
+                / "personal_codex"
+                / "skills"
+                / "review-orchestration-playbook"
+            )
+            shutil.copytree(
+                SKILL_ROOT,
+                release_skill,
+                ignore=shutil.ignore_patterns("__pycache__", "*.pyc", "*.pyo"),
+            )
+            stable_skill = root / "stable/review-orchestration-playbook"
+            stable_skill.parent.mkdir(mode=0o700)
+            stable_skill.symlink_to(release_skill, target_is_directory=True)
+            tool_root = stable_skill / "scripts" / "independent_codex_pr_review"
+            entrypoint = tool_root / "independent-codex-pr-review"
+            account_home = root / "account-home"
+            account_home.mkdir(mode=0o700)
+            repository = root / "repository"
+            repository.mkdir(mode=0o700)
+
+            def release_snapshot() -> dict[str, bytes | None]:
+                return {
+                    path.relative_to(release_skill).as_posix(): (
+                        path.read_bytes() if path.is_file() else None
+                    )
+                    for path in (release_skill, *sorted(release_skill.rglob("*")))
+                }
+
+            before = release_snapshot()
+            wrapper = root / "run-installed-preflight.py"
+            wrapper.write_text(
+                "\n".join(
+                    (
+                        "import os",
+                        "import pwd",
+                        "import runpy",
+                        "import sys",
+                        "",
+                        "account = type(",
+                        "    'Account',",
+                        "    (),",
+                        "    {'pw_dir': os.environ['TEST_ACCOUNT_HOME']},",
+                        ")()",
+                        "pwd.getpwuid = lambda _uid: account",
+                        "entrypoint = os.environ['TEST_ENTRYPOINT']",
+                        "sys.path.insert(0, os.path.dirname(entrypoint))",
+                        "sys.argv = [entrypoint, *sys.argv[1:]]",
+                        "runpy.run_path(entrypoint, run_name='__main__')",
+                        "",
+                    )
+                ),
+                encoding="utf-8",
+            )
+            environment = os.environ.copy()
+            environment.pop("PYTHONDONTWRITEBYTECODE", None)
+            environment.pop("PYTHONPYCACHEPREFIX", None)
+            environment.pop("PYTHONPATH", None)
+            environment.update(
+                {
+                    "TEST_ACCOUNT_HOME": str(account_home),
+                    "TEST_ENTRYPOINT": str(entrypoint),
+                }
+            )
+            completed = subprocess.run(
+                (
+                    sys.executable,
+                    "-B",
+                    str(wrapper),
+                    "preflight",
+                    "--helper-state",
+                    str(root / "missing-helper-state"),
+                    "--repo",
+                    str(repository),
+                    "--base",
+                    "1" * 40,
+                    "--head",
+                    "2" * 40,
+                    "--pr-url",
+                    "https://github.com/example/example/pull/1",
+                ),
+                cwd=tool_root,
+                env=environment,
+                check=False,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=30,
+            )
+            self.assertEqual(completed.returncode, 2, completed.stderr)
+            payload = json.loads(completed.stdout)
+            self.assertNotEqual(payload.get("status"), "ready")
+
+            state_root = (
+                account_home
+                / ".codex"
+                / "review-runtime"
+                / "independent-codex-pr-review"
+            )
+            self.assertTrue((state_root / "retention").is_dir())
+            self.assertTrue((state_root / "checkouts").is_dir())
+            self.assertFalse((release_skill / "runtime").exists())
+            self.assertEqual(release_snapshot(), before)
+
+    def test_documented_validation_does_not_create_bundle_bytecode(self) -> None:
+        syntax_probe = (
+            "import pathlib, sys; "
+            '[compile(pathlib.Path(path).read_bytes(), path, "exec") '
+            "for path in sys.argv[1:]]"
+        )
+        if CI_PROFILE == "canonical":
+            readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
+            self.assertIn(f"python3 -B -c '{syntax_probe}'", readme)
+            self.assertIn(
+                "python3 -B -m unittest discover "
+                "-s skills/review-orchestration-playbook/tests",
+                readme,
+            )
+
+        with tempfile.TemporaryDirectory(
+            prefix="review-documented-validation-"
+        ) as temporary:
+            copied_skill = pathlib.Path(temporary) / "review-orchestration-playbook"
+            shutil.copytree(
+                SKILL_ROOT,
+                copied_skill,
+                ignore=shutil.ignore_patterns("__pycache__", "*.pyc", "*.pyo"),
+            )
+            copied_scripts = copied_skill / "scripts"
+            syntax_sources = [
+                copied_scripts / "isolated_review",
+                copied_scripts / "named_lane_guard",
+                *sorted((copied_scripts / "review_runtime").glob("*.py")),
+            ]
+            environment = os.environ.copy()
+            environment.pop("PYTHONDONTWRITEBYTECODE", None)
+            environment.pop("PYTHONPYCACHEPREFIX", None)
+            environment.pop("PYTHONPATH", None)
+
+            syntax_check = subprocess.run(
+                (
+                    sys.executable,
+                    "-B",
+                    "-c",
+                    syntax_probe,
+                    *(str(path) for path in syntax_sources),
+                ),
+                cwd=copied_skill,
+                env=environment,
+                check=False,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=30,
+            )
+            self.assertEqual(syntax_check.returncode, 0, syntax_check.stderr)
+
+            tests = subprocess.run(
+                (
+                    sys.executable,
+                    "-B",
+                    "-m",
+                    "unittest",
+                    "test_named_lane.NamedLaneGuardTest."
+                    "test_entrypoint_does_not_write_import_bytecode",
+                ),
+                cwd=copied_skill / "tests",
+                env=environment,
+                check=False,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=60,
+            )
+            self.assertEqual(tests.returncode, 0, tests.stderr)
+
+            bytecode = sorted(
+                path.relative_to(copied_skill)
+                for path in copied_skill.rglob("*")
+                if path.name == "__pycache__" or path.suffix in {".pyc", ".pyo"}
+            )
+            self.assertEqual(bytecode, [])
+
+    def test_bare_direct_package_import_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory(
+            prefix="review-installed-bare-import-"
+        ) as temporary:
+            copied_skill = pathlib.Path(temporary) / "review-orchestration-playbook"
+            shutil.copytree(
+                SKILL_ROOT,
+                copied_skill,
+                ignore=shutil.ignore_patterns("__pycache__", "*.pyc", "*.pyo"),
+            )
+            copied_scripts = copied_skill / "scripts"
+            environment = os.environ.copy()
+            environment.pop("PYTHONDONTWRITEBYTECODE", None)
+            environment.pop("PYTHONPYCACHEPREFIX", None)
+            environment.pop("PYTHONPATH", None)
+            packages = {
+                "review_runtime": copied_scripts,
+                "review_supervisor": (copied_scripts / "independent_codex_pr_review"),
+            }
+
+            for package_name, import_root in packages.items():
+                with self.subTest(package=package_name):
+                    import_probe = (
+                        "import sys;"
+                        f"sys.path.insert(0, {str(import_root)!r});"
+                        f"import {package_name}"
+                    )
+                    completed = subprocess.run(
+                        (sys.executable, "-c", import_probe),
+                        cwd=copied_skill,
+                        env=environment,
+                        check=False,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        text=True,
+                        timeout=30,
+                    )
+                    self.assertNotEqual(completed.returncode, 0)
+                    self.assertIn(
+                        f"{package_name} requires bytecode to be disabled before import",
+                        completed.stderr,
+                    )
+
+            bytecode = sorted(
+                path.relative_to(copied_skill) for path in copied_skill.rglob("*.pyc")
+            )
+            self.assertEqual(len(bytecode), 2)
+            self.assertTrue(
+                all(path.name.startswith("__init__.") for path in bytecode),
+                bytecode,
+            )
+            self.assertEqual(
+                {path.parent.parent.name for path in bytecode},
+                {"review_runtime", "review_supervisor"},
+            )
+
+    def test_installed_bundle_python_child_launchers_pass_no_bytecode(self) -> None:
+        launch_vectors: list[tuple[pathlib.Path, int, str]] = []
+        production_sources = [
+            path
+            for path in SCRIPTS.rglob("*")
+            if path.is_file()
+            and "tests" not in path.relative_to(SCRIPTS).parts
+            and (path.suffix == ".py" or _has_python_shebang(path))
+        ]
+        for source_path in sorted(production_sources):
+            source = source_path.read_text(encoding="utf-8")
+            tree = ast.parse(source, filename=str(source_path))
+            for node in ast.walk(tree):
+                if not isinstance(node, (ast.List, ast.Tuple)) or len(node.elts) < 2:
+                    continue
+                first = ast.unparse(node.elts[0])
+                if "sys.executable" not in first:
+                    continue
+                launch_vectors.append((source_path, node.lineno, first))
+                leading_flags: list[str] = []
+                for item in node.elts[1:]:
+                    if not (
+                        isinstance(item, ast.Constant)
+                        and isinstance(item.value, str)
+                        and item.value.startswith("-")
+                    ):
+                        break
+                    leading_flags.append(item.value)
+                self.assertIn(
+                    "-B",
+                    leading_flags,
+                    f"{source_path}:{node.lineno} must pass -B",
+                )
+        self.assertGreaterEqual(len(launch_vectors), 9)
+
     def test_review_prompts_do_not_use_unbounded_only_matching_samples(self) -> None:
         forbidden = "rg -o --max-count 80"
         candidates = [
@@ -5668,6 +8812,40 @@ class RepositoryContractTest(unittest.TestCase):
                 "explicit-range-only standalone single/double with no selected pr",
                 content.lower(),
             )
+
+    def test_github_request_requires_terminal_local_lanes(self) -> None:
+        documents = {
+            "skill": SKILL_ROOT / "SKILL.md",
+            "PR readiness": SKILL_ROOT / "references/pr-readiness.md",
+            "lane contracts": SKILL_ROOT / "references/review-lane-contracts.md",
+            "GitHub probes": SKILL_ROOT / "references/github-pr-probes.md",
+            "prompt templates": SKILL_ROOT / "references/review-prompt-templates.md",
+        }
+        if CI_PROFILE == "canonical":
+            documents["README"] = REPO_ROOT / "README.md"
+        for name, path in documents.items():
+            content = " ".join(path.read_text(encoding="utf-8").split()).lower()
+            with self.subTest(policy_document=name):
+                self.assertIn("github-request-before-local-terminal", content)
+                self.assertIn("later local-lane completion does not cure", content)
+                self.assertIn("terminal payload cannot count", content)
+                self.assertIn("empty or anchor commit", content)
+
+        interface = (SKILL_ROOT / "agents/openai.yaml").read_text(encoding="utf-8")
+        self.assertIn("github-request-before-local-terminal", interface)
+        self.assertIn("both local terminals preceded", interface)
+        self.assertIn("cannot be cured by later local completion", interface)
+        self.assertIn("cannot be repeated on the unchanged head", interface)
+
+        readiness = documents["PR readiness"].read_text(encoding="utf-8")
+        self.assertLess(
+            readiness.index("Run the requested local lanes"),
+            readiness.index("Otherwise post the one exact `@codex review` comment"),
+        )
+        self.assertIn(
+            "only after both local lanes are terminal",
+            readiness,
+        )
 
 
 if __name__ == "__main__":

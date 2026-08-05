@@ -407,7 +407,7 @@ class NamedLaneGuardTest(unittest.TestCase):
         self.assertFalse(fake_python_marker.exists())
         self.assertFalse(sitecustomize_marker.exists())
 
-    def test_entrypoint_skips_global_sitecustomize_with_no_site(self) -> None:
+    def test_entrypoint_skips_global_site_hooks_with_no_site(self) -> None:
         _, guard = self.copy_guard_bundle()
         environment_root = self.root / "sitecustomize-environment"
         venv.EnvBuilder(with_pip=False).create(environment_root)
@@ -432,9 +432,10 @@ class NamedLaneGuardTest(unittest.TestCase):
         self.assertEqual(purelib_probe.returncode, 0, purelib_probe.stderr)
         site_packages = pathlib.Path(purelib_probe.stdout.strip())
         self.assertTrue(site_packages.is_dir())
-        marker = self.root / "global-sitecustomize.marker"
-        (site_packages / "sitecustomize.py").write_text(
-            f"import pathlib\npathlib.Path({str(marker)!r}).write_text('loaded')\n",
+        marker = self.root / "global-site-hook.marker"
+        # Executable .pth lines remain a venv site hook across Python 3.13 patches.
+        (site_packages / "codex-review-site-hook.pth").write_text(
+            f"import pathlib; pathlib.Path({str(marker)!r}).write_text('loaded')\n",
             encoding="utf-8",
         )
 
@@ -814,9 +815,7 @@ class NamedLaneGuardTest(unittest.TestCase):
             "BASELINE": str(
                 scripts.parent / "references/claude-2.1.212-stream-schema.json"
             ),
-            "PROFILE": str(
-                scripts.parent / "references/claude-stream-schema.json"
-            ),
+            "PROFILE": str(scripts.parent / "references/claude-stream-schema.json"),
             "CAPABILITY": str(runtime / "claude_capabilities.py"),
         }
         body = (
@@ -2911,9 +2910,7 @@ class NamedLaneGuardTest(unittest.TestCase):
         second_source = self.root / "linked-back-pointer-other-source"
         git(self.repo, "worktree", "add", "--detach", str(first_source), head)
         git(self.repo, "worktree", "add", "--detach", str(second_source), head)
-        first_admin = pathlib.Path(
-            git(first_source, "rev-parse", "--absolute-git-dir")
-        )
+        first_admin = pathlib.Path(git(first_source, "rev-parse", "--absolute-git-dir"))
         back_pointer = first_admin / "gitdir"
         original_payload = back_pointer.read_bytes()
         original_inode = back_pointer.lstat().st_ino
@@ -5793,6 +5790,7 @@ class NamedLaneGuardTest(unittest.TestCase):
         }
         denied = {
             "ANTHROPIC_API_KEY": "secret",
+            "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "0",
             "CLAUDE_CODE_OAUTH_TOKEN": "secret",
             "CLAUDE_CONFIG_DIR": "/private/claude",
             "GITHUB_TOKEN": "secret",
@@ -5842,7 +5840,18 @@ class NamedLaneGuardTest(unittest.TestCase):
         self.assertEqual(child["LOGNAME"], account.pw_name)
         self.assertEqual(child["SHELL"], account.pw_shell)
         self.assertEqual(child["PATH"], TRUSTED_PATH)
-        for key in denied.keys() - {"NODE_EXTRA_CA_CERTS"}:
+        self.assertEqual(
+            child["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"],
+            "1",
+        )
+        self.assertEqual(
+            default_child["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"],
+            "1",
+        )
+        for key in denied.keys() - {
+            "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC",
+            "NODE_EXTRA_CA_CERTS",
+        }:
             self.assertNotIn(key, child)
         self.assertNotIn("NODE_EXTRA_CA_CERTS", default_child)
         self.assertEqual(child["NODE_EXTRA_CA_CERTS"], str(node_extra_ca))
