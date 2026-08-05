@@ -1,0 +1,46 @@
+{
+  "version": 1,
+  "sources": [
+    {
+      "name": "codex-toolbox",
+      "repository": "Joey-Tools/codex-toolbox",
+      "sha": "20f37f4703715393480d550086980bb1fa44c7b3",
+      "tree": "10fe688d89732bbb4eae1ad7cae753f5089fc749"
+    },
+    {
+      "name": "codex-debug-triage",
+      "repository": "Joey-Tools/codex-debug-triage",
+      "sha": "d3b6fd26b021ef1a6aad8561a92a354c27510fbd",
+      "tree": "0441934d645703940407088346a464f014c934c8"
+    },
+    {
+      "name": "codex-review-workflows",
+      "repository": "Joey-Tools/codex-review-workflows",
+      "sha": "80d3fc9c7d9f4842d0fa247a7c0b974c00052124",
+      "tree": "971f6d2ae6c074172c924feb73e42f284a0b736d"
+    },
+    {
+      "name": "codex-workflow-hygiene",
+      "repository": "Joey-Tools/codex-workflow-hygiene",
+      "sha": "c69a0b1a92a349179ed41b0a378c08fe70e8160f",
+      "tree": "4f62cf26166c74c96012e1f4116cd05957007bd7"
+    },
+    {
+      "name": "codex-project-journal",
+      "repository": "Joey-Tools/codex-project-journal",
+      "sha": "4f53fd1bf9ba0a7c85db8d183016210d3d0089e5",
+      "tree": "f933904c339058d3e3b2b9a92bbf77a8f1395e2b"
+    },
+    {
+      "name": "codex-waited-delivery",
+      "repository": "Joey-Tools/codex-waited-delivery",
+      "sha": "2cc1f97efc86dfbcb582743e5f0eb46440f2f713",
+      "tree": "5737038c694c11d50794dc7c7bd5ebb740127b1b"
+    }
+  ],
+  "toolbox_generated_provenance": {
+    "repository": "Joey-Tools/codex-personal-sync",
+    "sha": "e57140e16a68db24dbdd883de665283538234730",
+    "receipt_sha256": "ff1a2dad1b3d473568c0a7b785110dfbe5094747f8d3fa31ade7ab5b2a0fdb9e"
+  }
+}

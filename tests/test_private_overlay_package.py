@@ -29,7 +29,7 @@ sys.modules[SPEC.name] = MODULE
 SPEC.loader.exec_module(MODULE)
 
 
-PUBLIC_SHA = "1" * 40
+PUBLIC_SHA = "20f37f4703715393480d550086980bb1fa44c7b3"
 PRIVATE_SHA = "2" * 40
 
 
@@ -191,6 +191,7 @@ class PrivateOverlayPackageTests(unittest.TestCase):
             manifest["base_release"]["repo"],
             "Joey-Tools/codex-toolbox",
         )
+        self.assertEqual(manifest["base_release"]["sha"], PUBLIC_SHA)
         self.assertIn("AGENTS.md", targets)
         self.assertIn("skills/agile-delivery-workflow", targets)
         self.assertIn("skills/cisco-trackers-lookup", targets)
@@ -1533,7 +1534,7 @@ class PrivateOverlayPackageTests(unittest.TestCase):
             downloads,
             [
                 ("Joey-Tools/codex-private-workflows", None),
-                ("Joey-Tools/codex-toolbox", None),
+                ("Joey-Tools/codex-toolbox", PUBLIC_SHA),
             ],
         )
         self.assertTrue((home / "bin" / "codex-personal-sync").is_symlink())
@@ -1702,12 +1703,12 @@ class PrivateOverlayPackageTests(unittest.TestCase):
             downloads,
             [
                 ("Joey-Tools/codex-private-workflows", None),
-                ("Joey-Tools/codex-toolbox", None),
+                ("Joey-Tools/codex-toolbox", PUBLIC_SHA),
             ],
         )
         self.assertEqual(manifest_path.read_bytes(), original_manifest)
 
-    def test_private_scheduler_invokes_private_install_entrypoint(self) -> None:
+    def test_private_scheduler_invokes_private_scheduled_entrypoint(self) -> None:
         home = self.root / "home" / ".codex"
         args = MODULE._scheduler_install_args(
             Path("/runner"),
@@ -1722,7 +1723,9 @@ class PrivateOverlayPackageTests(unittest.TestCase):
             args,
             [
                 "/runner",
-                "install-private",
+                "run-scheduled",
+                "--mode",
+                "private",
                 "--repo",
                 "Joey-Tools/codex-private-workflows",
                 "--base-repo",

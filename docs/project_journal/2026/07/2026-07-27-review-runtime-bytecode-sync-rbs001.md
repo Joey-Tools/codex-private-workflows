@@ -1,9 +1,9 @@
 ---
 id: 20260727-rbs001
 title: Review Runtime Bytecode Sync
-status: completed
+status: active
 created: 2026-07-27
-updated: 2026-08-01
+updated: 2026-08-05
 branch: wip/review-runtime-bytecode-sync
 pr: 139
 supersedes: []
@@ -17,6 +17,7 @@ superseded_by:
 - Propagate the review runtime's no-bytecode contract through private CI, release, scheduled sync, and documented local validation.
 - Align private CI exactly with the canonical reviewed fixture, including broker reproducibility and independent-supervisor jobs.
 - Sync the hardened review control plane without introducing repository-root duplicates of private policy files.
+- Consume the canonical personal-sync surface only through its receipt-bound toolbox mirror and immutable public base release.
 
 ## Current State
 
@@ -27,10 +28,15 @@ superseded_by:
 - Private policy-scope validation resolves `agents/reviewer.toml` beneath `personal_codex/`, while canonical validation remains repository-rooted.
 - Private sync rewrites the trusted-Mac operator command to the `personal_codex/` layout and fail-closes on any missing or unreviewed file in the independent-supervisor subtree.
 - The private review tree now matches the actual canonical PR #85 squash-merge tree for the complete reviewed file inventory, including caller-owned child-outcome receipts, read-only child isolation, and double-fork custody recovery.
+- The private base release is pinned to immutable toolbox commit `20f37f4703715393480d550086980bb1fa44c7b3`; its published tree is byte-identical to reviewed toolbox head `ac7275f2064531bde05bfe0502617efc44f573b3`.
+- The final source reconciliation freezes six direct inputs: toolbox `20f37f4703715393480d550086980bb1fa44c7b3`, review workflows `80d3fc9c7d9f4842d0fa247a7c0b974c00052124`, debug triage `d3b6fd26b021ef1a6aad8561a92a354c27510fbd`, workflow hygiene `c69a0b1a92a349179ed41b0a378c08fe70e8160f`, project journal `4f53fd1bf9ba0a7c85db8d183016210d3d0089e5`, and waited delivery `2cc1f97efc86dfbcb582743e5f0eb46440f2f713`.
+- Canonical personal-sync `e57140e16a68db24dbdd883de665283538234730` is recorded only as toolbox receipt provenance; private never mirrors it directly.
 
 ## Next Steps
 
-- None after the private overlay release is published and installed-release entrypoints confirm the immutable tree remains bytecode-free.
+- Freeze and sign the final combined source tree, then run exact-head admission, CI, conversation, lifecycle, mergeability, target-tree, and applicable same-head review gates.
+- Publish and install the immutable private release, prove a real successful scheduler run, and dispatch scheduled reconciliation only as a no-diff/no-new-PR check.
+- After the merged tree and release prove complete behavioral supersession, close draft PR #140 as superseded by PR #139.
 
 ## Evidence
 
@@ -61,3 +67,17 @@ superseded_by:
 - The complete read-only installation module passed 111/111 in 9.929 seconds, ten ordered normal/failure-injection double-fork rounds passed 20/20 in 67.387 seconds, and the repository contract module passed 105/105 with eight expected skips in 4.325 seconds.
 - The exact independent-supervisor inventory, private trusted-Mac path rewrite, installed-release immutability, and private CI fixture selectors passed. Source-only compilation covered 109 Python/entrypoint files, Ruff 0.13.2 lint passed, Bash syntax passed, the private root CI remained byte-identical to its reviewed fixture, project-journal validation passed, and no bytecode artifact remained.
 - Ruff 0.13.2 format reports the same nine pre-existing files on both PR head `960a234e953e390cc1720877a7dcdf8d1947ca16` and the final synchronized tree, so no unrelated formatter-only rewrite was added. Local `shellcheck` and `actionlint` executables were unavailable; Bash syntax, repository workflow contracts, fixture equality, and the canonical merged CI evidence provide the local fallbacks.
+- Current private master `9bbdf969dfd048c4431ca051a1d776789cdf4ac8` was ordinary-merged into the delivery line as signed checkpoint `cd90d518c951f9a2683a036946ee75e5ec72a525`; its two merge-resolution contract tests passed under uv-managed Python 3.13.
+- Toolbox squash commit `20f37f4703715393480d550086980bb1fa44c7b3` has tree `10fe688d89732bbb4eae1ad7cae753f5089fc749`, valid GitHub signature, successful default-branch CI and public-release workflows, and immutable release `personal-codex-20260805-163744-20f37f4`.
+- The toolbox archive asset is 195,351 bytes with SHA-256 `b9a4d126a1f6041ccb055d3b07ec150cc81179fb75220e4fd487ad5c2b899dd7`; the checksum asset is 129 bytes with SHA-256 `256e92a04e59b9df9516b1f5e30330a837d404d5fa8449c62a59b40592201f91`.
+- The toolbox generated-source receipt binds canonical personal-sync `e57140e16a68db24dbdd883de665283538234730`, mapping digest `3e26648dd65526e759089c5acf5a9f429f3df0f5adc8dbe94b3856954b801ece`, file-set digest `c280b934568b6bc8df0c993b91d3e2e051970a8395870bf0419fc475556af7ad`, and tree digest `7a273c8533839cd7efd13d96d4f6783ccce75442d00d1528015bed3290a6e505`.
+- Fresh custody for all six direct sources proved exact commit/tree/parent identity, clean detached worktrees, complete reachable objects, strict full `fsck`, and absence of shallow, promisor, or alternate object dependencies.
+- Owner-authored PR comment `5195454437` supersedes inference comment `5195337028`; the final review-workflows direct source remains trusted epoch `80d3fc9c7d9f4842d0fa247a7c0b974c00052124`, while `aec747a9265a55f702c4df01a511336f2738e51b` remains read-only chronology and compatibility evidence.
+- The exact six-source lock has SHA-256 `e6c869dc96fb7f45a31b26156bd3b4bd1a542a48966bd320300e66755286543c`; the generated toolbox receipt has SHA-256 `ff1a2dad1b3d473568c0a7b785110dfbe5094747f8d3fa31ade7ab5b2a0fdb9e`; and the private sync manifest has SHA-256 `0d1e3731baa1c5b70048eee73b7575089ebc4e7bc1eda3118d5d9b727a04ef96`.
+- The counting combined generator completed once and then repeated with identical input as a no-op. The tracked diff SHA-256 remained `0228435b42cc224e0d3a7cc59008ad3023eb6172bd5f5dfe2dc7f291aae7c2ee`, and the tracked/untracked status SHA-256 remained `daed04222e87b7912c364c56f963c0492934f3554c07d05125c6b2083e1d91eb`.
+- The final uv-managed Python 3.13 root suite passed 1,945/1,945 with three expected skips in 132.443 seconds under `umask 022`, no bytecode, and isolated system/global Git configuration. The waited-delivery suite passed 58/58 with two expected skips.
+- The canonical review suite completed 2,835 tests with 15 expected skips. Its only parent-sandbox failure was the nested `sandbox-exec` broker case, which passed 1/1 through the direct-local no-outer-Seatbelt channel; the combined gate is 2,835/2,835.
+- Receipt-bound generated-source verification installed the exact receipt plus all six managed files into a fresh owner-private snapshot and passed; the snapshot root was then identity-checked, proved process/FD-free, and removed.
+- Source-only compilation passed for 115 Python files, the private CI workflow is byte-identical to its canonical private fixture, project-journal validation passed with the trusted Homebrew Git runtime, `git diff --check` passed, and the repository contains no bytecode artifact.
+- Ruff 0.13.2 lint passed for every changed or added Python file. Its format check reports seven exact synchronized/upstream files that would be reformatted, so no consumer-side formatter rewrite was applied; `actionlint` and `shellcheck` remain unavailable locally and the workflow contract tests, fixture equality, source compilation, and hosted CI are the declared fallbacks.
+- Joey's current skills/AGENTS authorization keeps Claude lanes out of scope for this delivery; no Claude result is counted or claimed. The final applicable review, CI, conversation, lifecycle, mergeability, and target-tree gates remain mandatory on the unchanged signed head.

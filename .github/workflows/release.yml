@@ -10,6 +10,7 @@ on:
       - ".github/workflows/**"
       - "README.md"
       - "personal_codex/**"
+      - "private-overlay-source-lock.json"
       - "scripts/**"
       - "tests/**"
   workflow_dispatch:
@@ -48,10 +49,12 @@ jobs:
             scripts/build_personal_codex_package.py \
             scripts/validate_sync_manifest_changes.py \
             scripts/private_overlay_release.py \
+            scripts/private_overlay_source_lock.py \
             scripts/sync_private_overlay_sources.py \
             tests/test_package_builder_safety.py \
             tests/test_personal_sync_reconciliation_safety.py \
             tests/test_private_overlay_package.py \
+            tests/test_private_overlay_source_lock.py \
             tests/test_private_overlay_sync.py \
             tests/test_release_manifest_baseline.py \
             tests/test_sync_manifest_changes.py

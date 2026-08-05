@@ -79,7 +79,14 @@ ancestors, submodule `gitlink` content, and nested Git repositories.
 `Scheduled Private Overlay Sync Release` is a low-frequency fallback that runs every
 eight hours and can also be manually dispatched. It syncs explicit public Joey-Tools
 sources into this private aggregate, preserves private Joey/Cisco transforms, and
-opens or updates a sync PR when the source sync creates a repository diff. Merging
+persists the exact six-source commit/tree inventory in
+`private-overlay-source-lock.json` before it opens or updates a sync PR. The public
+toolbox source is always checked out at the exact immutable base release SHA declared
+by the private manifest and release verifier; advancing that base is an explicit
+reviewed policy change. The other five source repositories are refreshed from their
+default branches and frozen into the candidate lock. Every checkout is full,
+detached, non-promisor, alternate-free, clean, object-complete, and verified against
+the candidate lock both before and after generation. Merging
 that PR publishes the private overlay release through the normal `master` push
 release workflow. If a run detects sync changes, it does not attempt to repair an
 incomplete release from the pre-sync SHA after mutating the checkout; release repair
@@ -88,10 +95,9 @@ building, the workflow rechecks both `HEAD` and the complete Git working-tree st
 The canonical review skill's `tests/fixtures/ci/private.yml` materializes the live
 private CI workflow byte-for-byte; scheduled sync tracks and stages `.github`, and
 the scheduled and release full-suite jobs run on Python 3.13.
-This pipeline treats the `Joey-Tools/codex-review-workflows` default branch as its
-executable canonical-source trust root; treating it as untrusted requires separate
-SHA-promotion or allowlist hardening. The current generated PR workflow declares
-only `contents: read` and contains no `secrets.*` references.
+The generated PR records the exact review-workflow SHA and tree rather than treating
+a moving default branch as executable control-plane input. The current generated PR
+workflow declares only `contents: read` and contains no `secrets.*` references.
 
 The sync PR step requires a `PRIVATE_OVERLAY_SYNC_PR_TOKEN` secret with repository
 contents, pull-request, and issues write access. Because sync can update
