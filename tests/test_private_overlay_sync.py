@@ -7490,6 +7490,17 @@ jobs:
         self.assertEqual(len(locked_repositories), len(rule_repositories))
         self.assertEqual(frozenset(locked_repositories), frozenset(rule_repositories))
 
+    @unittest.skipUnless(sys.platform == "darwin", "macOS-only Git trust root")
+    def test_macos_source_lock_binds_actual_command_line_tools_git(self) -> None:
+        trusted = SOURCE_LOCK_MODULE._trusted_git_path()
+
+        self.assertEqual(
+            trusted.path,
+            Path("/Library/Developer/CommandLineTools/usr/bin/git"),
+        )
+        self.assertNotEqual(trusted.path, Path("/usr/bin/git"))
+        SOURCE_LOCK_MODULE._revalidate_trusted_git(trusted)
+
     def test_scheduled_workflow_skips_unchanged_sync_branch(self) -> None:
         workflow = (
             REPO_ROOT / ".github" / "workflows" / "scheduled-sync-release.yml"

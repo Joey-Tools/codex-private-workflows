@@ -28,6 +28,7 @@ MAX_GIT_OUTPUT_BYTES = 32 * 1024 * 1024
 MAX_MANAGED_FILE_BYTES = 32 * 1024 * 1024
 MAX_LOCKED_SOURCE_ENTRIES = 100_000
 GIT_TIMEOUT_SECONDS = 60
+MACOS_GIT_PATH = Path("/Library/Developer/CommandLineTools/usr/bin/git")
 SHA_RE = re.compile(r"[0-9a-f]{40}\Z")
 EXPECTED_SOURCES = (
     ("codex-toolbox", "Joey-Tools/codex-toolbox"),
@@ -428,21 +429,17 @@ def validate_generated_provenance(
 
 
 def _git_environment() -> dict[str, str]:
-    environment = {
-        key: value for key, value in os.environ.items() if not key.startswith("GIT_")
+    return {
+        "PATH": "/usr/bin:/bin",
+        "LANG": "C",
+        "LC_ALL": "C",
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_CONFIG_GLOBAL": "/dev/null",
+        "GIT_NO_REPLACE_OBJECTS": "1",
+        "GIT_NO_LAZY_FETCH": "1",
+        "GIT_OPTIONAL_LOCKS": "0",
+        "GIT_TERMINAL_PROMPT": "0",
     }
-    environment.update(
-        {
-            "GIT_CONFIG_NOSYSTEM": "1",
-            "GIT_CONFIG_GLOBAL": "/dev/null",
-            "GIT_NO_REPLACE_OBJECTS": "1",
-            "GIT_NO_LAZY_FETCH": "1",
-            "GIT_OPTIONAL_LOCKS": "0",
-            "GIT_TERMINAL_PROMPT": "0",
-            "LC_ALL": "C",
-        }
-    )
-    return environment
 
 
 def _git(
@@ -707,14 +704,17 @@ def _revalidate_trusted_git(git_path: _TrustedGitExecutable) -> None:
 
 
 def _trusted_git_path() -> _TrustedGitExecutable:
-    # On macOS, PATH commonly selects a mutable Homebrew convenience symlink.
-    # Source-lock custody instead declares the sealed root-owned system Git as
-    # its fixed trust root and executes this exact non-symlink path. Its entire
+    # On macOS, both PATH-selected Homebrew Git and /usr/bin/git are launch
+    # selectors rather than a fixed actual executable: the latter is an xcrun
+    # shim whose target can be changed by developer-tool environment variables.
+    # Source-lock custody instead declares the root-owned Command Line Tools Git
+    # as its fixed trust root and executes this exact non-symlink path under the
+    # closed environment returned by _git_environment(). Its complete
     # root-owned, non-writable ancestor chain excludes an untrusted replacement
     # between the final identity check and exec.
     if sys.platform == "darwin":
         return _bind_trusted_git_path(
-            Path("/usr/bin/git"),
+            MACOS_GIT_PATH,
             require_root_owner=True,
         )
     candidate = shutil.which("git")

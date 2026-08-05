@@ -389,14 +389,68 @@ class CheckoutVerifierTests(unittest.TestCase):
 
     def test_macos_uses_fixed_system_git_instead_of_homebrew_symlink(self) -> None:
         entry = self._homebrew_git_fixture()
+        self.assertEqual(
+            SOURCE_LOCK.MACOS_GIT_PATH,
+            Path("/Library/Developer/CommandLineTools/usr/bin/git"),
+        )
+        self.assertNotEqual(SOURCE_LOCK.MACOS_GIT_PATH, Path("/usr/bin/git"))
+        actual_system_git = (
+            SOURCE_LOCK.MACOS_GIT_PATH
+            if sys.platform == "darwin"
+            else Path("/usr/bin/git")
+        )
+        hostile_environment = {
+            "DEVELOPER_DIR": os.fspath(self.root / "developer"),
+            "SDKROOT": os.fspath(self.root / "sdk"),
+            "TOOLCHAINS": "attacker.toolchain",
+        }
 
         with (
             mock.patch.object(SOURCE_LOCK.sys, "platform", "darwin"),
+            mock.patch.object(SOURCE_LOCK, "MACOS_GIT_PATH", actual_system_git),
             mock.patch.object(SOURCE_LOCK.shutil, "which", return_value=str(entry)),
+            mock.patch.dict(SOURCE_LOCK.os.environ, hostile_environment),
         ):
             trusted = SOURCE_LOCK._trusted_git_path()
-            self.assertEqual(trusted.path, Path("/usr/bin/git"))
+            self.assertEqual(trusted.path, actual_system_git)
             SOURCE_LOCK.verify_checkouts(self.source_root, self.source_lock)
+
+    def test_git_environment_is_closed_against_tool_and_loader_injection(
+        self,
+    ) -> None:
+        hostile_environment = {
+            "DEVELOPER_DIR": "/attacker/developer",
+            "SDKROOT": "/attacker/sdk",
+            "TOOLCHAINS": "attacker.toolchain",
+            "DYLD_INSERT_LIBRARIES": "/attacker/darwin.dylib",
+            "DYLD_LIBRARY_PATH": "/attacker/darwin-libraries",
+            "LD_PRELOAD": "/attacker/linux.so",
+            "LD_LIBRARY_PATH": "/attacker/linux-libraries",
+            "GIT_EXEC_PATH": "/attacker/git-core",
+            "HOME": "/attacker/home",
+            "PATH": "/attacker/bin",
+            "UNRELATED_PARENT_VALUE": "must-not-propagate",
+        }
+
+        with mock.patch.dict(
+            SOURCE_LOCK.os.environ,
+            hostile_environment,
+            clear=True,
+        ):
+            self.assertEqual(
+                SOURCE_LOCK._git_environment(),
+                {
+                    "PATH": "/usr/bin:/bin",
+                    "LANG": "C",
+                    "LC_ALL": "C",
+                    "GIT_CONFIG_NOSYSTEM": "1",
+                    "GIT_CONFIG_GLOBAL": "/dev/null",
+                    "GIT_NO_REPLACE_OBJECTS": "1",
+                    "GIT_NO_LAZY_FETCH": "1",
+                    "GIT_OPTIONAL_LOCKS": "0",
+                    "GIT_TERMINAL_PROMPT": "0",
+                },
+            )
 
     def test_non_macos_rejects_homebrew_symlink_instead_of_broadening_policy(
         self,
@@ -427,26 +481,33 @@ class CheckoutVerifierTests(unittest.TestCase):
             )
 
     def test_rejects_bound_git_executable_replacement(self) -> None:
-        entry = self._homebrew_git_fixture()
-        (self.root / "homebrew" / "Cellar").chmod(0o755)
-        executable = (
-            entry.parent.parent / "Cellar" / "git" / "2.54.0" / "bin" / "git"
-        )
+        # tempfile.gettempdir() may be /tmp (01777), which the production
+        # full-path trust policy must reject. Use a cleanup-scoped directory
+        # under the already trusted repository instead of the real account home.
+        with tempfile.TemporaryDirectory(
+            prefix=".private-overlay-source-lock-trusted-git.",
+            dir=REPO_ROOT,
+        ) as trusted_parent_name:
+            trusted_parent = Path(trusted_parent_name).resolve()
+            trusted_parent.chmod(0o700)
+            executable = trusted_parent / "git"
+            shutil.copyfile(self.git_path, executable)
+            executable.chmod(0o755)
 
-        trusted = SOURCE_LOCK._bind_trusted_git_path(
-            executable,
-            require_root_owner=False,
-        )
-        replacement = trusted.path.with_name("git-replacement")
-        shutil.copyfile(self.git_path, replacement)
-        replacement.chmod(0o755)
-        os.replace(replacement, trusted.path)
+            trusted = SOURCE_LOCK._bind_trusted_git_path(
+                executable,
+                require_root_owner=False,
+            )
+            replacement = trusted.path.with_name("git-replacement")
+            shutil.copyfile(self.git_path, replacement)
+            replacement.chmod(0o755)
+            os.replace(replacement, trusted.path)
 
-        with self.assertRaisesRegex(
-            SOURCE_LOCK.SourceLockError,
-            "Git executable identity or access policy changed",
-        ):
-            SOURCE_LOCK._revalidate_trusted_git(trusted)
+            with self.assertRaisesRegex(
+                SOURCE_LOCK.SourceLockError,
+                "Git executable identity or access policy changed",
+            ):
+                SOURCE_LOCK._revalidate_trusted_git(trusted)
 
     def test_locked_file_manifest_and_blob_are_exact(self) -> None:
         checkout = self._checkout(1)
