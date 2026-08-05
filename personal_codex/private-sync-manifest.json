@@ -80,21 +80,6 @@
       "source": "personal_codex/skills/synthetic-token-fixtures",
       "target": "skills/synthetic-token-fixtures",
       "kind": "skill"
-    },
-    {
-      "source": "personal_codex/skills/waited-delivery",
-      "target": "skills/waited-delivery",
-      "kind": "skill"
-    },
-    {
-      "source": ".agents/skills/apple-notes-db-guardrails",
-      "target": "skills/apple-notes-db-guardrails",
-      "kind": "skill"
-    },
-    {
-      "source": ".agents/skills/apple-notes-work-report",
-      "target": "skills/apple-notes-work-report",
-      "kind": "skill"
     }
   ],
   "removed_links": [
@@ -129,6 +114,24 @@
       "kind": "skill",
       "replacement_target": "skills/submodule-linked-worktrees",
       "legacy": true
+    },
+    {
+      "id": "2026-08-05-retire-waited-delivery",
+      "source": "personal_codex/skills/waited-delivery",
+      "target": "skills/waited-delivery",
+      "kind": "skill"
+    },
+    {
+      "id": "2026-08-05-localize-apple-notes-db-guardrails",
+      "source": ".agents/skills/apple-notes-db-guardrails",
+      "target": "skills/apple-notes-db-guardrails",
+      "kind": "skill"
+    },
+    {
+      "id": "2026-08-05-localize-apple-notes-work-report",
+      "source": ".agents/skills/apple-notes-work-report",
+      "target": "skills/apple-notes-work-report",
+      "kind": "skill"
     }
   ],
   "reference_only": [

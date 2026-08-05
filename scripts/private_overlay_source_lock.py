@@ -36,7 +36,6 @@ EXPECTED_SOURCES = (
     ("codex-review-workflows", "Joey-Tools/codex-review-workflows"),
     ("codex-workflow-hygiene", "Joey-Tools/codex-workflow-hygiene"),
     ("codex-project-journal", "Joey-Tools/codex-project-journal"),
-    ("codex-waited-delivery", "Joey-Tools/codex-waited-delivery"),
 )
 EXPECTED_SOURCE_FIELDS = frozenset({"name", "repository", "sha", "tree"})
 EXPECTED_ROOT_FIELDS = frozenset({"version", "sources", "toolbox_generated_provenance"})
@@ -155,7 +154,9 @@ def load_source_lock(repo_root: Path) -> SourceLock:
         raise SourceLockError("unsupported source lock version")
     raw_sources = payload.get("sources")
     if not isinstance(raw_sources, list) or len(raw_sources) != len(EXPECTED_SOURCES):
-        raise SourceLockError("source lock must contain the exact six-source inventory")
+        raise SourceLockError(
+            "source lock must contain the exact five-source inventory"
+        )
     pins: list[SourcePin] = []
     for index, ((expected_name, expected_repo), raw_pin) in enumerate(
         zip(EXPECTED_SOURCES, raw_sources, strict=True)

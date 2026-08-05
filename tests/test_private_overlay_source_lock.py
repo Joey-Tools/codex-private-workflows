@@ -384,7 +384,7 @@ class CheckoutVerifierTests(unittest.TestCase):
             self.skipTest(f"platform cannot create the Git symlink fixture: {error}")
         return entry
 
-    def test_accepts_six_complete_clean_detached_checkouts(self) -> None:
+    def test_accepts_five_complete_clean_detached_checkouts(self) -> None:
         SOURCE_LOCK.verify_checkouts(self.source_root, self.source_lock)
 
     def test_macos_uses_fixed_system_git_instead_of_homebrew_symlink(self) -> None:
@@ -621,7 +621,7 @@ class CheckoutVerifierTests(unittest.TestCase):
                 Path("symlink-tree"),
             )
 
-    def test_refresh_keeps_toolbox_pin_and_updates_five_dynamic_pins(self) -> None:
+    def test_refresh_keeps_toolbox_pin_and_updates_four_dynamic_pins(self) -> None:
         repository_root = self.root / "private-repository"
         repository_root.mkdir(mode=0o700)
         (repository_root / "personal_codex").mkdir(mode=0o700)

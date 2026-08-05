@@ -79,11 +79,11 @@ ancestors, submodule `gitlink` content, and nested Git repositories.
 `Scheduled Private Overlay Sync Release` is a low-frequency fallback that runs every
 eight hours and can also be manually dispatched. It syncs explicit public Joey-Tools
 sources into this private aggregate, preserves private Joey/Cisco transforms, and
-persists the exact six-source commit/tree inventory in
+persists the exact five-source commit/tree inventory in
 `private-overlay-source-lock.json` before it opens or updates a sync PR. The public
 toolbox source is always checked out at the exact immutable base release SHA declared
 by the private manifest and release verifier; advancing that base is an explicit
-reviewed policy change. The other five source repositories are refreshed from their
+reviewed policy change. The other four source repositories are refreshed from their
 default branches and frozen into the candidate lock. Every checkout is full,
 detached, non-promisor, alternate-free, clean, object-complete, and verified against
 the candidate lock both before and after generation. Merging

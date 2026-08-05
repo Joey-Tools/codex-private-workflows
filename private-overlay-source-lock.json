@@ -30,12 +30,6 @@
       "repository": "Joey-Tools/codex-project-journal",
       "sha": "4f53fd1bf9ba0a7c85db8d183016210d3d0089e5",
       "tree": "f933904c339058d3e3b2b9a92bbf77a8f1395e2b"
-    },
-    {
-      "name": "codex-waited-delivery",
-      "repository": "Joey-Tools/codex-waited-delivery",
-      "sha": "2cc1f97efc86dfbcb582743e5f0eb46440f2f713",
-      "tree": "5737038c694c11d50794dc7c7bd5ebb740127b1b"
     }
   ],
   "toolbox_generated_provenance": {

@@ -565,12 +565,6 @@ SYNC_RULES = (
         "personal_codex/skills/synthetic-token-fixtures",
         common_joey_text=True,
     ),
-    _rule(
-        "codex-waited-delivery",
-        "skills/waited-delivery",
-        "personal_codex/skills/waited-delivery",
-        common_joey_text=True,
-    ),
 )
 
 
@@ -580,6 +574,7 @@ RETIRED_TARGETS = tuple(
         "personal_codex/skills/copilot-review-playbook",
         "personal_codex/skills/external-review-playbook",
         "personal_codex/skills/pr-readiness-review-workflow",
+        "personal_codex/skills/waited-delivery",
     )
 )
 

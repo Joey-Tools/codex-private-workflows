@@ -855,7 +855,7 @@ class PrivateOverlaySyncTests(unittest.TestCase):
             target_payload,
         )
 
-    def test_sync_removes_retired_review_skill_targets(self) -> None:
+    def test_sync_removes_retired_skill_targets(self) -> None:
         for relative in SYNC_MODULE.RETIRED_TARGETS:
             target = self.repo_root / relative
             target.mkdir(parents=True)
@@ -1215,8 +1215,23 @@ class PrivateOverlaySyncTests(unittest.TestCase):
         scripts = source / "scripts"
         scripts.mkdir(parents=True)
         (source / "SKILL.md").write_text(
+            "---\n"
+            "name: codex-session-retrospective\n"
+            "description: Run a read-only, redacted retrospective across local and remote Codex session history. Use only when the user explicitly invokes $codex-session-retrospective.\n"
+            "---\n\n"
+            "## Overview\n\n"
+            "Use this skill only when the user explicitly invokes `$codex-session-retrospective` to review how Codex collaboration went.\n"
             "- Default host scope follows `$remote-host-context`: local machine, `miku-bot-dev`, and `hoteng-srv-01`.\n"
             "Retained host labels are restricted to `local`, the two default remote hosts, and `custom_source`.\n",
+            encoding="utf-8",
+        )
+        agents = source / "agents" / "openai.yaml"
+        agents.parent.mkdir()
+        agents.write_text(
+            "interface:\n"
+            '  display_name: "Codex Session Retrospective"\n'
+            "policy:\n"
+            "  allow_implicit_invocation: false\n",
             encoding="utf-8",
         )
         (scripts / "session_retrospective.py").write_text(
@@ -1258,6 +1273,17 @@ class PrivateOverlaySyncTests(unittest.TestCase):
         synced_probe = (target / "scripts/remote_codex_probe.py").read_text(
             encoding="utf-8"
         )
+        synced_interface = (target / "agents/openai.yaml").read_text(encoding="utf-8")
+        self.assertIn(
+            "Use only when the user explicitly invokes $codex-session-retrospective.",
+            synced_skill,
+        )
+        self.assertIn(
+            "Use this skill only when the user explicitly invokes "
+            "`$codex-session-retrospective`",
+            synced_skill,
+        )
+        self.assertIn("allow_implicit_invocation: false", synced_interface)
         for host in ("BL-mac-mini-m4-hoteng", "codex-hoteng-srv-01"):
             self.assertIn(host, synced_skill)
             self.assertIn(host, synced_script)
@@ -7145,6 +7171,32 @@ jobs:
                 self.assertIn("private_overlay_release.py publish", publish_body)
                 self.assertEqual(workflow.count(immutable_token_env), 1)
 
+    def test_active_workflows_do_not_run_retired_waited_delivery_tests(
+        self,
+    ) -> None:
+        workflow_paths = (
+            REPO_ROOT / ".github" / "workflows" / "ci.yml",
+            REPO_ROOT / ".github" / "workflows" / "release.yml",
+            REPO_ROOT / ".github" / "workflows" / "scheduled-sync-release.yml",
+            REPO_ROOT
+            / "personal_codex"
+            / "skills"
+            / "review-orchestration-playbook"
+            / "tests"
+            / "fixtures"
+            / "ci"
+            / "private.yml",
+        )
+
+        for workflow_path in workflow_paths:
+            with self.subTest(workflow=workflow_path.name):
+                workflow = workflow_path.read_text(encoding="utf-8")
+                self.assertNotIn("Verify waited-delivery review contract", workflow)
+                self.assertNotIn(
+                    "personal_codex/skills/waited-delivery/tests",
+                    workflow,
+                )
+
     def test_ci_validates_review_helper_on_minimum_python_across_platforms(
         self,
     ) -> None:
@@ -7253,8 +7305,10 @@ jobs:
             for link in manifest["links"]
             if link["source"].startswith("personal_codex/skills/")
         }
+        all_manifest_targets = {link["target"] for link in manifest["links"]}
         sync_targets = {str(rule.target) for rule in SYNC_MODULE.SYNC_RULES}
         retired_targets = {str(path) for path in SYNC_MODULE.RETIRED_TARGETS}
+        removed_by_target = {link["target"]: link for link in manifest["removed_links"]}
 
         self.assertEqual(
             manifest_sources - private_only_sources, manifest_sources & sync_targets
@@ -7274,6 +7328,35 @@ jobs:
         )
         self.assertIn("skills/synthetic-token-fixtures", manifest_targets)
         self.assertIn("personal_codex/skills/synthetic-token-fixtures", sync_targets)
+        self.assertNotIn("skills/apple-notes-db-guardrails", all_manifest_targets)
+        self.assertNotIn("skills/apple-notes-work-report", all_manifest_targets)
+        self.assertNotIn("skills/waited-delivery", all_manifest_targets)
+        self.assertIn("personal_codex/skills/waited-delivery", retired_targets)
+        for target in (
+            "skills/apple-notes-db-guardrails",
+            "skills/apple-notes-work-report",
+            "skills/waited-delivery",
+        ):
+            with self.subTest(non_legacy_tombstone=target):
+                self.assertFalse(removed_by_target[target].get("legacy", False))
+
+    def test_personal_agents_routes_local_only_skills_explicitly(self) -> None:
+        agents = (REPO_ROOT / "personal_codex" / "AGENTS.md").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn(
+            "Use `$codex-session-retrospective` only when Joey explicitly invokes it",
+            agents,
+        )
+        self.assertIn(
+            "For Apple Notes tasks, start from the `codex-workspace` repo-local",
+            agents,
+        )
+        self.assertIn(
+            "do not rely on a global copy under `~/.codex/skills`",
+            agents,
+        )
 
     def test_bounded_command_output_is_installed_and_routed(self) -> None:
         agents = (REPO_ROOT / "personal_codex" / "AGENTS.md").read_text(
@@ -7438,7 +7521,7 @@ jobs:
         self.assertIn('git push --force-with-lease="$remote_ref:$remote_sha"', workflow)
         self.assertNotIn('git ls-remote --heads origin "$branch"', workflow)
 
-    def test_scheduled_workflow_freezes_and_revalidates_six_sources(self) -> None:
+    def test_scheduled_workflow_freezes_and_revalidates_five_sources(self) -> None:
         workflow = (
             REPO_ROOT / ".github" / "workflows" / "scheduled-sync-release.yml"
         ).read_text(encoding="utf-8")
@@ -7451,7 +7534,7 @@ jobs:
             "ref: ${{ steps.source-lock.outputs.codex_toolbox_sha }}",
             workflow,
         )
-        self.assertEqual(workflow.count("fetch-depth: 0"), 7)
+        self.assertEqual(workflow.count("fetch-depth: 0"), 6)
         self.assertIn("Detach dynamic source checkouts", workflow)
         self.assertEqual(
             workflow.count("checkout --detach --no-recurse-submodules HEAD"), 1
@@ -7474,7 +7557,6 @@ jobs:
             ("codex_review_workflows", "Joey-Tools/codex-review-workflows"),
             ("codex_workflow_hygiene", "Joey-Tools/codex-workflow-hygiene"),
             ("codex_project_journal", "Joey-Tools/codex-project-journal"),
-            ("codex_waited_delivery", "Joey-Tools/codex-waited-delivery"),
         ):
             with self.subTest(source=name):
                 self.assertIn(f"steps.refreshed-lock.outputs.{name}_sha", workflow)
@@ -7600,7 +7682,6 @@ jobs:
             "Check out codex-review-workflows",
             "Check out codex-workflow-hygiene",
             "Check out codex-project-journal",
-            "Check out codex-waited-delivery",
             "Detach dynamic source checkouts",
             "Refresh non-toolbox source pins",
             "Verify source checkouts before sync",
@@ -7632,6 +7713,8 @@ jobs:
                     rf"- name: {re.escape(step_name)}\n\s+if: {re.escape(release_guard)}\n",
                 )
         self.assertEqual(workflow.count(f"if: {release_guard}"), 6)
+        self.assertNotIn("codex-waited-delivery", workflow)
+        self.assertNotIn("personal_codex/skills/waited-delivery", workflow)
         self.assertIn('actual_sha="$(git rev-parse HEAD)"', workflow)
         self.assertIn("git status --porcelain=v1 --untracked-files=all", workflow)
         cache_redirect = (

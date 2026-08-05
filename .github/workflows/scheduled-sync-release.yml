@@ -128,15 +128,6 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Check out codex-waited-delivery
-        if: steps.cooldown.outputs.run == 'true'
-        uses: actions/checkout@v4
-        with:
-          repository: Joey-Tools/codex-waited-delivery
-          path: .source/codex-waited-delivery
-          fetch-depth: 0
-          persist-credentials: false
-
       - name: Detach dynamic source checkouts
         if: steps.cooldown.outputs.run == 'true'
         env:
@@ -150,8 +141,7 @@ jobs:
             codex-debug-triage \
             codex-review-workflows \
             codex-workflow-hygiene \
-            codex-project-journal \
-            codex-waited-delivery
+            codex-project-journal
           do
             git \
               -c core.fsmonitor=false \
@@ -250,13 +240,6 @@ jobs:
             -s personal_codex/skills/review-orchestration-playbook/tests \
             -p 'test_*.py'
 
-      - name: Verify waited-delivery review contract
-        if: steps.changes.outputs.changed == 'true' || steps.current-release.outputs.complete == 'false'
-        run: |
-          python3 -m unittest discover \
-            -s personal_codex/skills/waited-delivery/tests \
-            -p 'test_*.py'
-
       - name: Open synced overlay pull request
         if: steps.changes.outputs.changed == 'true'
         id: sync-pr
@@ -317,7 +300,7 @@ jobs:
           ## Summary
           - Syncs private overlay sources from the public Joey-Tools repositories.
           - Keeps the immutable public toolbox base pinned to `${{ steps.refreshed-lock.outputs.codex_toolbox_sha }}`.
-          - Persists source lock `${{ steps.refreshed-lock.outputs.source_lock_sha256 }}` for the exact six-source candidate.
+          - Persists source lock `${{ steps.refreshed-lock.outputs.source_lock_sha256 }}` for the exact five-source candidate.
           - Replaces the previous scheduled direct-push path, which is blocked by branch rules.
 
           ## Frozen sources
@@ -326,14 +309,12 @@ jobs:
           - codex-review-workflows: `${{ steps.refreshed-lock.outputs.codex_review_workflows_sha }}` / `${{ steps.refreshed-lock.outputs.codex_review_workflows_tree }}`
           - codex-workflow-hygiene: `${{ steps.refreshed-lock.outputs.codex_workflow_hygiene_sha }}` / `${{ steps.refreshed-lock.outputs.codex_workflow_hygiene_tree }}`
           - codex-project-journal: `${{ steps.refreshed-lock.outputs.codex_project_journal_sha }}` / `${{ steps.refreshed-lock.outputs.codex_project_journal_tree }}`
-          - codex-waited-delivery: `${{ steps.refreshed-lock.outputs.codex_waited_delivery_sha }}` / `${{ steps.refreshed-lock.outputs.codex_waited_delivery_tree }}`
 
           ## Validation
-          - Exact source-lock refresh plus six-source pre/post checkout verification.
+          - Exact source-lock refresh plus five-source pre/post checkout verification.
           - Source-only Python syntax check for release, sync, package, and test helpers.
           - python3 -m unittest discover -s tests
           - python3 -m unittest discover -s personal_codex/skills/review-orchestration-playbook/tests -p 'test_*.py'
-          - python3 -m unittest discover -s personal_codex/skills/waited-delivery/tests -p 'test_*.py'
           EOF
 
           pr_url="$(gh api --method GET "repos/$GITHUB_REPOSITORY/pulls" \
