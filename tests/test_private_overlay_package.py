@@ -195,8 +195,16 @@ class PrivateOverlayPackageTests(unittest.TestCase):
         self.assertIn("skills/agile-delivery-workflow", targets)
         self.assertIn("skills/cisco-trackers-lookup", targets)
         self.assertIn("skills/remote-host-context", targets)
-        self.assertIn("skills/apple-notes-work-report", targets)
+        self.assertNotIn("skills/apple-notes-db-guardrails", targets)
+        self.assertNotIn("skills/apple-notes-work-report", targets)
+        self.assertNotIn("skills/waited-delivery", targets)
         self.assertNotIn("bin/codex-personal-sync", targets)
+        self.assertTrue(
+            (REPO_ROOT / ".agents" / "skills" / "apple-notes-db-guardrails").is_dir()
+        )
+        self.assertTrue(
+            (REPO_ROOT / ".agents" / "skills" / "apple-notes-work-report").is_dir()
+        )
         self.assertEqual(
             manifest["removed_links"],
             [
@@ -231,7 +239,25 @@ class PrivateOverlayPackageTests(unittest.TestCase):
                     "kind": "skill",
                     "replacement_target": "skills/submodule-linked-worktrees",
                     "legacy": True,
-                }
+                },
+                {
+                    "id": "2026-08-05-retire-waited-delivery",
+                    "source": "personal_codex/skills/waited-delivery",
+                    "target": "skills/waited-delivery",
+                    "kind": "skill",
+                },
+                {
+                    "id": "2026-08-05-localize-apple-notes-db-guardrails",
+                    "source": ".agents/skills/apple-notes-db-guardrails",
+                    "target": "skills/apple-notes-db-guardrails",
+                    "kind": "skill",
+                },
+                {
+                    "id": "2026-08-05-localize-apple-notes-work-report",
+                    "source": ".agents/skills/apple-notes-work-report",
+                    "target": "skills/apple-notes-work-report",
+                    "kind": "skill",
+                },
             ],
         )
         generated_catalog = (
@@ -1792,6 +1818,25 @@ class PrivateOverlayPackageTests(unittest.TestCase):
 
 
 class AppleNotesWorkReportSkillTests(unittest.TestCase):
+    def test_helper_commands_resolve_the_canonical_toolkit_from_workspace(
+        self,
+    ) -> None:
+        skill = (
+            REPO_ROOT / ".agents" / "skills" / "apple-notes-work-report" / "SKILL.md"
+        ).read_text(encoding="utf-8")
+        locator = (
+            "python3 scripts/codex_workspace.py repo-path "
+            "--repo codex-apple-notes-toolkit --strict"
+        )
+
+        self.assertEqual(skill.count(locator), 2)
+        self.assertIn('bash "$toolkit_root/scripts/apple_notes_helper.sh" ...', skill)
+        self.assertIn(
+            'bash "$toolkit_root/scripts/apple_notes_helper.sh" show-note-prefix',
+            skill,
+        )
+        self.assertNotIn("bash scripts/apple_notes_helper.sh", skill)
+
     def test_webex_message_archiver_keeps_its_own_report_bucket(self) -> None:
         skill_root = REPO_ROOT / ".agents" / "skills" / "apple-notes-work-report"
         skill = (skill_root / "SKILL.md").read_text(encoding="utf-8")
@@ -1821,6 +1866,24 @@ class AppleNotesWorkReportSkillTests(unittest.TestCase):
 
 
 class PrivateAutomationPromptTests(unittest.TestCase):
+    def test_daily_work_report_uses_workspace_local_apple_notes_skill(self) -> None:
+        prompt = automation_prompt("daily-work-report-draft")
+        skill_root = (
+            "/Users/hoteng/Program/GitHub/Joey-Tools/codex-workspace/"
+            ".agents/skills/apple-notes-work-report"
+        )
+
+        self.assertIn(f"[$apple-notes-work-report]({skill_root}/SKILL.md)", prompt)
+        self.assertIn(
+            "[$report-drafting-example]"
+            f"({skill_root}/references/report-drafting-example.md)",
+            prompt,
+        )
+        self.assertNotIn(
+            "/Users/hoteng/.codex/skills/apple-notes-work-report",
+            prompt,
+        )
+
     def test_daily_work_report_bounds_memory_reads(self) -> None:
         prompt = automation_prompt("daily-work-report-draft")
 
