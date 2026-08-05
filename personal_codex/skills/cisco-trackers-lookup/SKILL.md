@@ -1,6 +1,6 @@
 ---
 name: cisco-trackers-lookup
-description: Look up Cisco Jira issues and Cisco GHE PR metadata with narrow read-only helpers. Use when Joey needs authoritative tracker metadata, comments, attachments, closed-PR search, or commit-to-PR mapping before broader bug triage or code review begins.
+description: Look up Cisco Jira issues and Cisco GHE PR metadata with narrow read-only helpers. Use when Joey needs authoritative tracker metadata, comments, attachments, closed-PR search, or commit-to-PR mapping before bounded artifact transport, ordinary diagnosis, or code review begins.
 ---
 
 # Cisco Trackers Lookup
@@ -14,8 +14,9 @@ The goal is to replace issue-specific `curl` commands and repo-specific `gh` lit
 
 1. Decide whether this is lookup or triage.
 - If the first missing evidence is a Jira issue, Jira comments, a Cisco GHE PR, a closed-PR search, or commit-to-PR mapping, start here.
-- If the task has already moved on to Jenkins URLs, console logs, zip archives, crash artifacts, or root-cause ranking, switch to [$bug-triage-playbook](../bug-triage-playbook/SKILL.md) as the top-level owner.
-- When a bug triage starts from a Jira issue, fetch the tracker metadata here first, then hand the task back to `bug-triage-playbook` once the evidence source becomes logs, builds, or code.
+- If the next missing evidence must be acquired from an exact Jenkins URL or inspected in a local ZIP, use [$bug-triage-playbook](../bug-triage-playbook/SKILL.md) for that bounded transport step only.
+- Keep crash-log interpretation, code-level hypotheses, and root-cause ranking in ordinary evidence-based diagnosis or the relevant forge workflow; reserve `bug-triage-playbook` for the bounded transport step above.
+- When diagnosis starts from a Jira issue, fetch the tracker metadata here first. If bounded artifact transport is then needed, return its evidence to the task's primary diagnostic workflow.
 
 2. Prefer the narrow helper that matches the tracker.
 - For Cisco Jira issue metadata, use `python3 "$HOME/.codex/skills/cisco-trackers-lookup/scripts/jira_issue_probe.py" issue ...`.
@@ -36,10 +37,10 @@ The goal is to replace issue-specific `curl` commands and repo-specific `gh` lit
 ## Guardrails
 
 - Keep this skill read-only.
-- Do not let this skill become the top-level owner for log-driven root-cause investigation; that remains `bug-triage-playbook`.
+- Keep tracker lookup, bounded artifact transport, and diagnosis separate: this skill owns tracker metadata, `bug-triage-playbook` owns only the transport step, and the task's primary diagnostic workflow owns interpretation.
 - Do not accept arbitrary auth env names, arbitrary Jira hosts, or generic GHE passthrough APIs.
 - If the helper cannot yet express the requested lookup, say which missing subcommand or field is missing instead of silently falling back to a long-lived literal command shape.
 
 ## References
 
-- Use [references/workflow.md](references/workflow.md) for the narrow helper entrypoints, allowed auth profile, and the intended handoff boundary to `bug-triage-playbook`.
+- Use [references/workflow.md](references/workflow.md) for the narrow helper entrypoints, allowed auth profile, and the bounded artifact-transport handoff.

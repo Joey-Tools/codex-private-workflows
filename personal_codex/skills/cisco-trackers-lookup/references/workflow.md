@@ -74,7 +74,7 @@ python3 "$HOME/.codex/skills/cisco-trackers-lookup/scripts/cisco_ghe_probe.py" c
 Keep the helper scope repo-bounded. Do not reintroduce raw `env GH_HOST=... gh api ...` or shell-wrapped `gh` literals when these subcommands already cover the lookup.
 For `search-prs`, keep the query repo-bounded: the helper keeps the query as plain text after `--`, allows negative filters such as `-label:bot`, but rejects `repo:`, `org:`, and `user:` qualifiers so the explicit `--repo` cannot be silently overridden from inside the query text.
 
-## 3. Handoff To Bug Triage
+## 3. Handoff To Bounded Artifact Transport
 
-When the next step is to inspect Jenkins URLs, archives, crash logs, or compare code-level hypotheses, switch to [$bug-triage-playbook](../../bug-triage-playbook/SKILL.md).
-This skill is for tracker metadata, not for root-cause ownership.
+When the next step is bounded acquisition from an exact Jenkins URL or inspection of a local ZIP, use [$bug-triage-playbook](../../bug-triage-playbook/SKILL.md) for that transport step, then return the artifact evidence to the task's primary diagnostic workflow.
+Crash-log interpretation, code-level hypotheses, and root-cause ranking remain ordinary evidence-based diagnosis or part of the relevant forge workflow; keep `bug-triage-playbook` limited to bounded artifact transport.

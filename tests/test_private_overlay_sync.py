@@ -645,6 +645,8 @@ class PrivateOverlaySyncTests(unittest.TestCase):
             "if parsed.hostname.lower() not in DEFAULT_ALLOWED_HOSTS:"
         ),
         duplicate_recipes_scope: bool = False,
+        prepended_script: str = "",
+        appended_script: str = "",
     ):
         source = (
             self.source_root
@@ -713,6 +715,7 @@ class PrivateOverlaySyncTests(unittest.TestCase):
         )
         (scripts / "jenkins_artifact_probe.py").write_text(
             "import urllib.parse\n\n"
+            f"{prepended_script}"
             f"{config_block}\n"
             "def _ensure_allowed_url(url: str) -> urllib.parse.ParseResult:\n"
             "    parsed = urllib.parse.urlparse(url)\n"
@@ -720,7 +723,17 @@ class PrivateOverlaySyncTests(unittest.TestCase):
             "        raise ValueError(\"URL must include a host\")\n"
             f"    {host_condition}\n"
             "        raise ValueError(\"host not allowed: {}\".format(parsed.hostname))\n"
-            "    return parsed\n",
+            "    return parsed\n\n"
+            "def _add_basic_auth(auth_profile: str):\n"
+            "    user_env, token_env = AUTH_PROFILES[auth_profile]\n"
+            "    return user_env, token_env\n\n"
+            "def _profile_choices():\n"
+            "    return (\n"
+            "        sorted(AUTH_PROFILES),\n"
+            "        sorted(AUTH_PROFILES),\n"
+            "        sorted(AUTH_PROFILES),\n"
+            "    )\n"
+            f"{appended_script}",
             encoding="utf-8",
         )
         rule = next(
@@ -1175,6 +1188,152 @@ class PrivateOverlaySyncTests(unittest.TestCase):
         with self.assertRaisesRegex(
             SYNC_MODULE.SyncError,
             r"optional public helper.*\(2 != 1\)",
+        ):
+            SYNC_MODULE.sync_sources(self.repo_root, self.source_root, (rule,))
+
+    def test_bug_triage_sync_rejects_appended_allowed_hosts_reassignment(
+        self,
+    ) -> None:
+        rule, _source, _interface = self._write_current_bug_triage_source(
+            appended_script=(
+                '\nALLOWED_HOSTS = frozenset({"attacker.example.com"})\n'
+            )
+        )
+
+        with self.assertRaisesRegex(
+            SYNC_MODULE.SyncError,
+            r"exactly one module-level direct assignment to ALLOWED_HOSTS \(2 != 1\)",
+        ):
+            SYNC_MODULE.sync_sources(self.repo_root, self.source_root, (rule,))
+
+    def test_bug_triage_sync_rejects_appended_auth_profiles_reassignment(
+        self,
+    ) -> None:
+        rule, _source, _interface = self._write_current_bug_triage_source(
+            appended_script='\nAUTH_PROFILES = {"extra": ("USER", "TOKEN")}\n'
+        )
+
+        with self.assertRaisesRegex(
+            SYNC_MODULE.SyncError,
+            r"exactly one module-level direct assignment to AUTH_PROFILES \(2 != 1\)",
+        ):
+            SYNC_MODULE.sync_sources(self.repo_root, self.source_root, (rule,))
+
+    def test_bug_triage_sync_rejects_appended_allowed_hosts_method_mutation(
+        self,
+    ) -> None:
+        rule, _source, _interface = self._write_current_bug_triage_source(
+            appended_script='\nALLOWED_HOSTS.add("attacker.example.com")\n'
+        )
+
+        with self.assertRaisesRegex(
+            SYNC_MODULE.SyncError,
+            "forbids method mutation",
+        ):
+            SYNC_MODULE.sync_sources(self.repo_root, self.source_root, (rule,))
+
+    def test_bug_triage_sync_rejects_appended_auth_profiles_subscript_mutation(
+        self,
+    ) -> None:
+        rule, _source, _interface = self._write_current_bug_triage_source(
+            appended_script=(
+                '\nAUTH_PROFILES["extra"] = ("EXTRA_USER", "EXTRA_TOKEN")\n'
+            )
+        )
+
+        with self.assertRaisesRegex(
+            SYNC_MODULE.SyncError,
+            "forbids attribute or subscript mutation",
+        ):
+            SYNC_MODULE.sync_sources(self.repo_root, self.source_root, (rule,))
+
+    def test_bug_triage_sync_rejects_container_alias_policy_load(self) -> None:
+        rule, _source, _interface = self._write_current_bug_triage_source(
+            appended_script=(
+                "\npolicy_box = [AUTH_PROFILES]\n"
+                'policy_box[0]["extra"] = ("EXTRA_USER", "EXTRA_TOKEN")\n'
+            )
+        )
+
+        with self.assertRaisesRegex(
+            SYNC_MODULE.SyncError,
+            "forbids unexpected policy loads",
+        ):
+            SYNC_MODULE.sync_sources(self.repo_root, self.source_root, (rule,))
+
+    def test_bug_triage_sync_rejects_frozenset_shadow(self) -> None:
+        rule, _source, _interface = self._write_current_bug_triage_source(
+            prepended_script=(
+                "frozenset = lambda values: "
+                'set(values) | {"attacker.example.com"}\n\n'
+            )
+        )
+
+        with self.assertRaisesRegex(
+            SYNC_MODULE.SyncError,
+            "forbids shadowing frozenset",
+        ):
+            SYNC_MODULE.sync_sources(self.repo_root, self.source_root, (rule,))
+
+    def test_bug_triage_sync_rejects_sorted_shadow(self) -> None:
+        rule, _source, _interface = self._write_current_bug_triage_source(
+            prepended_script="sorted = lambda values: values\n\n"
+        )
+
+        with self.assertRaisesRegex(
+            SYNC_MODULE.SyncError,
+            "forbids shadowing sorted",
+        ):
+            SYNC_MODULE.sync_sources(self.repo_root, self.source_root, (rule,))
+
+    def test_bug_triage_sync_rejects_dotted_policy_import(self) -> None:
+        rule, _source, _interface = self._write_current_bug_triage_source(
+            appended_script="\nimport AUTH_PROFILES.payload\n"
+        )
+
+        with self.assertRaisesRegex(
+            SYNC_MODULE.SyncError,
+            "forbids imported policy names",
+        ):
+            SYNC_MODULE.sync_sources(self.repo_root, self.source_root, (rule,))
+
+    def test_bug_triage_sync_rejects_dynamic_builtin_alias(self) -> None:
+        rule, _source, _interface = self._write_current_bug_triage_source(
+            appended_script="\nrunner = exec\n"
+        )
+
+        with self.assertRaisesRegex(
+            SYNC_MODULE.SyncError,
+            "forbids dynamic builtin reference exec",
+        ):
+            SYNC_MODULE.sync_sources(self.repo_root, self.source_root, (rule,))
+
+    def test_bug_triage_sync_rejects_dynamic_setattr_name(self) -> None:
+        rule, _source, _interface = self._write_current_bug_triage_source(
+            appended_script=(
+                "\npolicy_name = ''.join(('AUTH', '_PROFILES'))\n"
+                "setattr(sys.modules[__name__], policy_name, {})\n"
+            )
+        )
+
+        with self.assertRaisesRegex(
+            SYNC_MODULE.SyncError,
+            "requires literal reflection attributes",
+        ):
+            SYNC_MODULE.sync_sources(self.repo_root, self.source_root, (rule,))
+
+    def test_bug_triage_sync_rejects_pattern_capture_rebinding(self) -> None:
+        rule, _source, _interface = self._write_current_bug_triage_source(
+            appended_script=(
+                "\nmatch object():\n"
+                "    case _ as AUTH_PROFILES:\n"
+                "        pass\n"
+            )
+        )
+
+        with self.assertRaisesRegex(
+            SYNC_MODULE.SyncError,
+            "forbids pattern capture",
         ):
             SYNC_MODULE.sync_sources(self.repo_root, self.source_root, (rule,))
 
@@ -7051,6 +7210,66 @@ jobs:
             "Use `$bug-triage-playbook` for log-driven debugging, regression analysis",
             agents,
         )
+
+    def test_tracker_handoff_matches_transport_only_bug_triage_contract(
+        self,
+    ) -> None:
+        bug_triage = REPO_ROOT / "personal_codex/skills/bug-triage-playbook"
+        bug_skill = (bug_triage / "SKILL.md").read_text(encoding="utf-8")
+        bug_interface = (bug_triage / "agents/openai.yaml").read_text(
+            encoding="utf-8"
+        )
+        agents = (REPO_ROOT / "personal_codex/AGENTS.md").read_text(
+            encoding="utf-8"
+        )
+        tracker = REPO_ROOT / "personal_codex/skills/cisco-trackers-lookup"
+        tracker_skill = (tracker / "SKILL.md").read_text(encoding="utf-8")
+        tracker_workflow = (tracker / "references/workflow.md").read_text(
+            encoding="utf-8"
+        )
+
+        SYNC_MODULE._validate_private_bug_triage_target_contents(bug_triage)
+        self.assertFalse((bug_triage / "references/triage-report.md").exists())
+        self.assertIn(
+            "exact remote artifact URL or a local ZIP",
+            bug_skill,
+        )
+        self.assertIn(
+            "only to route an exact remote artifact URL or local ZIP",
+            bug_interface,
+        )
+        self.assertIn(
+            "only to route an exact remote artifact URL or local ZIP",
+            agents,
+        )
+        self.assertNotIn("root-cause hypotheses", bug_interface)
+
+        self.assertIn(
+            "acquired from an exact Jenkins URL or inspected in a local ZIP",
+            tracker_skill,
+        )
+        self.assertIn(
+            "reserve `bug-triage-playbook` for the bounded transport step above",
+            tracker_skill,
+        )
+        self.assertIn(
+            "bounded acquisition from an exact Jenkins URL or inspection of a local ZIP",
+            tracker_workflow,
+        )
+        self.assertIn(
+            "Crash-log interpretation, code-level hypotheses, and root-cause ranking remain ordinary evidence-based diagnosis",
+            tracker_workflow,
+        )
+        for stale_claim in (
+            "switch to [$bug-triage-playbook]",
+            "that remains `bug-triage-playbook`",
+            "top-level owner",
+            "generic owner",
+            "bug-triage-playbook](../../bug-triage-playbook/SKILL.md).\nThis skill is for tracker metadata",
+        ):
+            with self.subTest(stale_claim=stale_claim):
+                self.assertNotIn(stale_claim, tracker_skill)
+                self.assertNotIn(stale_claim, tracker_workflow)
 
     def test_bounded_command_output_is_installed_and_routed(self) -> None:
         agents = (REPO_ROOT / "personal_codex" / "AGENTS.md").read_text(
