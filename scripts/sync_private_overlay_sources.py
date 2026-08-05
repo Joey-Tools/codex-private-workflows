@@ -1175,7 +1175,7 @@ def _private_bug_triage_is_allowed_dynamic_reflection_call(node: ast.Call) -> bo
 
 def _private_bug_triage_is_allowed_direct_reflection_call(
     node: ast.Call,
-    policy_sensitive_builtins: frozenset[str],
+    forbidden_reflection_attributes: frozenset[str],
 ) -> bool:
     if (
         not isinstance(node.func, ast.Name)
@@ -1188,7 +1188,7 @@ def _private_bug_triage_is_allowed_direct_reflection_call(
         len(node.args) >= 2
         and isinstance(node.args[1], ast.Constant)
         and isinstance(node.args[1].value, str)
-        and node.args[1].value not in policy_sensitive_builtins
+        and node.args[1].value not in forbidden_reflection_attributes
     )
 
 
@@ -1205,13 +1205,19 @@ def _private_bug_triage_validate_no_policy_mutation(
     bounded_reflection_calls = frozenset(
         {"delattr", "getattr", "setattr"}
     )
+    indirect_reflection_attributes = frozenset(
+        {"__delattr__", "__dict__", "__getattribute__", "__globals__", "__setattr__"}
+    )
     policy_sensitive_builtins = forbidden_dynamic_calls | bounded_reflection_calls
+    forbidden_reflection_attributes = (
+        policy_sensitive_builtins | indirect_reflection_attributes | {"modules"}
+    )
     allowed_reflection_name_load_ids = {
         id(node.func)
         for node in ast.walk(tree)
         if isinstance(node, ast.Call)
         and _private_bug_triage_is_allowed_direct_reflection_call(
-            node, policy_sensitive_builtins
+            node, forbidden_reflection_attributes
         )
     }
     for node in ast.walk(tree):
@@ -1234,6 +1240,25 @@ def _private_bug_triage_validate_no_policy_mutation(
             )
         if isinstance(node, ast.Attribute) and node.attr in reserved:
             raise SyncError("private bug-triage policy forbids reserved attributes")
+        if (
+            isinstance(node, ast.Attribute)
+            and isinstance(node.ctx, ast.Load)
+            and node.attr in bounded_reflection_calls
+        ):
+            raise SyncError(
+                "private bug-triage policy forbids reflection builtin attribute loads"
+            )
+        if (
+            isinstance(node, ast.Attribute)
+            and isinstance(node.ctx, ast.Load)
+            and (
+                node.attr in indirect_reflection_attributes
+                or node.attr == "modules"
+            )
+        ):
+            raise SyncError(
+                "private bug-triage policy forbids indirect builtin namespace/reflection access"
+            )
         if isinstance(node, (ast.Attribute, ast.Subscript)) and isinstance(
             node.ctx, (ast.Store, ast.Del)
         ):
@@ -1271,13 +1296,17 @@ def _private_bug_triage_validate_no_policy_mutation(
         if (
             isinstance(node, ast.ImportFrom)
             and node.module == "builtins"
-            and any(
-                alias.name == "*" or alias.name in policy_sensitive_builtins
-                for alias in node.names
-            )
         ):
             raise SyncError(
-                "private bug-triage policy forbids importing policy-sensitive builtins"
+                "private bug-triage policy forbids importing from builtins"
+            )
+        if (
+            isinstance(node, ast.ImportFrom)
+            and node.module == "sys"
+            and any(alias.name in {"modules", "*"} for alias in node.names)
+        ):
+            raise SyncError(
+                "private bug-triage policy forbids importing the sys module registry"
             )
         if isinstance(node, ast.ExceptHandler) and node.name in reserved:
             raise SyncError("private bug-triage policy forbids exception-name shadowing")
@@ -1341,10 +1370,10 @@ def _private_bug_triage_validate_no_policy_mutation(
             and node.func.id in bounded_reflection_calls
             and len(node.args) >= 2
             and isinstance(node.args[1], ast.Constant)
-            and node.args[1].value in policy_sensitive_builtins
+            and node.args[1].value in forbidden_reflection_attributes
         ):
             raise SyncError(
-                "private bug-triage policy forbids reflection builtin acquisition"
+                "private bug-triage policy forbids reflection namespace/builtin acquisition"
             )
         if (
             isinstance(node.func, ast.Name)

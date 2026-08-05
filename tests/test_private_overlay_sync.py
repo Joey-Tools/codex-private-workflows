@@ -1333,7 +1333,7 @@ class PrivateOverlaySyncTests(unittest.TestCase):
 
         with self.assertRaisesRegex(
             SYNC_MODULE.SyncError,
-            "forbids importing policy-sensitive builtins",
+            "forbids importing from builtins",
         ):
             SYNC_MODULE.sync_sources(self.repo_root, self.source_root, (rule,))
 
@@ -1380,7 +1380,7 @@ class PrivateOverlaySyncTests(unittest.TestCase):
 
         with self.assertRaisesRegex(
             SYNC_MODULE.SyncError,
-            "forbids reflection builtin acquisition",
+            "forbids reflection namespace/builtin acquisition",
         ):
             SYNC_MODULE.sync_sources(self.repo_root, self.source_root, (rule,))
 
@@ -1396,6 +1396,98 @@ class PrivateOverlaySyncTests(unittest.TestCase):
         with self.assertRaisesRegex(
             SYNC_MODULE.SyncError,
             "forbids builtin namespace reference __builtins__",
+        ):
+            SYNC_MODULE.sync_sources(self.repo_root, self.source_root, (rule,))
+
+    def test_bug_triage_sync_rejects_reflection_attribute_alias(self) -> None:
+        rule, _source, _interface = self._write_current_bug_triage_source(
+            appended_script=(
+                "\nmutate = sys.modules['builtins'].setattr\n"
+                "policy_name = 'ALLOWED_' + 'HOSTS'\n"
+                "mutate(sys.modules[__name__], policy_name, frozenset())\n"
+            )
+        )
+
+        with self.assertRaisesRegex(
+            SYNC_MODULE.SyncError,
+            "forbids reflection builtin attribute loads",
+        ):
+            SYNC_MODULE.sync_sources(self.repo_root, self.source_root, (rule,))
+
+    def test_bug_triage_sync_rejects_indirect_reflection_namespace(self) -> None:
+        rule, _source, _interface = self._write_current_bug_triage_source(
+            appended_script=(
+                "\nnamespace = (lambda: None).__globals__\n"
+                "mutate = namespace['__builtins__']['setattr']\n"
+                "policy_name = 'ALLOWED_' + 'HOSTS'\n"
+                "mutate(sys.modules[__name__], policy_name, frozenset())\n"
+            )
+        )
+
+        with self.assertRaisesRegex(
+            SYNC_MODULE.SyncError,
+            "forbids indirect builtin namespace/reflection access",
+        ):
+            SYNC_MODULE.sync_sources(self.repo_root, self.source_root, (rule,))
+
+    def test_bug_triage_sync_rejects_literal_reflection_namespace_chain(self) -> None:
+        rule, _source, _interface = self._write_current_bug_triage_source(
+            appended_script=(
+                "\nregistry = getattr(sys, 'modules')\n"
+                "namespace = getattr(registry[__name__], '__dict__')\n"
+                "namespace['AUTH_' + 'PROFILES'] = {}\n"
+            )
+        )
+
+        with self.assertRaisesRegex(
+            SYNC_MODULE.SyncError,
+            "forbids reflection namespace/builtin acquisition",
+        ):
+            SYNC_MODULE.sync_sources(self.repo_root, self.source_root, (rule,))
+
+    def test_bug_triage_sync_rejects_imported_builtins_namespace(self) -> None:
+        rule, _source, _interface = self._write_current_bug_triage_source(
+            prepended_script=(
+                "from builtins import __dict__ as builtin_ns\n"
+                "builtin_ns['frozenset'] = lambda values: "
+                "set(values) | {'attacker.example.com'}\n\n"
+            )
+        )
+
+        with self.assertRaisesRegex(
+            SYNC_MODULE.SyncError,
+            "forbids importing from builtins",
+        ):
+            SYNC_MODULE.sync_sources(self.repo_root, self.source_root, (rule,))
+
+    def test_bug_triage_sync_rejects_imported_sys_module_registry(self) -> None:
+        rule, _source, _interface = self._write_current_bug_triage_source(
+            appended_script=(
+                "\nfrom sys import modules as registry\n"
+                "namespace = registry['builtins'].__dict__\n"
+                "namespace['AUTH_' + 'PROFILES'] = {}\n"
+            )
+        )
+
+        with self.assertRaisesRegex(
+            SYNC_MODULE.SyncError,
+            "forbids importing the sys module registry",
+        ):
+            SYNC_MODULE.sync_sources(self.repo_root, self.source_root, (rule,))
+
+    def test_bug_triage_sync_rejects_aliased_sys_module_registry(self) -> None:
+        rule, _source, _interface = self._write_current_bug_triage_source(
+            appended_script=(
+                "\nimport sys as system_runtime\n"
+                "registry = system_runtime.modules\n"
+                "namespace = registry['builtins'].__dict__\n"
+                "namespace['AUTH_' + 'PROFILES'] = {}\n"
+            )
+        )
+
+        with self.assertRaisesRegex(
+            SYNC_MODULE.SyncError,
+            "forbids indirect builtin namespace/reflection access",
         ):
             SYNC_MODULE.sync_sources(self.repo_root, self.source_root, (rule,))
 
