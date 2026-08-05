@@ -23,6 +23,14 @@ BASELINE_SCHEMA = SKILL_ROOT / "references/claude-2.1.212-stream-schema.json"
 SCHEMA = SKILL_ROOT / "references/claude-stream-schema.json"
 COMPATIBILITY = SKILL_ROOT / "references/claude-stream-compatibility.json"
 CAPABILITY_SOURCE = SCRIPTS / "review_runtime/claude_capabilities.py"
+OLD_CAPABILITIES = ["interrupt_receipt_v1", "msg_lifecycle_v1"]
+NEW_CAPABILITIES = [
+    "interrupt_receipt_v1",
+    "interrupt_cancel_queued_v1",
+    "msg_lifecycle_v1",
+]
+KNOWN_CAPABILITY_SEQUENCES = [OLD_CAPABILITIES, NEW_CAPABILITIES]
+FAST_MODE_DISABLED_REASON = "sdk_opt_in_required"
 sys.path.insert(0, str(SCRIPTS))
 
 import validate_claude_stream as validator  # noqa: E402
@@ -76,7 +84,7 @@ class ClaudeStreamValidatorTest(unittest.TestCase):
             "output_style": "default",
             "agents": ["claude", "Explore", "general-purpose", "Plan"],
             "capabilities": ["interrupt_receipt_v1", "msg_lifecycle_v1"],
-            "analytics_disabled": False,
+            "analytics_disabled": True,
             "product_feedback_disabled": False,
             "uuid": "22222222-2222-4222-8222-222222222222",
             "fast_mode_state": "off",
@@ -86,7 +94,6 @@ class ClaudeStreamValidatorTest(unittest.TestCase):
             "message": {
                 "content": [{"type": "text", "text": "working"}],
                 "context_management": None,
-                "diagnostics": None,
                 "id": "msg-synthetic",
                 "model": "claude-opus-4-8",
                 "role": "assistant",
@@ -319,12 +326,37 @@ class ClaudeStreamValidatorTest(unittest.TestCase):
             del events[0][field_name]
         for field_name in validator.EXTENDED_TERMINAL_FIELDS:
             del events[-1][field_name]
-        for event in events[1:-1]:
-            if event.get("type") != "assistant":
-                continue
-            message = event.get("message")
-            assert isinstance(message, dict)
-            del message["diagnostics"]
+        return events
+
+    def _v216_init_adaptation_events(self) -> list[dict[str, object]]:
+        events = self._full_events()
+        events[0].update(
+            {
+                "estimated_tokens": None,
+                "estimated_tokens_delta": None,
+            }
+        )
+        return events
+
+    def _known_compatible_extension_events(
+        self,
+        version: str,
+        capabilities: list[str] | None = None,
+    ) -> list[dict[str, object]]:
+        parsed_version = claude_version_policy.parse_compatible_release_version(version)
+        events = (
+            self._legacy_events(version)
+            if parsed_version < (2, 1, 216)
+            else self._full_events()
+        )
+        events[0].update(
+            {
+                "claude_code_version": version,
+                "capabilities": list(capabilities or NEW_CAPABILITIES),
+                "fast_mode_disabled_reason": FAST_MODE_DISABLED_REASON,
+            }
+        )
+        events[-1]["fast_mode_disabled_reason"] = FAST_MODE_DISABLED_REASON
         return events
 
     def _valid_runtime_binding_fields(
@@ -505,6 +537,10 @@ class ClaudeStreamValidatorTest(unittest.TestCase):
                 "stream_contract",
                 {"digest": "0" * 64},
             ),
+            "compatibility-digest": update_nested(
+                "stream_contract",
+                {"compatibility_digest": "0" * 64},
+            ),
             "capability-digest": update_nested(
                 "stream_contract",
                 {"capability_digest": "0" * 64},
@@ -518,6 +554,67 @@ class ClaudeStreamValidatorTest(unittest.TestCase):
                 self._write_preflight_evidence(
                     path,
                     version=self.claude_code_version,
+                    evidence=evidence,
+                )
+                with self.assertRaises(validator._ContractError):
+                    self._named_runtime_binding(path)
+
+    def test_named_preflight_rejects_stale_known_shape_contract_digests(self) -> None:
+        stale_compatibility = json.loads(COMPATIBILITY.read_text(encoding="utf-8"))
+        stale_compatibility["version_adaptations"]["2.1.220"] = {
+            "scope": "retired-exact-selected-version"
+        }
+        stale_compatibility_raw = (
+            json.dumps(stale_compatibility, indent=2) + "\n"
+        ).encode("utf-8")
+        stale_compatibility_digest = hashlib.sha256(stale_compatibility_raw).hexdigest()
+        stale_profile = json.loads(SCHEMA.read_text(encoding="utf-8"))
+        init_contract = stale_profile["init_event"]
+        init_contract["optional_fields"] = ["session_id"]
+        del init_contract["optional_field_contracts"]["capabilities"]
+        del init_contract["optional_field_contracts"]["fast_mode_disabled_reason"]
+        extended_init = init_contract["profiles"]["variants"]["extended-2x"]
+        extended_init["field_contracts"]["capabilities"] = {
+            "rule": "exact_ordered_array",
+            "values": OLD_CAPABILITIES,
+            "failure": "inconclusive",
+        }
+        terminal_contract = stale_profile["terminal_result"]
+        terminal_contract["optional_fields"].remove("fast_mode_disabled_reason")
+        del terminal_contract["optional_field_contracts"]["fast_mode_disabled_reason"]
+        stale_profile_raw = (json.dumps(stale_profile, indent=2) + "\n").encode("utf-8")
+        stale_aggregate_digest = hashlib.sha256(
+            stale_compatibility_raw
+            + b"\0"
+            + BASELINE_SCHEMA.read_bytes()
+            + b"\0"
+            + stale_profile_raw
+            + b"\0"
+            + CAPABILITY_SOURCE.read_bytes()
+        ).hexdigest()
+        self.assertNotEqual(
+            stale_compatibility_digest,
+            self.stream_contract_binding.compatibility_digest,
+        )
+        self.assertNotEqual(
+            stale_aggregate_digest,
+            self.stream_contract_binding.digest,
+        )
+
+        cases = {
+            "compatibility": ("compatibility_digest", stale_compatibility_digest),
+            "aggregate": ("digest", stale_aggregate_digest),
+        }
+        for name, (field_name, stale_digest) in cases.items():
+            with self.subTest(name=name):
+                evidence = self._preflight_evidence("2.1.220")
+                stream_contract = evidence["stream_contract"]
+                assert isinstance(stream_contract, dict)
+                stream_contract[field_name] = stale_digest
+                path = self.parent_state / f"stale-known-shape-{name}.json"
+                self._write_preflight_evidence(
+                    path,
+                    version="2.1.220",
                     evidence=evidence,
                 )
                 with self.assertRaises(validator._ContractError):
@@ -627,13 +724,36 @@ class ClaudeStreamValidatorTest(unittest.TestCase):
                 "session_id": {
                     "rule": "nonempty_string",
                     "failure": "inconclusive",
-                }
+                },
+                **validator.COMPATIBLE_INIT_OPTIONAL_CONTRACTS,
             },
         )
         self.assertEqual(init_contract["profiles"], validator.INIT_PROFILE_CONTRACT)
+        intermediate_contract = schema["intermediate_events"]
         self.assertEqual(
-            schema["intermediate_events"],
+            intermediate_contract,
             validator.INTERMEDIATE_EVENT_CONTRACT,
+        )
+        assistant_message_contract = intermediate_contract["event_contracts"][
+            "reviewed-2x"
+        ]["assistant-message"]["field_contracts"]["message"]
+        self.assertEqual(assistant_message_contract["optional_fields"], [])
+        self.assertEqual(
+            assistant_message_contract["profile_optional_field_contracts"],
+            {
+                "legacy-base": {},
+                "extended-2x": {
+                    "diagnostics": {
+                        "rule": "null_or_exact_object",
+                        "object": {
+                            "cache_miss_reason": {
+                                "type": "unavailable",
+                            }
+                        },
+                        "failure": "inconclusive",
+                    }
+                },
+            },
         )
         terminal_contract = schema["terminal_result"]
         self.assertFalse(terminal_contract["additional_fields"])
@@ -818,6 +938,60 @@ class ClaudeStreamValidatorTest(unittest.TestCase):
         self.assertEqual(
             schema["claude_code_version"],
             validator.CLAUDE_CODE_VERSION_CONTRACT,
+        )
+
+    def test_exact_version_adaptation_and_range_shapes_are_closed(self) -> None:
+        expected_v216 = {
+            "scope": "exact-selected-version",
+            "init_event": {
+                "optional_field_contracts": {
+                    "estimated_tokens": {
+                        "rule": "null",
+                        "failure": "inconclusive",
+                    },
+                    "estimated_tokens_delta": {
+                        "rule": "null",
+                        "failure": "inconclusive",
+                    },
+                }
+            },
+            "terminal_result": {"optional_field_contracts": {}},
+        }
+        self.assertEqual(
+            claude_stream_contract.VERSION_ADAPTATIONS,
+            {"2.1.216": expected_v216},
+        )
+        adaptation = claude_stream_contract.version_adaptation("2.1.216")
+        self.assertEqual(adaptation, expected_v216)
+        assert adaptation is not None
+        adaptation["scope"] = "mutated"
+        self.assertEqual(
+            claude_stream_contract.version_adaptation("2.1.216"),
+            expected_v216,
+        )
+        self.assertIsNone(claude_stream_contract.version_adaptation("2.1.215"))
+        self.assertIsNone(claude_stream_contract.version_adaptation("2.1.219"))
+        self.assertIsNone(claude_stream_contract.version_adaptation("2.1.220"))
+        self.assertIsNone(claude_stream_contract.version_adaptation("2.1.221"))
+        self.assertIsNone(claude_stream_contract.version_adaptation("2.1.217"))
+
+        schema = json.loads(SCHEMA.read_text(encoding="utf-8"))
+        init_contracts = schema["init_event"]["optional_field_contracts"]
+        self.assertEqual(
+            init_contracts["capabilities"],
+            validator.COMPATIBLE_INIT_OPTIONAL_CONTRACTS["capabilities"],
+        )
+        self.assertEqual(
+            init_contracts["fast_mode_disabled_reason"],
+            validator.COMPATIBLE_INIT_OPTIONAL_CONTRACTS["fast_mode_disabled_reason"],
+        )
+        self.assertEqual(
+            schema["terminal_result"]["optional_field_contracts"][
+                "fast_mode_disabled_reason"
+            ],
+            validator.COMPATIBLE_TERMINAL_OPTIONAL_CONTRACTS[
+                "fast_mode_disabled_reason"
+            ],
         )
 
     def test_named_preflight_factory_binds_private_evidence_and_rejects_tamper(
@@ -1123,6 +1297,7 @@ class ClaudeStreamValidatorTest(unittest.TestCase):
                             "reasons": ["validator.contract-invalid"],
                         },
                     )
+
     def test_accepts_complete_stream_and_preserves_findings_verbatim(self) -> None:
         outcome = self._validate(raw=self._raw(self._full_events(), blank_edges=True))
 
@@ -1268,25 +1443,101 @@ class ClaudeStreamValidatorTest(unittest.TestCase):
                     init = copy.deepcopy(self.init_event)
                     init["claude_code_version"] = version
                     result = copy.deepcopy(self.result_event)
-                intermediate_events = copy.deepcopy(
-                    self._reviewed_intermediate_events()
-                )
-                if version < "2.1.216":
-                    for intermediate in intermediate_events:
-                        if intermediate.get("type") != "assistant":
-                            continue
-                        message = intermediate.get("message")
-                        assert isinstance(message, dict)
-                        del message["diagnostics"]
                 events = [
                     init,
-                    *intermediate_events,
+                    *copy.deepcopy(self._reviewed_intermediate_events()),
                     result,
                 ]
                 self.assertEqual(
                     self._validate(events, claude_code_version=version),
                     {"classification": "accepted", "findings": "\nNo findings.\n"},
                 )
+
+    def test_extended_assistant_diagnostics_absent_or_null_is_accepted(self) -> None:
+        for version in ("2.1.216", "2.9.999"):
+            for case, include_diagnostics in (("absent", False), ("null", True)):
+                with self.subTest(version=version, case=case):
+                    events = self._full_events()
+                    events[0]["claude_code_version"] = version
+                    message = events[1]["message"]
+                    assert isinstance(message, dict)
+                    if include_diagnostics:
+                        message["diagnostics"] = None
+                    self.assertEqual(
+                        self._validate(events, claude_code_version=version),
+                        {
+                            "classification": "accepted",
+                            "findings": "\nNo findings.\n",
+                        },
+                    )
+
+    def test_extended_assistant_exact_cache_miss_diagnostics_is_accepted(self) -> None:
+        for version in ("2.1.216", "2.9.999"):
+            with self.subTest(version=version):
+                events = self._full_events()
+                events[0]["claude_code_version"] = version
+                message = events[1]["message"]
+                assert isinstance(message, dict)
+                message["diagnostics"] = {"cache_miss_reason": {"type": "unavailable"}}
+                self.assertEqual(
+                    self._validate(events, claude_code_version=version),
+                    {
+                        "classification": "accepted",
+                        "findings": "\nNo findings.\n",
+                    },
+                )
+
+    def test_extended_assistant_unknown_diagnostics_shapes_are_inconclusive(
+        self,
+    ) -> None:
+        invalid_values = {
+            "empty": {},
+            "outer-extra-key": {
+                "cache_miss_reason": {"type": "unavailable"},
+                "extra": None,
+            },
+            "outer-wrong-type": [],
+            "nested-wrong-type": {"cache_miss_reason": "unavailable"},
+            "nested-extra-key": {
+                "cache_miss_reason": {
+                    "type": "unavailable",
+                    "extra": None,
+                }
+            },
+            "wrong-value": {"cache_miss_reason": {"type": "available"}},
+            "extra-nesting": {"cache_miss_reason": {"type": {"value": "unavailable"}}},
+        }
+        for version in ("2.1.216", "2.9.999"):
+            for case, diagnostics in invalid_values.items():
+                with self.subTest(version=version, case=case):
+                    events = self._full_events()
+                    events[0]["claude_code_version"] = version
+                    message = events[1]["message"]
+                    assert isinstance(message, dict)
+                    message["diagnostics"] = diagnostics
+                    self.assertEqual(
+                        self._validate(events, claude_code_version=version),
+                        {
+                            "classification": "inconclusive",
+                            "reasons": [
+                                "intermediate.assistant.message.diagnostics.unsupported"
+                            ],
+                        },
+                    )
+
+    def test_legacy_assistant_diagnostics_presence_is_inconclusive(self) -> None:
+        events = self._legacy_events("2.1.215")
+        message = events[1]["message"]
+        assert isinstance(message, dict)
+        message["diagnostics"] = None
+
+        self.assertEqual(
+            self._validate(events, claude_code_version="2.1.215"),
+            {
+                "classification": "inconclusive",
+                "reasons": ["intermediate.assistant.message.unknown-field"],
+            },
+        )
 
     def test_accepts_structured_tool_paths_inside_exact_cwd(self) -> None:
         cases = {
@@ -1857,6 +2108,231 @@ class ClaudeStreamValidatorTest(unittest.TestCase):
                     "accepted",
                 )
 
+    def test_accepts_exact_v216_init_estimated_token_adaptation(self) -> None:
+        field_sets = (
+            ("estimated_tokens",),
+            ("estimated_tokens_delta",),
+            ("estimated_tokens", "estimated_tokens_delta"),
+        )
+        for field_names in field_sets:
+            with self.subTest(fields=field_names):
+                events = self._full_events()
+                events[0].update({field_name: None for field_name in field_names})
+
+                self.assertEqual(
+                    self._validate(events, claude_code_version="2.1.216"),
+                    {
+                        "classification": "accepted",
+                        "findings": "\nNo findings.\n",
+                    },
+                )
+
+    def test_v216_estimated_token_adaptation_remains_init_only(self) -> None:
+        for field_name in ("estimated_tokens", "estimated_tokens_delta"):
+            with self.subTest(field=field_name):
+                events = self._full_events()
+                events[-1][field_name] = None
+
+                self.assertEqual(
+                    self._validate(events, claude_code_version="2.1.216"),
+                    {
+                        "classification": "inconclusive",
+                        "reasons": ["terminal.unknown-field"],
+                    },
+                )
+
+    def test_v216_init_estimated_token_adaptation_is_exact_version_scoped(
+        self,
+    ) -> None:
+        cases = {
+            "legacy-before": ("2.1.215", self._legacy_events("2.1.215")),
+            "extended-after": ("2.1.217", self._full_events()),
+        }
+        for name, (version, events) in cases.items():
+            with self.subTest(name=name):
+                events[0]["claude_code_version"] = version
+                events[0].update(
+                    {
+                        "estimated_tokens": None,
+                        "estimated_tokens_delta": None,
+                    }
+                )
+
+                self.assertEqual(
+                    self._validate(events, claude_code_version=version),
+                    {
+                        "classification": "inconclusive",
+                        "reasons": ["init.unknown-field"],
+                    },
+                )
+
+    def test_v216_init_estimated_token_adaptation_rejects_non_null_values(
+        self,
+    ) -> None:
+        for field_name, value in (
+            ("estimated_tokens", 1),
+            ("estimated_tokens_delta", 0),
+        ):
+            with self.subTest(field=field_name):
+                events = self._v216_init_adaptation_events()
+                events[0][field_name] = value
+
+                self.assertEqual(
+                    self._validate(events, claude_code_version="2.1.216"),
+                    {
+                        "classification": "inconclusive",
+                        "reasons": [f"init.{field_name}.malformed"],
+                    },
+                )
+
+    def test_accepts_both_known_capability_shapes_across_compatible_range(
+        self,
+    ) -> None:
+        versions = (
+            "2.1.211",
+            "2.1.215",
+            "2.1.216",
+            "2.1.219",
+            "2.1.220",
+            "2.1.221",
+            "2.9.999",
+        )
+        for version in versions:
+            for shape_name, capabilities in (
+                ("old", OLD_CAPABILITIES),
+                ("new", NEW_CAPABILITIES),
+            ):
+                with self.subTest(version=version, shape=shape_name):
+                    self.assertEqual(
+                        self._validate(
+                            self._known_compatible_extension_events(
+                                version,
+                                capabilities,
+                            ),
+                            claude_code_version=version,
+                        ),
+                        {
+                            "classification": "accepted",
+                            "findings": "\nNo findings.\n",
+                        },
+                    )
+
+    def test_range_wide_fast_mode_disabled_reason_is_optional_on_both_surfaces(
+        self,
+    ) -> None:
+        cases = {
+            "init": (0,),
+            "terminal": (-1,),
+            "both": (0, -1),
+        }
+        for version in ("2.1.211", "2.1.216", "2.1.220", "2.9.999"):
+            for name, indexes in cases.items():
+                with self.subTest(version=version, omitted=name):
+                    events = self._known_compatible_extension_events(version)
+                    for index in indexes:
+                        del events[index]["fast_mode_disabled_reason"]
+                    self.assertEqual(
+                        self._validate(
+                            events,
+                            claude_code_version=version,
+                        )["classification"],
+                        "accepted",
+                    )
+
+    def test_capabilities_reject_unreviewed_shapes_across_compatible_range(
+        self,
+    ) -> None:
+        cases = {
+            "missing": NEW_CAPABILITIES[:1],
+            "extra": [*NEW_CAPABILITIES, "future_capability_v1"],
+            "reordered": [
+                NEW_CAPABILITIES[1],
+                NEW_CAPABILITIES[0],
+                NEW_CAPABILITIES[2],
+            ],
+            "duplicate": [
+                NEW_CAPABILITIES[0],
+                NEW_CAPABILITIES[1],
+                NEW_CAPABILITIES[1],
+                NEW_CAPABILITIES[2],
+            ],
+            "non-string": [
+                NEW_CAPABILITIES[0],
+                220,
+                NEW_CAPABILITIES[2],
+            ],
+        }
+        for version in ("2.1.211", "2.1.220", "2.9.999"):
+            for name, capabilities in cases.items():
+                with self.subTest(version=version, shape=name):
+                    events = self._known_compatible_extension_events(version)
+                    events[0]["capabilities"] = capabilities
+                    outcome = self._validate(
+                        events,
+                        claude_code_version=version,
+                    )
+                    expected_reason = (
+                        "init.capabilities.malformed"
+                        if name == "non-string"
+                        else "init.capabilities.mismatch"
+                    )
+                    self.assertEqual(
+                        outcome,
+                        {
+                            "classification": "inconclusive",
+                            "reasons": [expected_reason],
+                        },
+                    )
+
+    def test_range_wide_reason_rejects_type_and_value_drift(
+        self,
+    ) -> None:
+        cases = {
+            "malformed": 220,
+            "mismatch": "future_reason",
+        }
+        for version in ("2.1.211", "2.1.220", "2.9.999"):
+            for surface, index in (("init", 0), ("terminal", -1)):
+                for failure, value in cases.items():
+                    with self.subTest(
+                        version=version,
+                        surface=surface,
+                        failure=failure,
+                    ):
+                        events = self._known_compatible_extension_events(version)
+                        events[index]["fast_mode_disabled_reason"] = value
+                        self.assertEqual(
+                            self._validate(
+                                events,
+                                claude_code_version=version,
+                            ),
+                            {
+                                "classification": "inconclusive",
+                                "reasons": [
+                                    f"{surface}.fast_mode_disabled_reason.{failure}"
+                                ],
+                            },
+                        )
+
+    def test_range_wide_extensions_keep_other_field_sets_closed(
+        self,
+    ) -> None:
+        for version in ("2.1.211", "2.1.220", "2.9.999"):
+            for surface, index in (("init", 0), ("terminal", -1)):
+                with self.subTest(version=version, surface=surface):
+                    events = self._known_compatible_extension_events(version)
+                    events[index]["future_field"] = True
+                    self.assertEqual(
+                        self._validate(
+                            events,
+                            claude_code_version=version,
+                        ),
+                        {
+                            "classification": "inconclusive",
+                            "reasons": [f"{surface}.unknown-field"],
+                        },
+                    )
+
     def test_rejects_out_of_range_and_nonrelease_version_arguments(self) -> None:
         for version in ("2.1.210", "3.0.0", "2.1.216-beta.1", "v2.1.216"):
             with self.subTest(version=version):
@@ -1962,45 +2438,6 @@ class ClaudeStreamValidatorTest(unittest.TestCase):
             {
                 "classification": "inconclusive",
                 "reasons": ["stream.session_id.unbound"],
-            },
-        )
-
-    def test_extended_assistant_message_requires_null_diagnostics(self) -> None:
-        missing = self._full_events()
-        missing_message = missing[1]["message"]
-        assert isinstance(missing_message, dict)
-        del missing_message["diagnostics"]
-        self.assertEqual(
-            self._validate(missing),
-            {
-                "classification": "inconclusive",
-                "reasons": ["intermediate.assistant.message.diagnostics.missing"],
-            },
-        )
-
-        nonnull = self._full_events()
-        nonnull_message = nonnull[1]["message"]
-        assert isinstance(nonnull_message, dict)
-        nonnull_message["diagnostics"] = []
-        self.assertEqual(
-            self._validate(nonnull),
-            {
-                "classification": "inconclusive",
-                "reasons": ["intermediate.assistant.message.diagnostics.nonnull"],
-            },
-        )
-
-    def test_legacy_assistant_message_rejects_extended_diagnostics(self) -> None:
-        events = self._legacy_events("2.1.215")
-        message = events[1]["message"]
-        assert isinstance(message, dict)
-        message["diagnostics"] = None
-
-        self.assertEqual(
-            self._validate(events, claude_code_version="2.1.215"),
-            {
-                "classification": "inconclusive",
-                "reasons": ["intermediate.assistant.message.unknown-field"],
             },
         )
 
@@ -2544,6 +2981,7 @@ class ClaudeStreamValidatorTest(unittest.TestCase):
             "output_style": "compact",
             "agents": ["Explore", "claude", "general-purpose", "Plan"],
             "capabilities": ["msg_lifecycle_v1", "interrupt_receipt_v1"],
+            "analytics_disabled": False,
             "fast_mode_state": "on",
         }
 
@@ -2557,13 +2995,11 @@ class ClaudeStreamValidatorTest(unittest.TestCase):
                 self.assertIn(f"init.{field_name}.mismatch", outcome["reasons"])
                 self.assertNotIn("findings", outcome)
 
-    def test_extended_profile_accepts_either_policy_boolean(self) -> None:
-        for field_name in ("analytics_disabled", "product_feedback_disabled"):
-            with self.subTest(field=field_name):
-                events = self._full_events()
-                events[0][field_name] = True
+    def test_extended_profile_accepts_either_feedback_boolean(self) -> None:
+        events = self._full_events()
+        events[0]["product_feedback_disabled"] = True
 
-                self.assertEqual(self._validate(events)["classification"], "accepted")
+        self.assertEqual(self._validate(events)["classification"], "accepted")
 
     def test_legacy_profile_rejects_extended_shape(self) -> None:
         events = self._full_events()
@@ -2573,11 +3009,7 @@ class ClaudeStreamValidatorTest(unittest.TestCase):
             self._validate(events, claude_code_version="2.1.215"),
             {
                 "classification": "inconclusive",
-                "reasons": [
-                    "init.unknown-field",
-                    "intermediate.assistant.message.unknown-field",
-                    "terminal.unknown-field",
-                ],
+                "reasons": ["init.unknown-field", "terminal.unknown-field"],
             },
         )
 

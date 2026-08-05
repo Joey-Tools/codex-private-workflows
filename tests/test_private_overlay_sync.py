@@ -6768,6 +6768,11 @@ jobs:
             "A named triple review is the named double review plus a complete terminal provider-authored GitHub Codex findings payload",
             "every operating identity in `{hoteng, hoteng_cisco}` is unsupported",
             'user.login == "chatgpt-codex-connector[bot]"',
+            "Allow at most one acceptable exact request per unchanged head and never post a second one",
+            "The canonical reference `skills/review-orchestration-playbook/references/github-codex-evidence-authority.md` is authoritative for provider-evidence consumption in this lane",
+            "records `duplicate-observed`; that warning is outcome-neutral",
+            "does not by itself invalidate an otherwise complete, trustworthy current-scope terminal result",
+            "a lone compliant pending request is not a warning",
             "If GitHub Codex is unavailable because there is no PR or the integration/host/identity is unsupported, report `effective double`; never claim triple",
             "PR readiness adds CI, conversation, and branch/base gates, but no retired extra Codex gates",
             "never count a supplied-diff helper as a named lane",
@@ -6781,6 +6786,7 @@ jobs:
             "required `independent-codex-pr-review`",
             "$external-review-playbook",
             "$copilot-review-playbook",
+            "review/comment evidence is triple-inconclusive whenever an older request might overlap",
         ):
             with self.subTest(retired=retired):
                 self.assertNotIn(retired, agents)
