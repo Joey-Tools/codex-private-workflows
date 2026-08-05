@@ -1791,6 +1791,35 @@ class PrivateOverlayPackageTests(unittest.TestCase):
             self.run_quietly(MODULE.rollback, home, None, "private")
 
 
+class AppleNotesWorkReportSkillTests(unittest.TestCase):
+    def test_webex_message_archiver_keeps_its_own_report_bucket(self) -> None:
+        skill_root = REPO_ROOT / ".agents" / "skills" / "apple-notes-work-report"
+        skill = (skill_root / "SKILL.md").read_text(encoding="utf-8")
+        style = (skill_root / "references" / "report-drafting-style.md").read_text(
+            encoding="utf-8"
+        )
+        example = (skill_root / "references" / "report-drafting-example.md").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn(
+            "the exact `webex-message-archiver` repository always maps to "
+            "`#webex-message-archiver`",
+            skill,
+        )
+        self.assertIn(
+            "Map the exact `webex-message-archiver` repository to "
+            "`#webex-message-archiver`.",
+            style,
+        )
+        self.assertIn(
+            "never infer it from the word `Webex`",
+            style,
+        )
+        self.assertIn("4. #webex-message-archiver", example)
+        self.assertIn("628 spaces and 628 message files", example)
+
+
 class PrivateAutomationPromptTests(unittest.TestCase):
     def test_daily_work_report_bounds_memory_reads(self) -> None:
         prompt = automation_prompt("daily-work-report-draft")

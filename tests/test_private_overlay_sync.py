@@ -12,6 +12,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shlex
 import shutil
 import stat
 import sys
@@ -653,6 +654,97 @@ class PrivateOverlaySyncTests(unittest.TestCase):
         target = self.repo_root / "personal_codex" / "skills" / "example" / "SKILL.md"
         self.assertEqual(
             target.read_text(encoding="utf-8"), "Use this when Joey asks.\n"
+        )
+
+    def test_private_ci_workflow_sync_rule_is_unique_and_byte_exact(self) -> None:
+        canonical_source = Path(
+            "skills/review-orchestration-playbook/tests/fixtures/ci/private.yml"
+        )
+        private_target = Path(".github/workflows/ci.yml")
+        source_keys = [
+            (rule.repo, rule.source) for rule in SYNC_MODULE.SYNC_RULES
+        ]
+        targets = [rule.target for rule in SYNC_MODULE.SYNC_RULES]
+        rules = [
+            rule
+            for rule in SYNC_MODULE.SYNC_RULES
+            if rule.source == canonical_source or rule.target == private_target
+        ]
+
+        self.assertEqual(len(source_keys), len(set(source_keys)))
+        self.assertEqual(len(targets), len(set(targets)))
+        self.assertEqual(len(rules), 1)
+        rule = rules[0]
+        self.assertEqual(rule.repo, "codex-review-workflows")
+        self.assertEqual(rule.source, canonical_source)
+        self.assertEqual(rule.target, private_target)
+        self.assertFalse(rule.replacements)
+        self.assertFalse(rule.regular_file_overlays)
+
+        payload = (
+            b"name: Private CI\n"
+            b"# Preserve canonical fixture bytes without text transforms.\n"
+        )
+        source = self.source_root / rule.repo / rule.source
+        source.parent.mkdir(parents=True)
+        source.write_bytes(payload)
+
+        SYNC_MODULE.sync_sources(self.repo_root, self.source_root, (rule,))
+
+        self.assertEqual((self.repo_root / rule.target).read_bytes(), payload)
+
+    def test_review_sync_preserves_private_ci_fixture_replacement_bytes(
+        self,
+    ) -> None:
+        fixture_relative = Path("tests/fixtures/ci/private.yml")
+        ci_rule = next(
+            rule
+            for rule in SYNC_MODULE.SYNC_RULES
+            if rule.target == Path(".github/workflows/ci.yml")
+        )
+        review_rule = next(
+            rule
+            for rule in SYNC_MODULE.SYNC_RULES
+            if rule.target == SYNC_MODULE.CANONICAL_REVIEW_TARGET
+        )
+        self.assertEqual(
+            review_rule.replacement_excluded_paths,
+            (fixture_relative,),
+        )
+
+        source = self.source_root / review_rule.repo / review_rule.source
+        for relative in SYNC_MODULE.CANONICAL_REVIEW_REQUIRED_FILES:
+            path = source / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("public\n", encoding="utf-8")
+        (source / "SKILL.md").write_text(
+            "Use this when the user asks.\n",
+            encoding="utf-8",
+        )
+        fixture_payload = (
+            b"name: Private CI\n"
+            b"# Keep the user and user-specific profile bytes canonical.\n"
+        )
+        (source / fixture_relative).write_bytes(fixture_payload)
+
+        private_catalog = self.repo_root / review_rule.regular_file_overlays[0].source
+        private_catalog.parent.mkdir(parents=True)
+        private_catalog.write_bytes(b'{"pool":"private"}\n')
+
+        SYNC_MODULE.sync_sources(
+            self.repo_root,
+            self.source_root,
+            (review_rule, ci_rule),
+        )
+
+        live_ci = self.repo_root / ci_rule.target
+        nested_fixture = self.repo_root / review_rule.target / fixture_relative
+        synced_skill = self.repo_root / review_rule.target / "SKILL.md"
+        self.assertEqual(live_ci.read_bytes(), fixture_payload)
+        self.assertEqual(nested_fixture.read_bytes(), fixture_payload)
+        self.assertEqual(
+            synced_skill.read_text(encoding="utf-8"),
+            "Use this when Joey asks.\n",
         )
 
     def test_validator_sync_rule_replaces_legacy_mutable_release_identity(
@@ -1349,6 +1441,94 @@ class PrivateOverlaySyncTests(unittest.TestCase):
 
         with self.assertRaisesRegex(SYNC_MODULE.SyncError, "required replacement"):
             SYNC_MODULE.sync_sources(self.repo_root, self.source_root, (rule,))
+
+    def test_replacement_excluded_paths_reject_unsafe_and_ambiguous_rules(
+        self,
+    ) -> None:
+        replacement = SYNC_MODULE.Replacement(
+            "public",
+            "private",
+            required=False,
+        )
+        path_scoped_replacement = SYNC_MODULE.Replacement(
+            "public",
+            "private",
+            path=Path("private.yml"),
+        )
+        cases = (
+            ("require replacements", (), (Path("private.yml"),)),
+            ("unsafe", (replacement,), (Path("."),)),
+            (
+                "duplicate",
+                (replacement,),
+                (Path("private.yml"), Path("private.yml")),
+            ),
+            (
+                "conflicts with path-scoped",
+                (path_scoped_replacement,),
+                (Path("private.yml"),),
+            ),
+        )
+
+        for error, replacements, excluded_paths in cases:
+            with self.subTest(error=error):
+                rule = SYNC_MODULE.SyncRule(
+                    repo="example-repo",
+                    source=Path("skill"),
+                    target=Path("personal_codex/skills/example"),
+                    replacements=replacements,
+                    replacement_excluded_paths=excluded_paths,
+                )
+                with self.assertRaisesRegex(SYNC_MODULE.SyncError, error):
+                    SYNC_MODULE.sync_sources(
+                        self.repo_root,
+                        self.source_root,
+                        (rule,),
+                    )
+
+    def test_replacement_excluded_path_must_name_a_text_candidate(self) -> None:
+        source = self.source_root / "example-repo" / "skill"
+        source.mkdir(parents=True)
+        (source / "SKILL.md").write_text("public\n", encoding="utf-8")
+        rule = SYNC_MODULE.SyncRule(
+            repo="example-repo",
+            source=Path("skill"),
+            target=Path("personal_codex/skills/example"),
+            replacements=(
+                SYNC_MODULE.Replacement("public", "private", required=False),
+            ),
+            replacement_excluded_paths=(Path("missing.yml"),),
+        )
+
+        with self.assertRaisesRegex(
+            SYNC_MODULE.SyncError,
+            "missing or not a text candidate",
+        ):
+            SYNC_MODULE.sync_sources(self.repo_root, self.source_root, (rule,))
+
+        self.assertFalse((self.repo_root / rule.target).exists())
+
+    def test_replacement_exclusion_does_not_bypass_forbidden_residuals(
+        self,
+    ) -> None:
+        source = self.source_root / "example-repo" / "skill"
+        source.mkdir(parents=True)
+        (source / "private.yml").write_text("public-token\n", encoding="utf-8")
+        rule = SYNC_MODULE.SyncRule(
+            repo="example-repo",
+            source=Path("skill"),
+            target=Path("personal_codex/skills/example"),
+            replacements=(
+                SYNC_MODULE.Replacement("public", "private", required=False),
+            ),
+            forbidden_residuals=("public-token",),
+            replacement_excluded_paths=(Path("private.yml"),),
+        )
+
+        with self.assertRaisesRegex(SYNC_MODULE.SyncError, "forbidden residual"):
+            SYNC_MODULE.sync_sources(self.repo_root, self.source_root, (rule,))
+
+        self.assertFalse((self.repo_root / rule.target).exists())
 
     def test_failed_replacement_leaves_existing_target_unchanged(self) -> None:
         source = self.source_root / "example-repo" / "skill" / "SKILL.md"
@@ -5703,6 +5883,10 @@ class PrivateOverlaySyncTests(unittest.TestCase):
             )
         )
         self.assertEqual(
+            rule.replacement_excluded_paths,
+            (Path("tests/fixtures/ci/private.yml"),),
+        )
+        self.assertEqual(
             rule.regular_file_overlays,
             (
                 SYNC_MODULE.RegularFileOverlay(
@@ -6265,23 +6449,182 @@ class PrivateOverlaySyncTests(unittest.TestCase):
         self.assertEqual(checked_out_repos, sync_rule_repos)
         self.assertEqual(checked_out_paths, sync_rule_repos)
 
+    def test_live_private_ci_workflow_matches_synced_fixture_bytes(self) -> None:
+        workflow = REPO_ROOT / ".github" / "workflows" / "ci.yml"
+        fixture = (
+            REPO_ROOT
+            / "personal_codex"
+            / "skills"
+            / "review-orchestration-playbook"
+            / "tests"
+            / "fixtures"
+            / "ci"
+            / "private.yml"
+        )
+
+        self.assertEqual(workflow.read_bytes(), fixture.read_bytes())
+
+    def test_scheduled_workflow_tracks_generated_github_files(self) -> None:
+        workflow = (
+            REPO_ROOT / ".github" / "workflows" / "scheduled-sync-release.yml"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn(
+            "git status --porcelain -- .github scripts tests personal_codex .agents",
+            workflow,
+        )
+        self.assertIn(
+            "git add .github scripts tests personal_codex .agents",
+            workflow,
+        )
+        self.assertNotIn(
+            "git status --porcelain -- scripts tests personal_codex .agents",
+            workflow,
+        )
+        self.assertNotIn(
+            "git add scripts tests personal_codex .agents",
+            workflow,
+        )
+
     def test_python_workflows_disable_bytecode_before_runtime_imports(self) -> None:
+        def assert_bytecode_guard_contract(workflow: str) -> None:
+            preamble, separator, jobs = workflow.partition("\njobs:\n")
+            self.assertEqual(separator, "\njobs:\n")
+            self.assertIn(
+                '\nenv:\n  PYTHONDONTWRITEBYTECODE: "1"\n',
+                preamble,
+            )
+            self.assertEqual(preamble.count("PYTHONDONTWRITEBYTECODE"), 1)
+
+            job_lines = jobs.splitlines()
+            for line_index, line in enumerate(job_lines):
+                if "PYTHONDONTWRITEBYTECODE" not in line:
+                    continue
+                self.assertEqual(line.count("PYTHONDONTWRITEBYTECODE"), 1)
+                self.assertRegex(
+                    line.strip(),
+                    r"\bPYTHONDONTWRITEBYTECODE=1\s*\\$",
+                )
+                command_start = line_index
+                while (
+                    command_start > 0
+                    and job_lines[command_start - 1].rstrip().endswith("\\")
+                ):
+                    command_start -= 1
+                command_context = "\n".join(
+                    job_lines[command_start : line_index + 1]
+                )
+                variable_index = command_context.rfind("PYTHONDONTWRITEBYTECODE")
+                env_index = command_context.rfind(
+                    "/usr/bin/env -i", 0, variable_index
+                )
+                self.assertGreaterEqual(env_index, 0)
+                env_arguments = command_context[
+                    env_index + len("/usr/bin/env -i") : variable_index
+                ]
+                self.assertNotRegex(env_arguments, r"[;&|]")
+                try:
+                    argument_tokens = shlex.split(
+                        env_arguments.replace("\\\n", " ")
+                    )
+                except ValueError as error:
+                    self.fail(f"invalid env -i argument quoting: {error}")
+                for argument in argument_tokens:
+                    self.assertRegex(argument, r"^[A-Z_][A-Z0-9_]*=.+$")
+
         workflow_paths = (
             REPO_ROOT / ".github" / "workflows" / "ci.yml",
             REPO_ROOT / ".github" / "workflows" / "release.yml",
             REPO_ROOT / ".github" / "workflows" / "scheduled-sync-release.yml",
         )
+        workflow_cases = [
+            (workflow_path.name, workflow_path.read_text(encoding="utf-8"))
+            for workflow_path in workflow_paths
+        ]
+        workflow_cases.append(
+            (
+                "scrubbed-child-multiline-environment",
+                r"""name: Synthetic
 
-        for workflow_path in workflow_paths:
-            with self.subTest(workflow=workflow_path.name):
-                workflow = workflow_path.read_text(encoding="utf-8")
-                preamble, separator, _jobs = workflow.partition("\njobs:\n")
-                self.assertEqual(separator, "\njobs:\n")
-                self.assertIn(
-                    '\nenv:\n  PYTHONDONTWRITEBYTECODE: "1"\n',
-                    preamble,
-                )
-                self.assertEqual(preamble.count("PYTHONDONTWRITEBYTECODE"), 1)
+env:
+  PYTHONDONTWRITEBYTECODE: "1"
+
+jobs:
+  test:
+    steps:
+      - run: |
+          /usr/bin/env -i \
+            HOME=/var/empty \
+            PYTHONDONTWRITEBYTECODE=1 \
+            python3 -I -B -S test.py
+""",
+            )
+        )
+        workflow_cases.append(
+            (
+                "scrubbed-child-inline-environment",
+                r"""name: Synthetic
+
+env:
+  PYTHONDONTWRITEBYTECODE: "1"
+
+jobs:
+  test:
+    steps:
+      - run: |
+          /usr/bin/env -i PYTHONDONTWRITEBYTECODE=1 \
+            python3 -I -B -S test.py
+""",
+            )
+        )
+
+        for workflow_name, workflow in workflow_cases:
+            with self.subTest(workflow=workflow_name):
+                assert_bytecode_guard_contract(workflow)
+
+        invalid_job_bodies = {
+            "job-env-override": """  test:
+    env:
+      PYTHONDONTWRITEBYTECODE: "0"
+""",
+            "unisolated-command-override": r"""  test:
+    steps:
+      - run: |
+          PYTHONDONTWRITEBYTECODE=1 \
+            python3 -I -B -S test.py
+""",
+            "separated-from-scrubbed-command": r"""  test:
+    steps:
+      - run: |
+          /usr/bin/env -i true; PYTHONDONTWRITEBYTECODE=1 \
+            python3 -I -B -S test.py
+""",
+            "duplicate-on-admitted-line": r"""  test:
+    steps:
+      - run: |
+          /usr/bin/env -i PYTHONDONTWRITEBYTECODE=0 PYTHONDONTWRITEBYTECODE=1 \
+            python3 -I -B -S test.py
+""",
+            "duplicate-across-separated-continuations": r"""  test:
+    steps:
+      - run: |
+          /usr/bin/env -i \
+            PYTHONDONTWRITEBYTECODE=1 \
+            true; PYTHONDONTWRITEBYTECODE=1 \
+            python3 -I -B -S test.py
+""",
+        }
+        for case_name, jobs in invalid_job_bodies.items():
+            with self.subTest(rejected=case_name):
+                workflow = """name: Synthetic
+
+env:
+  PYTHONDONTWRITEBYTECODE: "1"
+
+jobs:
+""" + jobs
+                with self.assertRaises(AssertionError):
+                    assert_bytecode_guard_contract(workflow)
 
     def test_release_workflows_use_vm_backed_runners(self) -> None:
         workflows = {
@@ -6313,32 +6656,43 @@ class PrivateOverlaySyncTests(unittest.TestCase):
                 )
                 self.assertEqual(runners, ["ubuntu-latest"])
 
-    def test_release_workflows_pin_review_runtime_to_python_313(self) -> None:
-        workflows = {
-            "scheduled sync-release": (
-                REPO_ROOT / ".github" / "workflows" / "scheduled-sync-release.yml",
-                "sync-release",
-            ),
-            "release build": (
-                REPO_ROOT / ".github" / "workflows" / "release.yml",
-                "release",
-            ),
-            "release publish": (
-                REPO_ROOT / ".github" / "workflows" / "release.yml",
-                "publish",
-            ),
-        }
+    def test_full_canonical_suite_jobs_use_python_313_with_bounded_timeout(
+        self,
+    ) -> None:
+        scheduled = (
+            REPO_ROOT / ".github" / "workflows" / "scheduled-sync-release.yml"
+        ).read_text(encoding="utf-8")
+        release = (REPO_ROOT / ".github" / "workflows" / "release.yml").read_text(
+            encoding="utf-8"
+        )
 
-        for label, (path, job_name) in workflows.items():
-            with self.subTest(job=label):
-                workflow = path.read_text(encoding="utf-8")
-                job = re.search(
-                    rf"(?ms)^  {re.escape(job_name)}:\n(?P<body>.*?)(?=^  [-a-zA-Z0-9_]+:\n|\Z)",
-                    workflow,
-                )
-                self.assertIsNotNone(job)
-                self.assertIn('python-version: "3.13"', job.group("body"))
-                self.assertNotIn('python-version: "3.x"', job.group("body"))
+        scheduled_job = re.search(
+            r"(?ms)^  sync-release:\n(?P<body>.*?)(?=^  [-a-zA-Z0-9_]+:\n|\Z)",
+            scheduled,
+        )
+        release_job = re.search(
+            r"(?ms)^  release:\n(?P<body>.*?)(?=^  [-a-zA-Z0-9_]+:\n|\Z)",
+            release,
+        )
+        publish_job = re.search(
+            r"(?ms)^  publish:\n(?P<body>.*?)(?=^  [-a-zA-Z0-9_]+:\n|\Z)",
+            release,
+        )
+        self.assertIsNotNone(scheduled_job)
+        self.assertIsNotNone(release_job)
+        self.assertIsNotNone(publish_job)
+
+        scheduled_body = scheduled_job.group("body")
+        release_body = release_job.group("body")
+        publish_body = publish_job.group("body")
+        self.assertIn("timeout-minutes: 30", scheduled_body)
+        self.assertNotIn("timeout-minutes: 15", scheduled_body)
+        self.assertIn('python-version: "3.13"', scheduled_body)
+        self.assertNotIn('python-version: "3.x"', scheduled_body)
+        self.assertIn('python-version: "3.13"', release_body)
+        self.assertNotIn('python-version: "3.x"', release_body)
+        self.assertIn('python-version: "3.13"', publish_body)
+        self.assertNotIn('python-version: "3.x"', publish_body)
 
     def test_release_publish_steps_use_separate_immutable_releases_token(
         self,
@@ -6680,7 +7034,50 @@ class PrivateOverlaySyncTests(unittest.TestCase):
 
         self.assertIn("PRIVATE_OVERLAY_SYNC_PR_TOKEN", readme)
         self.assertIn("contents, pull-request, and issues write access", readme)
+        self.assertIn("fine-grained PAT or GitHub App token", readme)
+        self.assertIn("`Workflows: write`", readme)
+        self.assertIn("classic PAT must include the `workflow` scope", readme)
         self.assertIn("codex-automation", readme)
+
+    def test_readme_documents_canonical_source_trust_boundary(self) -> None:
+        readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
+        normalized_readme = re.sub(r"\s+", " ", readme)
+
+        self.assertIn(
+            "`Joey-Tools/codex-review-workflows` default branch as its executable "
+            "canonical-source trust root",
+            normalized_readme,
+        )
+        self.assertIn(
+            "untrusted requires separate SHA-promotion or allowlist hardening",
+            normalized_readme,
+        )
+        self.assertIn(
+            "The current generated PR workflow declares only `contents: read` and "
+            "contains no `secrets.*` references",
+            normalized_readme,
+        )
+
+        ci_workflow = (REPO_ROOT / ".github/workflows/ci.yml").read_text(
+            encoding="utf-8"
+        )
+        private_fixture = (
+            REPO_ROOT
+            / "personal_codex"
+            / "skills"
+            / "review-orchestration-playbook"
+            / "tests"
+            / "fixtures"
+            / "ci"
+            / "private.yml"
+        ).read_text(
+            encoding="utf-8",
+        )
+        self.assertEqual(ci_workflow, private_fixture)
+        preamble, separator, _jobs = ci_workflow.partition("\njobs:\n")
+        self.assertEqual(separator, "\njobs:\n")
+        self.assertIn("permissions:\n  contents: read", preamble)
+        self.assertNotIn("secrets.", ci_workflow)
 
     def test_readme_documents_immutable_releases_token_permissions(self) -> None:
         readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")

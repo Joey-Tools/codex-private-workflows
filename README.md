@@ -85,12 +85,21 @@ release workflow. If a run detects sync changes, it does not attempt to repair a
 incomplete release from the pre-sync SHA after mutating the checkout; release repair
 is reserved for runs whose sync working tree remains unchanged. Immediately before
 building, the workflow rechecks both `HEAD` and the complete Git working-tree state.
+The canonical review skill's `tests/fixtures/ci/private.yml` materializes the live
+private CI workflow byte-for-byte; scheduled sync tracks and stages `.github`, and
+the scheduled and release full-suite jobs run on Python 3.13.
+This pipeline treats the `Joey-Tools/codex-review-workflows` default branch as its
+executable canonical-source trust root; treating it as untrusted requires separate
+SHA-promotion or allowlist hardening. The current generated PR workflow declares
+only `contents: read` and contains no `secrets.*` references.
 
 The sync PR step requires a `PRIVATE_OVERLAY_SYNC_PR_TOKEN` secret with repository
-contents, pull-request, and issues write access. The workflow uses that token for
-branch pushes, PR creation, and the `codex-automation` PR label so the resulting
-PR `pull_request` validation workflows are not suppressed as `GITHUB_TOKEN`-triggered
-events.
+contents, pull-request, and issues write access. Because sync can update
+`.github/workflows/ci.yml`, a fine-grained PAT or GitHub App token must also grant
+`Workflows: write`; a classic PAT must include the `workflow` scope. The workflow
+uses that token for branch pushes, PR creation, and the `codex-automation` PR label
+so the resulting PR `pull_request` validation workflows are not suppressed as
+`GITHUB_TOKEN`-triggered events.
 
 After merging a Joey-Tools source-repo PR that should flow into the private overlay,
 trigger the sync manually so the release is not delayed until the fallback window:
