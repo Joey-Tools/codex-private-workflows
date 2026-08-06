@@ -3,7 +3,7 @@ id: 20260727-rbs001
 title: Review Runtime Bytecode Sync
 status: active
 created: 2026-07-27
-updated: 2026-08-05
+updated: 2026-08-06
 branch: wip/review-runtime-bytecode-sync
 pr: 139
 supersedes: []
@@ -29,16 +29,17 @@ superseded_by:
 - Private sync rewrites the trusted-Mac operator command to the `personal_codex/` layout and fail-closes on any missing or unreviewed file in the independent-supervisor subtree.
 - The private review tree now matches the actual canonical PR #85 squash-merge tree for the complete reviewed file inventory, including caller-owned child-outcome receipts, read-only child isolation, and double-fork custody recovery.
 - The private base release is pinned to immutable toolbox commit `20f37f4703715393480d550086980bb1fa44c7b3`; its published tree is byte-identical to reviewed toolbox head `ac7275f2064531bde05bfe0502617efc44f573b3`.
-- The final source reconciliation freezes five direct inputs: toolbox `20f37f4703715393480d550086980bb1fa44c7b3`, review workflows `80d3fc9c7d9f4842d0fa247a7c0b974c00052124`, debug triage `d3b6fd26b021ef1a6aad8561a92a354c27510fbd`, workflow hygiene `c69a0b1a92a349179ed41b0a378c08fe70e8160f`, and project journal `4f53fd1bf9ba0a7c85db8d183016210d3d0089e5`.
+- The current source reconciliation freezes five direct inputs: toolbox `20f37f4703715393480d550086980bb1fa44c7b3`, review workflows `1be78d747859b9004fd31ea9f893cef2640efa5d`, debug triage `d3b6fd26b021ef1a6aad8561a92a354c27510fbd`, workflow hygiene `04325e6a0d582b19d1ad8788f568722e5607bd74`, and project journal `4f53fd1bf9ba0a7c85db8d183016210d3d0089e5`.
 - Private master `1f716fdb81d7b02565656de6d0308837d826fac6` retires waited-delivery from the sync and install surfaces. The exact source inventory, scheduled checkout set, sync rules, active workflow tests, package links, and installed targets all exclude it.
 - Canonical personal-sync `e57140e16a68db24dbdd883de665283538234730` is recorded only as toolbox receipt provenance; private never mirrors it directly.
 - On macOS the source-lock verifier ignores PATH and every parent developer-tool or loader selector, then directly executes fixed `/Library/Developer/CommandLineTools/usr/bin/git` under a closed environment. It binds that root-owned actual executable and every root-owned, non-group/world-writable ancestor by object identity and access policy before and after each command. The `/usr/bin/git` xcrun shim and current-user-owned or group-writable Homebrew and Xcode ancestors are intentionally outside this trust path rather than newly admitted.
+- Private baseline `94666dd0b0da0d1935dde3c155065fb60338373b` is the immutable released predecessor of this reconciliation. The latest source update advances only review workflows from `8c09dafcdf09a6b43ae6370d40e79ca4ab8fcb21` to `1be78d747859b9004fd31ea9f893cef2640efa5d` and carries the public #93 whole-PR evidence policy into `personal_codex/AGENTS.md`; it does not widen the trusted review-control epoch used to certify this private change.
 
 ## Next Steps
 
-- Freeze and sign the final combined source tree, then run exact-head admission, CI, conversation, lifecycle, mergeability, target-tree, and applicable same-head review gates.
-- Re-run those exact-head gates on the signed Git trust-root repair; the coordinating root owns the sole fresh named single and all remote gate orchestration.
-- Publish and install the immutable private release, prove a real successful scheduler run, and dispatch scheduled reconciliation only as a no-diff/no-new-PR check.
+- Publish and install the immutable private release that contains this source reconciliation.
+- Migrate the macOS scheduler from the legacy `install-private` command to the stable installed runner's `run-scheduled` command, then prove one real successful scheduled run and immutable public/private baselines.
+- Dispatch scheduled reconciliation only after that release and require a no-diff/no-new-PR result.
 - After the merged tree and release prove complete behavioral supersession, close draft PR #140 as superseded by PR #139.
 
 ## Evidence
@@ -92,3 +93,7 @@ superseded_by:
 - The broader private-overlay sync module ran 197 tests locally and stopped with 17 failures plus four errors at the pre-existing `catalog.json` regular-file binding check. A fresh task-scoped clone of unchanged signed head `e1b85cfec954053d8d00a9bb61197a09ed7959d0` reproduced the same first failure under the same Python 3.10 command, proving that local APFS-sensitive baseline failure is independent of this Git trust-root patch; the comparison root was process/FD-free before removal and is now absent.
 - A later duplicate reviewer root `/private/tmp/codex-private139-final-review.gWckvQ` was interrupted before consumption, its findings were not read or used, and it was marked non-counting. The root was bound as device `16777232`, inode `44296468`, uid `502`, gid `0`, mode `0700`; zero task processes and recursive file descriptors were observed before identity-safe cleanup, and the path is now absent.
 - Private master `1f716fdb81d7b02565656de6d0308837d826fac6` was ordinary-merged into the delivery line. Conflict resolution preserves its waited-delivery retirement by migrating the lock and scheduled pre/post checkout verification to the exact five active sources; the retired source is never checked out, copied into the overlay, linked by the private manifest, packaged, installed, or executed by active CI/release workflows.
+- Scheduled reconciliation run `31085440238` on released predecessor `94666dd0b0da0d1935dde3c155065fb60338373b` synchronized the latest review source and passed the root suite plus manifest validation, then fail-closed before opening a PR because the private repository policy had not yet adopted public #93's artifact-publication, legacy-receipt, and terminal-clean evidence contracts. Every PR/build/publish step was skipped.
+- Fresh complete custody freezes the five direct source commits and trees without shallow, promisor, bitmap, or alternate object dependencies; every checkout passed strict full `fsck` before and after sync.
+- The refreshed private source lock has SHA-256 `e2b0d8acd2ab774f484a70c2dab361b19ac913a0de18cebf68557f090482f2f8`. The counting sync and an identical-input second run produced the same tracked binary diff SHA-256 `dac290ebb6d7aa3532349037ae3ecdb69b39f065fdeb6740756193dc76c61e68`, proving the second run was a tracked no-op.
+- The two focused repository-policy contract tests pass after importing the complete four-part public #93 root-policy delta. The complete 111-test contract module reaches 110 passing tests locally; its sole failure is the installed-supervisor preflight rejecting the workspace-injected `com.apple.provenance` attribute before exercising the contract. The four-module sync/manifest run reaches 431 tests, with its 47 failures/errors rooted in the same automatic attribute changing the bound `catalog.json` identity; a separated 175-test generated-lock/manifest run is additionally non-counting because the outer Seatbelt denies fixed `/tmp` fixtures and task-local Git tag setup. Hosted clean-runner evidence remains the authoritative complete-suite gate.
