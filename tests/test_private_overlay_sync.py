@@ -8564,10 +8564,26 @@ jobs:
         self.assertNotIn('if [[ -f "$launcher" ]]', workflow)
         self.assertIn("\n  python-39-compatibility:\n", workflow)
         self.assertIn("Run Python 3.9 compatibility regressions", workflow)
-        self.assertIn("\n  platform-safety:\n", workflow)
-        self.assertIn("Run platform reconciliation safety tests", workflow)
+        self.assertNotIn("\n  broker_reproducibility:\n", workflow)
+        self.assertNotIn("\n  platform-safety:\n", workflow)
+        self.assertIn("\n  independent_supervisor_tests:\n", workflow)
+        self.assertIn("Require hosted-runner byte reproduction", workflow)
+        self.assertEqual(
+            workflow.count(
+                "Run platform reconciliation safety tests (Python 3.x)"
+            ),
+            2,
+        )
+        self.assertEqual(
+            workflow.count(
+                "if: ${{ always() && steps.setup_latest_python.outcome == "
+                "'success' }}"
+            ),
+            2,
+        )
+        self.assertEqual(workflow.count("    runs-on: ubuntu-slim\n"), 2)
         self.assertIn(
-            "needs:\n      - python-39-compatibility\n      - platform-safety",
+            "needs:\n      - python-39-compatibility\n    strategy:",
             workflow,
         )
         self.assertIn("\n  test:\n", workflow)
@@ -8577,7 +8593,8 @@ jobs:
             "needs:\n"
             "      - platform_tests\n"
             "      - python-39-compatibility\n"
-            "      - platform-safety",
+            "      - independent_supervisor_tests\n"
+            "      - readonly_install_supervisor_tests",
             workflow,
         )
         self.assertIn(
@@ -8589,12 +8606,23 @@ jobs:
             workflow,
         )
         self.assertIn(
-            "PLATFORM_SAFETY_RESULT: ${{ needs.platform-safety.result }}",
+            "INDEPENDENT_SUPERVISOR_RESULT: "
+            "${{ needs.independent_supervisor_tests.result }}",
+            workflow,
+        )
+        self.assertIn(
+            "READONLY_INSTALL_SUPERVISOR_RESULT: "
+            "${{ needs.readonly_install_supervisor_tests.result }}",
             workflow,
         )
         self.assertIn('test "$PLATFORM_TESTS_RESULT" = "success"', workflow)
         self.assertIn('test "$PYTHON_39_RESULT" = "success"', workflow)
-        self.assertIn('test "$PLATFORM_SAFETY_RESULT" = "success"', workflow)
+        self.assertIn(
+            'test "$INDEPENDENT_SUPERVISOR_RESULT" = "success"', workflow
+        )
+        self.assertIn(
+            'test "$READONLY_INSTALL_SUPERVISOR_RESULT" = "success"', workflow
+        )
 
     def test_python_workflows_disable_implicit_bytecode(self) -> None:
         workflow_paths = (

@@ -32,6 +32,8 @@ superseded_by:
   review suites on `ubuntu-latest` before publication.
 - Superseded pull-request CI and release runs cancel, while default-branch
   publication and scheduled sync remain non-cancelling.
+- The private-owned workflow contract now follows the compact generated graph
+  and no longer requires the retired standalone broker or platform-safety jobs.
 
 ## Next Steps
 
@@ -47,3 +49,6 @@ superseded_by:
   minutes; all of that macOS execution came from CI.
 - The target repository rulesets require squash merges and the three status
   contexts named above, with no bypass actor.
+- Forced sync run `31105834769` exposed the stale private-owned
+  `platform-safety` assertion before opening a PR; the updated contract and
+  release-specific checks pass together on the locally generated final tree.
