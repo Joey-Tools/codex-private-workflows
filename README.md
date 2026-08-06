@@ -24,8 +24,12 @@ private-owned symlinks.
 ## Test
 
 The synced review helper requires Python 3.10 or later. CI exercises its full
-test suite on both Ubuntu and macOS at that minimum runtime, while the private
-overlay packaging and sync tests run on the Linux matrix leg.
+pull-request test suite on both Ubuntu and macOS at that minimum runtime, while
+the private overlay packaging and sync tests run on the Linux matrix leg. macOS
+runners are reserved for gates that need real Darwin, Xcode, Seatbelt, or
+Keychain behavior. Bounded, short-lived status and release-specific pull-request
+jobs use `ubuntu-slim`; longer validation, publishing, and scheduled sync jobs
+remain on `ubuntu-latest`.
 
 ```bash
 python3 -B -c 'import pathlib, sys; [compile(pathlib.Path(path).read_bytes(), path, "exec") for path in sys.argv[1:]]' \
@@ -41,9 +45,18 @@ PYTHONDONTWRITEBYTECODE=1 python3 -B -m unittest discover -s tests
 
 ## Release
 
-`Private Overlay Release` runs on pull requests for validation and on `master` pushes
-or manual dispatch to publish a GitHub release. Release assets keep the same sync
-format used by the public base channel:
+On pull requests, `Private Overlay Release` keeps the required
+`Build private overlay release` check focused on release-specific validation:
+sync-manifest validation, package build and verification, and the source-only
+Python-tree guard. CI owns the full helper syntax, private test, and canonical
+review suites for pull requests, so the release workflow does not repeat them.
+
+On `master` pushes and eligible manual dispatches, `Private Overlay Release`
+still runs the complete validation set before publishing a GitHub release. New
+pull-request runs cancel superseded release validation for the same ref, while
+push, manual, and scheduled release work remains non-cancelling through the
+shared concurrency group. Release assets keep the same sync format used by the
+public base channel:
 
 - `personal-codex-<full-sha>.tar.gz`
 - `personal-codex-<full-sha>.sha256`

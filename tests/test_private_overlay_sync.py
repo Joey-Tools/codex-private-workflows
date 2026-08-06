@@ -8351,23 +8351,26 @@ jobs:
                 with self.assertRaises(AssertionError):
                     assert_bytecode_guard_contract(workflow)
 
-    def test_release_workflows_use_vm_backed_runners(self) -> None:
+    def test_release_workflows_use_event_appropriate_runners(self) -> None:
         workflows = {
             "scheduled sync-release": (
                 REPO_ROOT / ".github" / "workflows" / "scheduled-sync-release.yml",
                 "sync-release",
+                "ubuntu-latest",
             ),
             "release build": (
                 REPO_ROOT / ".github" / "workflows" / "release.yml",
                 "release",
+                "${{ github.event_name == 'pull_request' && 'ubuntu-slim' || 'ubuntu-latest' }}",
             ),
             "release publish": (
                 REPO_ROOT / ".github" / "workflows" / "release.yml",
                 "publish",
+                "ubuntu-latest",
             ),
         }
 
-        for label, (path, job_name) in workflows.items():
+        for label, (path, job_name, expected_runner) in workflows.items():
             with self.subTest(job=label):
                 workflow = path.read_text(encoding="utf-8")
                 job = re.search(
@@ -8379,7 +8382,64 @@ jobs:
                     r"(?m)^    runs-on: *([^\n]+?) *$",
                     job.group("body"),
                 )
-                self.assertEqual(runners, ["ubuntu-latest"])
+                self.assertEqual(runners, [expected_runner])
+
+    def test_release_workflow_keeps_pr_validation_release_specific(self) -> None:
+        workflow = (REPO_ROOT / ".github" / "workflows" / "release.yml").read_text(
+            encoding="utf-8"
+        )
+        release_job = re.search(
+            r"(?ms)^  release:\n(?P<body>.*?)(?=^  [-a-zA-Z0-9_]+:\n|\Z)",
+            workflow,
+        )
+        self.assertIsNotNone(release_job)
+        release_body = release_job.group("body")
+
+        self.assertIn("    name: Build private overlay release\n", release_body)
+        self.assertIn(
+            "  group: private-overlay-release-${{ github.repository }}-${{ github.ref }}",
+            workflow,
+        )
+        self.assertIn(
+            "  cancel-in-progress: ${{ github.event_name == 'pull_request' }}",
+            workflow,
+        )
+
+        def step_body(step_name: str) -> str:
+            step = re.search(
+                rf"(?ms)^      - name: {re.escape(step_name)}\n"
+                r"(?P<body>.*?)(?=^      - name: |\Z)",
+                release_body,
+            )
+            self.assertIsNotNone(step, step_name)
+            return step.group("body")
+
+        for duplicate_step in (
+            "Check helper syntax without bytecode",
+            "Run tests",
+            "Verify canonical review workflow",
+        ):
+            with self.subTest(skipped_on_pull_request=duplicate_step):
+                self.assertRegex(
+                    step_body(duplicate_step),
+                    r"(?m)^        if: github\.event_name != 'pull_request'$",
+                )
+
+        for release_specific_step in (
+            "Validate sync manifest changes",
+            "Build release package",
+            "Verify release package",
+        ):
+            with self.subTest(retained_on_pull_request=release_specific_step):
+                self.assertNotIn(
+                    "github.event_name != 'pull_request'",
+                    step_body(release_specific_step),
+                )
+
+        self.assertRegex(
+            step_body("Require source-only Python tree"),
+            r"(?m)^        if: always\(\)$",
+        )
 
     def test_full_canonical_suite_jobs_use_python_313_with_bounded_timeout(
         self,
@@ -8412,6 +8472,10 @@ jobs:
         publish_body = publish_job.group("body")
         self.assertIn("timeout-minutes: 30", scheduled_body)
         self.assertNotIn("timeout-minutes: 15", scheduled_body)
+        self.assertIn(
+            "timeout-minutes: ${{ github.event_name == 'pull_request' && 15 || 30 }}",
+            release_body,
+        )
         self.assertIn('python-version: "3.13"', scheduled_body)
         self.assertNotIn('python-version: "3.x"', scheduled_body)
         self.assertIn('python-version: "3.13"', release_body)
