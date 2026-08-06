@@ -743,7 +743,6 @@ SYNC_RULES = (
             ),
         ),
         common_joey_text=True,
-        exclude_names=("README.md",),
     ),
     _rule(
         "codex-review-workflows",
