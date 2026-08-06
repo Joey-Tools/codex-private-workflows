@@ -249,6 +249,67 @@ AUTH_PROFILES = {
 }'''
 
 
+PUBLIC_BUG_TRIAGE_BUILD_REMOTE_REQUEST_BLOCK = '''def _build_remote_request(
+    url: str,
+    *,
+    method: str,
+    auth_profile: Optional[str],
+) -> Tuple[urllib.request.Request, str]:
+    _ensure_allowed_url(url)
+    request = urllib.request.Request(url, method=method)
+    auth_state = _add_basic_auth(request, auth_profile)
+    return request, auth_state'''
+
+
+PRIVATE_BUG_TRIAGE_BUILD_REMOTE_REQUEST_BLOCK = '''def _build_remote_request(
+    url: str,
+    *,
+    method: str,
+    auth_profile: Optional[str],
+) -> Tuple[urllib.request.Request, str]:
+    parsed = _ensure_allowed_url(url)
+    request = urllib.request.Request(parsed.geturl(), method=method)
+    auth_state = _add_basic_auth(request, auth_profile)
+    return request, auth_state'''
+
+
+PUBLIC_BUG_TRIAGE_REDIRECT_REQUEST_CONSTRUCTION = (
+    "redirected = urllib.request.Request(target, method=method)"
+)
+PRIVATE_BUG_TRIAGE_REDIRECT_REQUEST_CONSTRUCTION = (
+    "redirected = urllib.request.Request(parsed.geturl(), method=method)"
+)
+
+
+PUBLIC_BUG_TRIAGE_BUILD_OPENER_BLOCK = '''def _build_opener(initial_url: str, max_redirects: int) -> urllib.request.OpenerDirector:
+    return urllib.request.build_opener(
+        SameOriginRedirectHandler(initial_url, max_redirects)
+    )'''
+
+
+PRIVATE_BUG_TRIAGE_BUILD_OPENER_BLOCK = '''def _build_opener(initial_url: str, max_redirects: int) -> urllib.request.OpenerDirector:
+    return urllib.request.build_opener(
+        urllib.request.ProxyHandler({}),
+        SameOriginRedirectHandler(initial_url, max_redirects),
+    )'''
+
+
+PUBLIC_BUG_TRIAGE_BLOCKABLE_SIGNALS_BLOCK = '''def _blockable_signals() -> frozenset:
+    blocked = set(signal.valid_signals())
+    for name in ("SIGKILL", "SIGSTOP"):
+        unmaskable = getattr(signal, name, None)
+        if unmaskable is not None:
+            blocked.discard(unmaskable)
+    return frozenset(blocked)'''
+
+
+PRIVATE_BUG_TRIAGE_BLOCKABLE_SIGNALS_BLOCK = '''def _blockable_signals() -> frozenset:
+    blocked = set(signal.valid_signals())
+    blocked.discard(signal.SIGKILL)
+    blocked.discard(signal.SIGSTOP)
+    return frozenset(blocked)'''
+
+
 PRIVATE_BUG_TRIAGE_TARGET = _path("personal_codex/skills/bug-triage-playbook")
 PRIVATE_BUG_TRIAGE_ALLOWED_HOSTS = frozenset({"engci-private-sjc.cisco.com"})
 PRIVATE_BUG_TRIAGE_AUTH_PROFILES = {
@@ -266,7 +327,7 @@ PRIVATE_BUG_TRIAGE_AUTH_PROFILES = {
     ),
 }
 PRIVATE_BUG_TRIAGE_REVIEWED_HELPER_SHA256 = (
-    "f080007defab89f85e8a6852cde8ace17930af3692e29ade8158fa8c995e49aa"
+    "643f914a7367d799d3837645cd7dc5a0a309e57cef8e26d595de6e250a1e0ea7"
 )
 
 
@@ -429,6 +490,30 @@ SYNC_RULES = (
             Replacement(
                 "if parsed.hostname.lower() not in DEFAULT_ALLOWED_HOSTS:",
                 "if parsed.hostname.lower() not in ALLOWED_HOSTS:",
+                path=Path("scripts/jenkins_artifact_probe.py"),
+                required_count=1,
+            ),
+            Replacement(
+                PUBLIC_BUG_TRIAGE_BUILD_REMOTE_REQUEST_BLOCK,
+                PRIVATE_BUG_TRIAGE_BUILD_REMOTE_REQUEST_BLOCK,
+                path=Path("scripts/jenkins_artifact_probe.py"),
+                required_count=1,
+            ),
+            Replacement(
+                PUBLIC_BUG_TRIAGE_REDIRECT_REQUEST_CONSTRUCTION,
+                PRIVATE_BUG_TRIAGE_REDIRECT_REQUEST_CONSTRUCTION,
+                path=Path("scripts/jenkins_artifact_probe.py"),
+                required_count=1,
+            ),
+            Replacement(
+                PUBLIC_BUG_TRIAGE_BUILD_OPENER_BLOCK,
+                PRIVATE_BUG_TRIAGE_BUILD_OPENER_BLOCK,
+                path=Path("scripts/jenkins_artifact_probe.py"),
+                required_count=1,
+            ),
+            Replacement(
+                PUBLIC_BUG_TRIAGE_BLOCKABLE_SIGNALS_BLOCK,
+                PRIVATE_BUG_TRIAGE_BLOCKABLE_SIGNALS_BLOCK,
                 path=Path("scripts/jenkins_artifact_probe.py"),
                 required_count=1,
             ),
@@ -1899,7 +1984,7 @@ def _private_bug_triage_validate_policy_loads(
 
 
 def _validate_private_bug_triage_target_contents(target: Path) -> None:
-    """Protect the reviewed helper bytes and credential-routing access policy."""
+    """Run structural diagnostics and reject bytes outside the reviewed helper."""
 
     script = target / "scripts/jenkins_artifact_probe.py"
     if not script.is_file():
@@ -1932,11 +2017,9 @@ def _validate_private_bug_triage_target_contents(target: Path) -> None:
     host_condition = _private_bug_triage_validate_url_guard(function)
     _private_bug_triage_validate_policy_loads(tree, host_condition)
 
-    # The protected property is reviewed executable-content stability.  The
-    # digest and AST checks consume the same byte capture, while the sibling
-    # inventory separately contains the helper's import surface.  Object
-    # identity is not a compared signal: this is a private staging tree that
-    # is replaced only after validation succeeds.
+    # The AST checks above are non-authoritative structural diagnostics.  The
+    # capability-closed admission boundary is the exact digest plus the
+    # descriptor-bound scripts inventory validated from the captured manifest.
     helper_digest = hashlib.sha256(payload).hexdigest()
     if helper_digest != PRIVATE_BUG_TRIAGE_REVIEWED_HELPER_SHA256:
         raise SyncError(
@@ -4330,6 +4413,8 @@ def _validate_private_bug_triage_reviewed_manifest(
     *,
     surface: str,
 ) -> None:
+    """Enforce descriptor-bound executable inventory and exact-byte admission."""
+
     if target != PRIVATE_BUG_TRIAGE_TARGET:
         return
 
