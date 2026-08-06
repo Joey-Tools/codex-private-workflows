@@ -16,14 +16,14 @@
     {
       "name": "codex-review-workflows",
       "repository": "Joey-Tools/codex-review-workflows",
-      "sha": "80d3fc9c7d9f4842d0fa247a7c0b974c00052124",
-      "tree": "971f6d2ae6c074172c924feb73e42f284a0b736d"
+      "sha": "be754482b991a305216ca75f1dc7007ecd3af9a1",
+      "tree": "2b4e72b92af73f973be0afb749953dec3b6ebea1"
     },
     {
       "name": "codex-workflow-hygiene",
       "repository": "Joey-Tools/codex-workflow-hygiene",
-      "sha": "c69a0b1a92a349179ed41b0a378c08fe70e8160f",
-      "tree": "4f62cf26166c74c96012e1f4116cd05957007bd7"
+      "sha": "04325e6a0d582b19d1ad8788f568722e5607bd74",
+      "tree": "46daa8bd432d8a060b54977930c4eeee95b9fe44"
     },
     {
       "name": "codex-project-journal",
