@@ -34,9 +34,18 @@ superseded_by:
   publication and scheduled sync remain non-cancelling.
 - The private-owned workflow contract now follows the compact generated graph
   and no longer requires the retired standalone broker or platform-safety jobs.
+- A fresh-context source review identified a P2 timeout-budget risk: the
+  consolidated private macOS gates could consume the original 15-minute job
+  budget before later failure-independent diagnostics were scheduled.
+- The synchronized independent-supervisor job now has a 20-minute job budget.
+  Its deterministic suite is capped at 10 minutes, while `setup_latest_python`,
+  reconciliation, and broker reproduction are each capped at 2 minutes.
 - The installed private review policy now matches the synchronized review
   contracts: terminal GitHub Codex payloads classify evidence but cannot by
   themselves complete triple review or make a pull request merge-ready.
+- The private installation policy also retains the synchronized legacy-receipt
+  migration rule: an old artifact is never adopted retroactively, and the
+  agent cannot perform or repeat the caller-owned manual trigger.
 
 ## Next Steps
 
@@ -48,6 +57,13 @@ superseded_by:
 
 - Recent CI PR run `31074970581` completed in about 22.5 minutes; its same-tree
   squash push run `31076151831` repeated the complete graph.
+- In run `31074970581`, the independent supervisor took 5m48s, broker
+  reproduction took 24s, and macOS reconciliation took 45s, for about 6m57s
+  combined.
+- The 20-minute job budget leaves about 13m03s of empirical headroom against
+  that observed combined runtime. The 10/2/2/2-minute step caps retain
+  practical margin for later failure-independent diagnostics; this is not a
+  formal timing guarantee.
 - Across the most recent 30 repository runs, macOS jobs consumed about 252 raw
   minutes; all of that macOS execution came from CI.
 - The target repository rulesets require squash merges and the three status
@@ -59,3 +75,10 @@ superseded_by:
   both the review-policy contract selector and the private installation-policy
   selector pass after aligning `personal_codex/AGENTS.md` with the locked
   `codex-review-workflows` policy.
+- Source PR `Joey-Tools/codex-review-workflows#95` merged as
+  `77531f0c7ba8a705b14cf1e9b90b4e28baa5eecd`; the updated
+  `codex-review-workflows` entry in `private-overlay-source-lock.json` pins the
+  same SHA.
+- The full 112-test private review-policy contract initially exposed the
+  missing legacy-receipt migration rule in `personal_codex/AGENTS.md`; after
+  exact source-policy alignment it passes, as do all 257 private overlay tests.

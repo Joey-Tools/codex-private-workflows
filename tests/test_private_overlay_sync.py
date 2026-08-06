@@ -8542,6 +8542,63 @@ jobs:
         workflow = (REPO_ROOT / ".github" / "workflows" / "ci.yml").read_text(
             encoding="utf-8"
         )
+        independent_job_match = re.search(
+            r"(?ms)^  independent_supervisor_tests:\n"
+            r"(?P<body>.*?)(?=^  [-a-zA-Z0-9_]+:\n|\Z)",
+            workflow,
+        )
+        self.assertIsNotNone(independent_job_match)
+        independent_job = independent_job_match.group("body")
+
+        self.assertEqual(
+            independent_job.count("\n    timeout-minutes: 20\n"),
+            1,
+        )
+        deterministic_step = """      - name: Run deterministic independent supervisor tests
+        timeout-minutes: 10
+        working-directory: personal_codex/skills/review-orchestration-playbook/scripts/independent_codex_pr_review
+        env:
+          CODEX_REVIEW_TEST_RUNTIME_PARENT: ${{ runner.temp }}
+        run: |
+          python3 -m tests.run_required_deterministic_supervisor
+"""
+        setup_latest_step = """      - uses: actions/setup-python@v5
+        id: setup_latest_python
+        if: always()
+        timeout-minutes: 2
+        with:
+          python-version: "3.x"
+"""
+        reconciliation_step = """      - name: Run platform reconciliation safety tests (Python 3.x)
+        if: ${{ always() && steps.setup_latest_python.outcome == 'success' }}
+        timeout-minutes: 2
+        run: python3 -m unittest tests.test_personal_sync_reconciliation_safety
+"""
+        broker_step = """      - name: Require hosted-runner byte reproduction
+        if: always()
+        timeout-minutes: 2
+        env:
+          DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
+        run: |
+          /bin/bash \\
+            personal_codex/skills/review-orchestration-playbook/scripts/build_claude_keychain_broker_macos.sh \\
+            --check
+"""
+        for step in (
+            deterministic_step,
+            setup_latest_step,
+            reconciliation_step,
+            broker_step,
+        ):
+            self.assertEqual(independent_job.count(step), 1)
+        self.assertEqual(
+            independent_job.count("\n        timeout-minutes: 10\n"),
+            1,
+        )
+        self.assertEqual(
+            independent_job.count("\n        timeout-minutes: 2\n"),
+            3,
+        )
 
         self.assertIn("\n  platform_tests:\n", workflow)
         self.assertIn("name: platform-tests (${{ matrix.os }})", workflow)
@@ -8840,6 +8897,10 @@ jobs:
             "never prebuild or inject the full diff into its prompt",
             "A named double review is that single-review agent plus an actual Anthropic Claude Code process",
             "Named double adds actual Claude Code",
+            "Legacy receipt migration never adopts an old artifact retroactively",
+            "caller-owned manual exact `@codex review` trigger",
+            "reaction-only evidence is unavailable",
+            "A proved `base-changed-same-head` event cannot use the manual path",
             "The canonical Claude Code compatibility range is `>=2.1.211,<3.0.0`",
             "Claude Code `2.1.212` is the audited stream-schema baseline, not a global pin",
             "outside-workspace read exclusion as prompt/model scope",
