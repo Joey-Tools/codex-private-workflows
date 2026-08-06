@@ -34,6 +34,9 @@ superseded_by:
   publication and scheduled sync remain non-cancelling.
 - The private-owned workflow contract now follows the compact generated graph
   and no longer requires the retired standalone broker or platform-safety jobs.
+- The installed private review policy now matches the synchronized review
+  contracts: terminal GitHub Codex payloads classify evidence but cannot by
+  themselves complete triple review or make a pull request merge-ready.
 
 ## Next Steps
 
@@ -52,3 +55,7 @@ superseded_by:
 - Forced sync run `31105834769` exposed the stale private-owned
   `platform-safety` assertion before opening a PR; the updated contract and
   release-specific checks pass together on the locally generated final tree.
+- A fresh Codex review exposed a second stale private-owned policy assertion;
+  both the review-policy contract selector and the private installation-policy
+  selector pass after aligning `personal_codex/AGENTS.md` with the locked
+  `codex-review-workflows` policy.
