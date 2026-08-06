@@ -986,16 +986,40 @@ class PrivateOverlaySyncTests(unittest.TestCase):
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text("public\n", encoding="utf-8")
         canonical_tool_prefix = "TOOL_REL=skills/review-orchestration-playbook/scripts/"
+        contract_relative = Path("tests/test_contracts.py")
+        contract_replacements = tuple(
+            replacement
+            for replacement in review_rule.replacements
+            if replacement.path == contract_relative
+        )
+        self.assertEqual(len(contract_replacements), 1)
         for relative in (
             Path("references/pr-readiness.md"),
-            Path("tests/test_contracts.py"),
         ):
             (source / relative).write_text(
                 f"{canonical_tool_prefix}independent_codex_pr_review\n",
                 encoding="utf-8",
             )
+        (source / contract_relative).write_text(
+            f"{canonical_tool_prefix}independent_codex_pr_review\n"
+            + contract_replacements[0].old
+            + "\n",
+            encoding="utf-8",
+        )
         (source / "SKILL.md").write_text(
             "Use this when the user asks.\n",
+            encoding="utf-8",
+        )
+        probe_relative = Path("references/github-pr-probes.md")
+        probe_replacements = tuple(
+            replacement
+            for replacement in review_rule.replacements
+            if replacement.path == probe_relative
+        )
+        self.assertEqual(len(probe_replacements), 2)
+        (source / probe_relative).write_text(
+            "\n\n".join(replacement.old for replacement in probe_replacements)
+            + "\n",
             encoding="utf-8",
         )
         fixture_payload = (
@@ -1023,6 +1047,15 @@ class PrivateOverlaySyncTests(unittest.TestCase):
             synced_skill.read_text(encoding="utf-8"),
             "Use this when Joey asks.\n",
         )
+        synced_probe = self.repo_root / review_rule.target / probe_relative
+        synced_probe_text = synced_probe.read_text(encoding="utf-8")
+        for replacement in probe_replacements:
+            self.assertNotIn(replacement.old, synced_probe_text)
+            self.assertIn(replacement.new, synced_probe_text)
+        synced_contracts = self.repo_root / review_rule.target / contract_relative
+        synced_contracts_text = synced_contracts.read_text(encoding="utf-8")
+        self.assertNotIn(contract_replacements[0].old, synced_contracts_text)
+        self.assertIn(contract_replacements[0].new, synced_contracts_text)
 
     def test_validator_sync_rule_replaces_legacy_mutable_release_identity(
         self,
@@ -7510,16 +7543,40 @@ class PrivateOverlaySyncTests(unittest.TestCase):
             for rule in SYNC_MODULE.SYNC_RULES
             if rule.target == SYNC_MODULE.CANONICAL_REVIEW_TARGET
         )
+        private_replacements = rule.replacements[
+            : -len(SYNC_MODULE.COMMON_JOEY_TEXT_REPLACEMENTS)
+        ]
         self.assertEqual(
-            rule.replacements,
-            (
-                SYNC_MODULE.Replacement(
-                    "TOOL_REL=skills/review-orchestration-playbook/scripts/",
-                    "TOOL_REL=personal_codex/skills/"
-                    "review-orchestration-playbook/scripts/",
-                ),
+            private_replacements[0],
+            SYNC_MODULE.Replacement(
+                "TOOL_REL=skills/review-orchestration-playbook/scripts/",
+                "TOOL_REL=personal_codex/skills/"
+                "review-orchestration-playbook/scripts/",
+            ),
+        )
+        probe_replacements = tuple(
+            replacement
+            for replacement in private_replacements
+            if replacement.path == Path("references/github-pr-probes.md")
+        )
+        self.assertEqual(len(probe_replacements), 2)
+        self.assertTrue(
+            all(
+                replacement.required and replacement.required_count == 1
+                for replacement in probe_replacements
             )
-            + SYNC_MODULE.COMMON_JOEY_TEXT_REPLACEMENTS,
+        )
+        contract_replacements = tuple(
+            replacement
+            for replacement in private_replacements
+            if replacement.path == Path("tests/test_contracts.py")
+        )
+        self.assertEqual(len(contract_replacements), 1)
+        self.assertTrue(contract_replacements[0].required)
+        self.assertEqual(contract_replacements[0].required_count, 1)
+        self.assertEqual(
+            rule.replacements[-len(SYNC_MODULE.COMMON_JOEY_TEXT_REPLACEMENTS) :],
+            SYNC_MODULE.COMMON_JOEY_TEXT_REPLACEMENTS,
         )
         obsolete_layout_replacements = {
             "REPO_ROOT = SKILL_ROOT.parents[1]",
@@ -8500,10 +8557,13 @@ jobs:
         self.assertNotIn('if [[ -f "$launcher" ]]', workflow)
         self.assertIn("\n  python-39-compatibility:\n", workflow)
         self.assertIn("Run Python 3.9 compatibility regressions", workflow)
-        self.assertIn("\n  platform-safety:\n", workflow)
+        self.assertNotIn("\n  broker_reproducibility:\n", workflow)
+        self.assertNotIn("\n  platform-safety:\n", workflow)
+        self.assertIn("\n  independent_supervisor_tests:\n", workflow)
+        self.assertIn("Require hosted-runner byte reproduction", workflow)
         self.assertIn("Run platform reconciliation safety tests", workflow)
         self.assertIn(
-            "needs:\n      - python-39-compatibility\n      - platform-safety",
+            "needs:\n      - python-39-compatibility\n    strategy:",
             workflow,
         )
         self.assertIn("\n  test:\n", workflow)
@@ -8513,7 +8573,8 @@ jobs:
             "needs:\n"
             "      - platform_tests\n"
             "      - python-39-compatibility\n"
-            "      - platform-safety",
+            "      - independent_supervisor_tests\n"
+            "      - readonly_install_supervisor_tests",
             workflow,
         )
         self.assertIn(
@@ -8525,12 +8586,23 @@ jobs:
             workflow,
         )
         self.assertIn(
-            "PLATFORM_SAFETY_RESULT: ${{ needs.platform-safety.result }}",
+            "INDEPENDENT_SUPERVISOR_RESULT: "
+            "${{ needs.independent_supervisor_tests.result }}",
+            workflow,
+        )
+        self.assertIn(
+            "READONLY_INSTALL_SUPERVISOR_RESULT: "
+            "${{ needs.readonly_install_supervisor_tests.result }}",
             workflow,
         )
         self.assertIn('test "$PLATFORM_TESTS_RESULT" = "success"', workflow)
         self.assertIn('test "$PYTHON_39_RESULT" = "success"', workflow)
-        self.assertIn('test "$PLATFORM_SAFETY_RESULT" = "success"', workflow)
+        self.assertIn(
+            'test "$INDEPENDENT_SUPERVISOR_RESULT" = "success"', workflow
+        )
+        self.assertIn(
+            'test "$READONLY_INSTALL_SUPERVISOR_RESULT" = "success"', workflow
+        )
 
     def test_python_workflows_disable_implicit_bytecode(self) -> None:
         workflow_paths = (
