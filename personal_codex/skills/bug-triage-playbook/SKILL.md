@@ -1,15 +1,15 @@
 ---
 name: bug-triage-playbook
-description: Optionally transport and inspect allowlisted Jenkins-style HTTPS console, API, and ZIP artifacts with bounded authentication, redirects, output, extraction, and wall time. Use when a task has an exact remote artifact URL or a local ZIP and needs a private probe, fetch, member listing, text view, or single-member extraction before diagnosis.
+description: Transport and inspect allowlisted Cisco Jenkins HTTPS console, API, and ZIP artifacts with bounded authentication, redirects, output, extraction, and wall time. Use when Joey has an exact remote artifact URL or a local ZIP and needs a private fixed-profile probe, fetch, member listing, text view, or single-member extraction before diagnosis.
 ---
 
 # Bounded Artifact Transport
 
 ## Scope
 
-This private skill supplies one canonical artifact transport helper. It does not define a generic root-cause method, GitHub Actions triage, tracker lookup, remote process diagnosis, or private host policy. Use the relevant forge or tracker skill for those tasks, and use ordinary evidence-based reasoning after the requested artifact is available.
+This private skill supplies one canonical artifact transport helper for Joey's fixed Cisco Jenkins policy. It does not define a generic root-cause method, GitHub Actions triage, tracker lookup, or remote process diagnosis. Use the relevant forge skill or [$cisco-trackers-lookup](../cisco-trackers-lookup/SKILL.md) for those tasks, and use ordinary evidence-based reasoning after the requested artifact is available.
 
-The helper is `scripts/jenkins_artifact_probe.py`. Its private configuration is deliberately fixed and fail-closed; callers cannot widen hosts, auth profiles, deadlines, or resource ceilings at runtime.
+The helper is `scripts/jenkins_artifact_probe.py`. Its private configuration is fixed and fail-closed by this release process; callers cannot widen hosts, auth profiles, deadlines, or resource ceilings at runtime.
 
 ## Workflow
 

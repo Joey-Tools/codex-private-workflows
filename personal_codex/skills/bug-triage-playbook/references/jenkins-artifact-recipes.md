@@ -1,6 +1,6 @@
 # Bounded Jenkins-Style Artifact Recipes
 
-These recipes use the optional public helper as the canonical transport boundary. The public host and job names are synthetic. Run the installed helper directly; avoid wrapping authenticated calls in a broad shell command.
+These recipes use the private helper as the canonical transport boundary. The allowed host is fixed by the private release, and job names are examples. Run the installed helper directly; avoid wrapping authenticated calls in a broad shell command.
 
 ```bash
 helper="$HOME/.codex/skills/bug-triage-playbook/scripts/jenkins_artifact_probe.py"

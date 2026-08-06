@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import ast
 import contextlib
 from collections.abc import Callable, Iterator
 import ctypes
@@ -155,6 +156,120 @@ PRIVATE_LEGACY_MUTABLE_RELEASE_BLOCK = """_LEGACY_MUTABLE_RELEASES = {
 }"""
 
 
+PUBLIC_BUG_TRIAGE_DESCRIPTION = (
+    "description: Optionally transport and inspect allowlisted Jenkins-style HTTPS "
+    "console, API, and ZIP artifacts with bounded authentication, redirects, output, "
+    "extraction, and wall time. Use when a task has an exact remote artifact URL or a "
+    "local ZIP and needs a public-safe probe, fetch, member listing, text view, or "
+    "single-member extraction before diagnosis."
+)
+
+
+PRIVATE_BUG_TRIAGE_DESCRIPTION = (
+    "description: Transport and inspect allowlisted Cisco Jenkins HTTPS console, API, "
+    "and ZIP artifacts with bounded authentication, redirects, output, extraction, "
+    "and wall time. Use when Joey has an exact remote artifact URL or a local ZIP and "
+    "needs a private fixed-profile probe, fetch, member listing, text view, or "
+    "single-member extraction before diagnosis."
+)
+
+
+PUBLIC_BUG_TRIAGE_SCOPE = (
+    "This optional public skill supplies one canonical artifact transport helper. It "
+    "does not define a generic root-cause method, GitHub Actions triage, tracker "
+    "lookup, remote process diagnosis, or private host policy. Use the relevant forge "
+    "or tracker skill for those tasks, and use ordinary evidence-based reasoning after "
+    "the requested artifact is available."
+)
+
+
+PRIVATE_BUG_TRIAGE_SCOPE = (
+    "This private skill supplies one canonical artifact transport helper for Joey's "
+    "fixed Cisco Jenkins policy. It does not define a generic root-cause method, GitHub "
+    "Actions triage, tracker lookup, or remote process diagnosis. "
+    "Use the relevant forge skill or "
+    "[$cisco-trackers-lookup](../cisco-trackers-lookup/SKILL.md) for those tasks, and "
+    "use ordinary evidence-based reasoning after the requested artifact is available."
+)
+
+
+PUBLIC_BUG_TRIAGE_CONFIGURATION = (
+    "The helper is `scripts/jenkins_artifact_probe.py`. Its public configuration is "
+    "deliberately synthetic and fail-closed. A private installation may specialize "
+    "fixed source constants through its own release process; callers cannot widen "
+    "hosts, auth profiles, deadlines, or resource ceilings at runtime."
+)
+
+
+PRIVATE_BUG_TRIAGE_CONFIGURATION = (
+    "The helper is `scripts/jenkins_artifact_probe.py`. Its private configuration is "
+    "fixed and fail-closed by this release process; callers cannot widen hosts, auth "
+    "profiles, deadlines, or resource ceilings at runtime."
+)
+
+
+PUBLIC_BUG_TRIAGE_RECIPES_SCOPE = (
+    "These recipes use the optional public helper as the canonical transport boundary. "
+    "The public host and job names are synthetic. Run the installed helper directly; "
+    "avoid wrapping authenticated calls in a broad shell command."
+)
+
+
+PRIVATE_BUG_TRIAGE_RECIPES_SCOPE = (
+    "These recipes use the private helper as the canonical transport boundary. The "
+    "allowed host is fixed by the private release, and job names are examples. Run the "
+    "installed helper directly; avoid wrapping authenticated calls in a broad shell "
+    "command."
+)
+
+
+PUBLIC_BUG_TRIAGE_CONFIG_BLOCK = '''DEFAULT_ALLOWED_HOSTS = frozenset({"jenkins.example.com"})
+AUTH_PROFILES = {
+    "default": (
+        "JENKINS_ARTIFACT_USER",
+        "JENKINS_ARTIFACT_TOKEN",
+    ),
+}'''
+
+
+PRIVATE_BUG_TRIAGE_CONFIG_BLOCK = '''ALLOWED_HOSTS = frozenset({"engci-private-sjc.cisco.com"})
+AUTH_PROFILES = {
+    "jenkins_mbpm2_codex": (
+        "Jenkins_mbpM2_codex_username",
+        "Jenkins_mbpM2_codex_token",
+    ),
+    "jenkins_webex_teams": (
+        "Jenkins_webex_teams_username",
+        "Jenkins_webex_teams_token",
+    ),
+    "wme_jenkins_jobs_artifact": (
+        "wme_jenkins_jobs_artifact_user",
+        "wme_jenkins_jobs_artifact_token",
+    ),
+}'''
+
+
+PRIVATE_BUG_TRIAGE_TARGET = _path("personal_codex/skills/bug-triage-playbook")
+PRIVATE_BUG_TRIAGE_ALLOWED_HOSTS = frozenset({"engci-private-sjc.cisco.com"})
+PRIVATE_BUG_TRIAGE_AUTH_PROFILES = {
+    "jenkins_mbpm2_codex": (
+        "Jenkins_mbpM2_codex_username",
+        "Jenkins_mbpM2_codex_token",
+    ),
+    "jenkins_webex_teams": (
+        "Jenkins_webex_teams_username",
+        "Jenkins_webex_teams_token",
+    ),
+    "wme_jenkins_jobs_artifact": (
+        "wme_jenkins_jobs_artifact_user",
+        "wme_jenkins_jobs_artifact_token",
+    ),
+}
+PRIVATE_BUG_TRIAGE_REVIEWED_HELPER_SHA256 = (
+    "f080007defab89f85e8a6852cde8ace17930af3692e29ade8158fa8c995e49aa"
+)
+
+
 def _rule(
     repo: str,
     source: str,
@@ -287,49 +402,53 @@ SYNC_RULES = (
         "skills/bug-triage-playbook",
         "personal_codex/skills/bug-triage-playbook",
         (
-            Replacement("needs a public-safe probe", "needs a private probe"),
             Replacement(
-                "This optional public skill supplies one canonical artifact "
-                "transport helper.",
-                "This private skill supplies one canonical artifact transport helper.",
+                PUBLIC_BUG_TRIAGE_DESCRIPTION,
+                PRIVATE_BUG_TRIAGE_DESCRIPTION,
+                path=Path("SKILL.md"),
+                required_count=1,
             ),
             Replacement(
-                "Its public configuration is deliberately synthetic and fail-closed. "
-                "A private installation may specialize fixed source constants through "
-                "its own release process;",
-                "Its private configuration is deliberately fixed and fail-closed;",
+                PUBLIC_BUG_TRIAGE_SCOPE,
+                PRIVATE_BUG_TRIAGE_SCOPE,
+                path=Path("SKILL.md"),
+                required_count=1,
             ),
             Replacement(
-                'DEFAULT_ALLOWED_HOSTS = frozenset({"jenkins.example.com"})\n'
-                "AUTH_PROFILES = {\n"
-                '    "default": (\n'
-                '        "JENKINS_ARTIFACT_USER",\n'
-                '        "JENKINS_ARTIFACT_TOKEN",\n'
-                "    ),\n"
-                "}",
-                'ALLOWED_HOSTS = frozenset({"engci-private-sjc.cisco.com"})\n'
-                "AUTH_PROFILES = {\n"
-                '    "jenkins_mbpm2_codex": (\n'
-                '        "Jenkins_mbpM2_codex_username",\n'
-                '        "Jenkins_mbpM2_codex_token",\n'
-                "    ),\n"
-                '    "jenkins_webex_teams": (\n'
-                '        "Jenkins_webex_teams_username",\n'
-                '        "Jenkins_webex_teams_token",\n'
-                "    ),\n"
-                '    "wme_jenkins_jobs_artifact": (\n'
-                '        "wme_jenkins_jobs_artifact_user",\n'
-                '        "wme_jenkins_jobs_artifact_token",\n'
-                "    ),\n"
-                "}",
+                PUBLIC_BUG_TRIAGE_CONFIGURATION,
+                PRIVATE_BUG_TRIAGE_CONFIGURATION,
+                path=Path("SKILL.md"),
+                required_count=1,
             ),
-            Replacement("jenkins.example.com", "engci-private-sjc.cisco.com"),
             Replacement(
-                "--auth-profile default", "--auth-profile wme_jenkins_jobs_artifact"
+                PUBLIC_BUG_TRIAGE_CONFIG_BLOCK,
+                PRIVATE_BUG_TRIAGE_CONFIG_BLOCK,
+                path=Path("scripts/jenkins_artifact_probe.py"),
+                required_count=1,
             ),
             Replacement(
                 "if parsed.hostname.lower() not in DEFAULT_ALLOWED_HOSTS:",
                 "if parsed.hostname.lower() not in ALLOWED_HOSTS:",
+                path=Path("scripts/jenkins_artifact_probe.py"),
+                required_count=1,
+            ),
+            Replacement(
+                PUBLIC_BUG_TRIAGE_RECIPES_SCOPE,
+                PRIVATE_BUG_TRIAGE_RECIPES_SCOPE,
+                path=Path("references/jenkins-artifact-recipes.md"),
+                required_count=1,
+            ),
+            Replacement(
+                "jenkins.example.com",
+                "engci-private-sjc.cisco.com",
+                path=Path("references/jenkins-artifact-recipes.md"),
+                required_count=3,
+            ),
+            Replacement(
+                "--auth-profile default",
+                "--auth-profile wme_jenkins_jobs_artifact",
+                path=Path("references/jenkins-artifact-recipes.md"),
+                required_count=3,
             ),
         ),
         common_joey_text=True,
@@ -339,7 +458,16 @@ SYNC_RULES = (
             "JENKINS_ARTIFACT_TOKEN",
             "--auth-profile default",
             "DEFAULT_ALLOWED_HOSTS",
-            "_allowed_hosts()",
+            "_allowed_hosts",
+            "optional public skill",
+            "public-safe",
+            "public configuration",
+            "deliberately synthetic",
+            "A private installation may specialize",
+            "relevant forge or tracker skill",
+            "optional public helper",
+            "The public host",
+            "private host policy",
         ),
     ),
     _rule(
@@ -1185,6 +1313,654 @@ def _reject_forbidden_residuals(target: Path, rule: SyncRule) -> None:
                 raise SyncError(
                     f"forbidden residual {residual!r} remains in {path.relative_to(target)}"
                 )
+
+
+def _private_bug_triage_direct_assignments(
+    tree: ast.Module,
+) -> tuple[dict[str, ast.Assign], set[int]]:
+    protected = {"ALLOWED_HOSTS", "AUTH_PROFILES"}
+    assignments: dict[str, list[ast.Assign]] = {
+        name: [] for name in protected
+    }
+    allowed_target_ids: set[int] = set()
+    for statement in tree.body:
+        if not isinstance(statement, ast.Assign) or len(statement.targets) != 1:
+            continue
+        target = statement.targets[0]
+        if not isinstance(target, ast.Name) or target.id not in protected:
+            continue
+        assignments[target.id].append(statement)
+        allowed_target_ids.add(id(target))
+
+    exact: dict[str, ast.Assign] = {}
+    for name in sorted(protected):
+        matches = assignments[name]
+        if len(matches) != 1:
+            raise SyncError(
+                "private bug-triage policy requires exactly one module-level direct "
+                f"assignment to {name} ({len(matches)} != 1)"
+            )
+        exact[name] = matches[0]
+    return exact, allowed_target_ids
+
+
+def _private_bug_triage_literal_string(node: ast.AST, *, label: str) -> str:
+    if not isinstance(node, ast.Constant) or not isinstance(node.value, str):
+        raise SyncError(f"private bug-triage {label} must be a string literal")
+    return node.value
+
+
+def _private_bug_triage_validate_policy_values(
+    assignments: dict[str, ast.Assign],
+) -> None:
+    allowed_hosts_value = assignments["ALLOWED_HOSTS"].value
+    if not (
+        isinstance(allowed_hosts_value, ast.Call)
+        and isinstance(allowed_hosts_value.func, ast.Name)
+        and allowed_hosts_value.func.id == "frozenset"
+        and len(allowed_hosts_value.args) == 1
+        and not allowed_hosts_value.keywords
+        and isinstance(allowed_hosts_value.args[0], ast.Set)
+    ):
+        raise SyncError(
+            "private bug-triage ALLOWED_HOSTS must be one explicit frozenset literal"
+        )
+    host_nodes = allowed_hosts_value.args[0].elts
+    hosts = frozenset(
+        _private_bug_triage_literal_string(node, label="allowed host")
+        for node in host_nodes
+    )
+    if len(host_nodes) != len(hosts) or hosts != PRIVATE_BUG_TRIAGE_ALLOWED_HOSTS:
+        raise SyncError("private bug-triage ALLOWED_HOSTS policy does not match")
+
+    auth_value = assignments["AUTH_PROFILES"].value
+    if not isinstance(auth_value, ast.Dict) or len(auth_value.keys) != len(
+        PRIVATE_BUG_TRIAGE_AUTH_PROFILES
+    ):
+        raise SyncError("private bug-triage AUTH_PROFILES must be one exact dict literal")
+    profiles: dict[str, tuple[str, str]] = {}
+    for key_node, value_node in zip(auth_value.keys, auth_value.values, strict=True):
+        if key_node is None:
+            raise SyncError("private bug-triage AUTH_PROFILES cannot use dict unpacking")
+        key = _private_bug_triage_literal_string(key_node, label="auth profile name")
+        if (
+            not isinstance(value_node, ast.Tuple)
+            or len(value_node.elts) != 2
+            or any(isinstance(element, ast.Starred) for element in value_node.elts)
+        ):
+            raise SyncError(
+                f"private bug-triage auth profile {key!r} must be a two-string tuple"
+            )
+        value = tuple(
+            _private_bug_triage_literal_string(
+                element,
+                label=f"auth profile {key!r} environment name",
+            )
+            for element in value_node.elts
+        )
+        if key in profiles:
+            raise SyncError(f"private bug-triage duplicate auth profile: {key}")
+        profiles[key] = value
+    if profiles != PRIVATE_BUG_TRIAGE_AUTH_PROFILES:
+        raise SyncError("private bug-triage AUTH_PROFILES policy does not match")
+
+
+def _private_bug_triage_references_name(
+    node: ast.AST,
+    names: frozenset[str],
+) -> bool:
+    return any(
+        isinstance(candidate, ast.Name) and candidate.id in names
+        for candidate in ast.walk(node)
+    )
+
+
+def _private_bug_triage_is_allowed_sorted_call(node: ast.Call) -> bool:
+    return (
+        isinstance(node.func, ast.Name)
+        and node.func.id == "sorted"
+        and len(node.args) == 1
+        and not node.keywords
+        and isinstance(node.args[0], ast.Name)
+        and node.args[0].id == "AUTH_PROFILES"
+    )
+
+
+def _private_bug_triage_is_allowed_dynamic_reflection_call(node: ast.Call) -> bool:
+    return (
+        isinstance(node.func, ast.Name)
+        and node.func.id == "getattr"
+        and len(node.args) == 3
+        and not node.keywords
+        and isinstance(node.args[0], ast.Name)
+        and node.args[0].id == "signal"
+        and isinstance(node.args[1], ast.Name)
+        and node.args[1].id == "name"
+        and isinstance(node.args[2], ast.Constant)
+        and node.args[2].value is None
+    )
+
+
+def _private_bug_triage_is_allowed_direct_reflection_call(
+    node: ast.Call,
+    forbidden_reflection_attributes: frozenset[str],
+) -> bool:
+    if (
+        not isinstance(node.func, ast.Name)
+        or node.func.id not in {"delattr", "getattr", "setattr"}
+    ):
+        return False
+    if _private_bug_triage_is_allowed_dynamic_reflection_call(node):
+        return True
+    return (
+        len(node.args) >= 2
+        and isinstance(node.args[1], ast.Constant)
+        and isinstance(node.args[1].value, str)
+        and node.args[1].value not in forbidden_reflection_attributes
+    )
+
+
+def _private_bug_triage_validate_no_policy_mutation(
+    tree: ast.Module,
+    allowed_target_ids: set[int],
+    allowed_definition_ids: set[int],
+) -> None:
+    protected = frozenset({"ALLOWED_HOSTS", "AUTH_PROFILES"})
+    protected_bindings = protected | {"_ensure_allowed_url"}
+    reserved = protected_bindings | {"frozenset", "sorted"}
+    reserved_builtins = frozenset({"frozenset", "sorted"})
+    forbidden_dynamic_calls = frozenset(
+        {"__import__", "compile", "eval", "exec", "globals", "locals", "vars"}
+    )
+    bounded_reflection_calls = frozenset(
+        {"delattr", "getattr", "setattr"}
+    )
+    indirect_reflection_attributes = frozenset(
+        {
+            "__delattr__",
+            "__builtins__",
+            "__dict__",
+            "__getattribute__",
+            "__globals__",
+            "__setattr__",
+            "_current_frames",
+            "_getframe",
+            "f_builtins",
+            "f_globals",
+            "f_locals",
+        }
+    )
+    policy_sensitive_builtins = forbidden_dynamic_calls | bounded_reflection_calls
+    forbidden_reflection_attributes = (
+        policy_sensitive_builtins | indirect_reflection_attributes | {"modules"}
+    )
+    allowed_reflection_name_load_ids = {
+        id(node.func)
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and _private_bug_triage_is_allowed_direct_reflection_call(
+            node, forbidden_reflection_attributes
+        )
+    }
+    allowed_guard_name_load_ids = {
+        id(node.func)
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "_ensure_allowed_url"
+    }
+    for node in ast.walk(tree):
+        if (
+            isinstance(node, ast.Name)
+            and node.id in protected_bindings
+            and isinstance(node.ctx, (ast.Store, ast.Del))
+            and id(node) not in allowed_target_ids
+        ):
+            raise SyncError(
+                f"private bug-triage policy forbids rebinding {node.id}"
+            )
+        if (
+            isinstance(node, ast.Name)
+            and node.id in reserved_builtins
+            and isinstance(node.ctx, (ast.Store, ast.Del))
+        ):
+            raise SyncError(
+                f"private bug-triage policy forbids shadowing {node.id}"
+            )
+        if isinstance(node, ast.Attribute) and node.attr in reserved:
+            raise SyncError("private bug-triage policy forbids reserved attributes")
+        if (
+            isinstance(node, ast.Attribute)
+            and isinstance(node.ctx, ast.Load)
+            and node.attr in bounded_reflection_calls
+        ):
+            raise SyncError(
+                "private bug-triage policy forbids reflection builtin attribute loads"
+            )
+        if (
+            isinstance(node, ast.Attribute)
+            and isinstance(node.ctx, ast.Load)
+            and (
+                node.attr in indirect_reflection_attributes
+                or node.attr == "modules"
+            )
+        ):
+            raise SyncError(
+                "private bug-triage policy forbids indirect builtin namespace/reflection access"
+            )
+        if isinstance(node, (ast.Attribute, ast.Subscript)) and isinstance(
+            node.ctx, (ast.Store, ast.Del)
+        ):
+            if _private_bug_triage_references_name(node, protected_bindings):
+                raise SyncError(
+                    "private bug-triage policy forbids attribute or subscript mutation"
+                )
+        if isinstance(node, ast.AugAssign) and _private_bug_triage_references_name(
+            node.target, protected_bindings
+        ):
+            raise SyncError("private bug-triage policy forbids augmented mutation")
+        if isinstance(node, (ast.Global, ast.Nonlocal)) and reserved.intersection(
+            node.names
+        ):
+            raise SyncError("private bug-triage policy forbids global/nonlocal policy names")
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            if node.name in reserved and id(node) not in allowed_definition_ids:
+                raise SyncError(
+                    f"private bug-triage policy forbids shadowing {node.name}"
+                )
+        if isinstance(node, ast.arg) and node.arg in reserved:
+            raise SyncError(
+                f"private bug-triage policy forbids argument shadowing {node.arg}"
+            )
+        if isinstance(node, ast.alias) and (
+            node.name.split(".", 1)[0] in reserved or node.asname in reserved
+        ):
+            raise SyncError("private bug-triage policy forbids imported policy names")
+        if isinstance(node, ast.Import) and any(
+            alias.name.split(".", 1)[0] == "builtins" for alias in node.names
+        ):
+            raise SyncError(
+                "private bug-triage policy forbids importing the builtins module"
+            )
+        if (
+            isinstance(node, ast.ImportFrom)
+            and node.module == "builtins"
+        ):
+            raise SyncError(
+                "private bug-triage policy forbids importing from builtins"
+            )
+        if (
+            isinstance(node, ast.ImportFrom)
+            and any(alias.name == "*" for alias in node.names)
+        ):
+            raise SyncError(
+                "private bug-triage policy forbids wildcard imports"
+            )
+        if (
+            isinstance(node, ast.ImportFrom)
+            and node.module == "sys"
+            and any(alias.name == "modules" for alias in node.names)
+        ):
+            raise SyncError(
+                "private bug-triage policy forbids importing the sys module registry"
+            )
+        if (
+            isinstance(node, ast.ImportFrom)
+            and node.module == "sys"
+            and any(
+                alias.name in {"_current_frames", "_getframe"}
+                for alias in node.names
+            )
+        ):
+            raise SyncError(
+                "private bug-triage policy forbids importing sys frame reflection"
+            )
+        if isinstance(node, ast.ExceptHandler) and node.name in reserved:
+            raise SyncError("private bug-triage policy forbids exception-name shadowing")
+        if isinstance(node, (ast.MatchAs, ast.MatchStar)) and node.name in reserved:
+            raise SyncError("private bug-triage policy forbids pattern capture")
+        if isinstance(node, ast.MatchMapping) and node.rest in reserved:
+            raise SyncError("private bug-triage policy forbids mapping-rest capture")
+        if (
+            isinstance(node, ast.Constant)
+            and isinstance(node.value, str)
+            and any(name in node.value for name in reserved)
+        ):
+            raise SyncError("private bug-triage policy forbids dynamic name lookup")
+        if not isinstance(node, ast.Call):
+            if (
+                isinstance(node, ast.Name)
+                and node.id in forbidden_dynamic_calls
+                and isinstance(node.ctx, ast.Load)
+            ):
+                raise SyncError(
+                    f"private bug-triage policy forbids dynamic builtin reference {node.id}"
+                )
+            if (
+                isinstance(node, ast.Name)
+                and node.id in bounded_reflection_calls
+                and isinstance(node.ctx, ast.Load)
+                and id(node) not in allowed_reflection_name_load_ids
+            ):
+                raise SyncError(
+                    f"private bug-triage policy forbids unapproved reflection builtin reference {node.id}"
+                )
+            if (
+                isinstance(node, ast.Name)
+                and node.id in {"builtins", "__builtins__"}
+                and isinstance(node.ctx, ast.Load)
+            ):
+                raise SyncError(
+                    f"private bug-triage policy forbids builtin namespace reference {node.id}"
+                )
+            if (
+                isinstance(node, ast.Name)
+                and node.id == "_ensure_allowed_url"
+                and isinstance(node.ctx, ast.Load)
+                and id(node) not in allowed_guard_name_load_ids
+            ):
+                raise SyncError(
+                    "private bug-triage policy forbids unapproved "
+                    "_ensure_allowed_url references"
+                )
+            continue
+        if isinstance(node.func, ast.Name) and node.func.id in forbidden_dynamic_calls:
+            raise SyncError(
+                f"private bug-triage policy forbids dynamic call {node.func.id}()"
+            )
+        if (
+            isinstance(node.func, ast.Attribute)
+            and (
+                node.func.attr in bounded_reflection_calls
+                or (
+                    node.func.attr in forbidden_dynamic_calls
+                    and isinstance(node.func.value, ast.Name)
+                    and node.func.value.id in {"builtins", "__builtins__"}
+                )
+            )
+        ):
+            raise SyncError(
+                "private bug-triage policy forbids qualified dynamic/reflection builtin calls"
+            )
+        if (
+            isinstance(node.func, ast.Name)
+            and node.func.id in bounded_reflection_calls
+            and len(node.args) >= 2
+            and isinstance(node.args[1], ast.Constant)
+            and node.args[1].value in forbidden_reflection_attributes
+        ):
+            raise SyncError(
+                "private bug-triage policy forbids reflection namespace/builtin acquisition"
+            )
+        if (
+            isinstance(node.func, ast.Name)
+            and node.func.id in bounded_reflection_calls
+            and (
+                len(node.args) < 2
+                or not isinstance(node.args[1], ast.Constant)
+                or not isinstance(node.args[1].value, str)
+            )
+            and not _private_bug_triage_is_allowed_dynamic_reflection_call(node)
+        ):
+            raise SyncError(
+                "private bug-triage policy requires literal reflection attributes"
+            )
+        if isinstance(node.func, ast.Attribute) and _private_bug_triage_references_name(
+            node.func.value, protected_bindings
+        ):
+            raise SyncError("private bug-triage policy forbids method mutation")
+
+
+def _private_bug_triage_is_host_membership_condition(node: ast.Compare) -> bool:
+    if (
+        len(node.ops) != 1
+        or not isinstance(node.ops[0], ast.NotIn)
+        or len(node.comparators) != 1
+        or not isinstance(node.comparators[0], ast.Name)
+        or node.comparators[0].id != "ALLOWED_HOSTS"
+    ):
+        return False
+    call = node.left
+    return (
+        isinstance(call, ast.Call)
+        and not call.args
+        and not call.keywords
+        and isinstance(call.func, ast.Attribute)
+        and call.func.attr == "lower"
+        and isinstance(call.func.value, ast.Attribute)
+        and call.func.value.attr == "hostname"
+        and isinstance(call.func.value.value, ast.Name)
+        and call.func.value.value.id == "parsed"
+    )
+
+
+def _private_bug_triage_validate_url_guard(
+    function: ast.FunctionDef,
+) -> ast.Compare:
+    if function.decorator_list:
+        raise SyncError(
+            "private bug-triage policy forbids _ensure_allowed_url decorators"
+        )
+
+    guards = [
+        statement
+        for statement in function.body
+        if isinstance(statement, ast.If)
+        and isinstance(statement.test, ast.Compare)
+        and _private_bug_triage_is_host_membership_condition(statement.test)
+    ]
+    if len(guards) != 1:
+        raise SyncError(
+            "private bug-triage policy requires one direct lowercase "
+            "ALLOWED_HOSTS guard"
+        )
+    guard = guards[0]
+
+    parsed_assignments = [
+        statement
+        for statement in function.body
+        if (
+            isinstance(statement, ast.Assign)
+            and len(statement.targets) == 1
+            and isinstance(statement.targets[0], ast.Name)
+            and statement.targets[0].id == "parsed"
+            and isinstance(statement.value, ast.Call)
+            and len(statement.value.args) == 1
+            and not statement.value.keywords
+            and isinstance(statement.value.args[0], ast.Name)
+            and statement.value.args[0].id == "url"
+            and isinstance(statement.value.func, ast.Attribute)
+            and statement.value.func.attr == "urlparse"
+            and isinstance(statement.value.func.value, ast.Attribute)
+            and statement.value.func.value.attr == "parse"
+            and isinstance(statement.value.func.value.value, ast.Name)
+            and statement.value.func.value.value.id == "urllib"
+        )
+    ]
+    if len(parsed_assignments) != 1:
+        raise SyncError(
+            "private bug-triage _ensure_allowed_url requires one direct "
+            "parsed = urllib.parse.urlparse(url) assignment"
+        )
+    parsed_assignment = parsed_assignments[0]
+    allowed_parsed_store_id = id(parsed_assignment.targets[0])
+    rebound_inputs = [
+        node
+        for node in ast.walk(function)
+        if (
+            isinstance(node, ast.Name)
+            and node.id in {"parsed", "url"}
+            and isinstance(node.ctx, (ast.Store, ast.Del))
+            and id(node) != allowed_parsed_store_id
+        )
+    ]
+    if rebound_inputs or any(
+        isinstance(node, (ast.Global, ast.Nonlocal))
+        and {"parsed", "url"}.intersection(node.names)
+        for node in ast.walk(function)
+    ):
+        raise SyncError(
+            "private bug-triage _ensure_allowed_url forbids parsed/url rebinding"
+        )
+    if function.body.index(parsed_assignment) >= function.body.index(guard):
+        raise SyncError(
+            "private bug-triage URL parse assignment must precede the host guard"
+        )
+    if (
+        guard.orelse
+        or len(guard.body) != 1
+        or not isinstance(guard.body[0], ast.Raise)
+    ):
+        raise SyncError(
+            "private bug-triage ALLOWED_HOSTS guard must directly raise"
+        )
+
+    returns = [node for node in ast.walk(function) if isinstance(node, ast.Return)]
+    if (
+        len(returns) != 1
+        or returns[0] not in function.body
+        or function.body.index(guard) >= function.body.index(returns[0])
+        or not isinstance(returns[0].value, ast.Name)
+        or returns[0].value.id != "parsed"
+    ):
+        raise SyncError(
+            "private bug-triage ALLOWED_HOSTS guard must precede the sole "
+            "direct parsed return"
+        )
+    if any(
+        isinstance(node, (ast.Yield, ast.YieldFrom)) for node in ast.walk(function)
+    ):
+        raise SyncError(
+            "private bug-triage _ensure_allowed_url cannot be a generator"
+        )
+    return guard.test
+
+
+def _private_bug_triage_validate_policy_loads(
+    tree: ast.Module,
+    host_condition: ast.Compare,
+) -> None:
+    protected = frozenset({"ALLOWED_HOSTS", "AUTH_PROFILES"})
+    allowed_load_ids = {id(host_condition.comparators[0])}
+
+    auth_functions = [
+        statement
+        for statement in tree.body
+        if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and statement.name == "_add_basic_auth"
+    ]
+    if len(auth_functions) != 1:
+        raise SyncError("private bug-triage policy requires exactly one _add_basic_auth")
+    auth_lookups = [
+        node
+        for node in ast.walk(auth_functions[0])
+        if isinstance(node, ast.Subscript)
+        and isinstance(node.ctx, ast.Load)
+        and isinstance(node.value, ast.Name)
+        and node.value.id == "AUTH_PROFILES"
+        and isinstance(node.slice, ast.Name)
+        and node.slice.id == "auth_profile"
+    ]
+    if len(auth_lookups) != 1:
+        raise SyncError(
+            "private bug-triage policy requires one AUTH_PROFILES[auth_profile] load"
+        )
+    allowed_load_ids.add(id(auth_lookups[0].value))
+
+    sorted_calls = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and _private_bug_triage_is_allowed_sorted_call(node)
+    ]
+    if len(sorted_calls) != 3:
+        raise SyncError(
+            "private bug-triage policy requires exactly three sorted(AUTH_PROFILES) "
+            f"loads ({len(sorted_calls)} != 3)"
+        )
+    allowed_load_ids.update(id(call.args[0]) for call in sorted_calls)
+
+    unexpected = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Name)
+        and isinstance(node.ctx, ast.Load)
+        and node.id in protected
+        and id(node) not in allowed_load_ids
+    ]
+    if unexpected:
+        locations = ", ".join(
+            f"{node.id}@{getattr(node, 'lineno', '?')}" for node in unexpected
+        )
+        raise SyncError(
+            "private bug-triage policy forbids unexpected policy loads: "
+            f"{locations}"
+        )
+
+
+def _validate_private_bug_triage_target_contents(target: Path) -> None:
+    """Protect the reviewed helper bytes and credential-routing access policy."""
+
+    script = target / "scripts/jenkins_artifact_probe.py"
+    if not script.is_file():
+        raise SyncError(f"private bug-triage target missing helper: {script}")
+    try:
+        payload = script.read_bytes()
+        text = payload.decode("utf-8")
+        tree = ast.parse(text, filename=str(script))
+    except (OSError, UnicodeError, SyntaxError) as exc:
+        raise SyncError(f"cannot parse private bug-triage helper: {exc}") from exc
+    assignments, allowed_target_ids = _private_bug_triage_direct_assignments(tree)
+    _private_bug_triage_validate_policy_values(assignments)
+
+    functions = [
+        statement
+        for statement in tree.body
+        if isinstance(statement, ast.FunctionDef)
+        and statement.name == "_ensure_allowed_url"
+    ]
+    if len(functions) != 1:
+        raise SyncError(
+            "private bug-triage policy requires exactly one _ensure_allowed_url"
+        )
+    function = functions[0]
+    _private_bug_triage_validate_no_policy_mutation(
+        tree,
+        allowed_target_ids,
+        {id(function)},
+    )
+    host_condition = _private_bug_triage_validate_url_guard(function)
+    _private_bug_triage_validate_policy_loads(tree, host_condition)
+
+    # The protected property is reviewed executable-content stability.  The
+    # digest and AST checks consume the same byte capture, while the sibling
+    # inventory separately contains the helper's import surface.  Object
+    # identity is not a compared signal: this is a private staging tree that
+    # is replaced only after validation succeeds.
+    helper_digest = hashlib.sha256(payload).hexdigest()
+    if helper_digest != PRIVATE_BUG_TRIAGE_REVIEWED_HELPER_SHA256:
+        raise SyncError(
+            "private bug-triage reviewed helper payload digest mismatch "
+            f"({helper_digest} != {PRIVATE_BUG_TRIAGE_REVIEWED_HELPER_SHA256})"
+        )
+
+    scripts_dir = script.parent
+    unexpected_entries: list[str] = []
+    for entry in scripts_dir.iterdir():
+        if entry == script:
+            continue
+        if (
+            entry.name == "__pycache__"
+            and entry.is_dir()
+            and not entry.is_symlink()
+        ):
+            continue
+        unexpected_entries.append(entry.name)
+    if unexpected_entries:
+        raise SyncError(
+            "private bug-triage scripts directory contains unreviewed entries: "
+            + ", ".join(sorted(unexpected_entries))
+        )
 
 
 def _require_overlay_relative_path(path: Path, *, field: str) -> None:
@@ -3548,6 +4324,43 @@ def _validate_regular_file_overlay_required_manifest_paths(
     )
 
 
+def _validate_private_bug_triage_reviewed_manifest(
+    manifest: _RegularFileOverlayTreeManifest,
+    target: Path,
+    *,
+    surface: str,
+) -> None:
+    if target != PRIVATE_BUG_TRIAGE_TARGET:
+        return
+
+    scripts_entries = {
+        entry.relative_parts: entry
+        for entry in manifest.entries
+        if entry.relative_parts[:1] == ("scripts",)
+    }
+    expected_scripts_entries = {
+        ("scripts",): "directory",
+        ("scripts", "jenkins_artifact_probe.py"): "file",
+    }
+    observed_kinds = {
+        relative_parts: entry.kind
+        for relative_parts, entry in scripts_entries.items()
+    }
+    if observed_kinds != expected_scripts_entries:
+        raise SyncError(
+            "private bug-triage reviewed scripts inventory differs at "
+            f"{surface}"
+        )
+
+    helper = scripts_entries[("scripts", "jenkins_artifact_probe.py")]
+    if helper.sha256 != PRIVATE_BUG_TRIAGE_REVIEWED_HELPER_SHA256:
+        raise SyncError(
+            "private bug-triage reviewed helper payload digest mismatch at "
+            f"{surface} ({helper.sha256} != "
+            f"{PRIVATE_BUG_TRIAGE_REVIEWED_HELPER_SHA256})"
+        )
+
+
 def _copy_regular_file_overlay_public_source_to_prepared(
     source: Path,
     prepared: Path,
@@ -3995,6 +4808,19 @@ def _copy_regular_file_overlay_public_source_to_prepared(
             label="prepared public root",
         )
         _validate_regular_file_overlay_required_manifest_paths(
+            manifest,
+            rule.target,
+            surface="prepared public source",
+        )
+        if rule.target == PRIVATE_BUG_TRIAGE_TARGET:
+            # Preserve structural diagnostics, while the descriptor-bound
+            # manifest below remains the installation admission control.
+            _validate_private_bug_triage_target_contents(prepared)
+        # The manifest is captured from descriptor-bound file content and is
+        # revalidated before install.  Comparing its helper digest protects
+        # the reviewed byte content without reopening a pathname in the
+        # production locked-source lane.
+        _validate_private_bug_triage_reviewed_manifest(
             manifest,
             rule.target,
             surface="prepared public source",
@@ -4576,6 +5402,11 @@ def _copy_prepared_regular_file_overlay_staging(
         policy_target,
         surface="staged target",
     )
+    _validate_private_bug_triage_reviewed_manifest(
+        manifest,
+        policy_target,
+        surface="staged target",
+    )
     if (
         _capture_regular_file_overlay_tree_manifest(
             staging_root.descriptor,
@@ -4987,6 +5818,12 @@ def _sync_sources_with_repo_binding(
         _ensure_safe_source(source_repo_root, source)
         _ensure_safe_target(repo_root, target)
         if (
+            rule.target == PRIVATE_BUG_TRIAGE_TARGET
+            and locked_source is not None
+            and getattr(locked_source.manifest, "root_kind", None) != "tree"
+        ):
+            raise SyncError("private bug-triage locked source must be a tree")
+        if (
             locked_source is not None
             and getattr(locked_source.manifest, "root_kind", None) == "file"
         ):
@@ -5001,7 +5838,11 @@ def _sync_sources_with_repo_binding(
             if recovery_path is not None:
                 recovery_paths.append(recovery_path)
             continue
-        if rule.regular_file_overlays or locked_source is not None:
+        if (
+            rule.regular_file_overlays
+            or rule.target == PRIVATE_BUG_TRIAGE_TARGET
+            or locked_source is not None
+        ):
             if repo_binding is None:
                 raise SyncError("secure sync requires a pinned repository root")
             if (
@@ -5167,6 +6008,8 @@ def _sync_sources_with_repo_binding(
             _copy_source_to_staging(source, staging, exclude_names=rule.exclude_names)
             _apply_rule_replacements(staging, rule)
             _reject_forbidden_residuals(staging, rule)
+            if rule.target == PRIVATE_BUG_TRIAGE_TARGET:
+                _validate_private_bug_triage_target_contents(staging)
             if rule.target == CANONICAL_REVIEW_TARGET:
                 _validate_canonical_review_target_contents(staging)
             _replace_target(target, staging)
@@ -5212,8 +6055,18 @@ def sync_sources(
                 label="repository root",
             )
         return recovery_paths
-    plain_rules = tuple(rule for rule in rules if not rule.regular_file_overlays)
-    secure_rules = tuple(rule for rule in rules if rule.regular_file_overlays)
+    plain_rules = tuple(
+        rule
+        for rule in rules
+        if not rule.regular_file_overlays
+        and rule.target != PRIVATE_BUG_TRIAGE_TARGET
+    )
+    secure_rules = tuple(
+        rule
+        for rule in rules
+        if rule.regular_file_overlays
+        or rule.target == PRIVATE_BUG_TRIAGE_TARGET
+    )
     recovery_paths = _sync_sources_with_repo_binding(
         repo_root,
         source_root,
