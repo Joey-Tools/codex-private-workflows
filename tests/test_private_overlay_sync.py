@@ -2604,6 +2604,11 @@ class PrivateOverlaySyncTests(unittest.TestCase):
             '"""Manage cross-repo project journal indexes for Codex workflows."""\n',
             encoding="utf-8",
         )
+        readme = source.parent / "README.md"
+        readme.write_text(
+            "Project journal adoption and migration contract.\n",
+            encoding="utf-8",
+        )
         rule = next(
             rule
             for rule in SYNC_MODULE.SYNC_RULES
@@ -2639,6 +2644,11 @@ class PrivateOverlaySyncTests(unittest.TestCase):
         self.assertIn(
             "Manage cross-repo project journal indexes for Joey's Codex workflows.",
             synced_script.read_text(encoding="utf-8"),
+        )
+        synced_readme = target.parent / "README.md"
+        self.assertEqual(
+            synced_readme.read_text(encoding="utf-8"),
+            "Project journal adoption and migration contract.\n",
         )
 
     def test_project_journal_sync_rule_rejects_frontmatter_drift(self) -> None:
