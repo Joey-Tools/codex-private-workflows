@@ -5710,12 +5710,16 @@ printf '%s\n' "$trusted_uv"
             normalized_probes,
         )
         self.assertIn(
-            "`whole_pr_completion_action: audit-only-no-merge-ready`",
+            "`clean_action: audit-only-no-merge-ready`",
             normalized_probes,
         )
         self.assertIn(
-            "`whole_pr_completion_action: "
+            "`negative_evidence_action: "
             "block-and-report-no-whole-pr-completion`",
+            normalized_probes,
+        )
+        self.assertIn(
+            "`whole_pr_completion_action` remains `triple-inconclusive`",
             normalized_probes,
         )
         self.assertIn(
