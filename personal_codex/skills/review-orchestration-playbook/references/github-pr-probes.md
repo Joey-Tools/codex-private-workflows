@@ -213,11 +213,13 @@ started work under an earlier merge base. It never authorizes triple completion
 or merge readiness. The receipt does not attest the provider's
 internal input merge base. Only a valid same-head/different-merge-base request
 sidecar proves `base-changed-same-head`; a missing or malformed sidecar is
-`not-proved`, makes request policy unknown, and cannot be bypassed by an
-independently trustworthy publication receipt. A future predeclared provider
-profile with provider-authenticated input-base or request/run/artifact binding
-may change this policy explicitly; the current accepted terminal-binding schema
-set is empty.
+`not-proved` and makes request policy unknown. An independently trustworthy
+publication receipt may still support artifact-level terminal classification,
+including blocking negative findings, but it cannot bypass the sidecar failure
+to authorize triple completion or merge readiness. A future predeclared
+provider profile with provider-authenticated input-base or
+request/run/artifact binding may change this policy explicitly; the current
+accepted terminal-binding schema set is empty.
 
 The strict pre edge is intentional: GitHub supplies only whole-second time
 authority for these fields, so equality cannot distinguish an artifact created
