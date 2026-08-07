@@ -3,9 +3,9 @@ id: 20260806-fci001
 title: Make Private CI Faster and Cheaper
 status: completed
 created: 2026-08-06
-updated: 2026-08-06
+updated: 2026-08-07
 branch: codex/scheduled-private-overlay-sync
-pr:
+pr: 153
 supersedes: []
 superseded_by:
 ---
@@ -40,10 +40,11 @@ superseded_by:
 - The synchronized independent-supervisor job now has a 20-minute job budget.
   Its deterministic suite is capped at 10 minutes, while `setup_latest_python`,
   reconciliation, and broker reproduction are each capped at 2 minutes.
-- The installed private review policy now matches the synchronized review
+- The landed source-reconciliation baseline supplies the private review policy
+  matching the synchronized review
   contracts: terminal GitHub Codex payloads classify evidence but cannot by
   themselves complete triple review or make a pull request merge-ready.
-- The private installation policy also retains the synchronized legacy-receipt
+- That baseline also retains the synchronized legacy-receipt
   migration rule: an old artifact is never adopted retroactively, and the
   agent cannot perform or repeat the caller-owned manual trigger.
 
@@ -75,10 +76,14 @@ superseded_by:
   both the review-policy contract selector and the private installation-policy
   selector pass after aligning `personal_codex/AGENTS.md` with the locked
   `codex-review-workflows` policy.
-- Source PR `Joey-Tools/codex-review-workflows#95` merged as
-  `77531f0c7ba8a705b14cf1e9b90b4e28baa5eecd`; the updated
-  `codex-review-workflows` entry in `private-overlay-source-lock.json` pins the
-  same SHA.
-- The full 112-test private review-policy contract initially exposed the
-  missing legacy-receipt migration rule in `personal_codex/AGENTS.md`; after
-  exact source-policy alignment it passes, as do all 257 private overlay tests.
+- Source PR `Joey-Tools/codex-review-workflows#96` landed as
+  `9a90db95cebe2d66c669e2991a8ede62f66563aa` with tree
+  `2fd8907b9dfb25fa1551a9e8bd023a6ca1d2649b`; private source-reconciliation
+  PR #154 then landed the synchronized baseline as
+  `a916e2491b70a8fcd9614df30ddd3baaa0d5cc58`.
+- Baseline release run `31135055434` completed successfully for exact private
+  master `a916e2491b70a8fcd9614df30ddd3baaa0d5cc58` before the CI-only merge.
+- The final ordinary-merge tree passes all 2,012 repository tests and all 257
+  focused private-overlay contracts. A 2,876-test review-runtime sweep exposed
+  only sandbox-denied socket binds; all 16 affected test methods pass when
+  rerun outside Seatbelt.

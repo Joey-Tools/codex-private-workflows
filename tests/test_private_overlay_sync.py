@@ -986,16 +986,40 @@ class PrivateOverlaySyncTests(unittest.TestCase):
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text("public\n", encoding="utf-8")
         canonical_tool_prefix = "TOOL_REL=skills/review-orchestration-playbook/scripts/"
+        contract_relative = Path("tests/test_contracts.py")
+        contract_replacements = tuple(
+            replacement
+            for replacement in review_rule.replacements
+            if replacement.path == contract_relative
+        )
+        self.assertEqual(len(contract_replacements), 1)
         for relative in (
             Path("references/pr-readiness.md"),
-            Path("tests/test_contracts.py"),
         ):
             (source / relative).write_text(
                 f"{canonical_tool_prefix}independent_codex_pr_review\n",
                 encoding="utf-8",
             )
+        (source / contract_relative).write_text(
+            f"{canonical_tool_prefix}independent_codex_pr_review\n"
+            + contract_replacements[0].old
+            + "\n",
+            encoding="utf-8",
+        )
         (source / "SKILL.md").write_text(
             "Use this when the user asks.\n",
+            encoding="utf-8",
+        )
+        probe_relative = Path("references/github-pr-probes.md")
+        probe_replacements = tuple(
+            replacement
+            for replacement in review_rule.replacements
+            if replacement.path == probe_relative
+        )
+        self.assertEqual(len(probe_replacements), 2)
+        (source / probe_relative).write_text(
+            "\n\n".join(replacement.old for replacement in probe_replacements)
+            + "\n",
             encoding="utf-8",
         )
         fixture_payload = (
@@ -1023,6 +1047,15 @@ class PrivateOverlaySyncTests(unittest.TestCase):
             synced_skill.read_text(encoding="utf-8"),
             "Use this when Joey asks.\n",
         )
+        synced_probe = self.repo_root / review_rule.target / probe_relative
+        synced_probe_text = synced_probe.read_text(encoding="utf-8")
+        for replacement in probe_replacements:
+            self.assertNotIn(replacement.old, synced_probe_text)
+            self.assertIn(replacement.new, synced_probe_text)
+        synced_contracts = self.repo_root / review_rule.target / contract_relative
+        synced_contracts_text = synced_contracts.read_text(encoding="utf-8")
+        self.assertNotIn(contract_replacements[0].old, synced_contracts_text)
+        self.assertIn(contract_replacements[0].new, synced_contracts_text)
 
     def test_validator_sync_rule_replaces_legacy_mutable_release_identity(
         self,
@@ -7510,16 +7543,40 @@ class PrivateOverlaySyncTests(unittest.TestCase):
             for rule in SYNC_MODULE.SYNC_RULES
             if rule.target == SYNC_MODULE.CANONICAL_REVIEW_TARGET
         )
+        private_replacements = rule.replacements[
+            : -len(SYNC_MODULE.COMMON_JOEY_TEXT_REPLACEMENTS)
+        ]
         self.assertEqual(
-            rule.replacements,
-            (
-                SYNC_MODULE.Replacement(
-                    "TOOL_REL=skills/review-orchestration-playbook/scripts/",
-                    "TOOL_REL=personal_codex/skills/"
-                    "review-orchestration-playbook/scripts/",
-                ),
+            private_replacements[0],
+            SYNC_MODULE.Replacement(
+                "TOOL_REL=skills/review-orchestration-playbook/scripts/",
+                "TOOL_REL=personal_codex/skills/"
+                "review-orchestration-playbook/scripts/",
+            ),
+        )
+        probe_replacements = tuple(
+            replacement
+            for replacement in private_replacements
+            if replacement.path == Path("references/github-pr-probes.md")
+        )
+        self.assertEqual(len(probe_replacements), 2)
+        self.assertTrue(
+            all(
+                replacement.required and replacement.required_count == 1
+                for replacement in probe_replacements
             )
-            + SYNC_MODULE.COMMON_JOEY_TEXT_REPLACEMENTS,
+        )
+        contract_replacements = tuple(
+            replacement
+            for replacement in private_replacements
+            if replacement.path == Path("tests/test_contracts.py")
+        )
+        self.assertEqual(len(contract_replacements), 1)
+        self.assertTrue(contract_replacements[0].required)
+        self.assertEqual(contract_replacements[0].required_count, 1)
+        self.assertEqual(
+            rule.replacements[-len(SYNC_MODULE.COMMON_JOEY_TEXT_REPLACEMENTS) :],
+            SYNC_MODULE.COMMON_JOEY_TEXT_REPLACEMENTS,
         )
         obsolete_layout_replacements = {
             "REPO_ROOT = SKILL_ROOT.parents[1]",
@@ -8629,14 +8686,14 @@ jobs:
             workflow.count(
                 "Run platform reconciliation safety tests (Python 3.x)"
             ),
-            2,
+            1,
         )
         self.assertEqual(
             workflow.count(
                 "if: ${{ always() && steps.setup_latest_python.outcome == "
                 "'success' }}"
             ),
-            2,
+            1,
         )
         self.assertEqual(workflow.count("    runs-on: ubuntu-slim\n"), 2)
         self.assertIn(
@@ -8897,10 +8954,6 @@ jobs:
             "never prebuild or inject the full diff into its prompt",
             "A named double review is that single-review agent plus an actual Anthropic Claude Code process",
             "Named double adds actual Claude Code",
-            "Legacy receipt migration never adopts an old artifact retroactively",
-            "caller-owned manual exact `@codex review` trigger",
-            "reaction-only evidence is unavailable",
-            "A proved `base-changed-same-head` event cannot use the manual path",
             "The canonical Claude Code compatibility range is `>=2.1.211,<3.0.0`",
             "Claude Code `2.1.212` is the audited stream-schema baseline, not a global pin",
             "outside-workspace read exclusion as prompt/model scope",
@@ -8911,9 +8964,7 @@ jobs:
             "A named triple review is the named double review plus complete authenticated current-scope GitHub Codex evidence",
             "every operating identity in `{hoteng, hoteng_cisco}` is unsupported",
             'user.login == "chatgpt-codex-connector[bot]"',
-            "Only a complete `thumbs-up-clean` reaction basis can reach the weak `+1` fallback and complete the lane",
             "If GitHub Codex is unavailable because there is no PR or the host/identity is unsupported, report `effective double`; never claim triple",
-            "An accepted terminal clean classification is immediately `triple-inconclusive`",
             "PR readiness adds CI, conversation, and branch/base gates, but no retired extra Codex gates",
             "never count a supplied-diff helper as a named lane",
             "possible cache or tool-result artifacts",

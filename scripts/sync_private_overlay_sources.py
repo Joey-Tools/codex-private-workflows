@@ -758,6 +758,62 @@ SYNC_RULES = (
                 "TOOL_REL=skills/review-orchestration-playbook/scripts/",
                 "TOOL_REL=personal_codex/skills/review-orchestration-playbook/scripts/",
             ),
+            Replacement(
+                "`not-proved`, makes request policy unknown, and cannot be bypassed by an\n"
+                "independently trustworthy publication receipt. A future predeclared provider\n"
+                "profile with provider-authenticated input-base or request/run/artifact binding\n"
+                "may change this policy explicitly; the current accepted terminal-binding schema\n"
+                "set is empty.",
+                "`not-proved` and makes request policy unknown. An independently trustworthy\n"
+                "publication receipt may still support artifact-level terminal classification,\n"
+                "including blocking negative findings, but it cannot bypass the sidecar failure\n"
+                "to authorize triple completion or merge readiness. A future predeclared\n"
+                "provider profile with provider-authenticated input-base or\n"
+                "request/run/artifact binding may change this policy explicitly; the current\n"
+                "accepted terminal-binding schema set is empty.",
+                path=Path("references/github-pr-probes.md"),
+                required_count=1,
+            ),
+            Replacement(
+                "`scope_assurance: artifact-publication-only` and\n"
+                "`whole_pr_completion_action: audit-only-no-merge-ready`; receipt-bound terminal\n"
+                "findings supplies only blocking negative evidence with\n"
+                "`whole_pr_completion_action: block-and-report-no-whole-pr-completion`. Neither",
+                "`scope_assurance: artifact-publication-only` and\n"
+                "`clean_action: audit-only-no-merge-ready`; receipt-bound terminal\n"
+                "findings supplies only blocking negative evidence with\n"
+                "`negative_evidence_action: block-and-report-no-whole-pr-completion`. The\n"
+                "machine-readable `whole_pr_completion_action` remains\n"
+                "`triple-inconclusive` for both outcomes. Neither",
+                path=Path("references/github-pr-probes.md"),
+                required_count=1,
+            ),
+            Replacement(
+                "        self.assertIn(\n"
+                "            \"`whole_pr_completion_action: audit-only-no-merge-ready`\",\n"
+                "            normalized_probes,\n"
+                "        )\n"
+                "        self.assertIn(\n"
+                "            \"`whole_pr_completion_action: \"\n"
+                "            \"block-and-report-no-whole-pr-completion`\",\n"
+                "            normalized_probes,\n"
+                "        )",
+                "        self.assertIn(\n"
+                "            \"`clean_action: audit-only-no-merge-ready`\",\n"
+                "            normalized_probes,\n"
+                "        )\n"
+                "        self.assertIn(\n"
+                "            \"`negative_evidence_action: \"\n"
+                "            \"block-and-report-no-whole-pr-completion`\",\n"
+                "            normalized_probes,\n"
+                "        )\n"
+                "        self.assertIn(\n"
+                "            \"`whole_pr_completion_action` remains `triple-inconclusive`\",\n"
+                "            normalized_probes,\n"
+                "        )",
+                path=Path("tests/test_contracts.py"),
+                required_count=1,
+            ),
         ),
         common_joey_text=True,
         replacement_excluded_paths=("tests/fixtures/ci/private.yml",),

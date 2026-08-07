@@ -213,11 +213,13 @@ started work under an earlier merge base. It never authorizes triple completion
 or merge readiness. The receipt does not attest the provider's
 internal input merge base. Only a valid same-head/different-merge-base request
 sidecar proves `base-changed-same-head`; a missing or malformed sidecar is
-`not-proved`, makes request policy unknown, and cannot be bypassed by an
-independently trustworthy publication receipt. A future predeclared provider
-profile with provider-authenticated input-base or request/run/artifact binding
-may change this policy explicitly; the current accepted terminal-binding schema
-set is empty.
+`not-proved` and makes request policy unknown. An independently trustworthy
+publication receipt may still support artifact-level terminal classification,
+including blocking negative findings, but it cannot bypass the sidecar failure
+to authorize triple completion or merge readiness. A future predeclared
+provider profile with provider-authenticated input-base or
+request/run/artifact binding may change this policy explicitly; the current
+accepted terminal-binding schema set is empty.
 
 The strict pre edge is intentional: GitHub supplies only whole-second time
 authority for these fields, so equality cannot distinguish an artifact created
@@ -602,9 +604,11 @@ artifact must come from the receipt-bound normalized member; the legacy member
 never supplies terminal clean classification or whole-PR completion. A
 receipt-bound terminal clean supplies only artifact-level classification with
 `scope_assurance: artifact-publication-only` and
-`whole_pr_completion_action: audit-only-no-merge-ready`; receipt-bound terminal
+`clean_action: audit-only-no-merge-ready`; receipt-bound terminal
 findings supplies only blocking negative evidence with
-`whole_pr_completion_action: block-and-report-no-whole-pr-completion`. Neither
+`negative_evidence_action: block-and-report-no-whole-pr-completion`. The
+machine-readable `whole_pr_completion_action` remains
+`triple-inconclusive` for both outcomes. Neither
 completes the third lane. Only a complete `thumbs-up-clean` reaction basis can
 complete the third lane. Within that legacy member,
 `clean-pending-resolution` and the exact raw-internal
