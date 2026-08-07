@@ -8418,7 +8418,7 @@ jobs:
             "release build": (
                 REPO_ROOT / ".github" / "workflows" / "release.yml",
                 "release",
-                "${{ github.event_name == 'pull_request' && 'ubuntu-slim' || 'ubuntu-latest' }}",
+                "ubuntu-latest",
             ),
             "release publish": (
                 REPO_ROOT / ".github" / "workflows" / "release.yml",
@@ -8482,30 +8482,8 @@ jobs:
                     r"(?m)^        if: github\.event_name != 'pull_request'$",
                 )
 
-        manifest_step = step_body("Validate sync manifest changes")
-        self.assertRegex(
-            manifest_step,
-            r"(?m)^        if: github\.event_name == 'pull_request'$",
-        )
-        self.assertIn(
-            "          BASE_REF: ${{ github.event.pull_request.base.sha }}\n",
-            manifest_step,
-        )
-        self.assertIn('--base-ref "$BASE_REF"', manifest_step)
-        self.assertNotIn("--release-repo", manifest_step)
-
-        release_history_step = step_body("Validate release history")
-        self.assertRegex(
-            release_history_step,
-            r"(?m)^        if: github\.event_name != 'pull_request'$",
-        )
-        self.assertIn(
-            '--release-repo "$GITHUB_REPOSITORY"',
-            release_history_step,
-        )
-        self.assertNotIn("--base-ref", release_history_step)
-
         for release_specific_step in (
+            "Validate sync manifest changes",
             "Build release package",
             "Verify release package",
         ):
@@ -8514,6 +8492,13 @@ jobs:
                     "github.event_name != 'pull_request'",
                     step_body(release_specific_step),
                 )
+
+        manifest_step = step_body("Validate sync manifest changes")
+        self.assertIn(
+            '--release-repo "$GITHUB_REPOSITORY"',
+            manifest_step,
+        )
+        self.assertNotIn("--base-ref", manifest_step)
 
         self.assertRegex(
             step_body("Require source-only Python tree"),
@@ -8551,10 +8536,8 @@ jobs:
         publish_body = publish_job.group("body")
         self.assertIn("timeout-minutes: 30", scheduled_body)
         self.assertNotIn("timeout-minutes: 15", scheduled_body)
-        self.assertIn(
-            "timeout-minutes: ${{ github.event_name == 'pull_request' && 15 || 30 }}",
-            release_body,
-        )
+        self.assertIn("timeout-minutes: 30", release_body)
+        self.assertNotIn("timeout-minutes: 15", release_body)
         self.assertIn('python-version: "3.13"', scheduled_body)
         self.assertNotIn('python-version: "3.x"', scheduled_body)
         self.assertIn('python-version: "3.13"', release_body)

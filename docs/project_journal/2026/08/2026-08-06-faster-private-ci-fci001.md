@@ -17,8 +17,8 @@ superseded_by:
 - Consume the reviewed pull-request-only CI fixture from
   `codex-review-workflows`, cancelling superseded heads and reserving macOS for
   tests with real Darwin, Xcode, codesign, Keychain, or Seatbelt semantics.
-- Use `ubuntu-slim` for bounded status, Python compatibility, aggregate, and
-  pull-request release-validation jobs.
+- Use `ubuntu-slim` for bounded status, Python compatibility, and aggregate
+  jobs.
 - Keep the required `Build private overlay release` check on pull requests but
   avoid repeating test suites already owned by the required CI workflow.
 
@@ -26,10 +26,10 @@ superseded_by:
 
 - Pull requests still require `test`, `Build private overlay release`, and
   `codex/review-gate`; the required check names are unchanged.
-- Pull-request release validation checks sync-manifest changes against the PR
-  base, builds and verifies the package, and rejects Python bytecode artifacts.
-- Default-branch and manual release validation retain the complete GitHub
-  Release-history scan; it is not forced into the 15-minute `ubuntu-slim` job.
+- Pull-request release validation retains the complete GitHub Release-history
+  scan, builds and verifies the package, and rejects Python bytecode artifacts.
+- Release validation remains on `ubuntu-latest` with a 30-minute budget because
+  cross-version manifest safety is not equivalent to a direct PR-base diff.
 - Default-branch and manual release runs retain the full test and canonical
   review suites on `ubuntu-latest` before publication.
 - Superseded pull-request CI and release runs cancel, while default-branch
@@ -89,7 +89,9 @@ superseded_by:
   focused private-overlay contracts. A 2,876-test review-runtime sweep exposed
   only sandbox-denied socket binds; all 16 affected test methods pass when
   rerun outside Seatbelt.
-- The first post-merge fresh Codex review identified that complete
-  Release-history validation had no proven 15-minute upper bound. Pull
-  requests now use the bounded local `--base-ref` path, while push/manual
-  release runs retain the strict `--release-repo` history path.
+- Two post-merge fresh Codex reviews closed the release-validation tradeoff:
+  complete history has no proven 15-minute bound, while a direct PR-base diff
+  misses cross-version hierarchy and transaction-capacity failures. The final
+  workflow therefore keeps strict `--release-repo` validation on
+  `ubuntu-latest` with 30 minutes and saves PR minutes by removing only the
+  suites already required by CI.
