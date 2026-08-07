@@ -34,6 +34,7 @@ superseded_by:
 - Canonical personal-sync `b4e74d7f35226801483a63ebe605b1298d60dc8e` is recorded only as toolbox receipt provenance; private never mirrors it directly.
 - On macOS the source-lock verifier ignores PATH and every parent developer-tool or loader selector, then directly executes fixed `/Library/Developer/CommandLineTools/usr/bin/git` under a closed environment. It binds that root-owned actual executable and every root-owned, non-group/world-writable ancestor by object identity and access policy before and after each command. The `/usr/bin/git` xcrun shim and current-user-owned or group-writable Homebrew and Xcode ancestors are intentionally outside this trust path rather than newly admitted.
 - Private master `16221c4046efa39f086e4ae6d9afba80724b04e5` is the immutable released predecessor of this reconciliation. This source update advances only the toolbox source and its receipt-bound generated payload; the other four direct source identities remain unchanged.
+- The review-source transformer now accepts the canonical single-line Ruff layout for the adjacent `whole_pr_completion_action` assertions while retaining an exact path-scoped count of one and the private `clean_action`, `negative_evidence_action`, and `triple-inconclusive` field mapping.
 
 ## Next Steps
 
@@ -114,3 +115,9 @@ superseded_by:
 - Source-only compilation, manifest-change validation, source-lock output validation, project-journal validation, and `git diff --check` passed. The complete private root suite passed 2,021/2,021 with three expected skips in 213.149 seconds outside the parent Seatbelt sandbox.
 - The complete review-runtime discovery exercised 2,876 tests with 35 expected skips. Its only seven failures and eleven errors under the parent Seatbelt sandbox were Unix-domain or loopback socket bind denials; the 16 affected test methods passed 16/16 in 6.496 seconds through the direct-local no-outer-Seatbelt channel.
 - The final toolbox-pin reconciliation was prepared on `wip/toolbox-610cd76-private-sync`; its pull request identity is recorded in the delivery surface rather than replacing this journal's historical branch and PR provenance.
+- Review-workflows PR #97 landed as `7d2ede222dba6bb98863b042c15f3d7e8945c953`, tree `7537e5e5c6309f806eac26920e676129ebf65d3b`; at the private replacement anchor, its relevant assertion source differs only by a source-layout fold, without changing the asserted runtime value.
+- Forced sync run `31196331211` stopped before PR creation or release because the prior split-string anchor matched zero times. Every other required review-source replacement matched its exact count.
+- After updating the one exact anchor, the complete landed review skill passes the stock private sync rule and retains the WME parent-edge materialization contract in the generated runtime.
+- The two focused private-sync regressions pass, and an actual-source probe over the complete landed review skill succeeds with all required replacement counts intact.
+- The local root discovery ran 2,021 tests: 2,013 passed, three skipped, and five unchanged tests failed only because the parent Seatbelt denied a Unix socket bind or temporary Git/GPG merge commits. Those exact five tests then passed 5/5 outside the parent Seatbelt.
+- Ruff lint, source-only compilation, project-journal validation, and `git diff --check` pass. Ruff format reports the same two pre-existing non-clean files on the unchanged base, so no unrelated whole-file formatting rewrite was applied.
