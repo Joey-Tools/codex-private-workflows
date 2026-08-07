@@ -47,9 +47,10 @@ PYTHONDONTWRITEBYTECODE=1 python3 -B -m unittest discover -s tests
 
 On pull requests, `Private Overlay Release` keeps the required
 `Build private overlay release` check focused on release-specific validation:
-sync-manifest validation, package build and verification, and the source-only
-Python-tree guard. CI owns the full helper syntax, private test, and canonical
-review suites for pull requests, so the release workflow does not repeat them.
+sync-manifest change validation against the pull-request base, package build
+and verification, and the source-only Python-tree guard. CI owns the full
+helper syntax, private test, and canonical review suites for pull requests, so
+the release workflow does not repeat them or scan complete Release history.
 
 On `master` pushes and eligible manual dispatches, `Private Overlay Release`
 still runs the complete validation set before publishing a GitHub release. New
@@ -80,11 +81,11 @@ python3 scripts/build_personal_codex_package.py \
   --output-dir dist
 ```
 
-Release validation compares removal history with the most recent complete
-GitHub Release rather than the immediately preceding commit. Strict release
-validation also batch-loads every authenticated complete Release manifest and
-rejects target hierarchy or transaction-capacity failures for clients that skip
-one or more intermediate Releases. Strict release
+Default-branch and manual release validation compares removal history with the
+most recent complete GitHub Release rather than the immediately preceding
+commit. That strict validation also batch-loads every authenticated complete
+Release manifest and rejects target hierarchy or transaction-capacity failures
+for clients that skip one or more intermediate Releases. Strict release
 builds bind the requested package SHA to `HEAD`, require packaged files to match
 the committed Git index, and reject untracked content, symlinked source
 ancestors, submodule `gitlink` content, and nested Git repositories.

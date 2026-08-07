@@ -26,8 +26,10 @@ superseded_by:
 
 - Pull requests still require `test`, `Build private overlay release`, and
   `codex/review-gate`; the required check names are unchanged.
-- Pull-request release validation still checks the sync manifest, builds and
-  verifies the package, and rejects Python bytecode artifacts.
+- Pull-request release validation checks sync-manifest changes against the PR
+  base, builds and verifies the package, and rejects Python bytecode artifacts.
+- Default-branch and manual release validation retain the complete GitHub
+  Release-history scan; it is not forced into the 15-minute `ubuntu-slim` job.
 - Default-branch and manual release runs retain the full test and canonical
   review suites on `ubuntu-latest` before publication.
 - Superseded pull-request CI and release runs cancel, while default-branch
@@ -87,3 +89,7 @@ superseded_by:
   focused private-overlay contracts. A 2,876-test review-runtime sweep exposed
   only sandbox-denied socket binds; all 16 affected test methods pass when
   rerun outside Seatbelt.
+- The first post-merge fresh Codex review identified that complete
+  Release-history validation had no proven 15-minute upper bound. Pull
+  requests now use the bounded local `--base-ref` path, while push/manual
+  release runs retain the strict `--release-repo` history path.

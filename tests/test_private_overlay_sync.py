@@ -8482,8 +8482,30 @@ jobs:
                     r"(?m)^        if: github\.event_name != 'pull_request'$",
                 )
 
+        manifest_step = step_body("Validate sync manifest changes")
+        self.assertRegex(
+            manifest_step,
+            r"(?m)^        if: github\.event_name == 'pull_request'$",
+        )
+        self.assertIn(
+            "          BASE_REF: ${{ github.event.pull_request.base.sha }}\n",
+            manifest_step,
+        )
+        self.assertIn('--base-ref "$BASE_REF"', manifest_step)
+        self.assertNotIn("--release-repo", manifest_step)
+
+        release_history_step = step_body("Validate release history")
+        self.assertRegex(
+            release_history_step,
+            r"(?m)^        if: github\.event_name != 'pull_request'$",
+        )
+        self.assertIn(
+            '--release-repo "$GITHUB_REPOSITORY"',
+            release_history_step,
+        )
+        self.assertNotIn("--base-ref", release_history_step)
+
         for release_specific_step in (
-            "Validate sync manifest changes",
             "Build release package",
             "Verify release package",
         ):
