@@ -8200,7 +8200,7 @@ class PrivateOverlaySyncTests(unittest.TestCase):
         )
         self.assertEqual(
             receipt["canonical_commit"],
-            "e57140e16a68db24dbdd883de665283538234730",
+            "b4e74d7f35226801483a63ebe605b1298d60dc8e",
         )
         self.assertEqual(receipt["mirror"], "toolbox")
         self.assertEqual(

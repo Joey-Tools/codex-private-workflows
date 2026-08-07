@@ -92,7 +92,7 @@ class SourceLockContractTests(unittest.TestCase):
         self.assertEqual(source_lock.digest, hashlib.sha256(raw).hexdigest())
         self.assertEqual(
             source_lock.pins[0].sha,
-            "20f37f4703715393480d550086980bb1fa44c7b3",
+            "610cd768614010dc9c2a56fc36bf1d0fe0254257",
         )
 
     def test_rejects_unexpected_root_and_entry_fields(self) -> None:
