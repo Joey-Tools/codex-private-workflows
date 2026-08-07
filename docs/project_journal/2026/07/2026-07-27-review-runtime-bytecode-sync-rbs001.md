@@ -1,7 +1,7 @@
 ---
 id: 20260727-rbs001
 title: Review Runtime Bytecode Sync
-status: active
+status: completed
 created: 2026-07-27
 updated: 2026-08-07
 branch: wip/review-runtime-bytecode-sync
@@ -28,20 +28,16 @@ superseded_by:
 - Private policy-scope validation resolves `agents/reviewer.toml` beneath `personal_codex/`, while canonical validation remains repository-rooted.
 - Private sync rewrites the trusted-Mac operator command to the `personal_codex/` layout and fail-closes on any missing or unreviewed file in the independent-supervisor subtree.
 - The private review tree now matches the actual canonical PR #85 squash-merge tree for the complete reviewed file inventory, including caller-owned child-outcome receipts, read-only child isolation, and double-fork custody recovery.
-- The private base release is pinned to immutable toolbox commit `20f37f4703715393480d550086980bb1fa44c7b3`; its published tree is byte-identical to reviewed toolbox head `ac7275f2064531bde05bfe0502617efc44f573b3`.
-- The current source reconciliation freezes five direct inputs: toolbox `20f37f4703715393480d550086980bb1fa44c7b3`, review workflows `9a90db95cebe2d66c669e2991a8ede62f66563aa`, debug triage `d3b6fd26b021ef1a6aad8561a92a354c27510fbd`, workflow hygiene `04325e6a0d582b19d1ad8788f568722e5607bd74`, and project journal `4f53fd1bf9ba0a7c85db8d183016210d3d0089e5`.
+- The private base release is pinned to immutable toolbox squash commit `610cd768614010dc9c2a56fc36bf1d0fe0254257`; its tree `3296bba0bf7dbacca54694a038c68c89b098e6a7` matches reviewed PR #21 head `4df0e4ea547405298b1e2953e20713b144fe31c3`, and public release `personal-codex-20260807-095132-610cd76` targets that exact commit.
+- The current source reconciliation freezes five direct inputs: toolbox `610cd768614010dc9c2a56fc36bf1d0fe0254257`, review workflows `9a90db95cebe2d66c669e2991a8ede62f66563aa`, debug triage `d3b6fd26b021ef1a6aad8561a92a354c27510fbd`, workflow hygiene `04325e6a0d582b19d1ad8788f568722e5607bd74`, and project journal `4f53fd1bf9ba0a7c85db8d183016210d3d0089e5`.
 - Private master `1f716fdb81d7b02565656de6d0308837d826fac6` retires waited-delivery from the sync and install surfaces. The exact source inventory, scheduled checkout set, sync rules, active workflow tests, package links, and installed targets all exclude it.
-- Canonical personal-sync `e57140e16a68db24dbdd883de665283538234730` is recorded only as toolbox receipt provenance; private never mirrors it directly.
+- Canonical personal-sync `b4e74d7f35226801483a63ebe605b1298d60dc8e` is recorded only as toolbox receipt provenance; private never mirrors it directly.
 - On macOS the source-lock verifier ignores PATH and every parent developer-tool or loader selector, then directly executes fixed `/Library/Developer/CommandLineTools/usr/bin/git` under a closed environment. It binds that root-owned actual executable and every root-owned, non-group/world-writable ancestor by object identity and access policy before and after each command. The `/usr/bin/git` xcrun shim and current-user-owned or group-writable Homebrew and Xcode ancestors are intentionally outside this trust path rather than newly admitted.
-- Private baseline `a7531b6a69f913b7547ce7c8476c8d47a924927b` is the immutable released predecessor of this reconciliation. The latest source update advances only review workflows from `77531f0c7ba8a705b14cf1e9b90b4e28baa5eecd` to landed squash commit `9a90db95cebe2d66c669e2991a8ede62f66563aa`, importing its reviewed compact-CI contract without changing the other four direct source identities or the trusted review-control epoch used to certify this private change.
+- Private master `16221c4046efa39f086e4ae6d9afba80724b04e5` is the immutable released predecessor of this reconciliation. This source update advances only the toolbox source and its receipt-bound generated payload; the other four direct source identities remain unchanged.
 
 ## Next Steps
 
-- Publish and install the immutable private release that contains this source reconciliation.
-- Let the independent CI-optimization PR ordinary-merge this source baseline and retain only its separately reviewed CI semantics.
-- Migrate the macOS scheduler from the legacy `install-private` command to the stable installed runner's `run-scheduled` command, then prove one real successful scheduled run and immutable public/private baselines.
-- Dispatch scheduled reconciliation only after that release and require a no-diff/no-new-PR result.
-- After the final merged tree and release prove complete behavioral supersession, close draft PR #140 as superseded by the landed private delivery chain.
+- None within this repository. Release publication, installed-state acceptance, and retained-artifact cleanup remain in the downstream deployment handoff.
 
 ## Evidence
 
@@ -110,3 +106,11 @@ superseded_by:
 - Canonical review-workflows PR #96 squash-merged as `9a90db95cebe2d66c669e2991a8ede62f66563aa`; its tree `2fd8907b9dfb25fa1551a9e8bd023a6ca1d2649b` exactly matches reviewed head `f2548b098c7250607adb3837fe44c01d58b8c172`, and GitHub verification is valid. The exact-head CI attempt passed Ubuntu, macOS, broker-reproducibility, independent-supervisor, read-only-install-supervisor, and aggregate gates.
 - A fresh complete source custody bound the exact landed review source while retaining the other four frozen direct-source identities. Stock `refresh-non-toolbox-pins`, checkout verification, and sync completed; the refreshed source-lock SHA-256 is `5ca1bd57cda7481696bbbcc394d2c5ae23a85963952b5595af00a774ceef4a7d`. A second identical-input stock sync left the pre-journal binary diff unchanged at SHA-256 `8060c900396faf776385d6afecf0a09d3cf97b535137f706d02016cd42e8042d`.
 - Final recipient validation passed the five affected CI/source selectors, all 256 private-overlay sync tests, all 112 review-policy contract tests with eight expected profile skips, all 41 source-lock tests with one expected skip, and full repository discovery at 2,011/2,011 with three expected skips under uv-managed Python 3.13.13, standard `umask 022`, and no bytecode. Both live workflows are byte-identical to their synchronized fixtures; Python source parsing, JSON parsing, and `git diff --check` passed. `actionlint`, Ruff, and ShellCheck were unavailable locally, so hosted CI remains authoritative for those available static gates.
+- Toolbox PR #21 reviewed head `4df0e4ea547405298b1e2953e20713b144fe31c3` and squash commit `610cd768614010dc9c2a56fc36bf1d0fe0254257` have the same tree `3296bba0bf7dbacca54694a038c68c89b098e6a7`. Default-branch CI run `31167457004` and Public Toolbox Release run `31167457017` succeeded, and the landed commit has a valid GitHub signature.
+- The public archive asset is 219,258 bytes with SHA-256 `ffeda1eb91ddbcf53f17e15879976a50861a1127ae7d30ca92728527a483bca6`; its checksum asset is 129 bytes with SHA-256 `ab6150538c6c750336ca5bbc265e1f5843fa9e6057cb7c0422de12a7f7e6817b`.
+- The toolbox receipt records canonical personal-sync `b4e74d7f35226801483a63ebe605b1298d60dc8e` / tree `d7313b8dce755f58d13726dccfe60d1fb4cfee6c`, mapping digest `3e26648dd65526e759089c5acf5a9f429f3df0f5adc8dbe94b3856954b801ece`, file-set digest `c280b934568b6bc8df0c993b91d3e2e051970a8395870bf0419fc475556af7ad`, tree digest `f9c8bf7d92b5c25d8d0c2ccee256f3f205ce4e57c4f7adbf9b9123f1775ebaba`, and raw receipt SHA-256 `822a1d96512043149d9b95311a6009be69ac12a12821b38ec470349e9e5bfbd1`. The refreshed private source lock has SHA-256 `6ec9dd587330d88552ce846dd467d15931586b7f6db70b9194dd5f3145eb1287`, and the private sync manifest has SHA-256 `0f6f6ce6d656c621361af330eae9057002044a820a4022301af397acddf18903`.
+- Fresh complete custody froze the five direct source commits and trees in clean detached, full, non-promisor, alternate-free repositories; every checkout passed strict full `fsck` and source-lock verification.
+- Two identical-input stock sync runs left the pre-journal tracked binary diff unchanged at SHA-256 `a0b24904d7c5c8b98a839b13a70d46d2772dc67529a91342ed3f77e00fb28a54`, proving the second run was a tracked no-op. Recovery and prepared-tree artifacts remain retained under the sync recovery contract pending downstream release and installation acceptance.
+- Source-only compilation, manifest-change validation, source-lock output validation, project-journal validation, and `git diff --check` passed. The complete private root suite passed 2,021/2,021 with three expected skips in 213.149 seconds outside the parent Seatbelt sandbox.
+- The complete review-runtime discovery exercised 2,876 tests with 35 expected skips. Its only seven failures and eleven errors under the parent Seatbelt sandbox were Unix-domain or loopback socket bind denials; the 16 affected test methods passed 16/16 in 6.496 seconds through the direct-local no-outer-Seatbelt channel.
+- The final toolbox-pin reconciliation was prepared on `wip/toolbox-610cd76-private-sync`; its pull request identity is recorded in the delivery surface rather than replacing this journal's historical branch and PR provenance.
