@@ -8862,6 +8862,10 @@ jobs:
             for source in source_lock["sources"]
             if source["name"] == "codex-review-workflows"
         )
+        self.assertEqual(
+            review_source["repository"],
+            "Joey-Tools/codex-review-workflows",
+        )
         prior_identity = (
             "9a90db95cebe2d66c669e2991a8ede62f66563aa",
             "2fd8907b9dfb25fa1551a9e8bd023a6ca1d2649b",
@@ -8870,15 +8874,34 @@ jobs:
             "fc2b38bd3001ff1784b3283d3822782b85e48755",
             "c2159f1736cb1db258861386f857db2196fc6523",
         )
-
-        self.assertEqual(
-            (review_source["sha"], review_source["tree"]),
-            prior_identity,
+        activation = agents.split(
+            "- Materialization contract activation is a machine-bound two-state gate.",
+            1,
+        )[1].split("\n- Under the expanded contract", 1)[0]
+        cases = (
+            (
+                "prior",
+                prior_identity,
+                "uses the prior CLI and receipt contract",
+            ),
+            (
+                "first-supporting",
+                supporting_identity,
+                "The expanded contract may activate only after",
+            ),
+            (
+                "supporting-descendant",
+                (),
+                "fully present pinned descendant",
+            ),
         )
-        for identity in (*prior_identity, *supporting_identity):
-            self.assertIn(identity, agents)
+        for name, identity, semantic in cases:
+            with self.subTest(activation_state=name):
+                for value in identity:
+                    self.assertIn(value, activation)
+                self.assertIn(semantic, activation)
+        self.assertIn("machine-bound two-state gate", agents)
         for anchor in (
-            "machine-bound two-state gate",
             "private-overlay-source-lock.json",
             "git merge-base --is-ancestor",
             "validate-worktree --help",
@@ -8889,7 +8912,7 @@ jobs:
             "parent_graph_sha256",
             "local_config_sha256",
         ):
-            self.assertIn(anchor, agents)
+            self.assertIn(anchor, activation)
 
     def test_personal_agents_scopes_bug_triage_to_artifact_transport(self) -> None:
         agents = (REPO_ROOT / "personal_codex" / "AGENTS.md").read_text(
