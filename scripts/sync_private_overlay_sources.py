@@ -794,8 +794,7 @@ SYNC_RULES = (
                 "            normalized_probes,\n"
                 "        )\n"
                 "        self.assertIn(\n"
-                "            \"`whole_pr_completion_action: \"\n"
-                "            \"block-and-report-no-whole-pr-completion`\",\n"
+                "            \"`whole_pr_completion_action: block-and-report-no-whole-pr-completion`\",\n"
                 "            normalized_probes,\n"
                 "        )",
                 "        self.assertIn(\n"

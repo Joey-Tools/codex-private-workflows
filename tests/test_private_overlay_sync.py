@@ -7574,6 +7574,10 @@ class PrivateOverlaySyncTests(unittest.TestCase):
         self.assertEqual(len(contract_replacements), 1)
         self.assertTrue(contract_replacements[0].required)
         self.assertEqual(contract_replacements[0].required_count, 1)
+        self.assertIn(
+            "`whole_pr_completion_action: block-and-report-no-whole-pr-completion`",
+            contract_replacements[0].old,
+        )
         self.assertEqual(
             rule.replacements[-len(SYNC_MODULE.COMMON_JOEY_TEXT_REPLACEMENTS) :],
             SYNC_MODULE.COMMON_JOEY_TEXT_REPLACEMENTS,
