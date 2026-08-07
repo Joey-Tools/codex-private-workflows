@@ -8408,23 +8408,26 @@ jobs:
                 with self.assertRaises(AssertionError):
                     assert_bytecode_guard_contract(workflow)
 
-    def test_release_workflows_use_vm_backed_runners(self) -> None:
+    def test_release_workflows_use_event_appropriate_runners(self) -> None:
         workflows = {
             "scheduled sync-release": (
                 REPO_ROOT / ".github" / "workflows" / "scheduled-sync-release.yml",
                 "sync-release",
+                "ubuntu-latest",
             ),
             "release build": (
                 REPO_ROOT / ".github" / "workflows" / "release.yml",
                 "release",
+                "ubuntu-latest",
             ),
             "release publish": (
                 REPO_ROOT / ".github" / "workflows" / "release.yml",
                 "publish",
+                "ubuntu-latest",
             ),
         }
 
-        for label, (path, job_name) in workflows.items():
+        for label, (path, job_name, expected_runner) in workflows.items():
             with self.subTest(job=label):
                 workflow = path.read_text(encoding="utf-8")
                 job = re.search(
@@ -8436,7 +8439,71 @@ jobs:
                     r"(?m)^    runs-on: *([^\n]+?) *$",
                     job.group("body"),
                 )
-                self.assertEqual(runners, ["ubuntu-latest"])
+                self.assertEqual(runners, [expected_runner])
+
+    def test_release_workflow_keeps_pr_validation_release_specific(self) -> None:
+        workflow = (REPO_ROOT / ".github" / "workflows" / "release.yml").read_text(
+            encoding="utf-8"
+        )
+        release_job = re.search(
+            r"(?ms)^  release:\n(?P<body>.*?)(?=^  [-a-zA-Z0-9_]+:\n|\Z)",
+            workflow,
+        )
+        self.assertIsNotNone(release_job)
+        release_body = release_job.group("body")
+
+        self.assertIn("    name: Build private overlay release\n", release_body)
+        self.assertIn(
+            "  group: private-overlay-release-${{ github.repository }}-${{ github.ref }}",
+            workflow,
+        )
+        self.assertIn(
+            "  cancel-in-progress: ${{ github.event_name == 'pull_request' }}",
+            workflow,
+        )
+
+        def step_body(step_name: str) -> str:
+            step = re.search(
+                rf"(?ms)^      - name: {re.escape(step_name)}\n"
+                r"(?P<body>.*?)(?=^      - name: |\Z)",
+                release_body,
+            )
+            self.assertIsNotNone(step, step_name)
+            return step.group("body")
+
+        for duplicate_step in (
+            "Check helper syntax without bytecode",
+            "Run tests",
+            "Verify canonical review workflow",
+        ):
+            with self.subTest(skipped_on_pull_request=duplicate_step):
+                self.assertRegex(
+                    step_body(duplicate_step),
+                    r"(?m)^        if: github\.event_name != 'pull_request'$",
+                )
+
+        for release_specific_step in (
+            "Validate sync manifest changes",
+            "Build release package",
+            "Verify release package",
+        ):
+            with self.subTest(retained_on_pull_request=release_specific_step):
+                self.assertNotIn(
+                    "github.event_name != 'pull_request'",
+                    step_body(release_specific_step),
+                )
+
+        manifest_step = step_body("Validate sync manifest changes")
+        self.assertIn(
+            '--release-repo "$GITHUB_REPOSITORY"',
+            manifest_step,
+        )
+        self.assertNotIn("--base-ref", manifest_step)
+
+        self.assertRegex(
+            step_body("Require source-only Python tree"),
+            r"(?m)^        if: always\(\)$",
+        )
 
     def test_full_canonical_suite_jobs_use_python_313_with_bounded_timeout(
         self,
@@ -8469,6 +8536,8 @@ jobs:
         publish_body = publish_job.group("body")
         self.assertIn("timeout-minutes: 30", scheduled_body)
         self.assertNotIn("timeout-minutes: 15", scheduled_body)
+        self.assertIn("timeout-minutes: 30", release_body)
+        self.assertNotIn("timeout-minutes: 15", release_body)
         self.assertIn('python-version: "3.13"', scheduled_body)
         self.assertNotIn('python-version: "3.x"', scheduled_body)
         self.assertIn('python-version: "3.13"', release_body)
@@ -8535,6 +8604,63 @@ jobs:
         workflow = (REPO_ROOT / ".github" / "workflows" / "ci.yml").read_text(
             encoding="utf-8"
         )
+        independent_job_match = re.search(
+            r"(?ms)^  independent_supervisor_tests:\n"
+            r"(?P<body>.*?)(?=^  [-a-zA-Z0-9_]+:\n|\Z)",
+            workflow,
+        )
+        self.assertIsNotNone(independent_job_match)
+        independent_job = independent_job_match.group("body")
+
+        self.assertEqual(
+            independent_job.count("\n    timeout-minutes: 20\n"),
+            1,
+        )
+        deterministic_step = """      - name: Run deterministic independent supervisor tests
+        timeout-minutes: 10
+        working-directory: personal_codex/skills/review-orchestration-playbook/scripts/independent_codex_pr_review
+        env:
+          CODEX_REVIEW_TEST_RUNTIME_PARENT: ${{ runner.temp }}
+        run: |
+          python3 -m tests.run_required_deterministic_supervisor
+"""
+        setup_latest_step = """      - uses: actions/setup-python@v5
+        id: setup_latest_python
+        if: always()
+        timeout-minutes: 2
+        with:
+          python-version: "3.x"
+"""
+        reconciliation_step = """      - name: Run platform reconciliation safety tests (Python 3.x)
+        if: ${{ always() && steps.setup_latest_python.outcome == 'success' }}
+        timeout-minutes: 2
+        run: python3 -m unittest tests.test_personal_sync_reconciliation_safety
+"""
+        broker_step = """      - name: Require hosted-runner byte reproduction
+        if: always()
+        timeout-minutes: 2
+        env:
+          DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
+        run: |
+          /bin/bash \\
+            personal_codex/skills/review-orchestration-playbook/scripts/build_claude_keychain_broker_macos.sh \\
+            --check
+"""
+        for step in (
+            deterministic_step,
+            setup_latest_step,
+            reconciliation_step,
+            broker_step,
+        ):
+            self.assertEqual(independent_job.count(step), 1)
+        self.assertEqual(
+            independent_job.count("\n        timeout-minutes: 10\n"),
+            1,
+        )
+        self.assertEqual(
+            independent_job.count("\n        timeout-minutes: 2\n"),
+            3,
+        )
 
         self.assertIn("\n  platform_tests:\n", workflow)
         self.assertIn("name: platform-tests (${{ matrix.os }})", workflow)
@@ -8561,7 +8687,20 @@ jobs:
         self.assertNotIn("\n  platform-safety:\n", workflow)
         self.assertIn("\n  independent_supervisor_tests:\n", workflow)
         self.assertIn("Require hosted-runner byte reproduction", workflow)
-        self.assertIn("Run platform reconciliation safety tests", workflow)
+        self.assertEqual(
+            workflow.count(
+                "Run platform reconciliation safety tests (Python 3.x)"
+            ),
+            1,
+        )
+        self.assertEqual(
+            workflow.count(
+                "if: ${{ always() && steps.setup_latest_python.outcome == "
+                "'success' }}"
+            ),
+            1,
+        )
+        self.assertEqual(workflow.count("    runs-on: ubuntu-slim\n"), 2)
         self.assertIn(
             "needs:\n      - python-39-compatibility\n    strategy:",
             workflow,

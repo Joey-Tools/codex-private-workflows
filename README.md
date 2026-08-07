@@ -24,8 +24,11 @@ private-owned symlinks.
 ## Test
 
 The synced review helper requires Python 3.10 or later. CI exercises its full
-test suite on both Ubuntu and macOS at that minimum runtime, while the private
-overlay packaging and sync tests run on the Linux matrix leg.
+pull-request test suite on both Ubuntu and macOS at that minimum runtime, while
+the private overlay packaging and sync tests run on the Linux matrix leg. macOS
+runners are reserved for gates that need real Darwin, Xcode, Seatbelt, or
+Keychain behavior. Bounded, short-lived status jobs use `ubuntu-slim`; release
+validation, publishing, and scheduled sync jobs remain on `ubuntu-latest`.
 
 ```bash
 python3 -B -c 'import pathlib, sys; [compile(pathlib.Path(path).read_bytes(), path, "exec") for path in sys.argv[1:]]' \
@@ -41,9 +44,21 @@ PYTHONDONTWRITEBYTECODE=1 python3 -B -m unittest discover -s tests
 
 ## Release
 
-`Private Overlay Release` runs on pull requests for validation and on `master` pushes
-or manual dispatch to publish a GitHub release. Release assets keep the same sync
-format used by the public base channel:
+On pull requests, `Private Overlay Release` keeps the required
+`Build private overlay release` check focused on release-specific validation:
+complete sync-manifest Release-history validation, package build and
+verification, and the source-only Python-tree guard. CI owns the full helper
+syntax, private test, and canonical review suites for pull requests, so the
+release workflow does not repeat them. Release validation retains its
+`ubuntu-latest` runner and 30-minute budget because cross-version manifest
+safety requires inspecting complete Release history.
+
+On `master` pushes and eligible manual dispatches, `Private Overlay Release`
+still runs the complete validation set before publishing a GitHub release. New
+pull-request runs cancel superseded release validation for the same ref, while
+push, manual, and scheduled release work remains non-cancelling through the
+shared concurrency group. Release assets keep the same sync format used by the
+public base channel:
 
 - `personal-codex-<full-sha>.tar.gz`
 - `personal-codex-<full-sha>.sha256`
@@ -68,7 +83,7 @@ python3 scripts/build_personal_codex_package.py \
 ```
 
 Release validation compares removal history with the most recent complete
-GitHub Release rather than the immediately preceding commit. Strict release
+GitHub Release rather than the immediately preceding commit. That strict
 validation also batch-loads every authenticated complete Release manifest and
 rejects target hierarchy or transaction-capacity failures for clients that skip
 one or more intermediate Releases. Strict release
