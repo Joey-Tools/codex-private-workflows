@@ -8848,6 +8848,72 @@ jobs:
             agents,
         )
 
+    def test_personal_agents_bind_materialization_contract_activation(self) -> None:
+        agents = (REPO_ROOT / "personal_codex" / "AGENTS.md").read_text(
+            encoding="utf-8"
+        )
+        source_lock = json.loads(
+            (REPO_ROOT / "private-overlay-source-lock.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        review_source = next(
+            source
+            for source in source_lock["sources"]
+            if source["name"] == "codex-review-workflows"
+        )
+        self.assertEqual(
+            review_source["repository"],
+            "Joey-Tools/codex-review-workflows",
+        )
+        prior_identity = (
+            "9a90db95cebe2d66c669e2991a8ede62f66563aa",
+            "2fd8907b9dfb25fa1551a9e8bd023a6ca1d2649b",
+        )
+        supporting_identity = (
+            "fc2b38bd3001ff1784b3283d3822782b85e48755",
+            "c2159f1736cb1db258861386f857db2196fc6523",
+        )
+        activation = agents.split(
+            "- Materialization contract activation is a machine-bound two-state gate.",
+            1,
+        )[1].split("\n- Under the expanded contract", 1)[0]
+        cases = (
+            (
+                "prior",
+                prior_identity,
+                "uses the prior CLI and receipt contract",
+            ),
+            (
+                "first-supporting",
+                supporting_identity,
+                "The expanded contract may activate only after",
+            ),
+            (
+                "supporting-descendant",
+                (),
+                "fully present pinned descendant",
+            ),
+        )
+        for name, identity, semantic in cases:
+            with self.subTest(activation_state=name):
+                for value in identity:
+                    self.assertIn(value, activation)
+                self.assertIn(semantic, activation)
+        self.assertIn("machine-bound two-state gate", agents)
+        for anchor in (
+            "private-overlay-source-lock.json",
+            "git merge-base --is-ancestor",
+            "validate-worktree --help",
+            "blocks activation",
+            "retains the prior trusted installed bundle",
+            "commit_count",
+            "parent_edge_count",
+            "parent_graph_sha256",
+            "local_config_sha256",
+        ):
+            self.assertIn(anchor, activation)
+
     def test_personal_agents_scopes_bug_triage_to_artifact_transport(self) -> None:
         agents = (REPO_ROOT / "personal_codex" / "AGENTS.md").read_text(
             encoding="utf-8"

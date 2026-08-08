@@ -3,7 +3,7 @@ id: 20260727-rbs001
 title: Review Runtime Bytecode Sync
 status: completed
 created: 2026-07-27
-updated: 2026-08-07
+updated: 2026-08-08
 branch: wip/review-runtime-bytecode-sync
 pr: 139
 supersedes: []
@@ -121,3 +121,10 @@ superseded_by:
 - The two focused private-sync regressions pass, and an actual-source probe over the complete landed review skill succeeds with all required replacement counts intact.
 - The local root discovery ran 2,021 tests: 2,013 passed, three skipped, and five unchanged tests failed only because the parent Seatbelt denied a Unix socket bind or temporary Git/GPG merge commits. Those exact five tests then passed 5/5 outside the parent Seatbelt.
 - Ruff lint, source-only compilation, project-journal validation, and `git diff --check` pass. Ruff format reports the same two pre-existing non-clean files on the unchanged base, so no unrelated whole-file formatting rewrite was applied.
+- Review-workflows PR #98 landed as `fc2b38bd3001ff1784b3283d3822782b85e48755`, tree `c2159f1736cb1db258861386f857db2196fc6523`; that squash tree exactly matches reviewed head `133dac3efc5aeb18381efd750a0cd8875443c379`, and GitHub verification is valid.
+- Forced private source-sync run `31200513038` completed source refresh and the ordinary private suite, then failed closed before branch or PR publication because the private repository policy lacked the canonical exact-range parent-graph, local-config, graft, stat-policy, and 250,000 parent-edge receipt anchors.
+- The private repository policy now imports that complete canonical materialization contract, including mandatory base/head CLI binding, config and graft controls, exact parent-scope semantics, receipt equality, and unchanged legacy object ceilings. The source generator continues to own runtime files; this policy-only bridge makes the next stock source sync admissible without hand-editing generated content.
+- The focused repository-policy contract passed 1/1, and the complete private review contract module passed 112/112 with eight expected skips. Standard-umask final root discovery exercised 2,022 tests: 2,014 passed, three skipped, four unchanged GPG tests were blocked only by parent-sandbox denial of `~/.gnupg`/keyboxd, and one unchanged cleanup test was blocked only by parent-sandbox denial of an AF_UNIX bind; Joey's explicit unchanged-permission-failure waiver applies to those five results. Project-journal validation and `git diff --check` passed.
+- The first fresh single review found a release-order gap: the policy-only bridge would precede the generated guard that implements the mandatory validator base and expanded receipts. The bridge now explicitly keeps the currently released runtime on its prior CLI/receipt contract and activates the staged exact-range requirements only in the later source-sync release that contains their supporting runtime. The corrected policy re-passed the complete 112-test private review contract module with eight expected skips and no failures.
+- The final whole-range review required a machine-verifiable activation boundary rather than release-order prose. The policy now binds the current prior-runtime source identity and the first supporting `codex-review-workflows` commit/tree, requires local descendant and manifest-bound capability/receipt proof, blocks ambiguous activation while retaining the prior installed bundle, and has a regression test covering both boundary identities. The resulting policy and test state re-passed the complete 112-test review contract module with eight expected skips and no failures.
+- A subsequent whole-range review found that the first regression test pinned the live source lock to the prior identity and would therefore reject the intended stock sync. The test now treats the live lock as structural input and validates independent prior, first-supporting, and supporting-descendant policy cases, so updating the lock no longer invalidates the activation contract.
