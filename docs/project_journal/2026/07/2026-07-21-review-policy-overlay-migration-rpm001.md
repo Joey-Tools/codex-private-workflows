@@ -28,7 +28,9 @@ superseded_by:
 - The custom gate starts GitHub Codex after its sole local lane is terminal, retains the playbook's one-request and evidence-authority rules, and has no local-only fallback. Provider findings block, while unavailable or inconclusive GitHub evidence leaves the gate incomplete and the PR not ready.
 
 ## Next Steps
-- Advance the frozen `codex-toolbox` public-base pin and reconcile later public AGENTS additions in a separate reviewed workstream before claiming the collaboration guardrails from toolbox PR #22 are active in the private overlay.
+- The public-base pin now includes toolbox PR #22, but its collaboration
+  guardrails remain inactive in the private overlay until a separate reviewed
+  AGENTS reconciliation lands; do not claim them yet.
 - Update the skill-repository list and its contract test whenever a canonical skill repository is added, removed, renamed, transferred, or changes responsibility.
 
 ## Evidence
