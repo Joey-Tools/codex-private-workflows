@@ -9056,6 +9056,34 @@ jobs:
             with self.subTest(retired=retired):
                 self.assertNotIn(retired, agents)
 
+    def test_agents_guidance_defines_skill_repo_codex_review_gate(self) -> None:
+        agents = (REPO_ROOT / "personal_codex" / "AGENTS.md").read_text(
+            encoding="utf-8"
+        )
+
+        for repository in (
+            "codex-toolbox",
+            "codex-debug-triage",
+            "codex-review-workflows",
+            "codex-workflow-hygiene",
+            "codex-project-journal",
+            "codex-apple-notes-toolkit",
+            "codex-private-workflows",
+        ):
+            with self.subTest(repository=repository):
+                self.assertIn(f"`{repository}`", agents)
+
+        for anchor in (
+            "use exactly two review processors",
+            "one fresh-context local Codex reviewer",
+            "current-head GitHub Codex through exact `@codex review`",
+            "Do not invoke Claude Code unless Joey explicitly opts in",
+            "not a named double or triple review",
+            "omitting the Claude lane",
+        ):
+            with self.subTest(anchor=anchor):
+                self.assertIn(anchor, agents)
+
     def test_codex_review_gate_is_compatibility_status_only(self) -> None:
         workflow_path = REPO_ROOT / ".github" / "workflows" / "codex-review-gate.yml"
         canonical_fixture = (
