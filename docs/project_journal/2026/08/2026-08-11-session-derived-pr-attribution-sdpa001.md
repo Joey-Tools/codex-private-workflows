@@ -3,7 +3,7 @@ id: 20260811-sdpa001
 title: Derive Codex PR Attribution From Session History
 status: completed
 created: 2026-08-11
-updated: 2026-08-11
+updated: 2026-08-12
 branch: wip/pr-attribution
 pr:
 supersedes: []
@@ -25,6 +25,9 @@ superseded_by:
 - `codex-session-mining` provides a small standard-library helper that selects
   the pair mode and resolves ties with the UUIDv7 turn timestamp rather than a
   replayable record timestamp, falling back on same-millisecond ambiguity.
+- Root-task resolution follows explicit subagent provenance, legacy archived
+  rollout names can be indexed from bounded metadata, and unsafe or oversized
+  rollout inputs produce the fallback rather than a partial attribution.
 - The helper deliberately uses the whole task family because resumed or
   compacted rollouts can replay old turns with new record timestamps; a simple
   time cutoff is not a reliable change-set boundary.
@@ -35,7 +38,9 @@ superseded_by:
 
 - Focused tests cover recursive family discovery, root-task resolution,
   per-turn deduplication, replay-safe tie resolution, every Desktop reasoning
-  label, and fail-closed fallback paths.
+  label, legacy archived layouts, and fail-closed fallback paths.
+- The final focused suite passed 19 tests, and the repository suite passed
+  2,042 tests with 3 skips.
 
 ## Next Steps
 
