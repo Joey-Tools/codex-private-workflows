@@ -29,7 +29,7 @@ sys.modules[SPEC.name] = MODULE
 SPEC.loader.exec_module(MODULE)
 
 
-PUBLIC_SHA = "610cd768614010dc9c2a56fc36bf1d0fe0254257"
+PUBLIC_SHA = "8b9cc676601e7e4de408d1e8fe3090b510fcb22d"
 PRIVATE_SHA = "2" * 40
 
 
@@ -50,17 +50,13 @@ def write_public_base_fixture(root: Path) -> None:
         "#!/usr/bin/env python3\n",
         encoding="utf-8",
     )
-    skill_root = (
-        root
-        / "personal_codex"
-        / "skills"
-        / "submodule-linked-worktrees"
-    )
-    skill_root.mkdir(parents=True)
-    (skill_root / "SKILL.md").write_text(
-        "---\nname: submodule-linked-worktrees\n---\n",
-        encoding="utf-8",
-    )
+    for skill_name in ("grilling", "submodule-linked-worktrees"):
+        skill_root = root / "personal_codex" / "skills" / skill_name
+        skill_root.mkdir(parents=True)
+        (skill_root / "SKILL.md").write_text(
+            f"---\nname: {skill_name}\n---\n",
+            encoding="utf-8",
+        )
     manifest_root = root / "personal_codex"
     (manifest_root / "sync-manifest.json").write_text(
         """
@@ -72,6 +68,11 @@ def write_public_base_fixture(root: Path) -> None:
       "source": "scripts/codex_personal_sync.py",
       "target": "bin/codex-personal-sync",
       "kind": "file"
+    },
+    {
+      "source": "personal_codex/skills/grilling",
+      "target": "skills/grilling",
+      "kind": "skill"
     },
     {
       "source": "personal_codex/skills/submodule-linked-worktrees",
@@ -1475,6 +1476,15 @@ class PrivateOverlayPackageTests(unittest.TestCase):
             self.build_private_package(),
             self.root / "private-extract",
         )
+        private_manifest = json.loads(
+            (
+                private_release / "personal_codex" / "sync-manifest.json"
+            ).read_text(encoding="utf-8")
+        )
+        self.assertNotIn(
+            "skills/grilling",
+            {entry["target"] for entry in private_manifest["links"]},
+        )
 
         self.run_quietly(
             MODULE.install_release_tree,
@@ -1494,6 +1504,12 @@ class PrivateOverlayPackageTests(unittest.TestCase):
         self.assertTrue((home / "bin" / "codex-personal-sync").is_symlink())
         self.assertTrue((home / "AGENTS.md").is_symlink())
         self.assertTrue((home / "skills" / "cisco-trackers-lookup").is_symlink())
+        grilling = home / "skills" / "grilling"
+        self.assertTrue(grilling.is_symlink())
+        self.assertEqual(
+            os.readlink(grilling),
+            "../personal-sync/current/personal_codex/skills/grilling",
+        )
         self.run_quietly(MODULE.verify_overlay, home, "private")
 
     def test_install_private_downloads_public_base_and_overlay(self) -> None:
@@ -1565,6 +1581,12 @@ class PrivateOverlayPackageTests(unittest.TestCase):
         )
         self.assertTrue((home / "bin" / "codex-personal-sync").is_symlink())
         self.assertTrue((home / "AGENTS.md").is_symlink())
+        grilling = home / "skills" / "grilling"
+        self.assertTrue(grilling.is_symlink())
+        self.assertEqual(
+            os.readlink(grilling),
+            "../personal-sync/current/personal_codex/skills/grilling",
+        )
         self.run_quietly(MODULE.verify_overlay, home, "private")
 
     def test_install_private_rejects_replaced_extracted_overlay_root(self) -> None:
