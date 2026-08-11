@@ -9056,6 +9056,50 @@ jobs:
             with self.subTest(retired=retired):
                 self.assertNotIn(retired, agents)
 
+    def test_agents_guidance_defines_skill_repo_codex_review_gate(self) -> None:
+        agents = (REPO_ROOT / "personal_codex" / "AGENTS.md").read_text(
+            encoding="utf-8"
+        )
+        gate_start = agents.index(
+            "- For PR-bound delivery in the Joey-Tools skill repositories"
+        )
+        gate_end = agents.index("\n- Legacy receipt migration", gate_start)
+        gate = agents[gate_start:gate_end]
+
+        for repository in (
+            "codex-toolbox",
+            "codex-debug-triage",
+            "codex-review-workflows",
+            "codex-workflow-hygiene",
+            "codex-project-journal",
+            "codex-apple-notes-toolkit",
+            "codex-private-workflows",
+        ):
+            with self.subTest(repository=repository):
+                self.assertIn(f"`{repository}`", gate)
+
+        for anchor in (
+            "when Joey has not explicitly requested a named single, double, or triple review",
+            "use the `skill-repo-codex-gate`: exactly two review processors",
+            "one fresh-context local Codex reviewer",
+            "current-head GitHub Codex through exact `@codex review`",
+            "This default is not a named review shape",
+            "keeps its canonical meaning and overrides this default",
+            "a named double or triple request is such an opt-in",
+            "A separately requested Claude diagnostic remains outside the default gate",
+            "does not replace either required Codex processor",
+            "run the sole local Codex processor under the named single-lane workspace, prompt, and evidence contract",
+            "interpret the GitHub producer precondition `both local lanes are terminal` as satisfied by this gate's one required local lane",
+            "Report the requested and effective shape as `skill-repo-codex-gate`",
+            "There is no local-only fallback",
+            "leaves the gate incomplete and the PR not ready",
+            "terminal findings block",
+            "only an accepted `thumbs-up-clean` basis completes the GitHub processor",
+            "terminal-payload clean remains classification-only and inconclusive for readiness",
+        ):
+            with self.subTest(anchor=anchor):
+                self.assertIn(anchor, gate)
+
     def test_codex_review_gate_is_compatibility_status_only(self) -> None:
         workflow_path = REPO_ROOT / ".github" / "workflows" / "codex-review-gate.yml"
         canonical_fixture = (
