@@ -1,6 +1,6 @@
 ---
 name: codex-session-mining
-description: Search Joey's `~/.codex` active and archived session/history artifacts to recover prior work, audit recent activity, find rollout files by session ID or date, or summarize repeated workflow issues. Use when the task depends on `session_index.jsonl`, `history.jsonl`, `sessions/**/rollout-*.jsonl`, `archived_sessions/**/rollout-*.jsonl`, or a complete current-host session corpus; pair with `$remote-host-context` when remote-host evidence may matter.
+description: Search Joey's `~/.codex` active and archived session/history artifacts to recover prior work, audit recent activity, find rollout files by session ID or date, summarize repeated workflow issues, or derive the OpenAI Codex PR attribution note from a task family. Use when the task depends on `session_index.jsonl`, `history.jsonl`, `sessions/**/rollout-*.jsonl`, `archived_sessions/**/rollout-*.jsonl`, or a complete current-host session corpus; pair with `$remote-host-context` when remote-host evidence may matter.
 ---
 
 # Codex Session Mining
@@ -77,6 +77,20 @@ Use this skill for:
 - Quote or summarize only the decisive lines.
 - Keep the evidence tied to exact session IDs, dates, or file paths so the conclusion is auditable.
 - If the evidence is inconclusive, say which narrower search or missing host would resolve it fastest.
+
+## PR Attribution
+
+For a wholly Codex-authored PR, render the exact note sentence with:
+
+```bash
+python3 "$CODEX_HOME/skills/codex-session-mining/scripts/pr_attribution.py"
+```
+
+- The helper uses `--session-id` or exact `CODEX_THREAD_ID`, resolves the containing Desktop root task, and never guesses the latest task.
+- It follows recursive subagents, counts one latest complete `(model, effort)` pair per unique `(session_id, turn_id)`, selects the pair mode, and breaks a tie with the UUIDv7 turn timestamp rather than a replayable record timestamp. An ambiguous same-millisecond tie falls back.
+- It always uses the whole task family. Resume, compaction, and replay can copy old turns with new record timestamps, so a simple time cutoff is not a reliable change-set boundary.
+- Unknown mappings, no usable complete pair, or a tie without reliable turn ordering produce the full `GPT-5.6 Sol Ultra` fallback sentence.
+- Run it when opening the PR and immediately before merge. If the sentence changed, update the PR body before merging.
 
 ## Guardrails
 
