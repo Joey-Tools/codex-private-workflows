@@ -197,6 +197,167 @@ class PrAttributionTests(unittest.TestCase):
                 FALLBACK,
             )
 
+    def test_selected_child_cannot_bypass_invalid_root_provenance(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            home = Path(temporary_directory)
+            write_rollout(
+                home,
+                ROOT,
+                [meta(ROOT, ROOT, source={"subagent": "review"}), turn("root-a", "max")],
+            )
+            write_rollout(
+                home,
+                CHILD,
+                [
+                    meta(CHILD, ROOT, parent_id=ROOT),
+                    turn("child-a", "xhigh"),
+                    turn("child-b", "xhigh"),
+                ],
+            )
+
+            self.assertEqual(
+                self.run_helper(home, "--session-id", CHILD, session_id=UNRELATED),
+                FALLBACK,
+            )
+
+    def test_legacy_id_only_root_is_counted(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            home = Path(temporary_directory)
+            write_rollout(
+                home,
+                ROOT,
+                [
+                    {"type": "session_meta", "payload": {"id": ROOT}},
+                    turn("root-a", "max"),
+                ],
+            )
+
+            self.assertEqual(self.run_helper(home), sentence("GPT-5.6 Sol Max"))
+
+    def test_legacy_declared_subagent_without_parent_uses_fallback(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            home = Path(temporary_directory)
+            write_rollout(
+                home,
+                CHILD,
+                [
+                    {
+                        "type": "session_meta",
+                        "payload": {"id": CHILD, "thread_source": "subagent"},
+                    },
+                    turn("child-a", "max"),
+                ],
+            )
+
+            self.assertEqual(
+                self.run_helper(home, "--session-id", CHILD, session_id=UNRELATED),
+                FALLBACK,
+            )
+
+    def test_unknown_legacy_prefix_does_not_conflict_with_child_provenance(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            home = Path(temporary_directory)
+            write_rollout(home, ROOT, [meta(ROOT, ROOT, source="cli"), turn("root-a", "max")])
+            write_rollout(
+                home,
+                CHILD,
+                [
+                    {"type": "session_meta", "payload": {"id": CHILD}},
+                    meta(CHILD, ROOT, parent_id=ROOT),
+                    turn("child-a", "xhigh"),
+                    turn("child-b", "xhigh"),
+                ],
+            )
+
+            self.assertEqual(
+                self.run_helper(home, "--session-id", CHILD, session_id=UNRELATED),
+                sentence("GPT-5.6 Sol Extra High"),
+            )
+
+    def test_explicit_self_root_cannot_later_become_a_child(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            home = Path(temporary_directory)
+            write_rollout(home, ROOT, [meta(ROOT, ROOT), turn("root-a", "max")])
+            write_rollout(
+                home,
+                CHILD,
+                [
+                    meta(CHILD, CHILD),
+                    meta(CHILD, ROOT, parent_id=ROOT),
+                    turn("child-a", "xhigh"),
+                    turn("child-b", "xhigh"),
+                ],
+            )
+
+            self.assertEqual(
+                self.run_helper(home, "--session-id", CHILD, session_id=UNRELATED),
+                FALLBACK,
+            )
+
+    def test_explicit_user_role_cannot_follow_a_parent_chain(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            home = Path(temporary_directory)
+            write_rollout(home, ROOT, [meta(ROOT, ROOT), turn("root-a", "max")])
+            write_rollout(
+                home,
+                CHILD,
+                [
+                    {
+                        "type": "session_meta",
+                        "payload": {
+                            "id": CHILD,
+                            "session_id": ROOT,
+                            "parent_thread_id": ROOT,
+                            "thread_source": "user",
+                        },
+                    },
+                    turn("child-a", "xhigh"),
+                    turn("child-b", "xhigh"),
+                ],
+            )
+
+            self.assertEqual(
+                self.run_helper(home, "--session-id", CHILD, session_id=UNRELATED),
+                FALLBACK,
+            )
+
+    def test_cli_source_can_be_refined_to_a_subagent_role(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            home = Path(temporary_directory)
+            write_rollout(home, ROOT, [meta(ROOT, ROOT, source="cli"), turn("root-a", "max")])
+            write_rollout(
+                home,
+                CHILD,
+                [
+                    {
+                        "type": "session_meta",
+                        "payload": {
+                            "id": CHILD,
+                            "session_id": ROOT,
+                            "parent_thread_id": ROOT,
+                            "source": "cli",
+                        },
+                    },
+                    {
+                        "type": "session_meta",
+                        "payload": {
+                            "id": CHILD,
+                            "session_id": ROOT,
+                            "parent_thread_id": ROOT,
+                            "source": "cli",
+                            "thread_source": "subagent",
+                        },
+                    },
+                    turn("child-a", "xhigh"),
+                    turn("child-b", "xhigh"),
+                ],
+            )
+
+            self.assertEqual(
+                self.run_helper(home, "--session-id", CHILD, session_id=UNRELATED),
+                sentence("GPT-5.6 Sol Extra High"),
+            )
+
     def test_uuid_filename_without_root_metadata_uses_fallback(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             home = Path(temporary_directory)
@@ -444,13 +605,192 @@ class PrAttributionTests(unittest.TestCase):
                     handle.write(b'{"type":"turn_context",')
                 self.assertEqual(self.run_helper(home), expected)
 
-    def test_legacy_source_shapes_are_accepted(self) -> None:
-        sources = ("cli", {"subagent": "review"}, {"subagent": {"kind": "guardian"}})
+    def test_legacy_root_source_shapes_are_accepted(self) -> None:
+        sources = ("cli", "vscode")
         for source in sources:
             with self.subTest(source=source), tempfile.TemporaryDirectory() as temporary_directory:
                 home = Path(temporary_directory)
                 write_rollout(home, ROOT, [meta(ROOT, ROOT, source=source), turn("root-a", "max")])
                 self.assertEqual(self.run_helper(home), sentence("GPT-5.6 Sol Max"))
+
+    def test_modern_user_root_source_is_accepted(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            home = Path(temporary_directory)
+            write_rollout(
+                home,
+                ROOT,
+                [
+                    {
+                        "type": "session_meta",
+                        "payload": {
+                            "id": ROOT,
+                            "session_id": ROOT,
+                            "source": "cli",
+                            "thread_source": "user",
+                        },
+                    },
+                    turn("root-a", "max"),
+                ],
+            )
+
+            self.assertEqual(self.run_helper(home), sentence("GPT-5.6 Sol Max"))
+
+    def test_explicit_subagent_source_cannot_claim_root(self) -> None:
+        sources = (
+            "subagent",
+            {"subagent": "review"},
+            {"subagent": {"kind": "guardian"}},
+        )
+        for source in sources:
+            with self.subTest(source=source), tempfile.TemporaryDirectory() as temporary_directory:
+                home = Path(temporary_directory)
+                write_rollout(home, ROOT, [meta(ROOT, ROOT, source=source), turn("root-a", "max")])
+                self.assertEqual(self.run_helper(home), FALLBACK)
+
+    def test_thread_source_identifies_subagent_with_cli_source(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            home = Path(temporary_directory)
+            write_rollout(home, ROOT, [meta(ROOT, ROOT, source="cli"), turn("root-a", "max")])
+            write_rollout(
+                home,
+                CHILD,
+                [
+                    {
+                        "type": "session_meta",
+                        "payload": {
+                            "id": CHILD,
+                            "session_id": ROOT,
+                            "parent_thread_id": ROOT,
+                            "source": "cli",
+                            "thread_source": "subagent",
+                        },
+                    },
+                    turn("child-a", "xhigh"),
+                    turn("child-b", "xhigh"),
+                ],
+            )
+
+            self.assertEqual(
+                self.run_helper(home, "--session-id", CHILD, session_id=UNRELATED),
+                sentence("GPT-5.6 Sol Extra High"),
+            )
+
+    def test_replayed_lifecycle_claim_is_validated(self) -> None:
+        invalid_sources = ({"subagent": "review"}, [])
+        for source in invalid_sources:
+            with self.subTest(source=source), tempfile.TemporaryDirectory() as temporary_directory:
+                home = Path(temporary_directory)
+                write_rollout(
+                    home,
+                    ROOT,
+                    [meta(ROOT, ROOT, source="cli"), turn("root-a", "max"), child_event(CHILD)],
+                )
+                write_rollout(
+                    home,
+                    CHILD,
+                    [
+                        meta(CHILD, ROOT, parent_id=ROOT),
+                        meta(ROOT, ROOT, source=source),
+                        turn("replayed-root", "max"),
+                    ],
+                )
+
+                self.assertEqual(self.run_helper(home), FALLBACK)
+
+    def test_replayed_lifecycle_parent_must_match_its_binding(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            home = Path(temporary_directory)
+            write_rollout(
+                home,
+                ROOT,
+                [meta(ROOT, ROOT), turn("root-a", "max"), child_event(CHILD)],
+            )
+            write_rollout(
+                home,
+                CHILD,
+                [
+                    meta(CHILD, ROOT, parent_id=ROOT),
+                    turn("child-a", "xhigh"),
+                ],
+            )
+            write_rollout(
+                home,
+                GRANDCHILD,
+                [
+                    meta(GRANDCHILD, ROOT, parent_id=CHILD),
+                    {
+                        "type": "session_meta",
+                        "payload": {
+                            "id": CHILD,
+                            "session_id": ROOT,
+                            "parent_thread_id": UNRELATED,
+                            "thread_source": "subagent",
+                        },
+                    },
+                    turn("replayed-child", "xhigh"),
+                ],
+            )
+            write_rollout(
+                home,
+                UNRELATED,
+                [meta(UNRELATED, UNRELATED), turn("unrelated-a", "ultra")],
+            )
+
+            self.assertEqual(
+                self.run_helper(home, "--session-id", GRANDCHILD, session_id=UNRELATED),
+                FALLBACK,
+            )
+
+    def test_invalid_or_conflicting_root_source_uses_fallback(self) -> None:
+        cases = (
+            [
+                {"type": "session_meta", "payload": {"id": ROOT, "source": []}},
+                turn("root-a", "max"),
+            ],
+            [
+                {
+                    "type": "session_meta",
+                    "payload": {"id": ROOT, "thread_source": []},
+                },
+                turn("root-a", "max"),
+            ],
+            [
+                {
+                    "type": "session_meta",
+                    "payload": {
+                        "id": ROOT,
+                        "session_id": ROOT,
+                        "source": "subagent",
+                    },
+                },
+                {
+                    "type": "session_meta",
+                    "payload": {
+                        "id": ROOT,
+                        "session_id": ROOT,
+                        "source": "cli",
+                        "thread_source": "user",
+                    },
+                },
+                turn("root-a", "max"),
+            ],
+            [
+                {
+                    "type": "session_meta",
+                    "payload": {
+                        "id": ROOT,
+                        "source": {"subagent": "review"},
+                        "thread_source": "user",
+                    },
+                },
+                turn("root-a", "max"),
+            ],
+        )
+        for rows in cases:
+            with self.subTest(rows=rows[:1]), tempfile.TemporaryDirectory() as temporary_directory:
+                home = Path(temporary_directory)
+                write_rollout(home, ROOT, rows)
+                self.assertEqual(self.run_helper(home), FALLBACK)
 
     def test_invalid_provenance_uses_fallback(self) -> None:
         sources = (

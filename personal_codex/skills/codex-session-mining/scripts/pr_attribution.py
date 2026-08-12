@@ -120,6 +120,47 @@ def parent_thread_id(payload: Mapping[str, object]) -> Optional[str]:
     return next(iter(parents), None)
 
 
+def root_source_claim(payload: Mapping[str, object]) -> Optional[str]:
+    thread_source = payload.get("thread_source")
+    if thread_source is not None and not isinstance(thread_source, str):
+        raise RolloutError("session metadata has invalid thread source")
+    source = payload.get("source")
+    if source is not None and not isinstance(source, (str, dict)):
+        raise RolloutError("session metadata has invalid source")
+    source_subagent = source == "subagent" or (
+        isinstance(source, dict) and "subagent" in source
+    )
+    if thread_source == "subagent":
+        return "subagent"
+    if thread_source == "user":
+        if source_subagent:
+            raise RolloutError("session metadata source claims conflict")
+        return "ordinary"
+    if source_subagent:
+        return "subagent"
+    return None
+
+
+def validate_lifecycle_claim(
+    payload: Mapping[str, object],
+    lifecycle_id: str,
+    root_id: str,
+    expected_parent: Optional[str],
+) -> None:
+    claim = root_source_claim(payload)
+    root_hint = optional_id(payload, "session_id")
+    parent_id = parent_thread_id(payload)
+    if root_hint is not None and root_hint != root_id:
+        raise RolloutError("session metadata names an inconsistent root")
+    if parent_id is not None and parent_id != expected_parent:
+        raise RolloutError("session metadata names an inconsistent parent")
+    if expected_parent is None:
+        if parent_id is not None or claim == "subagent":
+            raise RolloutError("root metadata claims subagent provenance")
+    elif claim == "ordinary" or root_hint == lifecycle_id:
+        raise RolloutError("subagent metadata claims root provenance")
+
+
 def normalized_turn_id(turn_id: str) -> str:
     try:
         return str(uuid.UUID(turn_id))
@@ -321,6 +362,8 @@ def resolve_root(
         roots = set()
         parents = set()
         root_proven = False
+        strong_root = False
+        root_claim: Optional[str] = None
         for path in rollouts.get(current, ()):
             checked_first_meta = False
             for row in iter_records(
@@ -344,9 +387,21 @@ def resolve_root(
                 own_id = optional_id(payload, "id") or optional_id(payload, "thread_id")
                 root_id = optional_id(payload, "session_id")
                 parent_id = parent_thread_id(payload)
+                claim = root_source_claim(payload)
+                if claim is not None:
+                    if root_claim is not None and claim != root_claim:
+                        raise RolloutError("session metadata root claims conflict")
+                    root_claim = claim
                 if root_id == current and parent_id is not None:
                     raise RolloutError("root metadata names a parent")
                 if root_id == current and parent_id is None:
+                    root_proven = True
+                    strong_root = True
+                if (
+                    own_id == current
+                    and root_id is None
+                    and parent_id is None
+                ):
                     root_proven = True
                 if own_id == current and root_id not in (None, current):
                     roots.add(root_id)
@@ -356,6 +411,10 @@ def resolve_root(
                     parents.add(parent_id)
                 if len(roots) > 1 or len(parents) > 1:
                     raise RolloutError("session metadata provenance conflicts")
+        if strong_root and (roots or parents):
+            raise RolloutError("session metadata mixes root and subagent provenance")
+        if parents and root_claim == "ordinary":
+            raise RolloutError("subagent metadata claims root provenance")
         if roots:
             hinted_root = next(iter(roots))
             if hinted_root not in rollouts or expected_root not in (None, hinted_root):
@@ -366,7 +425,7 @@ def resolve_root(
         if not parents:
             if expected_root is not None and current != expected_root:
                 raise RolloutError("parent chain misses its root")
-            if expected_root is None and not root_proven:
+            if not root_proven or root_claim == "subagent":
                 raise RolloutError("root task identity is unverified")
             if chain is not None:
                 chain.extend(ordered_chain)
@@ -394,7 +453,37 @@ def collect_votes(
         if seed_id not in scheduled:
             pending.append(seed_id)
             scheduled.add(seed_id)
-    resolved_roots = {session_id: root_id for session_id in scheduled}
+    resolved_roots: Dict[str, str] = {}
+    resolved_parents: Dict[str, Optional[str]] = {}
+
+    def resolve_binding(session_id: str) -> Tuple[str, Optional[str]]:
+        if session_id not in resolved_parents:
+            resolved_chain: List[str] = []
+            resolved_root = resolve_root(
+                rollouts,
+                active_paths,
+                identities,
+                session_id,
+                deadline,
+                resolved_chain,
+            )
+            for index, member_id in enumerate(resolved_chain):
+                member_parent = (
+                    resolved_chain[index + 1]
+                    if index + 1 < len(resolved_chain)
+                    else None
+                )
+                if resolved_roots.get(member_id, resolved_root) != resolved_root:
+                    raise RolloutError("task root binding changed during attribution")
+                if (
+                    member_id in resolved_parents
+                    and resolved_parents[member_id] != member_parent
+                ):
+                    raise RolloutError("task parent binding changed during attribution")
+                resolved_roots[member_id] = resolved_root
+                resolved_parents[member_id] = member_parent
+        return resolved_roots[session_id], resolved_parents[session_id]
+
     visited = set()
     file_votes: Dict[Tuple[str, str, Path], Vote] = {}
     turn_keys: Set[TurnKey] = set()
@@ -403,6 +492,9 @@ def collect_votes(
         if session_id in visited:
             continue
         visited.add(session_id)
+        session_root, _session_parent = resolve_binding(session_id)
+        if session_root != root_id:
+            raise RolloutError("scheduled lifecycle is outside the task family")
         for path in rollouts.get(session_id, ()):
             checked_first_meta = False
             vote_session_id: Optional[str] = (
@@ -426,26 +518,22 @@ def collect_votes(
                     owner = lifecycle_id(payload)
                     if owner is None:
                         vote_session_id = None
-                    elif not checked_first_meta:
-                        checked_first_meta = True
-                        if owner != session_id:
-                            raise RolloutError("rollout filename and owner disagree")
-                        vote_session_id = owner
                     else:
                         if owner not in rollouts:
                             raise RolloutError("replayed lifecycle rollout is unavailable")
-                        owner_root = resolved_roots.get(owner)
-                        if owner_root is None:
-                            owner_root = resolve_root(
-                                rollouts,
-                                active_paths,
-                                identities,
-                                owner,
-                                deadline,
-                            )
-                            resolved_roots[owner] = owner_root
+                        owner_root, owner_parent = resolve_binding(owner)
                         if owner_root != root_id:
                             raise RolloutError("replayed lifecycle is outside the task family")
+                        validate_lifecycle_claim(
+                            payload,
+                            owner,
+                            root_id,
+                            owner_parent,
+                        )
+                        if not checked_first_meta:
+                            checked_first_meta = True
+                            if owner != session_id:
+                                raise RolloutError("rollout filename and owner disagree")
                         vote_session_id = owner
                         if owner not in scheduled:
                             pending.append(owner)
@@ -457,16 +545,7 @@ def collect_votes(
                     child_id = normalize_session_id(child_id)
                     if child_id not in rollouts:
                         raise RolloutError("referenced subagent rollout is unavailable")
-                    child_root = resolved_roots.get(child_id)
-                    if child_root is None:
-                        child_root = resolve_root(
-                            rollouts,
-                            active_paths,
-                            identities,
-                            child_id,
-                            deadline,
-                        )
-                        resolved_roots[child_id] = child_root
+                    child_root, _child_parent = resolve_binding(child_id)
                     if child_root != root_id:
                         raise RolloutError("referenced subagent is outside the task family")
                     if child_id not in scheduled:

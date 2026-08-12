@@ -28,6 +28,8 @@ superseded_by:
 - Root-task resolution follows explicit subagent provenance, legacy archived
   rollout names can be indexed from bounded metadata, and unsafe or oversized
   rollout inputs produce the fallback rather than a partial attribution.
+- Root, parent, and task-role bindings are checked across original and replayed
+  lifecycle metadata so contradictory provenance cannot contribute a vote.
 - Inventoried rollout identity is revalidated at open, and validated lifecycle
   cursors prevent copied turns from receiving duplicate cross-rollout votes.
 - The helper deliberately uses the whole task family because resumed or
@@ -41,8 +43,8 @@ superseded_by:
 - Focused tests cover recursive family discovery, root-task resolution,
   per-turn deduplication, replay-safe tie resolution, every Desktop reasoning
   label, legacy archived layouts, and fail-closed fallback paths.
-- The final focused suite passed 28 tests, and the repository suite passed
-  2,051 tests with 3 skips.
+- The final focused suite passed 41 tests, and the repository suite passed
+  2,064 tests with 3 skips.
 
 ## Next Steps
 
