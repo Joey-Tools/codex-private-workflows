@@ -36,6 +36,7 @@ def write_rollout(
     rows: list[dict],
     *,
     relative_path: Path | None = None,
+    add_owner_meta: bool = True,
 ) -> Path:
     path = codex_home / (
         relative_path
@@ -48,6 +49,8 @@ def write_rollout(
         )
     )
     path.parent.mkdir(parents=True, exist_ok=True)
+    if add_owner_meta and not any(row.get("type") == "session_meta" for row in rows):
+        rows = [meta(session_id, session_id), *rows]
     path.write_text(
         "".join(json.dumps(row, sort_keys=True) + "\n" for row in rows),
         encoding="utf-8",
@@ -179,6 +182,32 @@ class PrAttributionTests(unittest.TestCase):
                 self.run_helper(home, "--session-id", CHILD, session_id=UNRELATED),
                 sentence("GPT-5.6 Sol Extra High"),
             )
+
+    def test_selected_child_without_root_provenance_uses_fallback(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            home = Path(temporary_directory)
+            write_rollout(
+                home,
+                CHILD,
+                [meta(CHILD, None, source={"subagent": "review"}), turn("child-a", "max")],
+            )
+
+            self.assertEqual(
+                self.run_helper(home, "--session-id", CHILD, session_id=UNRELATED),
+                FALLBACK,
+            )
+
+    def test_uuid_filename_without_root_metadata_uses_fallback(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            home = Path(temporary_directory)
+            write_rollout(
+                home,
+                ROOT,
+                [turn("root-a", "max")],
+                add_owner_meta=False,
+            )
+
+            self.assertEqual(self.run_helper(home), FALLBACK)
 
     def test_conflicting_replayed_turn_uses_fallback(self) -> None:
         shared = "019ff116-ddd1-72f2-bff7-8a0d997c4b66"

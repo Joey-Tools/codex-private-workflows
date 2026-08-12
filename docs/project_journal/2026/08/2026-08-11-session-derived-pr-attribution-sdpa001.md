@@ -41,8 +41,8 @@ superseded_by:
 - Focused tests cover recursive family discovery, root-task resolution,
   per-turn deduplication, replay-safe tie resolution, every Desktop reasoning
   label, legacy archived layouts, and fail-closed fallback paths.
-- The final focused suite passed 26 tests, and the repository suite passed
-  2,049 tests with 3 skips.
+- The final focused suite passed 28 tests, and the repository suite passed
+  2,051 tests with 3 skips.
 
 ## Next Steps
 

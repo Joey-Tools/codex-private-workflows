@@ -320,6 +320,7 @@ def resolve_root(
         ordered_chain.append(current)
         roots = set()
         parents = set()
+        root_proven = False
         for path in rollouts.get(current, ()):
             checked_first_meta = False
             for row in iter_records(
@@ -345,6 +346,8 @@ def resolve_root(
                 parent_id = parent_thread_id(payload)
                 if root_id == current and parent_id is not None:
                     raise RolloutError("root metadata names a parent")
+                if root_id == current and parent_id is None:
+                    root_proven = True
                 if own_id == current and root_id not in (None, current):
                     roots.add(root_id)
                 if parent_id == current:
@@ -363,6 +366,8 @@ def resolve_root(
         if not parents:
             if expected_root is not None and current != expected_root:
                 raise RolloutError("parent chain misses its root")
+            if expected_root is None and not root_proven:
+                raise RolloutError("root task identity is unverified")
             if chain is not None:
                 chain.extend(ordered_chain)
             return current
