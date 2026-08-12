@@ -228,10 +228,11 @@ def probe_owner(
 def inventory_rollouts(
     codex_home: Path,
     deadline: float,
-) -> Tuple[Dict[str, List[Path]], Set[Path], Dict[Path, FileIdentity]]:
+) -> Tuple[Dict[str, List[Path]], Set[Path], Dict[Path, FileIdentity], Set[Path]]:
     by_session: Dict[str, List[Path]] = {}
     active_paths: Set[Path] = set()
     identities: Dict[Path, FileIdentity] = {}
+    filename_owned_paths: Set[Path] = set()
     entry_count = 0
     file_count = 0
     for root_name in ("sessions", "archived_sessions"):
@@ -278,6 +279,8 @@ def inventory_rollouts(
                         if len(ids) > 1:
                             raise RolloutError("rollout filename contains multiple task IDs")
                         path = Path(entry.path)
+                        if ids:
+                            filename_owned_paths.add(path)
                         identity = (metadata.st_dev, metadata.st_ino)
                         identities[path] = identity
                         active = root_name == "sessions"
@@ -295,7 +298,7 @@ def inventory_rollouts(
                 raise RolloutError("unable to inventory rollouts") from exc
     for paths in by_session.values():
         paths.sort()
-    return by_session, active_paths, identities
+    return by_session, active_paths, identities, filename_owned_paths
 
 
 def resolve_root(
@@ -372,6 +375,7 @@ def collect_votes(
     rollouts: Mapping[str, Sequence[Path]],
     active_paths: Set[Path],
     identities: Mapping[Path, FileIdentity],
+    filename_owned_paths: Set[Path],
     root_id: str,
     seed_ids: Sequence[str],
     deadline: float,
@@ -396,7 +400,9 @@ def collect_votes(
         visited.add(session_id)
         for path in rollouts.get(session_id, ()):
             checked_first_meta = False
-            vote_session_id: Optional[str] = session_id
+            vote_session_id: Optional[str] = (
+                session_id if path in filename_owned_paths else None
+            )
             for row in iter_records(
                 path,
                 identities[path],
@@ -524,7 +530,10 @@ def render_sentence(codex_home: Path, session_id: Optional[str]) -> str:
         return SENTENCE.format(FALLBACK_LABEL)
     try:
         deadline = time.monotonic() + DEADLINE_SECONDS
-        rollouts, active_paths, identities = inventory_rollouts(codex_home, deadline)
+        rollouts, active_paths, identities, filename_owned_paths = inventory_rollouts(
+            codex_home,
+            deadline,
+        )
         selected_id = normalize_session_id(session_id)
         if selected_id not in rollouts:
             return SENTENCE.format(FALLBACK_LABEL)
@@ -541,6 +550,7 @@ def render_sentence(codex_home: Path, session_id: Optional[str]) -> str:
             rollouts,
             active_paths,
             identities,
+            filename_owned_paths,
             root_id,
             tuple(reversed(chain)),
             deadline,

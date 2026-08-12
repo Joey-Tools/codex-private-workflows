@@ -386,6 +386,18 @@ class PrAttributionTests(unittest.TestCase):
 
             self.assertEqual(self.run_helper(home), sentence("GPT-5.6 Sol Max"))
 
+    def test_legacy_turn_before_lifecycle_owner_uses_fallback(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            home = Path(temporary_directory)
+            write_rollout(
+                home,
+                ROOT,
+                [turn("unknown-owner", "max"), meta(ROOT, ROOT)],
+                relative_path=Path("archived_sessions", "rollout-legacy.jsonl"),
+            )
+
+            self.assertEqual(self.run_helper(home), FALLBACK)
+
     def test_active_tail_is_ignored_but_archived_tail_fails(self) -> None:
         for root_name, expected in (
             ("sessions", sentence("GPT-5.6 Sol Max")),
