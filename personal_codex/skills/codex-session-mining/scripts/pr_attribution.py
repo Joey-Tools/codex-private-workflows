@@ -43,7 +43,11 @@ UUID_RE = re.compile(
     r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
     r"[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
 )
-MODEL_LABELS = {"gpt-5.6-sol": "GPT-5.6 Sol"}
+MODEL_LABELS = {
+    "gpt-5.5": "GPT-5.5",
+    "gpt-5.6-sol": "GPT-5.6 Sol",
+    "gpt-5.6-terra": "GPT-5.6 Terra",
+}
 EFFORT_LABELS = {
     "low": "Low",
     "medium": "Medium",
@@ -54,6 +58,7 @@ EFFORT_LABELS = {
 }
 Pair = Tuple[str, str]
 TurnKey = Tuple[str, str]
+FileIdentity = Tuple[int, int]
 
 
 class RolloutError(RuntimeError):
@@ -130,7 +135,7 @@ def turn_order(turn_id: str) -> Optional[int]:
     return parsed.int >> 80 if parsed.version == 7 else None
 
 
-def open_rollout(path: Path) -> BinaryIO:
+def open_rollout(path: Path, expected_identity: FileIdentity) -> BinaryIO:
     flags = os.O_RDONLY | os.O_NONBLOCK
     flags |= getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
     descriptor = -1
@@ -139,6 +144,9 @@ def open_rollout(path: Path) -> BinaryIO:
         metadata = os.fstat(descriptor)
         if not stat.S_ISREG(metadata.st_mode) or metadata.st_size > MAX_FILE_BYTES:
             raise RolloutError("selected rollout is not a bounded regular file")
+        # Bind object identity while allowing an active rollout to append in place.
+        if (metadata.st_dev, metadata.st_ino) != expected_identity:
+            raise RolloutError("selected rollout was replaced after inventory")
         return os.fdopen(descriptor, "rb")
     except RolloutError:
         try:
@@ -156,6 +164,7 @@ def open_rollout(path: Path) -> BinaryIO:
 
 def iter_records(
     path: Path,
+    expected_identity: FileIdentity,
     deadline: float,
     *,
     allow_partial_tail: bool,
@@ -163,7 +172,7 @@ def iter_records(
 ) -> Iterator[Mapping[str, object]]:
     consumed = 0
     try:
-        with open_rollout(path) as handle:
+        with open_rollout(path, expected_identity) as handle:
             while True:
                 check_deadline(deadline)
                 raw = handle.readline(MAX_RECORD_BYTES + 1)
@@ -189,10 +198,16 @@ def iter_records(
         raise RolloutError("unable to read selected rollout") from exc
 
 
-def probe_owner(path: Path, active: bool, deadline: float) -> Optional[str]:
+def probe_owner(
+    path: Path,
+    expected_identity: FileIdentity,
+    active: bool,
+    deadline: float,
+) -> Optional[str]:
     try:
         for row in iter_records(
             path,
+            expected_identity,
             deadline,
             allow_partial_tail=active,
             byte_limit=MAX_PROBE_BYTES,
@@ -213,9 +228,10 @@ def probe_owner(path: Path, active: bool, deadline: float) -> Optional[str]:
 def inventory_rollouts(
     codex_home: Path,
     deadline: float,
-) -> Tuple[Dict[str, List[Path]], Set[Path]]:
+) -> Tuple[Dict[str, List[Path]], Set[Path], Dict[Path, FileIdentity]]:
     by_session: Dict[str, List[Path]] = {}
     active_paths: Set[Path] = set()
+    identities: Dict[Path, FileIdentity] = {}
     entry_count = 0
     file_count = 0
     for root_name in ("sessions", "archived_sessions"):
@@ -252,15 +268,23 @@ def inventory_rollouts(
                             raise RolloutError("rollout inventory has too many files")
                         if any(not character.isprintable() for character in filename):
                             raise RolloutError("rollout filename is not printable")
+                        try:
+                            metadata = entry.stat(follow_symlinks=False)
+                        except OSError as exc:
+                            raise RolloutError("unable to inspect rollout file") from exc
+                        if not stat.S_ISREG(metadata.st_mode) or metadata.st_size > MAX_FILE_BYTES:
+                            raise RolloutError("rollout inventory contains an unsafe file")
                         ids = sorted({match.group(0).lower() for match in UUID_RE.finditer(filename)})
                         if len(ids) > 1:
                             raise RolloutError("rollout filename contains multiple task IDs")
                         path = Path(entry.path)
+                        identity = (metadata.st_dev, metadata.st_ino)
+                        identities[path] = identity
                         active = root_name == "sessions"
                         if active:
                             active_paths.add(path)
                         if not ids:
-                            owner = probe_owner(path, active, deadline)
+                            owner = probe_owner(path, identity, active, deadline)
                             if owner is not None:
                                 ids.append(owner)
                         for session_id in ids:
@@ -271,12 +295,13 @@ def inventory_rollouts(
                 raise RolloutError("unable to inventory rollouts") from exc
     for paths in by_session.values():
         paths.sort()
-    return by_session, active_paths
+    return by_session, active_paths, identities
 
 
 def resolve_root(
     rollouts: Mapping[str, Sequence[Path]],
     active_paths: Set[Path],
+    identities: Mapping[Path, FileIdentity],
     selected_id: str,
     deadline: float,
     chain: Optional[List[str]] = None,
@@ -296,6 +321,7 @@ def resolve_root(
             checked_first_meta = False
             for row in iter_records(
                 path,
+                identities[path],
                 deadline,
                 allow_partial_tail=path in active_paths,
             ):
@@ -345,6 +371,7 @@ def resolve_root(
 def collect_votes(
     rollouts: Mapping[str, Sequence[Path]],
     active_paths: Set[Path],
+    identities: Mapping[Path, FileIdentity],
     root_id: str,
     seed_ids: Sequence[str],
     deadline: float,
@@ -369,8 +396,10 @@ def collect_votes(
         visited.add(session_id)
         for path in rollouts.get(session_id, ()):
             checked_first_meta = False
+            vote_session_id: Optional[str] = session_id
             for row in iter_records(
                 path,
+                identities[path],
                 deadline,
                 allow_partial_tail=path in active_paths,
             ):
@@ -382,12 +411,34 @@ def collect_votes(
                     raise RolloutError("rollout record payload is invalid")
                 if not isinstance(payload, dict):
                     continue
-                if record_type == "session_meta" and not checked_first_meta:
+                if record_type == "session_meta":
                     owner = lifecycle_id(payload)
-                    if owner is not None:
+                    if owner is None:
+                        vote_session_id = None
+                    elif not checked_first_meta:
                         checked_first_meta = True
                         if owner != session_id:
                             raise RolloutError("rollout filename and owner disagree")
+                        vote_session_id = owner
+                    else:
+                        if owner not in rollouts:
+                            raise RolloutError("replayed lifecycle rollout is unavailable")
+                        owner_root = resolved_roots.get(owner)
+                        if owner_root is None:
+                            owner_root = resolve_root(
+                                rollouts,
+                                active_paths,
+                                identities,
+                                owner,
+                                deadline,
+                            )
+                            resolved_roots[owner] = owner_root
+                        if owner_root != root_id:
+                            raise RolloutError("replayed lifecycle is outside the task family")
+                        vote_session_id = owner
+                        if owner not in scheduled:
+                            pending.append(owner)
+                            scheduled.add(owner)
                 if record_type == "event_msg" and payload.get("type") == "sub_agent_activity":
                     child_id = payload.get("agent_thread_id")
                     if not isinstance(child_id, str) or not child_id or len(child_id) > MAX_ID_CHARS:
@@ -397,7 +448,13 @@ def collect_votes(
                         raise RolloutError("referenced subagent rollout is unavailable")
                     child_root = resolved_roots.get(child_id)
                     if child_root is None:
-                        child_root = resolve_root(rollouts, active_paths, child_id, deadline)
+                        child_root = resolve_root(
+                            rollouts,
+                            active_paths,
+                            identities,
+                            child_id,
+                            deadline,
+                        )
                         resolved_roots[child_id] = child_root
                     if child_root != root_id:
                         raise RolloutError("referenced subagent is outside the task family")
@@ -406,6 +463,8 @@ def collect_votes(
                         scheduled.add(child_id)
                 if record_type != "turn_context":
                     continue
+                if vote_session_id is None:
+                    raise RolloutError("turn context has no verified lifecycle owner")
                 turn_id = payload.get("turn_id")
                 model = payload.get("model")
                 effort = payload.get("effort")
@@ -416,11 +475,11 @@ def collect_votes(
                 if len(turn_id) > MAX_ID_CHARS or len(model) > 128 or len(effort) > 64:
                     raise RolloutError("turn context field exceeds its limit")
                 normalized_id = normalized_turn_id(turn_id)
-                turn_key = (session_id, normalized_id)
+                turn_key = (vote_session_id, normalized_id)
                 if turn_key not in turn_keys and len(turn_keys) >= MAX_TURNS:
                     raise RolloutError("task family has too many unique turns")
                 turn_keys.add(turn_key)
-                file_key = (session_id, normalized_id, path)
+                file_key = (vote_session_id, normalized_id, path)
                 if file_key not in file_votes and len(file_votes) >= MAX_VOTE_COPIES:
                     raise RolloutError("task family has too many replayed turn copies")
                 file_votes[file_key] = Vote((model, effort), turn_order(turn_id))
@@ -465,15 +524,23 @@ def render_sentence(codex_home: Path, session_id: Optional[str]) -> str:
         return SENTENCE.format(FALLBACK_LABEL)
     try:
         deadline = time.monotonic() + DEADLINE_SECONDS
-        rollouts, active_paths = inventory_rollouts(codex_home, deadline)
+        rollouts, active_paths, identities = inventory_rollouts(codex_home, deadline)
         selected_id = normalize_session_id(session_id)
         if selected_id not in rollouts:
             return SENTENCE.format(FALLBACK_LABEL)
         chain: List[str] = []
-        root_id = resolve_root(rollouts, active_paths, selected_id, deadline, chain)
+        root_id = resolve_root(
+            rollouts,
+            active_paths,
+            identities,
+            selected_id,
+            deadline,
+            chain,
+        )
         votes = collect_votes(
             rollouts,
             active_paths,
+            identities,
             root_id,
             tuple(reversed(chain)),
             deadline,

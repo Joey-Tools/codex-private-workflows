@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -95,6 +96,20 @@ def child_event(session_id: str) -> dict:
     }
 
 
+def load_helper_module():
+    module_name = "pr_attribution_test_module"
+    spec = importlib.util.spec_from_file_location(module_name, SCRIPT)
+    if spec is None or spec.loader is None:
+        raise RuntimeError("unable to load attribution helper")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
+    try:
+        spec.loader.exec_module(module)
+    finally:
+        sys.modules.pop(module_name, None)
+    return module
+
+
 class PrAttributionTests(unittest.TestCase):
     def run_helper(
         self,
@@ -165,7 +180,7 @@ class PrAttributionTests(unittest.TestCase):
                 sentence("GPT-5.6 Sol Extra High"),
             )
 
-    def test_session_meta_prefix_does_not_reassign_file_turns(self) -> None:
+    def test_conflicting_replayed_turn_uses_fallback(self) -> None:
         shared = "019ff116-ddd1-72f2-bff7-8a0d997c4b66"
         with tempfile.TemporaryDirectory() as temporary_directory:
             home = Path(temporary_directory)
@@ -174,6 +189,102 @@ class PrAttributionTests(unittest.TestCase):
                 home,
                 CHILD,
                 [meta(CHILD, ROOT, parent_id=ROOT), meta(ROOT, ROOT), turn(shared, "xhigh")],
+            )
+
+            self.assertEqual(self.run_helper(home), FALLBACK)
+
+    def test_repeated_lifecycle_prefix_deduplicates_replayed_turns(self) -> None:
+        first = "019ff116-ddd1-72f2-bff7-8a0d997c4b66"
+        second = "019ff117-ddd1-72f2-bff7-8a0d997c4b66"
+        third = "019ff118-ddd1-72f2-bff7-8a0d997c4b66"
+        latest = "019ff119-ddd1-72f2-bff7-8a0d997c4b66"
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            home = Path(temporary_directory)
+            write_rollout(
+                home,
+                ROOT,
+                [
+                    meta(ROOT, ROOT),
+                    turn(first, "max"),
+                    turn(second, "xhigh"),
+                    turn(third, "xhigh"),
+                    child_event(CHILD),
+                ],
+            )
+            write_rollout(
+                home,
+                CHILD,
+                [
+                    meta(CHILD, ROOT, parent_id=ROOT),
+                    meta(ROOT, ROOT),
+                    turn(first, "max"),
+                    turn(second, "xhigh"),
+                    turn(third, "xhigh"),
+                    meta(ROOT, ROOT),
+                    meta(ROOT, ROOT),
+                    turn(latest, "max"),
+                ],
+            )
+
+            self.assertEqual(self.run_helper(home), sentence("GPT-5.6 Sol Max"))
+
+    def test_later_lifecycle_prefix_deduplicates_partial_replay(self) -> None:
+        child_first = "019ff116-ddd1-72f2-bff7-8a0d997c4b66"
+        child_second = "019ff117-ddd1-72f2-bff7-8a0d997c4b66"
+        root_latest = "019ff119-ddd1-72f2-bff7-8a0d997c4b66"
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            home = Path(temporary_directory)
+            write_rollout(home, ROOT, [meta(ROOT, ROOT), turn(root_latest, "max"), child_event(CHILD)])
+            write_rollout(
+                home,
+                CHILD,
+                [
+                    meta(CHILD, ROOT, parent_id=ROOT),
+                    turn(child_first, "xhigh"),
+                    turn(child_second, "xhigh"),
+                    meta(ROOT, ROOT),
+                    turn(root_latest, "max"),
+                ],
+            )
+
+            self.assertEqual(self.run_helper(home), sentence("GPT-5.6 Sol Extra High"))
+
+    def test_opaque_turn_ids_remain_lifecycle_scoped(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            home = Path(temporary_directory)
+            write_rollout(
+                home,
+                ROOT,
+                [meta(ROOT, ROOT), turn("root-a", "max"), child_event(CHILD)],
+            )
+            write_rollout(
+                home,
+                CHILD,
+                [
+                    meta(CHILD, ROOT, parent_id=ROOT),
+                    turn("shared-opaque", "xhigh"),
+                    child_event(GRANDCHILD),
+                ],
+            )
+            write_rollout(
+                home,
+                GRANDCHILD,
+                [meta(GRANDCHILD, ROOT, parent_id=CHILD), turn("shared-opaque", "xhigh")],
+            )
+
+            self.assertEqual(self.run_helper(home), sentence("GPT-5.6 Sol Extra High"))
+
+    def test_ownerless_lifecycle_boundary_uses_fallback(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            home = Path(temporary_directory)
+            write_rollout(
+                home,
+                ROOT,
+                [
+                    meta(ROOT, ROOT),
+                    {"type": "session_meta", "payload": {}},
+                    turn("root-a", "max"),
+                ],
             )
 
             self.assertEqual(self.run_helper(home), FALLBACK)
@@ -237,6 +348,18 @@ class PrAttributionTests(unittest.TestCase):
                 home = Path(temporary_directory)
                 write_rollout(home, ROOT, [turn("root-a", effort)])
                 self.assertEqual(self.run_helper(home), sentence(f"GPT-5.6 Sol {label}"))
+
+    def test_current_model_labels(self) -> None:
+        models = {
+            "gpt-5.5": "GPT-5.5",
+            "gpt-5.6-sol": "GPT-5.6 Sol",
+            "gpt-5.6-terra": "GPT-5.6 Terra",
+        }
+        for model, label in models.items():
+            with self.subTest(model=model), tempfile.TemporaryDirectory() as temporary_directory:
+                home = Path(temporary_directory)
+                write_rollout(home, ROOT, [turn("root-a", "high", model=model)])
+                self.assertEqual(self.run_helper(home), sentence(f"{label} High"))
 
     def test_unknown_or_missing_evidence_uses_fallback(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
@@ -395,6 +518,26 @@ class PrAttributionTests(unittest.TestCase):
             link.parent.mkdir(parents=True)
             link.symlink_to(target)
             self.assertEqual(self.run_helper(home), FALLBACK)
+
+    def test_rollout_identity_allows_append_but_rejects_replacement(self) -> None:
+        helper = load_helper_module()
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            directory = Path(temporary_directory)
+            rollout = directory / "rollout.jsonl"
+            rollout.write_text("{}\n", encoding="utf-8")
+            metadata = rollout.stat()
+            identity = (metadata.st_dev, metadata.st_ino)
+
+            with rollout.open("a", encoding="utf-8") as handle:
+                handle.write("{}\n")
+            with helper.open_rollout(rollout, identity) as handle:
+                self.assertEqual(handle.readline(), b"{}\n")
+
+            replacement = directory / "replacement.jsonl"
+            replacement.write_text("{}\n", encoding="utf-8")
+            os.replace(replacement, rollout)
+            with self.assertRaises(helper.RolloutError):
+                helper.open_rollout(rollout, identity)
 
     def test_personal_guidance_routes_pr_note_to_helper(self) -> None:
         agents = (REPO_ROOT / "personal_codex" / "AGENTS.md").read_text(encoding="utf-8")
