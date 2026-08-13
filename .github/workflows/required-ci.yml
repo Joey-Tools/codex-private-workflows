@@ -22,9 +22,12 @@ jobs:
           - macos-latest
     runs-on: ${{ matrix.os }}
     steps:
+      - name: Reject unexpected repository
+        if: ${{ github.repository != 'Joey-Tools/codex-private-workflows' }}
+        run: exit 1
       - uses: actions/checkout@v4
         with:
-          repository: ${{ github.repository }}
+          repository: Joey-Tools/codex-private-workflows
           ref: ${{ github.sha }}
           fetch-depth: 0
           persist-credentials: false
@@ -109,9 +112,12 @@ jobs:
     runs-on: macos-26
     timeout-minutes: 20
     steps:
+      - name: Reject unexpected repository
+        if: ${{ github.repository != 'Joey-Tools/codex-private-workflows' }}
+        run: exit 1
       - uses: actions/checkout@v4
         with:
-          repository: ${{ github.repository }}
+          repository: Joey-Tools/codex-private-workflows
           ref: ${{ github.sha }}
           persist-credentials: false
       - uses: actions/setup-python@v5
@@ -179,9 +185,12 @@ jobs:
     runs-on: macos-26
     timeout-minutes: 20
     steps:
+      - name: Reject unexpected repository
+        if: ${{ github.repository != 'Joey-Tools/codex-private-workflows' }}
+        run: exit 1
       - uses: actions/checkout@v4
         with:
-          repository: ${{ github.repository }}
+          repository: Joey-Tools/codex-private-workflows
           ref: ${{ github.sha }}
           fetch-depth: 1
           persist-credentials: false
@@ -1797,9 +1806,12 @@ jobs:
     runs-on: ubuntu-slim
     timeout-minutes: 15
     steps:
+      - name: Reject unexpected repository
+        if: ${{ github.repository != 'Joey-Tools/codex-private-workflows' }}
+        run: exit 1
       - uses: actions/checkout@v4
         with:
-          repository: ${{ github.repository }}
+          repository: Joey-Tools/codex-private-workflows
           ref: ${{ github.sha }}
           persist-credentials: false
       - uses: actions/setup-python@v5
@@ -1857,10 +1869,13 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
+      - name: Reject unexpected repository
+        if: ${{ github.repository != 'Joey-Tools/codex-private-workflows' }}
+        run: exit 1
       - name: Check out repository
         uses: actions/checkout@v4
         with:
-          repository: ${{ github.repository }}
+          repository: Joey-Tools/codex-private-workflows
           ref: ${{ github.sha }}
           fetch-depth: 0
           persist-credentials: false
