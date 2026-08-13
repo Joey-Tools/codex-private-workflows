@@ -2,6 +2,15 @@ name: Required CI
 
 on:
   workflow_call:
+    inputs:
+      repository:
+        description: Repository whose exact ref Required CI validates.
+        required: true
+        type: string
+      ref:
+        description: Exact commit or ref Required CI validates.
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -24,6 +33,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          repository: ${{ inputs.repository }}
+          ref: ${{ inputs.ref }}
           fetch-depth: 0
       - uses: actions/setup-python@v5
         with:
@@ -107,6 +118,9 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.repository }}
+          ref: ${{ inputs.ref }}
       - uses: actions/setup-python@v5
         with:
           python-version: "3.13"
@@ -174,9 +188,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          repository: ${{ inputs.repository }}
+          ref: ${{ inputs.ref }}
           fetch-depth: 1
           persist-credentials: false
-          ref: ${{ github.sha }}
       - name: Install pinned uv
         id: setup-uv
         uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
@@ -1790,6 +1805,9 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.repository }}
+          ref: ${{ inputs.ref }}
       - uses: actions/setup-python@v5
         with:
           python-version: "3.9"
@@ -1848,6 +1866,8 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v4
         with:
+          repository: ${{ inputs.repository }}
+          ref: ${{ inputs.ref }}
           fetch-depth: 0
           persist-credentials: false
 

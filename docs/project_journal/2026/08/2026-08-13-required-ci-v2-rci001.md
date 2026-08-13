@@ -16,18 +16,25 @@ superseded_by:
 
 - Add a caller-only, read-only reusable workflow for the central Required CI
   rollout without changing the existing CI or release workflows.
+- Require the caller to provide the repository and exact ref validated by every
+  checkout in the reusable graph.
 - Preserve both current required scopes: `test` and
   `Build private overlay release`.
 
 ## Current State
 
-- `.github/workflows/required-ci.yml` exposes only `workflow_call` with
-  `contents: read` and omits the existing CI workflow's cancellation group.
+- `.github/workflows/required-ci.yml` exposes only `workflow_call` with the
+  required string inputs `repository` and `ref`, keeps `contents: read`, and
+  omits the existing CI workflow's cancellation group.
 - The reusable entry contains the complete CI job graph plus the release
   workflow's PR-active `release` job, while excluding the write-capable
   `publish` job.
-- A focused contract test byte-binds both source scopes and rejects trigger,
-  permission, secret, publication, or job-graph drift during the canary.
+- All five `actions/checkout` steps bind `repository` and `ref` to those exact
+  caller inputs while preserving their existing fetch-depth and credential
+  settings.
+- A focused contract test byte-binds both source scopes and rejects input,
+  checkout, trigger, permission, secret, publication, or job-graph drift during
+  the canary.
 
 ## Next Steps
 
@@ -37,6 +44,6 @@ superseded_by:
 ## Evidence
 
 - `python3 -B -m unittest discover -s tests -p 'test_required_ci_workflow.py' -v`
-  passes both focused contract tests under Python 3.13.0.
+  passes all three focused contract tests under Python 3.13.0.
 - `actionlint -shellcheck= .github/workflows/required-ci.yml` validates the
   reusable workflow structure and expressions.
