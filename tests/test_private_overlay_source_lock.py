@@ -294,6 +294,12 @@ class CheckoutVerifierTests(unittest.TestCase):
             checkout = self.source_root / name
             checkout.mkdir(mode=0o700)
             self._git(checkout, "init", "--quiet", "--initial-branch=main")
+            # Git 2.54 may detach automatic maintenance after a write command,
+            # leaving a fixture checkout active when TemporaryDirectory cleanup
+            # begins. Keep these short-lived repositories free of background
+            # writers instead of weakening teardown validation with retries.
+            self._git(checkout, "config", "maintenance.auto", "false")
+            self._git(checkout, "config", "gc.auto", "0")
             self._git(checkout, "config", "user.name", "Source Lock Test")
             self._git(checkout, "config", "user.email", "source-lock@example.invalid")
             self._git(checkout, "config", "commit.gpgsign", "false")
@@ -386,6 +392,31 @@ class CheckoutVerifierTests(unittest.TestCase):
 
     def test_accepts_five_complete_clean_detached_checkouts(self) -> None:
         SOURCE_LOCK.verify_checkouts(self.source_root, self.source_lock)
+
+    def test_fixture_disables_background_git_maintenance(self) -> None:
+        for checkout in (self._checkout(index) for index in range(len(self.pins))):
+            self.assertEqual(
+                self._git_stdout(
+                    checkout,
+                    "config",
+                    "--local",
+                    "--type=bool",
+                    "--get",
+                    "maintenance.auto",
+                ),
+                "false",
+            )
+            self.assertEqual(
+                self._git_stdout(
+                    checkout,
+                    "config",
+                    "--local",
+                    "--type=int",
+                    "--get",
+                    "gc.auto",
+                ),
+                "0",
+            )
 
     def test_macos_uses_fixed_system_git_instead_of_homebrew_symlink(self) -> None:
         entry = self._homebrew_git_fixture()
