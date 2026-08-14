@@ -42,11 +42,6 @@
       "kind": "skill"
     },
     {
-      "source": "personal_codex/skills/codex-rules-hygiene",
-      "target": "skills/codex-rules-hygiene",
-      "kind": "skill"
-    },
-    {
       "source": "personal_codex/skills/codex-session-mining",
       "target": "skills/codex-session-mining",
       "kind": "skill"
@@ -131,6 +126,12 @@
       "id": "2026-08-05-localize-apple-notes-work-report",
       "source": ".agents/skills/apple-notes-work-report",
       "target": "skills/apple-notes-work-report",
+      "kind": "skill"
+    },
+    {
+      "id": "2026-08-14-retire-codex-rules-hygiene",
+      "source": "personal_codex/skills/codex-rules-hygiene",
+      "target": "skills/codex-rules-hygiene",
       "kind": "skill"
     }
   ],

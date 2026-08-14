@@ -8820,11 +8820,14 @@ jobs:
         self.assertIn("personal_codex/skills/synthetic-token-fixtures", sync_targets)
         self.assertNotIn("skills/apple-notes-db-guardrails", all_manifest_targets)
         self.assertNotIn("skills/apple-notes-work-report", all_manifest_targets)
+        self.assertNotIn("skills/codex-rules-hygiene", all_manifest_targets)
         self.assertNotIn("skills/waited-delivery", all_manifest_targets)
+        self.assertIn("personal_codex/skills/codex-rules-hygiene", retired_targets)
         self.assertIn("personal_codex/skills/waited-delivery", retired_targets)
         for target in (
             "skills/apple-notes-db-guardrails",
             "skills/apple-notes-work-report",
+            "skills/codex-rules-hygiene",
             "skills/waited-delivery",
         ):
             with self.subTest(non_legacy_tombstone=target):
@@ -8847,6 +8850,7 @@ jobs:
             "do not rely on a global copy under `~/.codex/skills`",
             agents,
         )
+        self.assertNotIn("$codex-rules-hygiene", agents)
 
     def test_personal_agents_bind_materialization_contract_activation(self) -> None:
         agents = (REPO_ROOT / "personal_codex" / "AGENTS.md").read_text(
@@ -9249,6 +9253,7 @@ jobs:
 
         self.assertEqual(len(locked_repositories), len(rule_repositories))
         self.assertEqual(frozenset(locked_repositories), frozenset(rule_repositories))
+        self.assertIn("codex-workflow-hygiene", locked_repositories)
 
     @unittest.skipUnless(sys.platform == "darwin", "macOS-only Git trust root")
     def test_macos_source_lock_binds_actual_command_line_tools_git(self) -> None:
