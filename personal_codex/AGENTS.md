@@ -17,7 +17,6 @@
 - Use `$joey-skill-authoring` when creating or revising skills, or when deciding whether guidance belongs in `AGENTS.md`, `SKILL.md`, or `references/`.
 - Use `$bounded-command-output` before broad searches or inventories, large log, artifact, or manual reads, process diagnostics, or verbose or spinner-heavy builds and tests; apply it alongside the task's domain skill.
 - Use `$agile-delivery-workflow` when Joey explicitly asks to prioritize an early usable MVP or says `先可用`, `快速迭代`, `偏 agile`, `MVP`, or `scout`; stop first at a focused checked signed local commit, then continue to normal delivery/PR workflow only when requested.
-- Use `$codex-rules-hygiene` when auditing or pruning `~/.codex/rules/default.rules`, especially after recent approvals suggest wrapper drift, helper gaps, or approval-log buildup rather than genuinely new stable command families.
 - Use `$codex-session-mining` when a task depends on `~/.codex/session_index.jsonl`, `history.jsonl`, or `sessions/**/rollout-*.jsonl`, such as recent-session audits, prior-work recovery, or mining repeated skill friction.
 - Use `$codex-session-retrospective` only when Joey explicitly invokes it for a read-only, cross-host collaboration retrospective that produces redacted episode/topic summaries, turn-level prompt-improvement flags, and private history-ready reports.
 - Use `$synthetic-token-fixtures` when authoring or migrating credential-shaped source and test fixtures that must pass the review helper's exact synthetic-token policy.

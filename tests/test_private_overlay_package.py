@@ -199,6 +199,7 @@ class PrivateOverlayPackageTests(unittest.TestCase):
         self.assertIn("skills/remote-host-context", targets)
         self.assertNotIn("skills/apple-notes-db-guardrails", targets)
         self.assertNotIn("skills/apple-notes-work-report", targets)
+        self.assertNotIn("skills/codex-rules-hygiene", targets)
         self.assertNotIn("skills/waited-delivery", targets)
         self.assertNotIn("bin/codex-personal-sync", targets)
         self.assertTrue(
@@ -258,6 +259,12 @@ class PrivateOverlayPackageTests(unittest.TestCase):
                     "id": "2026-08-05-localize-apple-notes-work-report",
                     "source": ".agents/skills/apple-notes-work-report",
                     "target": "skills/apple-notes-work-report",
+                    "kind": "skill",
+                },
+                {
+                    "id": "2026-08-14-retire-codex-rules-hygiene",
+                    "source": "personal_codex/skills/codex-rules-hygiene",
+                    "target": "skills/codex-rules-hygiene",
                     "kind": "skill",
                 },
             ],
@@ -1947,6 +1954,7 @@ class PrivateAutomationPromptTests(unittest.TestCase):
             "because the rollout began with the automation wrapper",
             prompt,
         )
+        self.assertNotIn("rules hygiene", prompt)
 
 
 if __name__ == "__main__":

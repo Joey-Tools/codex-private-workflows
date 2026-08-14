@@ -574,31 +574,6 @@ SYNC_RULES = (
     ),
     _rule(
         "codex-workflow-hygiene",
-        "skills/codex-rules-hygiene",
-        "personal_codex/skills/codex-rules-hygiene",
-        (
-            Replacement(
-                "[$codex-skill-authoring](../codex-skill-authoring/SKILL.md)",
-                "[$joey-skill-authoring](../joey-skill-authoring/SKILL.md)",
-            ),
-            Replacement(
-                "[$codex-skill-authoring](../../codex-skill-authoring/SKILL.md)",
-                "[$joey-skill-authoring](../../joey-skill-authoring/SKILL.md)",
-            ),
-            Replacement(
-                "Repeated tracker issue metadata fetches before a dedicated tracker helper",
-                "Repeated Jira issue metadata fetches before `jira_issue_probe.py`",
-            ),
-            Replacement("Concrete tracker issue URLs", "Concrete Jira issue URLs"),
-        ),
-        common_joey_text=True,
-        forbidden_residuals=(
-            "environment-specific remote evidence workflow",
-            "environment-specific workflow",
-        ),
-    ),
-    _rule(
-        "codex-workflow-hygiene",
         "skills/codex-session-mining",
         "personal_codex/skills/codex-session-mining",
         (
@@ -842,6 +817,7 @@ RETIRED_TARGETS = tuple(
         "personal_codex/skills/external-review-playbook",
         "personal_codex/skills/pr-readiness-review-workflow",
         "personal_codex/skills/waited-delivery",
+        "personal_codex/skills/codex-rules-hygiene",
     )
 )
 
