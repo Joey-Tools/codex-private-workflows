@@ -4,8 +4,8 @@ title: Retire Codex Rules Hygiene Distribution
 status: completed
 created: 2026-08-14
 updated: 2026-08-14
-branch: wip/retire-rules-hygiene-distribution
-pr:
+branch: codex/retire-rules-hygiene-distribution
+pr: https://github.com/Joey-Tools/codex-private-workflows/pull/170
 supersedes: []
 superseded_by:
 ---
@@ -40,6 +40,7 @@ superseded_by:
 
 ## Evidence
 
+- Delivery PR: https://github.com/Joey-Tools/codex-private-workflows/pull/170
 - Retirement precedent: private-workflows PR #147, commit `1f716fd`.
 - Canonical donor-only rules work: codex-workflow-hygiene PR #63, head
   `5b769d3742d2b48377060373146638a3558d7d5d`.
