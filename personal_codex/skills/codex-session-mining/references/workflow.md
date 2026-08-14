@@ -376,6 +376,8 @@ Use the later bounded rollout probe for `sessions/**/rollout-*.jsonl` and `archi
 
 ## 2. Extract Only The Relevant Parts
 
+For first-pass keyword discovery in one exact rollout, use the fixed case-sensitive literal count, bounded matching-line position sample, and optional bounded raw-prefix sample in [rollout-search.md](rollout-search.md). Those templates prevent an unbounded matching JSONL record from reaching stdout, but they do not parse JSON, select trusted fields, freeze a live rollout, or prove a complete match set. Treat positive and negative counts plus line coordinates as raw-text locator results only. Run the record-shape-aware parser below with the same literal for match or no-match evidence, including when ripgrep counted zero; decoded escapes, normalized whitespace, and field boundaries intentionally give the parser different semantics.
+
 Before printing details from a large rollout, count record shapes and then filter:
 
 ```bash
@@ -409,37 +411,199 @@ import json
 import sys
 
 path = Path(sys.argv[1]).expanduser()
-needle = sys.argv[2]
+needle = ' '.join(sys.argv[2].split())
+if not needle:
+    print('NEEDLE must contain non-whitespace text', file=sys.stderr)
+    raise SystemExit(2)
+max_needle_bytes = 1024
+try:
+    needle_utf8_bytes = len(needle.encode('utf-8'))
+except UnicodeEncodeError:
+    print('NEEDLE must be valid UTF-8', file=sys.stderr)
+    raise SystemExit(2)
+if needle_utf8_bytes > max_needle_bytes:
+    print(f'NEEDLE must be at most {max_needle_bytes} UTF-8 bytes', file=sys.stderr)
+    raise SystemExit(2)
 printed = 0
+max_rows = 20
 max_record_bytes = 1024 * 1024
+max_inferred_raw_lf_fragments = 64
 before_chars = 180
 after_chars = 220
 max_metadata_chars = 80
+scan_meta = {
+    'kind': 'scan_meta',
+    'scan_complete': False,
+    'stop_reason': None,
+    'records_seen': 0,
+    'invalid_records': 0,
+    'oversized_records': 0,
+    'matched_records': 0,
+    'emitted_rows': 0,
+    'suppressed_rows': 0,
+    'max_rows': max_rows,
+    'output_truncated': False,
+}
+
+
+def read_prefix_without_advancing(handle, raw_line, limit):
+    prefix = raw_line[:limit]
+    if len(prefix) == limit:
+        return prefix
+    checkpoint = handle.tell()
+    prefix += handle.read(limit - len(prefix))
+    handle.seek(checkpoint)
+    return prefix
+
+
+def little_endian_framing(handle, raw_line):
+    prefix = read_prefix_without_advancing(handle, raw_line, 4)
+    if prefix.startswith(b'\xff\xfe\x00\x00'):
+        return 'bom', 4
+    if prefix.startswith(b'\xff\xfe'):
+        return 'bom', 2
+    if len(prefix) >= 4 and prefix[0] and not prefix[1]:
+        return 'inferred', 2 if prefix[2] or prefix[3] else 4
+    if len(prefix) >= 2 and prefix[0] and not prefix[1]:
+        return 'inferred', 2
+    return None, 1
+
+
+def consume_aligned_little_endian_lf_padding(handle, width, record_bytes):
+    if width == 1 or (record_bytes - 1) % width != 0:
+        return b''
+    padding_bytes = width - 1
+    padding = b'\x00' * padding_bytes
+    checkpoint = handle.tell()
+    candidate = handle.read(padding_bytes)
+    if candidate != padding:
+        handle.seek(checkpoint)
+        return b''
+    return candidate
+
+
+def read_bounded_little_endian_record(handle, raw_line, width):
+    retained = bytearray()
+    record_bytes = 0
+    raw_lf_count = 0
+    oversized = False
+    while raw_line:
+        record_bytes += len(raw_line)
+        if not oversized:
+            if record_bytes <= max_record_bytes:
+                retained.extend(raw_line)
+            else:
+                retained.clear()
+                oversized = True
+        terminated = False
+        if raw_line.endswith(b'\n'):
+            raw_lf_count += 1
+            padding = consume_aligned_little_endian_lf_padding(
+                handle, width, record_bytes
+            )
+            if padding:
+                record_bytes += len(padding)
+                if not oversized:
+                    if record_bytes <= max_record_bytes:
+                        retained.extend(padding)
+                    else:
+                        retained.clear()
+                        oversized = True
+                terminated = True
+        if terminated:
+            break
+        raw_line = handle.readline(max_record_bytes + 1)
+    return (None if oversized else bytes(retained), raw_lf_count)
+
+
+def read_inferred_little_endian_record(handle, raw_line, width):
+    first_raw_boundary = handle.tell()
+    retained = bytearray()
+    record_bytes = 0
+    raw_lf_count = 0
+    codec = f'utf-{width * 8}-le'
+    while raw_line:
+        record_bytes += len(raw_line)
+        if record_bytes > max_record_bytes:
+            handle.seek(first_raw_boundary)
+            return raw_line, int(raw_line.endswith(b'\n')), False
+        retained.extend(raw_line)
+        if raw_line.endswith(b'\n'):
+            raw_lf_count += 1
+            padding = consume_aligned_little_endian_lf_padding(
+                handle, width, record_bytes
+            )
+            if padding:
+                record_bytes += len(padding)
+                if record_bytes > max_record_bytes:
+                    handle.seek(first_raw_boundary)
+                    return raw_line, int(raw_line.endswith(b'\n')), False
+                retained.extend(padding)
+                try:
+                    json.loads(bytes(retained).decode(codec))
+                except (UnicodeDecodeError, ValueError, RecursionError):
+                    handle.seek(first_raw_boundary)
+                    return raw_line, int(raw_line.endswith(b'\n')), False
+                return bytes(retained), raw_lf_count, True
+            if raw_lf_count >= max_inferred_raw_lf_fragments:
+                handle.seek(first_raw_boundary)
+                return raw_line, int(raw_line.endswith(b'\n')), False
+        raw_line = handle.readline(max_record_bytes + 1)
+    handle.seek(first_raw_boundary)
+    return raw_line, 0, False
 
 
 def bounded_jsonl(handle):
-    line_no = 0
+    physical_line_no = 1
     while True:
         raw_line = handle.readline(max_record_bytes + 1)
         if not raw_line:
             return
-        line_no += 1
+        record_line_no = physical_line_no
+        scan_meta['records_seen'] += 1
+        framing_kind, little_endian_width = little_endian_framing(handle, raw_line)
+        if framing_kind == 'bom':
+            raw_line, raw_lf_count = read_bounded_little_endian_record(
+                handle, raw_line, little_endian_width
+            )
+            physical_line_no += raw_lf_count
+            if raw_line is None:
+                scan_meta['oversized_records'] += 1
+                continue
+            yield record_line_no, raw_line
+            continue
+        if framing_kind == 'inferred':
+            first_raw_line = raw_line
+            raw_line, raw_lf_count, committed = read_inferred_little_endian_record(
+                handle, raw_line, little_endian_width
+            )
+            if committed:
+                physical_line_no += raw_lf_count
+                yield record_line_no, raw_line
+                continue
+            raw_line = first_raw_line
+        raw_lf_count = int(raw_line.endswith(b'\n'))
         if len(raw_line) > max_record_bytes:
             while raw_line and not raw_line.endswith(b'\n'):
                 raw_line = handle.readline(max_record_bytes + 1)
+                raw_lf_count += int(raw_line.endswith(b'\n'))
+            physical_line_no += raw_lf_count
+            scan_meta['oversized_records'] += 1
             continue
-        yield line_no, raw_line
+        physical_line_no += raw_lf_count
+        yield record_line_no, raw_line
 
 
 def iter_text(value):
-    if isinstance(value, str):
-        yield value
-    elif isinstance(value, dict):
-        for item in value.values():
-            yield from iter_text(item)
-    elif isinstance(value, list):
-        for item in value:
-            yield from iter_text(item)
+    stack = [value]
+    while stack:
+        current = stack.pop()
+        if isinstance(current, str):
+            yield current
+        elif isinstance(current, dict):
+            stack.extend(reversed(tuple(current.values())))
+        elif isinstance(current, list):
+            stack.extend(reversed(current))
 
 
 def iter_top_level_fields(obj):
@@ -609,10 +773,12 @@ with path.open('rb') as handle:
     records = bounded_jsonl(handle)
     for line_no, raw_line in records:
         try:
-            obj = json.loads(raw_line)
-        except (UnicodeDecodeError, json.JSONDecodeError):
+            obj = json.loads(raw_line.decode('utf-8-sig'))
+        except (ValueError, RecursionError):
+            scan_meta['invalid_records'] += 1
             continue
         if not isinstance(obj, dict):
+            scan_meta['invalid_records'] += 1
             continue
         payload = obj.get('payload') or {}
         if not isinstance(payload, dict):
@@ -629,15 +795,32 @@ with path.open('rb') as handle:
         )
         if snippet is None:
             continue
-        safe_snippet = escaped_output_text(snippet)
-        print(f'{path}:{line_no}:{timestamp}:{record_kind}:{safe_snippet}')
-        printed += 1
-        if printed >= 20:
-            break
+        scan_meta['matched_records'] += 1
+        if printed < max_rows:
+            safe_snippet = escaped_output_text(snippet)
+            print(f'{path}:{line_no}:{timestamp}:{record_kind}:{safe_snippet}')
+            printed += 1
+        else:
+            scan_meta['suppressed_rows'] += 1
+
+scan_meta['scan_complete'] = True
+scan_meta['emitted_rows'] = printed
+scan_meta['output_truncated'] = scan_meta['suppressed_rows'] > 0
+print(json.dumps(scan_meta, sort_keys=True, separators=(',', ':')), file=sys.stderr)
 PY
 ```
 
-The binary reader accepts only physical JSONL records up to 1 MiB and drains an oversized record through LF in fixed-size chunks; a bare CR inside that record cannot expose its tail as a new record. Matching walks the full selected strings, including the original type string, incrementally, normalizes whitespace across both string and field boundaries, and retains only the needle plus the bounded context window instead of joining a complete tool output in memory. After raw matching and window selection, the snippet JSON-escapes only non-printable characters so terminal control sequences cannot reach stdout while printable Unicode remains unchanged. Printed metadata accepts strings only, normalizes whitespace, JSON-escapes non-ASCII and control characters, and caps each field before it reaches stdout.
+The parser rejects an empty, whitespace-only, invalid-UTF-8, or post-normalization needle larger than 1024 UTF-8 bytes before opening the rollout. This fixed needle cap bounds the portion repeated in each of the at most 20 output rows. The binary reader accepts only physical JSONL records up to 1 MiB and drains an oversized record through LF in fixed-size chunks; a bare CR inside that record cannot expose its tail as a new record. Raw LF is the default physical-record delimiter.
+
+A record that starts with a UTF-16LE or UTF-32LE BOM uses an authoritative recovery rule: it continues past raw `0a` bytes inside foreign code units until an LF is aligned to that code-unit width and the complete following 1 or 3 bytes are exactly NUL, then assigns that encoded-LF padding to the same rejected record. This remains a declared framing choice for BOM-prefixed input: a hybrid foreign record that instead uses a single-byte LF is ambiguous with an internal code-unit byte and remains one invalid or oversized record.
+
+A no-BOM little-endian prefix is only provisional. The reader derives a candidate width from the same leading NUL-byte shapes used for JSON byte decoding, retains at most 1 MiB, and checkpoints the logical position after its initial bounded raw read. It skips raw LF bytes whose alignment or following bytes do not form a complete encoded-LF trailer, and it attempts strict codec decoding plus `json.loads()` only at the first complete trailer. Each provisional candidate may span at most 64 raw-LF fragments, so overlapping unclosed candidates have a fixed linear-work ceiling instead of repeatedly scanning an unbounded suffix. The reader commits that first candidate boundary only when the retained bytes decode strictly with the inferred UTF-16LE or UTF-32LE codec and `json.loads()` accepts the complete decoded value; validation failure rolls back immediately rather than probing a later trailer.
+
+A malformed, hybrid, incomplete, multiline, EOF-only, fragment-limited, or oversized candidate restores the initial-read checkpoint and resumes default raw-LF framing. No-BOM recovery deliberately targets one encoded JSONL value rather than reconstructing pretty-printed foreign JSON across complete encoded newlines. This rollback preserves bytes but does not claim that an ambiguous NUL trailer belongs to either adjacent raw-LF record: such padding can make the immediately following UTF-8 record invalid under fallback framing, and nonzero `invalid_records` or `oversized_records` blocks a complete-evidence claim. An oversized or fragment-limited no-BOM candidate is not transactionally recovered. Prefix lookahead and trailer checks use bounded `read()` plus `tell()`/`seek()` rollback rather than assuming `peek()` fills a buffer. Neither recovery path strips arbitrary NULs, accepts the foreign encoding as a rollout record, or transcodes it for matching.
+
+Output line numbers remain 1-based raw-LF physical coordinates: every raw LF consumed inside a committed foreign record advances the next record's coordinate, while `records_seen` counts that recovered foreign record once. Every retained physical record is decoded with the strict `utf-8-sig` codec before JSON parsing: one leading UTF-8 BOM is removed for compatibility with the prior byte-oriented JSON parser, while malformed UTF-8, a second consecutive leading BOM, and UTF-16 or UTF-32 input remain invalid. This prevents `json.loads()` from auto-detecting foreign encodings and bypassing `invalid_records`. Matching walks the full selected strings, including the original type string, incrementally, normalizes whitespace across both string and field boundaries, and retains only the needle plus the bounded context window instead of joining a complete tool output in memory. After raw matching and window selection, the snippet JSON-escapes only non-printable characters so terminal control sequences cannot reach stdout while printable Unicode remains unchanged. Printed metadata accepts strings only, normalizes whitespace, JSON-escapes non-ASCII and control characters, and caps each field before it reaches stdout.
+
+The parser continues through point-in-time EOF after its 20 stdout rows are full. Its final stderr line is one compact `scan_meta` JSON object; keep it in a private bounded control sink and require normal process exit plus `scan_complete: true`. `matched_records` counts every matching physical record reached by the selected-field scan, while `emitted_rows`, `suppressed_rows`, and `output_truncated` distinguish complete matching from bounded presentation. `invalid_records` and `oversized_records` identify physical records the parser could not inspect; they must be zero before claiming a complete no-match result. These counters do not freeze a live rollout or prove content stability.
 
 For JSONL schema checks, inspect one record or aggregate unique keys once. Do not run `jq -R 'fromjson | keys' file.jsonl`, because it prints the same key list for every line and can produce massive output on retained artifacts such as `turn_flags.jsonl`.
 
@@ -788,6 +971,8 @@ If you need the raw wrappers for provenance, keep a second pass for them, but do
 
 Focus on tool failures or approval friction:
 
+Use this field-aware parser after the fixed rollout-search protocol has identified the exact file or candidate lines.
+
 ```bash
 python3 - <<'PY'
 from pathlib import Path
@@ -893,6 +1078,8 @@ PY
 ```
 
 Search a bounded rollout set without dumping full JSONL records:
+
+Use this field-aware parser after candidate discovery; it is not a replacement for the fixed one-file ripgrep output protocol.
 
 ```bash
 python3 - <<'PY'
