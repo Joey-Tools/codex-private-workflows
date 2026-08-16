@@ -14,8 +14,6 @@
 - private automation workspace routing, including Daily Skill Friction's
   `Joey-Tools/codex-workspace` canonical repo mirror wrapper and its active-plus-
   archived rollout corpus contract
-- private session retrospective automation routing for cross-host, redacted
-  retrospective history capture
 
 Public base release is published by `Joey-Tools/codex-toolbox`. This private overlay
 installs into `~/.codex/personal-sync/overlays/private/current` and manages only

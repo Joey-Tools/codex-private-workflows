@@ -2500,93 +2500,6 @@ class PrivateOverlaySyncTests(unittest.TestCase):
         self.assertIn("$remote-host-context", synced_reference)
         self.assertIn("default evidence scope", synced_reference)
 
-    def test_session_retrospective_sync_rule_adds_private_default_hosts(self) -> None:
-        source = (
-            self.source_root
-            / "codex-workflow-hygiene"
-            / "skills"
-            / "codex-session-retrospective"
-        )
-        scripts = source / "scripts"
-        scripts.mkdir(parents=True)
-        (source / "SKILL.md").write_text(
-            "---\n"
-            "name: codex-session-retrospective\n"
-            "description: Run a read-only, redacted retrospective across local and remote Codex session history. Use only when the user explicitly invokes $codex-session-retrospective.\n"
-            "---\n\n"
-            "## Overview\n\n"
-            "Use this skill only when the user explicitly invokes `$codex-session-retrospective` to review how Codex collaboration went.\n"
-            "- Default host scope follows `$remote-host-context`: local machine, `miku-bot-dev`, and `hoteng-srv-01`.\n"
-            "Retained host labels are restricted to `local`, the two default remote hosts, and `custom_source`.\n",
-            encoding="utf-8",
-        )
-        agents = source / "agents" / "openai.yaml"
-        agents.parent.mkdir()
-        agents.write_text(
-            "interface:\n"
-            '  display_name: "Codex Session Retrospective"\n'
-            "policy:\n"
-            "  allow_implicit_invocation: false\n",
-            encoding="utf-8",
-        )
-        (scripts / "session_retrospective.py").write_text(
-            'DEFAULT_REMOTE_HOSTS = ("miku-bot-dev", "hoteng-srv-01")\n'
-            'help="Source in HOST=PATH form. Defaults to local=~/.codex plus materialized miku-bot-dev and hoteng-srv-01 sources."\n',
-            encoding="utf-8",
-        )
-        (scripts / "remote_codex_probe.py").write_text(
-            "HOSTS = {\n"
-            '    "local": {"kind": "local", "label": "local", "codex_root": "~/.codex"},\n'
-            '    "miku-bot-dev": {\n'
-            '        "kind": "ssh",\n'
-            '        "label": "miku-bot-dev",\n'
-            '        "ssh_target": "miku-bot-dev",\n'
-            '        "codex_root": "/home/hoteng/.codex",\n'
-            "    },\n"
-            '    "hoteng-srv-01": {\n'
-            '        "kind": "ssh",\n'
-            '        "label": "hoteng-srv-01",\n'
-            '        "ssh_target": "hoteng-srv-01",\n'
-            '        "codex_root": "/home/hoteng/.codex",\n'
-            "    },\n"
-            "}\n",
-            encoding="utf-8",
-        )
-        rule = next(
-            rule
-            for rule in SYNC_MODULE.SYNC_RULES
-            if rule.target == Path("personal_codex/skills/codex-session-retrospective")
-        )
-
-        SYNC_MODULE.sync_sources(self.repo_root, self.source_root, (rule,))
-
-        target = self.repo_root / rule.target
-        synced_skill = (target / "SKILL.md").read_text(encoding="utf-8")
-        synced_script = (target / "scripts/session_retrospective.py").read_text(
-            encoding="utf-8"
-        )
-        synced_probe = (target / "scripts/remote_codex_probe.py").read_text(
-            encoding="utf-8"
-        )
-        synced_interface = (target / "agents/openai.yaml").read_text(encoding="utf-8")
-        self.assertIn(
-            "Use only when the user explicitly invokes $codex-session-retrospective.",
-            synced_skill,
-        )
-        self.assertIn(
-            "Use this skill only when the user explicitly invokes "
-            "`$codex-session-retrospective`",
-            synced_skill,
-        )
-        self.assertIn("allow_implicit_invocation: false", synced_interface)
-        for host in ("BL-mac-mini-m4-hoteng", "codex-hoteng-srv-01"):
-            self.assertIn(host, synced_skill)
-            self.assertIn(host, synced_script)
-            self.assertIn(host, synced_probe)
-        self.assertIn("the four default remote hosts", synced_skill)
-        self.assertIn('"codex_root": "/Users/hoteng/.codex"', synced_probe)
-        self.assertIn('"codex_root": "/home/codex/.codex"', synced_probe)
-
     def test_session_mining_sync_rule_rejects_remote_host_residuals(self) -> None:
         source = (
             self.source_root
@@ -8808,11 +8721,9 @@ jobs:
         self.assertIn("personal_codex/skills/bounded-command-output", manifest_sources)
         self.assertIn("skills/bounded-command-output", manifest_targets)
         self.assertIn("personal_codex/skills/bounded-command-output", sync_targets)
-        self.assertIn(
+        self.assertNotIn(
             "personal_codex/skills/codex-session-retrospective", manifest_sources
         )
-        self.assertIn("skills/codex-session-retrospective", manifest_targets)
-        self.assertIn("personal_codex/skills/codex-session-retrospective", sync_targets)
         self.assertIn(
             "personal_codex/skills/synthetic-token-fixtures", manifest_sources
         )
@@ -8821,27 +8732,43 @@ jobs:
         self.assertNotIn("skills/apple-notes-db-guardrails", all_manifest_targets)
         self.assertNotIn("skills/apple-notes-work-report", all_manifest_targets)
         self.assertNotIn("skills/codex-rules-hygiene", all_manifest_targets)
+        self.assertNotIn("skills/codex-session-retrospective", all_manifest_targets)
         self.assertNotIn("skills/waited-delivery", all_manifest_targets)
         self.assertIn("personal_codex/skills/codex-rules-hygiene", retired_targets)
+        self.assertIn(
+            "personal_codex/skills/codex-session-retrospective", retired_targets
+        )
+        self.assertNotIn(
+            "personal_codex/skills/codex-session-retrospective", sync_targets
+        )
         self.assertIn("personal_codex/skills/waited-delivery", retired_targets)
         for target in (
             "skills/apple-notes-db-guardrails",
             "skills/apple-notes-work-report",
             "skills/codex-rules-hygiene",
+            "skills/codex-session-retrospective",
             "skills/waited-delivery",
         ):
             with self.subTest(non_legacy_tombstone=target):
                 self.assertFalse(removed_by_target[target].get("legacy", False))
+
+        retrospective_root = (
+            REPO_ROOT / "personal_codex/skills/codex-session-retrospective"
+        )
+        self.assertFalse(retrospective_root.exists())
+        for automation in (
+            "personal_codex/automations/daily-session-retrospective/automation.toml",
+            "personal_codex/automations/weekly-session-retrospective/automation.toml",
+        ):
+            with self.subTest(retired_automation=automation):
+                self.assertNotIn(automation, manifest["reference_only"])
+                self.assertFalse((REPO_ROOT / automation).exists())
 
     def test_personal_agents_routes_local_only_skills_explicitly(self) -> None:
         agents = (REPO_ROOT / "personal_codex" / "AGENTS.md").read_text(
             encoding="utf-8"
         )
 
-        self.assertIn(
-            "Use `$codex-session-retrospective` only when Joey explicitly invokes it",
-            agents,
-        )
         self.assertIn(
             "For Apple Notes tasks, start from the `codex-workspace` repo-local",
             agents,
@@ -8851,6 +8778,10 @@ jobs:
             agents,
         )
         self.assertNotIn("$codex-rules-hygiene", agents)
+        self.assertNotIn("$codex-session-retrospective", agents)
+
+        readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
+        self.assertNotIn("private session retrospective automation routing", readme)
 
     def test_personal_agents_bind_materialization_contract_activation(self) -> None:
         agents = (REPO_ROOT / "personal_codex" / "AGENTS.md").read_text(
@@ -9254,6 +9185,19 @@ jobs:
         self.assertEqual(len(locked_repositories), len(rule_repositories))
         self.assertEqual(frozenset(locked_repositories), frozenset(rule_repositories))
         self.assertIn("codex-workflow-hygiene", locked_repositories)
+        workflow_hygiene_targets = {
+            str(rule.target)
+            for rule in SYNC_MODULE.SYNC_RULES
+            if rule.repo == "codex-workflow-hygiene"
+        }
+        self.assertEqual(
+            workflow_hygiene_targets,
+            {
+                "personal_codex/skills/bounded-command-output",
+                "personal_codex/skills/codex-session-mining",
+                "personal_codex/skills/joey-skill-authoring",
+            },
+        )
 
     @unittest.skipUnless(sys.platform == "darwin", "macOS-only Git trust root")
     def test_macos_source_lock_binds_actual_command_line_tools_git(self) -> None:
