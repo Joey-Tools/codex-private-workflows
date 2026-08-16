@@ -47,11 +47,6 @@
       "kind": "skill"
     },
     {
-      "source": "personal_codex/skills/codex-session-retrospective",
-      "target": "skills/codex-session-retrospective",
-      "kind": "skill"
-    },
-    {
       "source": "personal_codex/skills/joey-skill-authoring",
       "target": "skills/joey-skill-authoring",
       "kind": "skill"
@@ -133,13 +128,17 @@
       "source": "personal_codex/skills/codex-rules-hygiene",
       "target": "skills/codex-rules-hygiene",
       "kind": "skill"
+    },
+    {
+      "id": "2026-08-16-retire-codex-session-retrospective",
+      "source": "personal_codex/skills/codex-session-retrospective",
+      "target": "skills/codex-session-retrospective",
+      "kind": "skill"
     }
   ],
   "reference_only": [
     "personal_codex/automations/daily-skill-friction/automation.toml",
     "personal_codex/automations/daily-skill-friction/com.hoteng.codex.daily-skill-friction-prefetch.plist",
-    "personal_codex/automations/daily-work-report-draft/automation.toml",
-    "personal_codex/automations/daily-session-retrospective/automation.toml",
-    "personal_codex/automations/weekly-session-retrospective/automation.toml"
+    "personal_codex/automations/daily-work-report-draft/automation.toml"
   ]
 }

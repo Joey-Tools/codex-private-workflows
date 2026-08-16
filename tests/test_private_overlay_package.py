@@ -200,6 +200,7 @@ class PrivateOverlayPackageTests(unittest.TestCase):
         self.assertNotIn("skills/apple-notes-db-guardrails", targets)
         self.assertNotIn("skills/apple-notes-work-report", targets)
         self.assertNotIn("skills/codex-rules-hygiene", targets)
+        self.assertNotIn("skills/codex-session-retrospective", targets)
         self.assertNotIn("skills/waited-delivery", targets)
         self.assertNotIn("bin/codex-personal-sync", targets)
         self.assertTrue(
@@ -265,6 +266,12 @@ class PrivateOverlayPackageTests(unittest.TestCase):
                     "id": "2026-08-14-retire-codex-rules-hygiene",
                     "source": "personal_codex/skills/codex-rules-hygiene",
                     "target": "skills/codex-rules-hygiene",
+                    "kind": "skill",
+                },
+                {
+                    "id": "2026-08-16-retire-codex-session-retrospective",
+                    "source": "personal_codex/skills/codex-session-retrospective",
+                    "target": "skills/codex-session-retrospective",
                     "kind": "skill",
                 },
             ],
