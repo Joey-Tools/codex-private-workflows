@@ -3,12 +3,17 @@
   "owner": "private",
   "base_release": {
     "repo": "Joey-Tools/codex-toolbox",
-    "sha": "2640fd1694ea4c685540d5ff4b6b1bb483524d58"
+    "sha": "598671d0972193bf74f2b076227a269ebacf87b3"
   },
   "links": [
     {
       "source": "personal_codex/AGENTS.md",
       "target": "AGENTS.md",
+      "kind": "file"
+    },
+    {
+      "source": "personal_codex/bin/codex-private-macos-sync",
+      "target": "bin/codex-private-macos-sync",
       "kind": "file"
     },
     {
@@ -137,8 +142,11 @@
     }
   ],
   "reference_only": [
+    "generated-sync-source-lock.json",
     "personal_codex/automations/daily-skill-friction/automation.toml",
     "personal_codex/automations/daily-skill-friction/com.hoteng.codex.daily-skill-friction-prefetch.plist",
-    "personal_codex/automations/daily-work-report-draft/automation.toml"
+    "personal_codex/automations/daily-work-report-draft/automation.toml",
+    "personal_codex/private-sync-hosts.json",
+    "private-overlay-source-lock.json"
   ]
 }

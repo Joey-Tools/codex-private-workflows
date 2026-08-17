@@ -1,0 +1,21 @@
+{
+  "version": 1,
+  "hosts": [
+    {
+      "id": "HOTENG-M-NCQ2",
+      "role": "gui-controller",
+      "username": "hoteng",
+      "uid": 501,
+      "home": "/Users/hoteng"
+    },
+    {
+      "id": "BL-mac-mini-m4-hoteng",
+      "role": "headless-managed",
+      "username": "hoteng",
+      "uid": 502,
+      "home": "/Users/hoteng",
+      "controller": "HOTENG-M-NCQ2",
+      "ssh_alias": "BL-mac-mini-m4-hoteng"
+    }
+  ]
+}
