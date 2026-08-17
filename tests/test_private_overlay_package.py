@@ -8,6 +8,7 @@ import io
 import json
 import os
 from pathlib import Path
+import stat
 import subprocess
 import sys
 import tarfile
@@ -29,7 +30,7 @@ sys.modules[SPEC.name] = MODULE
 SPEC.loader.exec_module(MODULE)
 
 
-PUBLIC_SHA = "2640fd1694ea4c685540d5ff4b6b1bb483524d58"
+PUBLIC_SHA = "598671d0972193bf74f2b076227a269ebacf87b3"
 PRIVATE_SHA = "2" * 40
 
 
@@ -194,6 +195,15 @@ class PrivateOverlayPackageTests(unittest.TestCase):
         )
         self.assertEqual(manifest["base_release"]["sha"], PUBLIC_SHA)
         self.assertIn("AGENTS.md", targets)
+        self.assertIn("bin/codex-private-macos-sync", targets)
+        self.assertEqual(
+            targets["bin/codex-private-macos-sync"].owner,
+            "private",
+        )
+        self.assertEqual(
+            targets["bin/codex-private-macos-sync"].kind,
+            "file",
+        )
         self.assertIn("skills/agile-delivery-workflow", targets)
         self.assertIn("skills/cisco-trackers-lookup", targets)
         self.assertIn("skills/remote-host-context", targets)
@@ -203,6 +213,25 @@ class PrivateOverlayPackageTests(unittest.TestCase):
         self.assertNotIn("skills/codex-session-retrospective", targets)
         self.assertNotIn("skills/waited-delivery", targets)
         self.assertNotIn("bin/codex-personal-sync", targets)
+        packaged_helper = (
+            release_root / "personal_codex" / "bin" / "codex-private-macos-sync"
+        )
+        packaged_inventory = (
+            release_root / "personal_codex" / "private-sync-hosts.json"
+        )
+        self.assertTrue(packaged_helper.is_file())
+        self.assertEqual(stat.S_IMODE(packaged_helper.stat().st_mode), 0o755)
+        self.assertTrue(packaged_inventory.is_file())
+        self.assertIn(
+            "personal_codex/private-sync-hosts.json",
+            manifest["reference_only"],
+        )
+        self.assertFalse(
+            any(
+                entry["source"] == "personal_codex/private-sync-hosts.json"
+                for entry in manifest["links"]
+            )
+        )
         self.assertTrue(
             (REPO_ROOT / ".agents" / "skills" / "apple-notes-db-guardrails").is_dir()
         )
@@ -301,6 +330,24 @@ class PrivateOverlayPackageTests(unittest.TestCase):
             "packaged generated catalog differs from the private override source",
         )
         with tarfile.open(archive_path, "r:gz") as archive:
+            members = archive.getmembers()
+            helper_members = [
+                member
+                for member in members
+                if member.name.endswith(
+                    "/personal_codex/bin/codex-private-macos-sync"
+                )
+            ]
+            inventory_members = [
+                member
+                for member in members
+                if member.name.endswith(
+                    "/personal_codex/private-sync-hosts.json"
+                )
+            ]
+            self.assertEqual(len(helper_members), 1)
+            self.assertEqual(helper_members[0].mode, 0o755)
+            self.assertEqual(len(inventory_members), 1)
             self.assertFalse(any(".codex-tmp" in name for name in archive.getnames()))
             self.assertFalse(
                 any("private-overrides" in name for name in archive.getnames())
@@ -1516,6 +1563,26 @@ class PrivateOverlayPackageTests(unittest.TestCase):
         )
 
         self.assertTrue((home / "bin" / "codex-personal-sync").is_symlink())
+        private_helper = home / "bin" / "codex-private-macos-sync"
+        self.assertTrue(private_helper.is_symlink())
+        self.assertEqual(
+            os.readlink(private_helper),
+            "../personal-sync/overlays/private/current/"
+            "personal_codex/bin/codex-private-macos-sync",
+        )
+        self.assertTrue(
+            (
+                home
+                / "personal-sync"
+                / "overlays"
+                / "private"
+                / "current"
+                / "personal_codex"
+                / "private-sync-hosts.json"
+            ).is_file()
+        )
+        self.assertFalse((home / "private-sync-hosts.json").exists())
+        self.assertFalse((home / "config" / "private-sync-hosts.json").exists())
         self.assertTrue((home / "AGENTS.md").is_symlink())
         self.assertTrue((home / "skills" / "cisco-trackers-lookup").is_symlink())
         grilling = home / "skills" / "grilling"

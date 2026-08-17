@@ -11,6 +11,7 @@ from contextvars import ContextVar
 import ctypes
 from dataclasses import dataclass, field as dataclass_field, replace
 from datetime import datetime, timedelta, timezone
+import errno
 import fcntl
 from graphlib import CycleError, TopologicalSorter
 import gzip
@@ -46,6 +47,20 @@ SHA256_RE = re.compile(r"^personal-codex-([0-9a-f]{40})\.sha256$")
 RELEASE_DIR_RE = re.compile(r"^[0-9a-f]{40}$")
 MANIFEST_RELATIVE_PATH = Path("personal_codex/sync-manifest.json")
 MAX_RELEASE_MANIFEST_BYTES = 4 * 1024 * 1024
+_DARWIN_ACL_TYPE_EXTENDED = 0x00000100
+_DARWIN_ACL_FIRST_ENTRY = 0
+_DARWIN_ACL_NEXT_ENTRY = -1
+_DARWIN_ACL_EXTENDED_ALLOW = 1
+_DARWIN_ACL_EXTENDED_DENY = 2
+_DARWIN_UUID_BYTES = 16
+_RELEASE_IDENTITY_OWNER_UID: ContextVar[int | None] = ContextVar(
+    "release_identity_owner_uid",
+    default=None,
+)
+_INSTALL_RELEASE_OWNER_UID: ContextVar[int | None] = ContextVar(
+    "install_release_owner_uid",
+    default=None,
+)
 MAX_JSON_INTEGER_DIGITS = 4300
 MAX_ARCHIVE_COMPRESSED_BYTES = 64 * 1024 * 1024
 MAX_ARCHIVE_CHECKSUM_BYTES = 64 * 1024
@@ -273,6 +288,10 @@ MACOS_SCHEDULER_PATH = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin
 MACOS_BACKGROUND_LAUNCHD_DOMAIN = "user"
 MACOS_LEGACY_GUI_LAUNCHD_DOMAIN = "gui"
 MACOS_BACKGROUND_SESSION_TYPE = "Background"
+MACOS_AQUA_SESSION_TYPE = "Aqua"
+MACOS_LAUNCHD_PROFILE_AQUA = "hardened-aqua"
+MACOS_LAUNCHD_PROFILE_BACKGROUND = "legacy-hardened-background"
+MACOS_LAUNCHD_PROFILE_GUI = "legacy-minimal-gui"
 LINUX_SCHEDULER_PATH = "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 SCHEDULER_STATUS_RELATIVE_PATH = Path("state/scheduler-status.json")
 SCHEDULER_STATUS_PUBLICATION_MARKER_NAME = (
@@ -4578,6 +4597,11 @@ class ManifestData:
 
 ReleaseTreeIdentity = tuple[dict[str, Any], ManifestData, str]
 ReleaseTreeExpectation = tuple[ReleaseTreeIdentity, tuple[int, int]]
+ReleaseTreeDirectoryEvidence = tuple[
+    ReleaseTreeIdentity,
+    tuple[int, int],
+    tuple[int, int, int],
+]
 
 
 @dataclass
@@ -4586,9 +4610,16 @@ class InstallReleaseBinding:
     sha: str
     expected_identity: ReleaseTreeIdentity
     expected_directory_identity: tuple[int, int]
+    expected_owner_uid: int | None
     releases_root: Path
     releases_fd: int
     release_fd: int
+
+
+@dataclass(frozen=True)
+class _InstallReleaseDirectoryChains:
+    bindings: tuple[InstallReleaseBinding, ...]
+    ancestors: tuple[_ReleaseIdentityDirectoryBinding, ...]
 
 
 @dataclass(frozen=True)
@@ -4855,6 +4886,7 @@ class SchedulerConfig:
     base_repo: str | None
     owner: str | None
     launchd_domain: str | None = None
+    launchd_profile: str | None = None
 
 
 @dataclass(frozen=True)
@@ -18304,6 +18336,596 @@ class _ReleaseSourceSnapshot:
     size: int
     mtime_ns: int
     ctime_ns: int
+    content_identity: bytes | None = None
+
+
+@dataclass(frozen=True)
+class _DarwinExtendedAclApi:
+    acl_get_fd_np: Any
+    acl_valid: Any
+    acl_get_entry: Any
+    acl_get_tag_type: Any
+    acl_get_qualifier: Any
+    acl_free: Any
+    mbr_uid_to_uuid: Any
+
+
+@dataclass(frozen=True)
+class _ReleaseIdentityDirectoryBinding:
+    path: Path
+    file_descriptor: int
+    identity: tuple[int, int]
+
+
+def _release_identity_policy_error(
+    display_path: Path,
+    detail: str,
+    *,
+    mismatch: bool,
+) -> SyncError:
+    classification = "mismatch" if mismatch else "cannot be verified"
+    return SyncError(
+        f"release identity access policy {classification}: "
+        f"{display_path}: {detail}",
+        code="current-release-unverifiable",
+    )
+
+
+def _effective_release_identity_owner_uid(
+    expected_owner_uid: int | None,
+) -> int | None:
+    if sys.platform != "darwin":
+        return None
+    if expected_owner_uid is not None:
+        return expected_owner_uid
+    return _RELEASE_IDENTITY_OWNER_UID.get()
+
+
+@contextlib.contextmanager
+def _release_identity_owner_uid_scope(
+    expected_owner_uid: int | None,
+) -> Iterator[None]:
+    normalized_owner_uid = (
+        expected_owner_uid if sys.platform == "darwin" else None
+    )
+    token = _RELEASE_IDENTITY_OWNER_UID.set(normalized_owner_uid)
+    try:
+        yield
+    finally:
+        _RELEASE_IDENTITY_OWNER_UID.reset(token)
+
+
+def _load_darwin_extended_acl_api(display_path: Path) -> _DarwinExtendedAclApi:
+    try:
+        library = ctypes.CDLL(None, use_errno=True)
+        acl_get_fd_np = library.acl_get_fd_np
+        acl_valid = library.acl_valid
+        acl_get_entry = library.acl_get_entry
+        acl_get_tag_type = library.acl_get_tag_type
+        acl_get_qualifier = library.acl_get_qualifier
+        acl_free = library.acl_free
+        mbr_uid_to_uuid = library.mbr_uid_to_uuid
+    except (AttributeError, OSError) as error:
+        raise _release_identity_policy_error(
+            display_path,
+            "Darwin extended ACL API is unavailable",
+            mismatch=False,
+        ) from error
+
+    try:
+        acl_get_fd_np.argtypes = [ctypes.c_int, ctypes.c_int]
+        acl_get_fd_np.restype = ctypes.c_void_p
+        acl_valid.argtypes = [ctypes.c_void_p]
+        acl_valid.restype = ctypes.c_int
+        acl_get_entry.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_int,
+            ctypes.POINTER(ctypes.c_void_p),
+        ]
+        acl_get_entry.restype = ctypes.c_int
+        acl_get_tag_type.argtypes = [
+            ctypes.c_void_p,
+            ctypes.POINTER(ctypes.c_int),
+        ]
+        acl_get_tag_type.restype = ctypes.c_int
+        acl_get_qualifier.argtypes = [ctypes.c_void_p]
+        acl_get_qualifier.restype = ctypes.c_void_p
+        acl_free.argtypes = [ctypes.c_void_p]
+        acl_free.restype = ctypes.c_int
+        mbr_uid_to_uuid.argtypes = [
+            ctypes.c_uint,
+            ctypes.POINTER(ctypes.c_ubyte),
+        ]
+        mbr_uid_to_uuid.restype = ctypes.c_int
+    except (AttributeError, TypeError, ValueError) as error:
+        raise _release_identity_policy_error(
+            display_path,
+            "Darwin extended ACL API has an incompatible signature",
+            mismatch=False,
+        ) from error
+    return _DarwinExtendedAclApi(
+        acl_get_fd_np=acl_get_fd_np,
+        acl_valid=acl_valid,
+        acl_get_entry=acl_get_entry,
+        acl_get_tag_type=acl_get_tag_type,
+        acl_get_qualifier=acl_get_qualifier,
+        acl_free=acl_free,
+        mbr_uid_to_uuid=mbr_uid_to_uuid,
+    )
+
+
+def _darwin_extended_acl_entries(
+    file_descriptor: int,
+    display_path: Path,
+    api: _DarwinExtendedAclApi,
+) -> tuple[tuple[int, bytes | None], ...]:
+    ctypes.set_errno(0)
+    acl_pointer = api.acl_get_fd_np(
+        file_descriptor,
+        _DARWIN_ACL_TYPE_EXTENDED,
+    )
+    if not acl_pointer:
+        error_number = ctypes.get_errno()
+        if error_number == errno.ENOENT:
+            return ()
+        raise _release_identity_policy_error(
+            display_path,
+            f"acl_get_fd_np failed with errno {error_number}",
+            mismatch=False,
+        )
+
+    entries: list[tuple[int, bytes | None]] = []
+    acl_primary_error: BaseException | None = None
+    try:
+        ctypes.set_errno(0)
+        if api.acl_valid(acl_pointer) != 0:
+            error_number = ctypes.get_errno()
+            raise _release_identity_policy_error(
+                display_path,
+                f"acl_valid failed with errno {error_number}",
+                mismatch=False,
+            )
+        entry_selector = _DARWIN_ACL_FIRST_ENTRY
+        while True:
+            entry_pointer = ctypes.c_void_p()
+            ctypes.set_errno(0)
+            entry_result = api.acl_get_entry(
+                acl_pointer,
+                entry_selector,
+                ctypes.byref(entry_pointer),
+            )
+            error_number = ctypes.get_errno()
+            if (
+                entry_selector == _DARWIN_ACL_NEXT_ENTRY
+                and entry_result == -1
+                and error_number == errno.EINVAL
+            ):
+                break
+            if entry_result != 0 or not entry_pointer.value:
+                raise _release_identity_policy_error(
+                    display_path,
+                    f"acl_get_entry failed with errno {error_number}",
+                    mismatch=False,
+                )
+
+            tag_type = ctypes.c_int()
+            ctypes.set_errno(0)
+            if api.acl_get_tag_type(
+                entry_pointer,
+                ctypes.byref(tag_type),
+            ) != 0:
+                error_number = ctypes.get_errno()
+                raise _release_identity_policy_error(
+                    display_path,
+                    f"acl_get_tag_type failed with errno {error_number}",
+                    mismatch=False,
+                )
+
+            qualifier: bytes | None = None
+            if tag_type.value == _DARWIN_ACL_EXTENDED_ALLOW:
+                ctypes.set_errno(0)
+                qualifier_pointer = api.acl_get_qualifier(entry_pointer)
+                if not qualifier_pointer:
+                    error_number = ctypes.get_errno()
+                    raise _release_identity_policy_error(
+                        display_path,
+                        f"acl_get_qualifier failed with errno {error_number}",
+                        mismatch=False,
+                    )
+                qualifier_primary_error: BaseException | None = None
+                try:
+                    qualifier = ctypes.string_at(
+                        qualifier_pointer,
+                        _DARWIN_UUID_BYTES,
+                    )
+                except BaseException as error:
+                    qualifier_primary_error = error
+                    raise
+                finally:
+                    try:
+                        ctypes.set_errno(0)
+                        qualifier_free_result = api.acl_free(qualifier_pointer)
+                        error_number = ctypes.get_errno()
+                    except BaseException as cleanup_error:
+                        if qualifier_primary_error is None:
+                            raise _release_identity_policy_error(
+                                display_path,
+                                f"acl_free qualifier failed: {cleanup_error}",
+                                mismatch=False,
+                            ) from cleanup_error
+                    else:
+                        if (
+                            qualifier_free_result != 0
+                            and qualifier_primary_error is None
+                        ):
+                            raise _release_identity_policy_error(
+                                display_path,
+                                "acl_free qualifier failed with errno "
+                                f"{error_number}",
+                                mismatch=False,
+                            )
+            entries.append((tag_type.value, qualifier))
+            if len(entries) > 128:
+                raise _release_identity_policy_error(
+                    display_path,
+                    "extended ACL exceeds the Darwin entry limit",
+                    mismatch=False,
+                )
+            entry_selector = _DARWIN_ACL_NEXT_ENTRY
+    except BaseException as error:
+        acl_primary_error = error
+        raise
+    finally:
+        try:
+            ctypes.set_errno(0)
+            acl_free_result = api.acl_free(acl_pointer)
+            error_number = ctypes.get_errno()
+        except BaseException as cleanup_error:
+            if acl_primary_error is None:
+                raise _release_identity_policy_error(
+                    display_path,
+                    f"acl_free ACL failed: {cleanup_error}",
+                    mismatch=False,
+                ) from cleanup_error
+        else:
+            if acl_free_result != 0 and acl_primary_error is None:
+                raise _release_identity_policy_error(
+                    display_path,
+                    f"acl_free ACL failed with errno {error_number}",
+                    mismatch=False,
+                )
+    return tuple(entries)
+
+
+def _darwin_owner_uuid(
+    owner_uid: int,
+    display_path: Path,
+    api: _DarwinExtendedAclApi,
+) -> bytes:
+    owner_uuid = (ctypes.c_ubyte * _DARWIN_UUID_BYTES)()
+    result = api.mbr_uid_to_uuid(owner_uid, owner_uuid)
+    if result != 0:
+        raise _release_identity_policy_error(
+            display_path,
+            f"mbr_uid_to_uuid failed with error {result}",
+            mismatch=False,
+        )
+    return bytes(owner_uuid)
+
+
+def _require_darwin_acl_entries_owner_only(
+    entries: tuple[tuple[int, bytes | None], ...],
+    owner_uuid: bytes | None,
+    display_path: Path,
+) -> None:
+    if owner_uuid is not None and len(owner_uuid) != _DARWIN_UUID_BYTES:
+        raise _release_identity_policy_error(
+            display_path,
+            "owner UUID has an invalid size",
+            mismatch=False,
+        )
+    for tag_type, qualifier in entries:
+        if tag_type == _DARWIN_ACL_EXTENDED_DENY:
+            continue
+        if tag_type == _DARWIN_ACL_EXTENDED_ALLOW:
+            if owner_uuid is None:
+                raise _release_identity_policy_error(
+                    display_path,
+                    "owner UUID is unavailable for an ALLOW entry",
+                    mismatch=False,
+                )
+            if qualifier != owner_uuid:
+                raise _release_identity_policy_error(
+                    display_path,
+                    "extended ACL grants ALLOW access to a non-owner qualifier",
+                    mismatch=True,
+                )
+            continue
+        raise _release_identity_policy_error(
+            display_path,
+            f"extended ACL contains unknown tag {tag_type}",
+            mismatch=False,
+        )
+
+
+def _require_release_identity_fd_access_policy(
+    file_descriptor: int,
+    display_path: Path,
+    expected_owner_uid: int,
+) -> os.stat_result:
+    """Prove the release object is owner-controlled on this exact bound FD.
+
+    Raw ACL bytes and entry order are deliberately not evidence. The protected
+    property is a stable dev/inode/type, the expected UID, and the absence of
+    non-owner write authority from POSIX mode bits or the extended ACL
+    admission policy. Safe mode or ctime drift triggers one complete semantic
+    reread instead of being treated as mutation evidence by itself.
+    """
+    try:
+        initial_metadata = os.fstat(file_descriptor)
+    except OSError as error:
+        raise _release_identity_policy_error(
+            display_path,
+            f"fstat failed: {error}",
+            mismatch=False,
+        ) from error
+    if sys.platform != "darwin":
+        return initial_metadata
+
+    expected_identity = (
+        initial_metadata.st_dev,
+        initial_metadata.st_ino,
+        stat.S_IFMT(initial_metadata.st_mode),
+    )
+    api: _DarwinExtendedAclApi | None = None
+    pre_metadata = initial_metadata
+    for sample_index in range(2):
+        if sample_index:
+            try:
+                pre_metadata = os.fstat(file_descriptor)
+            except OSError as error:
+                raise _release_identity_policy_error(
+                    display_path,
+                    f"revalidation fstat failed: {error}",
+                    mismatch=False,
+                ) from error
+
+        pre_identity = (
+            pre_metadata.st_dev,
+            pre_metadata.st_ino,
+            stat.S_IFMT(pre_metadata.st_mode),
+        )
+        if pre_identity != expected_identity:
+            raise _release_identity_policy_error(
+                display_path,
+                "bound object identity changed during access-policy validation",
+                mismatch=True,
+            )
+        if pre_metadata.st_uid != expected_owner_uid:
+            raise _release_identity_policy_error(
+                display_path,
+                "owner UID "
+                f"{pre_metadata.st_uid} != expected UID {expected_owner_uid}",
+                mismatch=True,
+            )
+        pre_mode = stat.S_IMODE(pre_metadata.st_mode)
+        if pre_mode & 0o022:
+            raise _release_identity_policy_error(
+                display_path,
+                f"mode {pre_mode:04o} grants group or world write authority",
+                mismatch=True,
+            )
+
+        try:
+            if api is None:
+                api = _load_darwin_extended_acl_api(display_path)
+            entries = _darwin_extended_acl_entries(
+                file_descriptor,
+                display_path,
+                api,
+            )
+        except SyncError:
+            raise
+        except (OSError, TypeError, ValueError, ctypes.ArgumentError) as error:
+            raise _release_identity_policy_error(
+                display_path,
+                f"Darwin extended ACL API failed: {error}",
+                mismatch=False,
+            ) from error
+        if any(
+            tag_type == _DARWIN_ACL_EXTENDED_ALLOW
+            for tag_type, _qualifier in entries
+        ):
+            try:
+                owner_uuid = _darwin_owner_uuid(
+                    pre_metadata.st_uid,
+                    display_path,
+                    api,
+                )
+                _require_darwin_acl_entries_owner_only(
+                    entries,
+                    owner_uuid,
+                    display_path,
+                )
+            except SyncError:
+                raise
+            except (
+                OSError,
+                TypeError,
+                ValueError,
+                ctypes.ArgumentError,
+            ) as error:
+                raise _release_identity_policy_error(
+                    display_path,
+                    f"Darwin owner UUID API failed: {error}",
+                    mismatch=False,
+                ) from error
+        else:
+            _require_darwin_acl_entries_owner_only(
+                entries,
+                None,
+                display_path,
+            )
+
+        try:
+            post_metadata = os.fstat(file_descriptor)
+        except OSError as error:
+            raise _release_identity_policy_error(
+                display_path,
+                f"post-ACL fstat failed: {error}",
+                mismatch=False,
+            ) from error
+        post_identity = (
+            post_metadata.st_dev,
+            post_metadata.st_ino,
+            stat.S_IFMT(post_metadata.st_mode),
+        )
+        if post_identity != expected_identity:
+            raise _release_identity_policy_error(
+                display_path,
+                "bound object identity changed during access-policy validation",
+                mismatch=True,
+            )
+        if post_metadata.st_uid != expected_owner_uid:
+            raise _release_identity_policy_error(
+                display_path,
+                "owner UID "
+                f"{post_metadata.st_uid} != expected UID {expected_owner_uid}",
+                mismatch=True,
+            )
+        post_mode = stat.S_IMODE(post_metadata.st_mode)
+        if post_mode & 0o022:
+            raise _release_identity_policy_error(
+                display_path,
+                f"mode {post_mode:04o} grants group or world write authority",
+                mismatch=True,
+            )
+        if (
+            pre_mode == post_mode
+            and pre_metadata.st_ctime_ns == post_metadata.st_ctime_ns
+        ):
+            return post_metadata
+        if sample_index:
+            raise _release_identity_policy_error(
+                display_path,
+                "access policy did not stabilize during revalidation",
+                mismatch=False,
+            )
+
+    raise AssertionError("unreachable Darwin access-policy sample state")
+
+
+def _require_release_identity_directory_bindings(
+    home: Path,
+    bindings: list[_ReleaseIdentityDirectoryBinding],
+    expected_owner_uid: int,
+) -> None:
+    for binding in bindings:
+        metadata = _require_release_identity_fd_access_policy(
+            binding.file_descriptor,
+            binding.path,
+            expected_owner_uid,
+        )
+        if (
+            not stat.S_ISDIR(metadata.st_mode)
+            or (metadata.st_dev, metadata.st_ino) != binding.identity
+            or not _bound_directory_matches(
+                home,
+                binding.path,
+                binding.file_descriptor,
+            )
+        ):
+            raise _release_identity_policy_error(
+                binding.path,
+                "bound directory object changed",
+                mismatch=True,
+            )
+
+
+def _open_release_identity_directory_chain(
+    home: Path,
+    directory: Path,
+    expected_owner_uid: int,
+) -> list[_ReleaseIdentityDirectoryBinding]:
+    parts = _directory_parts_beneath(home, directory)
+    bindings: list[_ReleaseIdentityDirectoryBinding] = []
+    current_path = home
+    try:
+        current_fd = _bound_sync_home_anchor(home, None)
+        try:
+            metadata = _require_release_identity_fd_access_policy(
+                current_fd,
+                current_path,
+                expected_owner_uid,
+            )
+            if not stat.S_ISDIR(metadata.st_mode):
+                raise _release_identity_policy_error(
+                    current_path,
+                    "bound object is not a directory",
+                    mismatch=True,
+                )
+        except BaseException:
+            _close_fd_quietly(current_fd)
+            raise
+        bindings.append(
+            _ReleaseIdentityDirectoryBinding(
+                path=current_path,
+                file_descriptor=current_fd,
+                identity=(metadata.st_dev, metadata.st_ino),
+            )
+        )
+        for part in parts:
+            current_path /= part
+            next_fd = os.open(
+                part,
+                _source_directory_flags(),
+                dir_fd=bindings[-1].file_descriptor,
+            )
+            try:
+                metadata = _require_release_identity_fd_access_policy(
+                    next_fd,
+                    current_path,
+                    expected_owner_uid,
+                )
+                if not stat.S_ISDIR(metadata.st_mode):
+                    raise _release_identity_policy_error(
+                        current_path,
+                        "bound object is not a directory",
+                        mismatch=True,
+                    )
+            except BaseException:
+                _close_fd_quietly(next_fd)
+                raise
+            bindings.append(
+                _ReleaseIdentityDirectoryBinding(
+                    path=current_path,
+                    file_descriptor=next_fd,
+                    identity=(metadata.st_dev, metadata.st_ino),
+                )
+            )
+        _require_release_identity_directory_bindings(
+            home,
+            bindings,
+            expected_owner_uid,
+        )
+        return bindings
+    except BaseException as error:
+        for binding in reversed(bindings):
+            _close_fd_quietly(binding.file_descriptor)
+        if isinstance(error, OSError):
+            raise _release_identity_policy_error(
+                current_path,
+                f"cannot open directory chain: {error}",
+                mismatch=False,
+            ) from error
+        raise
+
+
+def _close_release_identity_directory_bindings(
+    bindings: list[_ReleaseIdentityDirectoryBinding],
+) -> None:
+    for binding in reversed(bindings):
+        _close_fd_quietly(binding.file_descriptor)
 
 
 def _release_source_snapshot(metadata: os.stat_result) -> _ReleaseSourceSnapshot:
@@ -18320,17 +18942,106 @@ def _release_source_snapshot(metadata: os.stat_result) -> _ReleaseSourceSnapshot
 def _release_source_matches(
     snapshot: _ReleaseSourceSnapshot,
     metadata: os.stat_result,
+    *,
+    ignore_ctime: bool = False,
 ) -> bool:
-    return snapshot == _release_source_snapshot(metadata)
+    current = _release_source_snapshot(metadata)
+    expected_metadata = (
+        snapshot.device,
+        snapshot.inode,
+        snapshot.mode,
+        snapshot.size,
+        snapshot.mtime_ns,
+    )
+    current_metadata = (
+        current.device,
+        current.inode,
+        current.mode,
+        current.size,
+        current.mtime_ns,
+    )
+    if expected_metadata != current_metadata:
+        return False
+    return ignore_ctime or snapshot.ctime_ns == current.ctime_ns
 
 
 def _require_release_source_unchanged(
     snapshot: _ReleaseSourceSnapshot,
     metadata: os.stat_result,
     display_path: Path,
-) -> None:
-    if not _release_source_matches(snapshot, metadata):
-        raise SyncError(f"release source changed during copy: {display_path}")
+    *,
+    ignore_ctime: bool = False,
+    file_descriptor: int | None = None,
+    expected_owner_uid: int | None = None,
+    operation: str = "copy",
+) -> _ReleaseSourceSnapshot:
+    if _release_source_matches(snapshot, metadata):
+        return snapshot
+    if not (
+        ignore_ctime
+        and _release_source_matches(snapshot, metadata, ignore_ctime=True)
+    ):
+        raise SyncError(
+            f"release source changed during {operation}: {display_path}"
+        )
+    # ctime is only a revalidation trigger. Directory entry content is bound by
+    # exact immediate-member identities; a regular file with ctime-only drift
+    # must be rehashed from the same bound FD before safe metadata churn is
+    # accepted. Callers with more than one terminal check for the same retained
+    # file FD use _require_release_stage_source_unchanged to enforce one rehash
+    # across that stage.
+    if stat.S_ISREG(snapshot.mode):
+        if file_descriptor is None or snapshot.content_identity is None:
+            raise SyncError(
+                "release source content cannot be revalidated after ctime drift "
+                f"during {operation}: {display_path}"
+            )
+        terminal_metadata = _rehash_release_source_file_content(
+            file_descriptor,
+            snapshot,
+            metadata,
+            display_path,
+            expected_owner_uid=expected_owner_uid,
+            operation=operation,
+        )
+        return replace(snapshot, ctime_ns=terminal_metadata.st_ctime_ns)
+    if not stat.S_ISDIR(snapshot.mode):
+        raise SyncError(
+            "release source type cannot be revalidated after ctime drift "
+            f"during {operation}: {display_path}"
+        )
+    return replace(snapshot, ctime_ns=metadata.st_ctime_ns)
+
+
+def _require_release_stage_source_unchanged(
+    snapshot: _ReleaseSourceSnapshot,
+    metadata: os.stat_result,
+    display_path: Path,
+    *,
+    rehash_used: bool,
+    ignore_ctime: bool,
+    file_descriptor: int,
+    expected_owner_uid: int | None,
+    operation: str,
+) -> tuple[_ReleaseSourceSnapshot, bool]:
+    exact_match = _release_source_matches(snapshot, metadata)
+    if rehash_used and stat.S_ISREG(snapshot.mode) and not exact_match:
+        raise SyncError(
+            f"release source changed during {operation}: {display_path}"
+        )
+    updated_snapshot = _require_release_source_unchanged(
+        snapshot,
+        metadata,
+        display_path,
+        ignore_ctime=ignore_ctime,
+        file_descriptor=file_descriptor,
+        expected_owner_uid=expected_owner_uid,
+        operation=operation,
+    )
+    return (
+        updated_snapshot,
+        rehash_used or (stat.S_ISREG(snapshot.mode) and not exact_match),
+    )
 
 
 def _source_directory_flags() -> int:
@@ -18352,6 +19063,8 @@ def _open_source_regular_file(
     name: str,
     named_snapshot: _ReleaseSourceSnapshot,
     display_path: Path,
+    *,
+    ignore_ctime: bool = False,
 ) -> tuple[int, _ReleaseSourceSnapshot]:
     file_fd = os.open(name, _source_regular_file_flags(), dir_fd=parent_fd)
     try:
@@ -18359,7 +19072,11 @@ def _open_source_regular_file(
         if not stat.S_ISREG(opened_metadata.st_mode):
             raise SyncError(f"release source is not a regular file: {display_path}")
         opened_snapshot = _release_source_snapshot(opened_metadata)
-        if opened_snapshot != named_snapshot:
+        if not _release_source_matches(
+            named_snapshot,
+            opened_metadata,
+            ignore_ctime=ignore_ctime,
+        ):
             raise SyncError(f"release source changed before open: {display_path}")
         return file_fd, opened_snapshot
     except BaseException:
@@ -18416,6 +19133,52 @@ def _hash_exact_regular_file(
     content_identity = snapshot.size.to_bytes(8, "big") + content_digest.digest()
     payload = b"".join(chunks) if chunks is not None else None
     return content_identity, payload
+
+
+def _rehash_release_source_file_content(
+    file_descriptor: int,
+    snapshot: _ReleaseSourceSnapshot,
+    revalidation_metadata: os.stat_result,
+    display_path: Path,
+    *,
+    expected_owner_uid: int | None,
+    operation: str,
+) -> os.stat_result:
+    try:
+        os.lseek(file_descriptor, 0, os.SEEK_SET)
+    except OSError as error:
+        raise SyncError(
+            "release source content cannot be revalidated after ctime drift "
+            f"during {operation}: {display_path}"
+        ) from error
+    observed_identity, _payload = _hash_exact_regular_file(
+        file_descriptor,
+        snapshot,
+        display_path,
+        capture_payload=False,
+    )
+    if observed_identity != snapshot.content_identity:
+        raise SyncError(
+            f"release source changed during {operation}: {display_path}"
+        )
+    terminal_metadata = (
+        _require_release_identity_fd_access_policy(
+            file_descriptor,
+            display_path,
+            expected_owner_uid,
+        )
+        if expected_owner_uid is not None
+        else os.fstat(file_descriptor)
+    )
+    if not _release_source_matches(
+        snapshot,
+        terminal_metadata,
+        ignore_ctime=True,
+    ) or terminal_metadata.st_ctime_ns != revalidation_metadata.st_ctime_ns:
+        raise SyncError(
+            f"release source changed during {operation}: {display_path}"
+        )
+    return terminal_metadata
 
 
 def _open_release_source_root(
@@ -18595,21 +19358,26 @@ def _release_tree_identity_and_captured_files_from_directory_fd(
     display_root: Path,
     *,
     require_sanitized_modes: bool = False,
+    expected_owner_uid: int | None = None,
     capture_limits: dict[PurePosixPath, int],
 ) -> tuple[ReleaseTreeIdentity, dict[PurePosixPath, bytes]]:
-    (
-        manifest_payload,
-        tree_digest,
-        path_kinds,
-        source_snapshots,
-        source_members,
-        captured_files,
-    ) = _release_tree_snapshot_from_directory_fd(
-        root_fd,
-        display_root,
-        require_sanitized_modes=require_sanitized_modes,
-        capture_limits=capture_limits,
+    expected_owner_uid = _effective_release_identity_owner_uid(
+        expected_owner_uid
     )
+    with _release_identity_owner_uid_scope(expected_owner_uid):
+        (
+            manifest_payload,
+            tree_digest,
+            path_kinds,
+            source_snapshots,
+            source_members,
+            captured_files,
+        ) = _release_tree_snapshot_from_directory_fd(
+            root_fd,
+            display_root,
+            require_sanitized_modes=require_sanitized_modes,
+            capture_limits=capture_limits,
+        )
     data = _decode_manifest_payload(
         manifest_payload,
         display_root / MANIFEST_RELATIVE_PATH,
@@ -18621,6 +19389,7 @@ def _release_tree_identity_and_captured_files_from_directory_fd(
         source_snapshots,
         source_members,
         operation="identity validation",
+        expected_owner_uid=expected_owner_uid,
     )
     return (data, manifest, tree_digest), captured_files
 
@@ -18630,33 +19399,86 @@ def _release_tree_identity_from_directory_fd(
     display_root: Path,
     *,
     require_sanitized_modes: bool = False,
+    expected_owner_uid: int | None = None,
 ) -> ReleaseTreeIdentity:
-    identity, _captured_files = (
-        _release_tree_identity_and_captured_files_from_directory_fd(
-            root_fd,
-            display_root,
-            require_sanitized_modes=require_sanitized_modes,
-            capture_limits={},
-        )
+    expected_owner_uid = _effective_release_identity_owner_uid(
+        expected_owner_uid
     )
+    with _release_identity_owner_uid_scope(expected_owner_uid):
+        identity, _captured_files = (
+            _release_tree_identity_and_captured_files_from_directory_fd(
+                root_fd,
+                display_root,
+                require_sanitized_modes=require_sanitized_modes,
+                capture_limits={},
+            )
+        )
     return identity
 
 
-def _installed_release_identity_and_directory_identity(
+def _release_tree_identity_with_owner_access_policy(
+    root_fd: int,
+    display_root: Path,
+    *,
+    require_sanitized_modes: bool = False,
+    expected_owner_uid: int | None,
+) -> ReleaseTreeIdentity:
+    with _release_identity_owner_uid_scope(expected_owner_uid):
+        return _release_tree_identity_from_directory_fd(
+            root_fd,
+            display_root,
+            require_sanitized_modes=require_sanitized_modes,
+        )
+
+
+def _release_directory_identity_and_access_policy(
+    directory_fd: int,
+) -> tuple[tuple[int, int], tuple[int, int, int]]:
+    metadata = os.fstat(directory_fd)
+    if not stat.S_ISDIR(metadata.st_mode):
+        raise SyncError("bound path is no longer a directory")
+    return (
+        (metadata.st_dev, metadata.st_ino),
+        (stat.S_IMODE(metadata.st_mode), metadata.st_uid, metadata.st_gid),
+    )
+
+
+def _installed_release_identity_and_directory_evidence(
     home: Path,
     owner: str,
     sha: str,
-) -> ReleaseTreeExpectation:
+    *,
+    release_identity_owner_uid: int | None = None,
+) -> ReleaseTreeDirectoryEvidence:
     owner = _validate_owner(owner)
     sha = _validate_release_sha(sha, f"installed release SHA for owner {owner}")
     release_root = _releases_root(home, owner) / sha
-    release_fd = _open_installed_release_directory_fd(home, owner, sha)
+    expected_owner_uid = (
+        release_identity_owner_uid if sys.platform == "darwin" else None
+    )
+    directory_bindings: list[_ReleaseIdentityDirectoryBinding] = []
+    if expected_owner_uid is None:
+        release_fd = _open_installed_release_directory_fd(home, owner, sha)
+    else:
+        directory_bindings = _open_release_identity_directory_chain(
+            home,
+            release_root,
+            expected_owner_uid,
+        )
+        try:
+            release_fd = os.dup(directory_bindings[-1].file_descriptor)
+        except BaseException:
+            _close_release_identity_directory_bindings(directory_bindings)
+            raise
     try:
-        directory_identity = _directory_identity(release_fd)
-        identity = _release_tree_identity_from_directory_fd(
+        directory_identity, directory_access_policy = (
+            _release_directory_identity_and_access_policy(release_fd)
+        )
+        identity = _release_tree_identity_with_owner_access_policy(
             release_fd,
             release_root,
             require_sanitized_modes=True,
+            expected_owner_uid=expected_owner_uid,
         )
         if identity[1].owner != owner:
             raise SyncError(
@@ -18664,11 +19486,35 @@ def _installed_release_identity_and_directory_identity(
             )
         if not _bound_directory_matches(home, release_root, release_fd):
             raise SyncError(f"installed release directory changed: {release_root}")
-        if _directory_identity(release_fd) != directory_identity:
+        terminal_directory_evidence = _release_directory_identity_and_access_policy(
+            release_fd
+        )
+        if terminal_directory_evidence != (
+            directory_identity,
+            directory_access_policy,
+        ):
             raise SyncError(f"installed release directory changed: {release_root}")
-        return identity, directory_identity
+        if expected_owner_uid is not None:
+            _require_release_identity_directory_bindings(
+                home,
+                directory_bindings,
+                expected_owner_uid,
+            )
+        return identity, directory_identity, directory_access_policy
     finally:
         _close_fd_quietly(release_fd)
+        _close_release_identity_directory_bindings(directory_bindings)
+
+
+def _installed_release_identity_and_directory_identity(
+    home: Path,
+    owner: str,
+    sha: str,
+) -> ReleaseTreeExpectation:
+    identity, directory_identity, _directory_access_policy = (
+        _installed_release_identity_and_directory_evidence(home, owner, sha)
+    )
+    return identity, directory_identity
 
 
 def _pending_release_expectations_for_state(
@@ -18826,6 +19672,7 @@ def _release_tree_snapshot_from_directory_fd(
     display_root: Path,
     *,
     require_sanitized_modes: bool,
+    expected_owner_uid: int | None = None,
     capture_limits: dict[PurePosixPath, int],
 ) -> tuple[
     bytes,
@@ -18836,6 +19683,9 @@ def _release_tree_snapshot_from_directory_fd(
     dict[PurePosixPath, bytes],
 ]:
     """Capture one normalized release-tree identity without following symlinks."""
+    expected_owner_uid = _effective_release_identity_owner_uid(
+        expected_owner_uid
+    )
     digest = hashlib.sha256(b"codex-personal-sync-release-tree-v1\0")
     manifest_relative = PurePosixPath(MANIFEST_RELATIVE_PATH.as_posix())
     manifest_payload: bytes | None = None
@@ -18877,7 +19727,15 @@ def _release_tree_snapshot_from_directory_fd(
     ) -> None:
         nonlocal manifest_payload
         display_directory = display_root / Path(*relative_root.parts)
-        directory_metadata = os.fstat(directory_fd)
+        directory_metadata = (
+            _require_release_identity_fd_access_policy(
+                directory_fd,
+                display_directory,
+                expected_owner_uid,
+            )
+            if expected_owner_uid is not None
+            else os.fstat(directory_fd)
+        )
         if not stat.S_ISDIR(directory_metadata.st_mode):
             raise SyncError(
                 f"release tree entry is not a directory: {display_directory}"
@@ -18926,6 +19784,16 @@ def _release_tree_snapshot_from_directory_fd(
                 raise SyncError(
                     f"release tree changed while hashing: {display_path}"
                 ) from error
+            if (
+                expected_owner_uid is not None
+                and named_metadata.st_uid != expected_owner_uid
+            ):
+                raise _release_identity_policy_error(
+                    display_path,
+                    f"owner UID {named_metadata.st_uid} != expected UID "
+                    f"{expected_owner_uid}",
+                    mismatch=True,
+                )
             snapshot = _release_source_snapshot(named_metadata)
             source_snapshots[relative_path] = snapshot
             if stat.S_ISDIR(named_metadata.st_mode):
@@ -18937,27 +19805,41 @@ def _release_tree_snapshot_from_directory_fd(
                         _source_directory_flags(),
                         dir_fd=directory_fd,
                     )
-                    _require_release_source_unchanged(
+                    snapshot = _require_release_source_unchanged(
                         snapshot,
                         os.fstat(child_fd),
                         display_path,
+                        ignore_ctime=expected_owner_uid is not None,
                     )
                     visit_directory(child_fd, relative_path)
-                    _require_release_source_unchanged(
+                    snapshot = _require_release_source_unchanged(
                         snapshot,
                         os.fstat(child_fd),
                         display_path,
+                        ignore_ctime=expected_owner_uid is not None,
                     )
                     current_metadata = os.stat(
                         name,
                         dir_fd=directory_fd,
                         follow_symlinks=False,
                     )
-                    _require_release_source_unchanged(
+                    if (
+                        expected_owner_uid is not None
+                        and current_metadata.st_uid != expected_owner_uid
+                    ):
+                        raise _release_identity_policy_error(
+                            display_path,
+                            f"owner UID {current_metadata.st_uid} != expected UID "
+                            f"{expected_owner_uid}",
+                            mismatch=True,
+                        )
+                    snapshot = _require_release_source_unchanged(
                         snapshot,
                         current_metadata,
                         display_path,
+                        ignore_ctime=expected_owner_uid is not None,
                     )
+                    source_snapshots[relative_path] = snapshot
                 except OSError as error:
                     raise SyncError(
                         f"release tree changed while hashing: {display_path}"
@@ -18976,7 +19858,14 @@ def _release_tree_snapshot_from_directory_fd(
                     name,
                     snapshot,
                     display_path,
+                    ignore_ctime=expected_owner_uid is not None,
                 )
+                if expected_owner_uid is not None:
+                    _require_release_identity_fd_access_policy(
+                        file_fd,
+                        display_path,
+                        expected_owner_uid,
+                    )
                 resource_budget.reserve_file_bytes(
                     opened_snapshot.size,
                     display_path,
@@ -19008,27 +19897,69 @@ def _release_tree_snapshot_from_directory_fd(
                     display_path,
                     capture_payload=capture_limit is not None,
                 )
+                opened_snapshot = replace(
+                    opened_snapshot,
+                    content_identity=file_identity,
+                )
+                source_snapshots[relative_path] = opened_snapshot
                 if relative_path == manifest_relative:
                     assert captured_payload is not None
                     manifest_payload = captured_payload
                 if relative_path in capture_limits:
                     assert captured_payload is not None
                     captured_files[relative_path] = captured_payload
-                _require_release_source_unchanged(
+                terminal_file_metadata = (
+                    _require_release_identity_fd_access_policy(
+                        file_fd,
+                        display_path,
+                        expected_owner_uid,
+                    )
+                    if expected_owner_uid is not None
+                    else os.fstat(file_fd)
+                )
+                file_stage_rehash_used = False
+                (
                     opened_snapshot,
-                    os.fstat(file_fd),
+                    file_stage_rehash_used,
+                ) = _require_release_stage_source_unchanged(
+                    opened_snapshot,
+                    terminal_file_metadata,
                     display_path,
+                    rehash_used=file_stage_rehash_used,
+                    ignore_ctime=expected_owner_uid is not None,
+                    file_descriptor=file_fd,
+                    expected_owner_uid=expected_owner_uid,
+                    operation="identity validation",
                 )
                 current_metadata = os.stat(
                     name,
                     dir_fd=directory_fd,
                     follow_symlinks=False,
                 )
-                _require_release_source_unchanged(
+                if (
+                    expected_owner_uid is not None
+                    and current_metadata.st_uid != expected_owner_uid
+                ):
+                    raise _release_identity_policy_error(
+                        display_path,
+                        f"owner UID {current_metadata.st_uid} != expected UID "
+                        f"{expected_owner_uid}",
+                        mismatch=True,
+                    )
+                (
+                    opened_snapshot,
+                    file_stage_rehash_used,
+                ) = _require_release_stage_source_unchanged(
                     opened_snapshot,
                     current_metadata,
                     display_path,
+                    rehash_used=file_stage_rehash_used,
+                    ignore_ctime=expected_owner_uid is not None,
+                    file_descriptor=file_fd,
+                    expected_owner_uid=expected_owner_uid,
+                    operation="identity validation",
                 )
+                source_snapshots[relative_path] = opened_snapshot
                 record(
                     b"file",
                     relative_path,
@@ -19053,11 +19984,60 @@ def _release_tree_snapshot_from_directory_fd(
             raise SyncError(
                 f"release tree directory changed while hashing: {display_directory}"
             )
-        _require_release_source_unchanged(
-            directory_snapshot,
-            os.fstat(directory_fd),
-            display_directory,
+        terminal_directory_metadata = (
+            _require_release_identity_fd_access_policy(
+                directory_fd,
+                display_directory,
+                expected_owner_uid,
+            )
+            if expected_owner_uid is not None
+            else os.fstat(directory_fd)
         )
+        directory_snapshot = _require_release_source_unchanged(
+            directory_snapshot,
+            terminal_directory_metadata,
+            display_directory,
+            ignore_ctime=expected_owner_uid is not None,
+        )
+        if expected_owner_uid is not None:
+            stable_names = _directory_member_names(
+                directory_fd,
+                maximum_entries=len(names),
+                overflow_message=(
+                    "release tree directory changed while hashing: "
+                    f"{display_directory}"
+                ),
+            )
+            if stable_names != names:
+                raise SyncError(
+                    "release tree directory changed while hashing: "
+                    f"{display_directory}"
+                )
+            _require_release_directory_members_unchanged(
+                directory_fd,
+                relative_root,
+                names,
+                source_snapshots,
+                (
+                    "release tree directory changed while hashing: "
+                    f"{display_directory}"
+                ),
+            )
+            stable_directory_metadata = (
+                _require_release_identity_fd_access_policy(
+                    directory_fd,
+                    display_directory,
+                    expected_owner_uid,
+                )
+            )
+            if not _release_source_matches(
+                directory_snapshot,
+                stable_directory_metadata,
+            ):
+                raise SyncError(
+                    f"release tree changed while hashing: {display_directory}"
+                )
+        source_snapshots[relative_root] = directory_snapshot
 
     resource_budget.reserve_path_entries()
     try:
@@ -19105,6 +20085,30 @@ def _directory_member_names(
                 raise SyncError(overflow_message)
             names.append(entry.name)
     return tuple(sorted(names))
+
+
+def _require_release_directory_members_unchanged(
+    directory_fd: int,
+    relative_root: PurePosixPath,
+    expected_names: tuple[str, ...],
+    source_snapshots: dict[PurePosixPath, _ReleaseSourceSnapshot],
+    changed_message: str,
+) -> None:
+    for name in expected_names:
+        relative_path = relative_root / name
+        expected_snapshot = source_snapshots.get(relative_path)
+        if expected_snapshot is None:
+            raise SyncError(changed_message)
+        try:
+            current_metadata = os.stat(
+                name,
+                dir_fd=directory_fd,
+                follow_symlinks=False,
+            )
+        except OSError as error:
+            raise SyncError(changed_message) from error
+        if not _release_source_matches(expected_snapshot, current_metadata):
+            raise SyncError(changed_message)
 
 
 def _open_source_directory_entry(
@@ -19336,7 +20340,10 @@ def _verify_release_source_snapshot(
     source_members: dict[PurePosixPath, tuple[str, ...]],
     *,
     operation: str = "copy",
+    expected_owner_uid: int | None = None,
 ) -> None:
+    if sys.platform != "darwin":
+        expected_owner_uid = None
     for relative_path, snapshot in source_snapshots.items():
         display_path = display_root / Path(*relative_path.parts)
         try:
@@ -19345,10 +20352,228 @@ def _verify_release_source_snapshot(
             raise SyncError(
                 f"release source changed during {operation}: {display_path}"
             ) from error
-        if not _release_source_matches(snapshot, metadata):
+        if expected_owner_uid is not None:
+            if metadata.st_uid != expected_owner_uid:
+                raise _release_identity_policy_error(
+                    display_path,
+                    f"owner UID {metadata.st_uid} != expected UID "
+                    f"{expected_owner_uid}",
+                    mismatch=True,
+                )
+            parent_fd = -1
+            entry_fd = -1
+            file_stage_rehash_used = False
+            try:
+                if not relative_path.parts:
+                    entry_fd = os.dup(root_fd)
+                else:
+                    parent_fd, name = _open_relative_parent_fd(
+                        root_fd,
+                        relative_path,
+                    )
+                    flags = (
+                        _source_directory_flags()
+                        if stat.S_ISDIR(snapshot.mode)
+                        else _source_regular_file_flags()
+                    )
+                    entry_fd = os.open(name, flags, dir_fd=parent_fd)
+                opened_metadata = _require_release_identity_fd_access_policy(
+                    entry_fd,
+                    display_path,
+                    expected_owner_uid,
+                )
+                (
+                    snapshot,
+                    file_stage_rehash_used,
+                ) = _require_release_stage_source_unchanged(
+                    snapshot,
+                    opened_metadata,
+                    display_path,
+                    rehash_used=file_stage_rehash_used,
+                    ignore_ctime=True,
+                    file_descriptor=entry_fd,
+                    expected_owner_uid=expected_owner_uid,
+                    operation=operation,
+                )
+                if stat.S_ISDIR(snapshot.mode):
+                    expected_names = source_members.get(relative_path)
+                    if expected_names is None:
+                        raise SyncError(
+                            "release source directory identity is incomplete: "
+                            f"{display_path}"
+                        )
+                    changed_message = (
+                        "release source directory changed during "
+                        f"{operation}: {display_path}"
+                    )
+                    current_names = _directory_member_names(
+                        entry_fd,
+                        maximum_entries=len(expected_names),
+                        overflow_message=changed_message,
+                    )
+                    if current_names != expected_names:
+                        raise SyncError(changed_message)
+                terminal_opened_metadata = (
+                    _require_release_identity_fd_access_policy(
+                        entry_fd,
+                        display_path,
+                        expected_owner_uid,
+                    )
+                )
+                (
+                    snapshot,
+                    file_stage_rehash_used,
+                ) = _require_release_stage_source_unchanged(
+                    snapshot,
+                    terminal_opened_metadata,
+                    display_path,
+                    rehash_used=file_stage_rehash_used,
+                    ignore_ctime=True,
+                    file_descriptor=entry_fd,
+                    expected_owner_uid=expected_owner_uid,
+                    operation=operation,
+                )
+                if stat.S_ISDIR(snapshot.mode):
+                    terminal_names = _directory_member_names(
+                        entry_fd,
+                        maximum_entries=len(expected_names),
+                        overflow_message=changed_message,
+                    )
+                    if terminal_names != expected_names:
+                        raise SyncError(changed_message)
+                    stable_opened_metadata = (
+                        _require_release_identity_fd_access_policy(
+                            entry_fd,
+                            display_path,
+                            expected_owner_uid,
+                        )
+                    )
+                    if not _release_source_matches(
+                        snapshot,
+                        stable_opened_metadata,
+                    ):
+                        raise SyncError(
+                            f"release source changed during {operation}: "
+                            f"{display_path}"
+                        )
+                terminal_named_metadata = (
+                    os.fstat(entry_fd)
+                    if not relative_path.parts
+                    else os.stat(
+                        name,
+                        dir_fd=parent_fd,
+                        follow_symlinks=False,
+                    )
+                )
+                if not _release_source_matches(
+                    snapshot,
+                    terminal_named_metadata,
+                ):
+                    raise SyncError(
+                        f"release source changed during {operation}: {display_path}"
+                    )
+                source_snapshots[relative_path] = snapshot
+            except OSError as error:
+                raise SyncError(
+                    f"release source changed during {operation}: {display_path}"
+                ) from error
+            finally:
+                if entry_fd >= 0:
+                    _close_fd_quietly(entry_fd)
+                if parent_fd >= 0:
+                    _close_fd_quietly(parent_fd)
+        elif not _release_source_matches(snapshot, metadata):
             raise SyncError(
                 f"release source changed during {operation}: {display_path}"
             )
+    if expected_owner_uid is not None:
+        for relative_path, expected_names in sorted(
+            source_members.items(),
+            key=lambda item: len(item[0].parts),
+            reverse=True,
+        ):
+            snapshot = source_snapshots[relative_path]
+            display_path = display_root / Path(*relative_path.parts)
+            changed_message = (
+                f"release source directory changed during {operation}: "
+                f"{display_path}"
+            )
+            parent_fd = -1
+            entry_fd = -1
+            try:
+                if not relative_path.parts:
+                    entry_fd = os.dup(root_fd)
+                else:
+                    parent_fd, name = _open_relative_parent_fd(
+                        root_fd,
+                        relative_path,
+                    )
+                    entry_fd = os.open(
+                        name,
+                        _source_directory_flags(),
+                        dir_fd=parent_fd,
+                    )
+                opened_metadata = _require_release_identity_fd_access_policy(
+                    entry_fd,
+                    display_path,
+                    expected_owner_uid,
+                )
+                snapshot = _require_release_source_unchanged(
+                    snapshot,
+                    opened_metadata,
+                    display_path,
+                    ignore_ctime=True,
+                    operation=operation,
+                )
+                current_names = _directory_member_names(
+                    entry_fd,
+                    maximum_entries=len(expected_names),
+                    overflow_message=changed_message,
+                )
+                if current_names != expected_names:
+                    raise SyncError(changed_message)
+                _require_release_directory_members_unchanged(
+                    entry_fd,
+                    relative_path,
+                    expected_names,
+                    source_snapshots,
+                    changed_message,
+                )
+                stable_opened_metadata = (
+                    _require_release_identity_fd_access_policy(
+                        entry_fd,
+                        display_path,
+                        expected_owner_uid,
+                    )
+                )
+                if not _release_source_matches(
+                    snapshot,
+                    stable_opened_metadata,
+                ):
+                    raise SyncError(changed_message)
+                terminal_named_metadata = (
+                    os.fstat(entry_fd)
+                    if not relative_path.parts
+                    else os.stat(
+                        name,
+                        dir_fd=parent_fd,
+                        follow_symlinks=False,
+                    )
+                )
+                if not _release_source_matches(
+                    snapshot,
+                    terminal_named_metadata,
+                ):
+                    raise SyncError(changed_message)
+                source_snapshots[relative_path] = snapshot
+            except OSError as error:
+                raise SyncError(changed_message) from error
+            finally:
+                if entry_fd >= 0:
+                    _close_fd_quietly(entry_fd)
+                if parent_fd >= 0:
+                    _close_fd_quietly(parent_fd)
+        return
     for relative_path, expected_names in source_members.items():
         display_path = display_root / Path(*relative_path.parts)
         changed_message = (
@@ -19609,6 +20834,7 @@ def _copy_release_tree(
     home: Path,
     expected_manifest: ManifestData,
     expected_source: ReleaseTreeExpectation,
+    expected_owner_uid: int | None,
 ) -> ReleaseTreeExpectation:
     source_parent_fd, source_fd, source_root_snapshot = _open_release_source_root(
         source_root
@@ -19623,6 +20849,12 @@ def _copy_release_tree(
     temp_fd = -1
     published = False
     try:
+        if expected_owner_uid is not None:
+            _require_release_identity_fd_access_policy(
+                releases_fd,
+                releases_root,
+                expected_owner_uid,
+            )
         (
             source_payload,
             source_manifest,
@@ -19696,10 +20928,11 @@ def _copy_release_tree(
             staged_payload,
             staged_manifest,
             staged_tree_digest,
-        ) = _release_tree_identity_from_directory_fd(
+        ) = _release_tree_identity_with_owner_access_policy(
             temp_fd,
             release_dir,
             require_sanitized_modes=True,
+            expected_owner_uid=expected_owner_uid,
         )
         if staged_payload != source_payload or staged_manifest != expected_manifest:
             raise SyncError("staged release manifest differs from install preflight")
@@ -19717,6 +20950,12 @@ def _copy_release_tree(
             raise SyncError(
                 "release staging changed before publication; canonical staging "
                 f"was retained as {', '.join(retained) or 'an unknown name'}"
+            )
+        if expected_owner_uid is not None:
+            _require_release_identity_fd_access_policy(
+                releases_fd,
+                releases_root,
+                expected_owner_uid,
             )
         _rename_noreplace_at(
             releases_fd,
@@ -19746,14 +20985,21 @@ def _copy_release_tree(
             )
             if _directory_identity(published_fd) != staged_identity:
                 raise SyncError("published release identity differs from staging")
+            if expected_owner_uid is not None:
+                _require_release_identity_fd_access_policy(
+                    releases_fd,
+                    releases_root,
+                    expected_owner_uid,
+                )
             (
                 published_payload,
                 published_manifest,
                 published_tree_digest,
-            ) = _release_tree_identity_from_directory_fd(
+            ) = _release_tree_identity_with_owner_access_policy(
                 published_fd,
                 release_dir,
                 require_sanitized_modes=True,
+                expected_owner_uid=expected_owner_uid,
             )
             if (
                 published_payload != source_payload
@@ -19791,6 +21037,12 @@ def _copy_release_tree(
             raise SyncError(
                 "published release changed after verification; canonical object was "
                 f"retained as {', '.join(retained) or 'an unknown name'}"
+            )
+        if expected_owner_uid is not None:
+            _require_release_identity_fd_access_policy(
+                releases_fd,
+                releases_root,
+                expected_owner_uid,
             )
         return (
             (source_payload, source_manifest, source_tree_digest),
@@ -19983,10 +21235,184 @@ def _capture_active_release_expectations(
     return active
 
 
+def _open_install_release_directory_chains(
+    home: Path,
+    bindings: dict[str, InstallReleaseBinding],
+    expected_owner_uid: int,
+) -> _InstallReleaseDirectoryChains:
+    for owner, binding in bindings.items():
+        if binding.owner != owner:
+            raise SyncError(
+                f"install release policy binding mismatch for owner {owner}"
+            )
+    ordered_bindings = tuple(binding for _owner, binding in sorted(bindings.items()))
+    expected_ancestor_paths = _install_release_strict_ancestor_paths(
+        home,
+        ordered_bindings,
+        expected_owner_uid,
+    )
+    ancestors: list[_ReleaseIdentityDirectoryBinding] = []
+    ancestors_by_path: dict[Path, _ReleaseIdentityDirectoryBinding] = {}
+    current_path = home
+    try:
+        for current_path in expected_ancestor_paths:
+            if current_path == home:
+                file_descriptor = _bound_sync_home_anchor(home, None)
+            else:
+                parent_binding = ancestors_by_path.get(current_path.parent)
+                if parent_binding is None:
+                    raise SyncError(
+                        "install release ancestor set is not prefix-complete: "
+                        f"{current_path}"
+                    )
+                file_descriptor = os.open(
+                    current_path.name,
+                    _source_directory_flags(),
+                    dir_fd=parent_binding.file_descriptor,
+                )
+            try:
+                metadata = _require_release_identity_fd_access_policy(
+                    file_descriptor,
+                    current_path,
+                    expected_owner_uid,
+                )
+                if not stat.S_ISDIR(metadata.st_mode):
+                    raise _release_identity_policy_error(
+                        current_path,
+                        "bound install ancestor is not a directory",
+                        mismatch=True,
+                    )
+            except BaseException:
+                _close_fd_quietly(file_descriptor)
+                raise
+            ancestor = _ReleaseIdentityDirectoryBinding(
+                path=current_path,
+                file_descriptor=file_descriptor,
+                identity=(metadata.st_dev, metadata.st_ino),
+            )
+            ancestors.append(ancestor)
+            ancestors_by_path[current_path] = ancestor
+        _require_release_identity_directory_bindings(
+            home,
+            ancestors,
+            expected_owner_uid,
+        )
+        return _InstallReleaseDirectoryChains(
+            bindings=ordered_bindings,
+            ancestors=tuple(ancestors),
+        )
+    except BaseException as error:
+        _close_release_identity_directory_bindings(ancestors)
+        if isinstance(error, OSError):
+            raise _release_identity_policy_error(
+                current_path,
+                f"cannot open install release ancestor: {error}",
+                mismatch=False,
+            ) from error
+        raise
+
+
+def _install_release_strict_ancestor_paths(
+    home: Path,
+    bindings: tuple[InstallReleaseBinding, ...],
+    expected_owner_uid: int,
+) -> tuple[Path, ...]:
+    expected_paths = {home}
+    seen_owners: set[str] = set()
+    for binding in bindings:
+        if (
+            binding.owner in seen_owners
+            or binding.expected_owner_uid != expected_owner_uid
+            or binding.releases_root != _releases_root(home, binding.owner)
+        ):
+            raise SyncError(
+                f"install release policy binding mismatch for owner {binding.owner}"
+            )
+        seen_owners.add(binding.owner)
+        release_root = binding.releases_root / binding.sha
+        parts = _directory_parts_beneath(home, release_root)
+        if len(parts) < 2 or parts[-2:] != ("releases", binding.sha):
+            raise SyncError(
+                f"install release path mismatch for owner {binding.owner}"
+            )
+        current_path = home
+        for part in parts[:-2]:
+            current_path /= part
+            expected_paths.add(current_path)
+    return tuple(
+        sorted(
+            expected_paths,
+            key=lambda path: (
+                len(path.relative_to(home).parts),
+                path.relative_to(home).parts,
+            ),
+        )
+    )
+
+
+def _require_install_release_directory_chains(
+    home: Path,
+    chains: _InstallReleaseDirectoryChains,
+    expected_owner_uid: int,
+) -> None:
+    expected_paths = _install_release_strict_ancestor_paths(
+        home,
+        chains.bindings,
+        expected_owner_uid,
+    )
+    actual_paths = tuple(ancestor.path for ancestor in chains.ancestors)
+    if actual_paths != expected_paths or len(set(actual_paths)) != len(actual_paths):
+        raise SyncError("install release ancestor binding set mismatch")
+    _require_release_identity_directory_bindings(
+        home,
+        list(chains.ancestors),
+        expected_owner_uid,
+    )
+    for binding in chains.bindings:
+        _verify_install_release_canonical_binding(home, binding)
+
+
+def _close_install_release_directory_chains(
+    chains: _InstallReleaseDirectoryChains | None,
+) -> None:
+    if chains is None:
+        return
+    _close_release_identity_directory_bindings(list(chains.ancestors))
+
+
+def _probe_install_release_fd_headroom(
+    chains: _InstallReleaseDirectoryChains,
+) -> None:
+    if not chains.ancestors:
+        raise SyncError("install release ancestor binding set is empty")
+    probe_fds: list[int] = []
+    try:
+        for _index in range(MAX_ARCHIVE_MEMBER_PATH_DEPTH + 16):
+            probe_fds.append(os.dup(chains.ancestors[0].file_descriptor))
+    except OSError as error:
+        raise SyncError(
+            "insufficient file descriptor headroom for install transaction"
+        ) from error
+    finally:
+        for file_descriptor in reversed(probe_fds):
+            _close_fd_quietly(file_descriptor)
+
+
 def _verify_install_release_canonical_binding(
     home: Path,
     binding: InstallReleaseBinding,
 ) -> None:
+    if binding.expected_owner_uid is not None:
+        _require_release_identity_fd_access_policy(
+            binding.releases_fd,
+            binding.releases_root,
+            binding.expected_owner_uid,
+        )
+        _require_release_identity_fd_access_policy(
+            binding.release_fd,
+            binding.releases_root / binding.sha,
+            binding.expected_owner_uid,
+        )
     if not _bound_directory_matches(
         home,
         binding.releases_root,
@@ -20026,10 +21452,11 @@ def _verify_install_release_binding(
         )
         _verify_install_release_canonical_binding(home, binding)
         release_root = binding.releases_root / binding.sha
-        current_identity = _release_tree_identity_from_directory_fd(
+        current_identity = _release_tree_identity_with_owner_access_policy(
             binding.release_fd,
             release_root,
             require_sanitized_modes=True,
+            expected_owner_uid=binding.expected_owner_uid,
         )
         if current_identity != binding.expected_identity:
             raise SyncError("complete release identity mismatch")
@@ -20044,7 +21471,8 @@ def _verify_install_release_binding(
     except (OSError, SyncError) as error:
         raise SyncError(
             f"release tree changed {phase}; raced release "
-            f"{binding.owner}@{binding.sha} was left in place"
+            f"{binding.owner}@{binding.sha} was left in place",
+            code=error.code if isinstance(error, SyncError) else None,
         ) from error
 
 
@@ -20060,6 +21488,16 @@ def _verify_install_release_binding_lightweight(
             _current_release_binding_snapshot(home, binding) if verify_current else None
         )
         _verify_install_release_canonical_binding(home, binding)
+        if binding.expected_owner_uid is not None:
+            release_root = binding.releases_root / binding.sha
+            current_identity = _release_tree_identity_with_owner_access_policy(
+                binding.release_fd,
+                release_root,
+                require_sanitized_modes=True,
+                expected_owner_uid=binding.expected_owner_uid,
+            )
+            if current_identity != binding.expected_identity:
+                raise SyncError("complete release identity mismatch")
         if verify_current:
             assert current_snapshot is not None
             if _current_release_binding_snapshot(home, binding) != current_snapshot:
@@ -20071,7 +21509,8 @@ def _verify_install_release_binding_lightweight(
     except (OSError, SyncError) as error:
         raise SyncError(
             f"release tree changed {phase}; raced release "
-            f"{binding.owner}@{binding.sha} was left in place"
+            f"{binding.owner}@{binding.sha} was left in place",
+            code=error.code if isinstance(error, SyncError) else None,
         ) from error
 
 
@@ -20080,6 +21519,7 @@ def _open_install_release_binding(
     owner: str,
     sha: str,
     expectation: ReleaseTreeExpectation,
+    expected_owner_uid: int | None = None,
 ) -> InstallReleaseBinding:
     expected_identity, expected_directory_identity = expectation
     releases_root = _releases_root(home, owner)
@@ -20096,6 +21536,7 @@ def _open_install_release_binding(
             sha=sha,
             expected_identity=expected_identity,
             expected_directory_identity=expected_directory_identity,
+            expected_owner_uid=expected_owner_uid,
             releases_root=releases_root,
             releases_fd=releases_fd,
             release_fd=release_fd,
@@ -20129,6 +21570,7 @@ def _close_install_release_bindings(
 def _open_active_release_bindings(
     home: Path,
     active: dict[str, ActiveReleaseExpectation],
+    expected_owner_uid: int | None = None,
 ) -> dict[str, InstallReleaseBinding]:
     bindings: dict[str, InstallReleaseBinding] = {}
     try:
@@ -20138,6 +21580,7 @@ def _open_active_release_bindings(
                 owner,
                 release.sha,
                 release.expectation,
+                expected_owner_uid,
             )
         return bindings
     except BaseException:
@@ -20222,7 +21665,8 @@ def _owner_shas_from_bound_current_releases(
             )
         except SyncError as error:
             raise SyncError(
-                f"current release changed {phase} for owner {owner}"
+                f"current release changed {phase} for owner {owner}",
+                code=error.code,
             ) from error
     return owner_shas
 
@@ -20333,6 +21777,7 @@ def _install_release_set_unlocked(
 ) -> None:
     releases = _normalize_install_releases(releases)
     home = home.expanduser()
+    expected_owner_uid = os.geteuid() if sys.platform == "darwin" else None
     recovered_retention_transaction = _recover_release_retention_transaction(
         home,
         dry_run=dry_run or preflight_only,
@@ -20507,19 +21952,24 @@ def _install_release_set_unlocked(
             print("all managed symlinks already point at current")
         return
 
-    active_bindings = _open_active_release_bindings(home, active_expectations)
+    active_bindings = _open_active_release_bindings(
+        home,
+        active_expectations,
+        expected_owner_uid,
+    )
     held_bindings = list(active_bindings.values())
     staged_releases: list[InstallReleaseBinding] = []
     try:
         for source_root, sha, manifest, source_expectation in releases:
             release_dir = _releases_root(home, manifest.owner) / sha
             already_present = release_dir.exists()
-            binding = _stage_release_tree_for_install(
+            binding = _stage_release_tree_for_install_with_owner_access_policy(
                 source_root,
                 home,
                 sha,
                 manifest,
                 source_expectation,
+                expected_owner_uid=expected_owner_uid,
             )
             active_binding = active_bindings.get(manifest.owner)
             if active_binding is not None and active_binding.sha == sha:
@@ -20554,6 +22004,7 @@ def _install_release_set_unlocked(
     link_transaction: ReconcileTransaction | None = None
     state_transaction: ManagedStateFileTransaction | None = None
     state_committed = False
+    install_release_directory_chains: _InstallReleaseDirectoryChains | None = None
     try:
         initial_state_snapshot = _bind_managed_state_parent_for_pending_staging(
             home,
@@ -20577,6 +22028,19 @@ def _install_release_set_unlocked(
                     phase="before activation",
                     verify_current=True,
                 )
+                if expected_owner_uid is not None:
+                    install_release_directory_chains = (
+                        _open_install_release_directory_chains(
+                            home,
+                            next_current_bindings,
+                            expected_owner_uid,
+                        )
+                    )
+                    _require_install_release_directory_chains(
+                        home,
+                        install_release_directory_chains,
+                        expected_owner_uid,
+                    )
                 _verify_desired_entries(home, desired_entries)
                 _verify_install_release_identities(
                     home,
@@ -20592,10 +22056,43 @@ def _install_release_set_unlocked(
                             "overlay no-op verification failed with "
                             f"{len(issues)} issue(s)"
                         )
+                if install_release_directory_chains is not None:
+                    _require_install_release_directory_chains(
+                        home,
+                        install_release_directory_chains,
+                        expected_owner_uid,
+                    )
             finally:
+                _close_install_release_directory_chains(
+                    install_release_directory_chains
+                )
+                install_release_directory_chains = None
                 _close_install_release_bindings(held_bindings)
             print("all managed symlinks already point at current")
             return
+        if expected_owner_uid is not None:
+            try:
+                install_release_directory_chains = (
+                    _open_install_release_directory_chains(
+                        home,
+                        next_current_bindings,
+                        expected_owner_uid,
+                    )
+                )
+                _require_install_release_directory_chains(
+                    home,
+                    install_release_directory_chains,
+                    expected_owner_uid,
+                )
+            except (OSError, SyncError) as error:
+                raise SyncError(
+                    "release tree changed before activation; raced release set "
+                    f"was left in place: {error}",
+                    code=error.code if isinstance(error, SyncError) else None,
+                ) from error
+            _probe_install_release_fd_headroom(
+                install_release_directory_chains,
+            )
         pending_batch = _stage_pending_link_batch(
             home,
             [("current", current_actions), ("managed", actions)],
@@ -20625,6 +22122,12 @@ def _install_release_set_unlocked(
             batch_root=pending_batch.batch_root,
             mutations=[],
         )
+        if install_release_directory_chains is not None:
+            _require_install_release_directory_chains(
+                home,
+                install_release_directory_chains,
+                expected_owner_uid,
+            )
         _apply_reconcile_actions(
             home,
             current_actions,
@@ -20634,6 +22137,12 @@ def _install_release_set_unlocked(
             batch_root=pending_batch.batch_root,
             transaction=current_transaction,
         )
+        if install_release_directory_chains is not None:
+            _require_install_release_directory_chains(
+                home,
+                install_release_directory_chains,
+                expected_owner_uid,
+            )
         link_transaction = ReconcileTransaction(
             batch_root=pending_batch.batch_root,
             mutations=[],
@@ -20747,11 +22256,21 @@ def _install_release_set_unlocked(
         _verify_managed_link_snapshots(home, next_state, managed_link_snapshots)
         _verify_committed_pending_link_records(home, pending_batch)
         _verify_published_state_transaction(home, state_transaction)
+        if install_release_directory_chains is not None:
+            _require_install_release_directory_chains(
+                home,
+                install_release_directory_chains,
+                expected_owner_uid,
+            )
         _publish_pending_commit_marker(home, pending_batch)
         state_committed = True
         _mark_pending_batch_cleanup_ready(home, pending_batch)
         _clear_pending_link_pointer(home, pending_batch, phase="after")
     except BaseException as error:
+        _close_install_release_directory_chains(
+            install_release_directory_chains
+        )
+        install_release_directory_chains = None
         if (
             not state_committed
             and pending_batch is not None
@@ -20809,6 +22328,9 @@ def _install_release_set_unlocked(
         assert pending_batch is not None
         _try_cleanup_committed_pending_batch(home, pending_batch)
     finally:
+        _close_install_release_directory_chains(
+            install_release_directory_chains
+        )
         _close_install_release_bindings(held_bindings)
     if not actions:
         print("all managed symlinks already point at current")
@@ -20866,7 +22388,12 @@ def _stage_release_tree_for_install(
     sha: str,
     manifest: ManifestData,
     source_expectation: ReleaseTreeExpectation | None = None,
+    expected_owner_uid: int | None = None,
 ) -> InstallReleaseBinding:
+    if sys.platform != "darwin":
+        expected_owner_uid = None
+    elif expected_owner_uid is None:
+        expected_owner_uid = _INSTALL_RELEASE_OWNER_UID.get()
     sha = _validate_release_sha(sha)
     if source_expectation is None:
         source_expectation = _source_release_identity(source_root, manifest)
@@ -20889,13 +22416,40 @@ def _stage_release_tree_for_install(
             home,
             manifest,
             source_expectation,
+            expected_owner_uid,
         )
     return _open_install_release_binding(
         home,
         owner,
         sha,
         expectation,
+        expected_owner_uid,
     )
+
+
+def _stage_release_tree_for_install_with_owner_access_policy(
+    source_root: Path,
+    home: Path,
+    sha: str,
+    manifest: ManifestData,
+    source_expectation: ReleaseTreeExpectation | None,
+    *,
+    expected_owner_uid: int | None,
+) -> InstallReleaseBinding:
+    normalized_owner_uid = (
+        expected_owner_uid if sys.platform == "darwin" else None
+    )
+    token = _INSTALL_RELEASE_OWNER_UID.set(normalized_owner_uid)
+    try:
+        return _stage_release_tree_for_install(
+            source_root,
+            home,
+            sha,
+            manifest,
+            source_expectation,
+        )
+    finally:
+        _INSTALL_RELEASE_OWNER_UID.reset(token)
 
 
 @contextlib.contextmanager
@@ -22447,19 +24001,42 @@ def install_private_from_github(
         )
 
 
-def _current_sha(home: Path, owner: str = PUBLIC_OWNER) -> str | None:
+def _current_sha(
+    home: Path,
+    owner: str = PUBLIC_OWNER,
+    *,
+    release_identity_owner_uid: int | None = None,
+) -> str | None:
     current = _current_link(home, owner)
     current_parent = current.parent
+    expected_owner_uid = (
+        release_identity_owner_uid if sys.platform == "darwin" else None
+    )
+    directory_bindings: list[_ReleaseIdentityDirectoryBinding] = []
     try:
-        current_parent_fd = _open_directory_beneath(home, current_parent)
+        if expected_owner_uid is None:
+            current_parent_fd = _open_directory_beneath(home, current_parent)
+        else:
+            directory_bindings = _open_release_identity_directory_chain(
+                home,
+                current_parent,
+                expected_owner_uid,
+            )
+            current_parent_fd = os.dup(
+                directory_bindings[-1].file_descriptor
+            )
     except FileNotFoundError:
+        _close_release_identity_directory_bindings(directory_bindings)
         return None
     except OSError as error:
+        _close_release_identity_directory_bindings(directory_bindings)
         raise SyncError(
             f"refusing unsafe current pointer parent: {current_parent}"
         ) from error
     releases_fd = -1
     release_fd = -1
+    releases_identity: tuple[int, int] | None = None
+    release_identity: tuple[int, int] | None = None
     try:
         if not _bound_directory_matches(home, current_parent, current_parent_fd):
             raise SyncError(f"current pointer parent changed: {current_parent}")
@@ -22518,6 +24095,27 @@ def _current_sha(home: Path, owner: str = PUBLIC_OWNER) -> str | None:
                 _source_directory_flags(),
                 dir_fd=releases_fd,
             )
+            if expected_owner_uid is not None:
+                releases_metadata = _require_release_identity_fd_access_policy(
+                    releases_fd,
+                    releases_root,
+                    expected_owner_uid,
+                )
+                opened_release_metadata = (
+                    _require_release_identity_fd_access_policy(
+                        release_fd,
+                        release_dir,
+                        expected_owner_uid,
+                    )
+                )
+                releases_identity = (
+                    releases_metadata.st_dev,
+                    releases_metadata.st_ino,
+                )
+                release_identity = (
+                    opened_release_metadata.st_dev,
+                    opened_release_metadata.st_ino,
+                )
         except SyncError:
             raise
         except OSError as error:
@@ -22548,6 +24146,43 @@ def _current_sha(home: Path, owner: str = PUBLIC_OWNER) -> str | None:
             )
         if not _bound_directory_matches(home, current_parent, current_parent_fd):
             raise SyncError(f"current pointer parent changed: {current_parent}")
+        if expected_owner_uid is not None:
+            terminal_releases_metadata = (
+                _require_release_identity_fd_access_policy(
+                    releases_fd,
+                    releases_root,
+                    expected_owner_uid,
+                )
+            )
+            terminal_release_metadata = (
+                _require_release_identity_fd_access_policy(
+                    release_fd,
+                    release_dir,
+                    expected_owner_uid,
+                )
+            )
+            if (
+                releases_identity
+                != (
+                    terminal_releases_metadata.st_dev,
+                    terminal_releases_metadata.st_ino,
+                )
+                or release_identity
+                != (
+                    terminal_release_metadata.st_dev,
+                    terminal_release_metadata.st_ino,
+                )
+            ):
+                raise _release_identity_policy_error(
+                    release_dir,
+                    "bound current release object changed",
+                    mismatch=True,
+                )
+            _require_release_identity_directory_bindings(
+                home,
+                directory_bindings,
+                expected_owner_uid,
+            )
         return sha
     except OSError as error:
         raise SyncError(
@@ -22559,6 +24194,7 @@ def _current_sha(home: Path, owner: str = PUBLIC_OWNER) -> str | None:
         if releases_fd >= 0:
             _close_fd_quietly(releases_fd)
         _close_fd_quietly(current_parent_fd)
+        _close_release_identity_directory_bindings(directory_bindings)
 
 
 def status(home: Path, owner: str = PUBLIC_OWNER) -> bool:
@@ -25574,7 +27210,7 @@ def _load_macos_scheduler_config(
         config_paths=(paths.launchd_plist,),
         interval_minutes=interval_seconds // 60,
     )
-    expected_background = _launchd_plist(
+    expected_aqua = _launchd_plist(
         config.home,
         config.repo,
         config.interval_minutes,
@@ -25583,7 +27219,16 @@ def _load_macos_scheduler_config(
         base_repo=config.base_repo or config.repo,
         owner=config.owner or PUBLIC_OWNER,
     )
-    expected_gui = _legacy_gui_launchd_plist(
+    expected_background = _legacy_background_launchd_plist(
+        config.home,
+        config.repo,
+        config.interval_minutes,
+        config.runner,
+        mode=config.mode,
+        base_repo=config.base_repo or config.repo,
+        owner=config.owner or PUBLIC_OWNER,
+    )
+    expected_legacy_gui = _legacy_gui_launchd_plist(
         config.home,
         config.repo,
         config.interval_minutes,
@@ -25594,11 +27239,29 @@ def _load_macos_scheduler_config(
     )
     if config.command != "run-scheduled":
         expected_background["ProgramArguments"] = data.get("ProgramArguments")
-        expected_gui["ProgramArguments"] = data.get("ProgramArguments")
-    accepted_profiles: list[tuple[dict[str, Any], str]] = [
-        (expected_background, MACOS_BACKGROUND_LAUNCHD_DOMAIN),
-        (expected_gui, MACOS_LEGACY_GUI_LAUNCHD_DOMAIN),
+        expected_legacy_gui["ProgramArguments"] = data.get("ProgramArguments")
+    legacy_profiles = [
+        (
+            expected_background,
+            MACOS_BACKGROUND_LAUNCHD_DOMAIN,
+            MACOS_LAUNCHD_PROFILE_BACKGROUND,
+        ),
+        (
+            expected_legacy_gui,
+            MACOS_LEGACY_GUI_LAUNCHD_DOMAIN,
+            MACOS_LAUNCHD_PROFILE_GUI,
+        ),
     ]
+    accepted_profiles: list[tuple[dict[str, Any], str, str]] = []
+    if config.command == "run-scheduled":
+        accepted_profiles.append(
+            (
+                expected_aqua,
+                MACOS_LEGACY_GUI_LAUNCHD_DOMAIN,
+                MACOS_LAUNCHD_PROFILE_AQUA,
+            )
+        )
+    accepted_profiles.extend(legacy_profiles)
     if config.command != "run-scheduled":
         # Older published schedulers predate the no-bytecode environment
         # hardening. Admit only those two otherwise-exact historical profiles
@@ -25615,19 +27278,20 @@ def _load_macos_scheduler_config(
                         },
                     },
                     domain,
+                    profile,
                 )
-                for expected, domain in tuple(accepted_profiles)
+                for expected, domain, profile in legacy_profiles
             )
         )
-    launchd_domain = next(
+    matched_profile = next(
         (
-            domain
-            for expected, domain in accepted_profiles
+            (domain, profile)
+            for expected, domain, profile in accepted_profiles
             if _plist_value_matches_exactly(data, expected)
         ),
         None,
     )
-    if launchd_domain is None:
+    if matched_profile is None:
         raise SyncError(
             f"launchd scheduler config has unsupported execution semantics: "
             f"{paths.launchd_plist}"
@@ -25639,7 +27303,12 @@ def _load_macos_scheduler_config(
         raise SyncError(
             f"launchd scheduler config changed during audit: {paths.launchd_plist}"
         )
-    return replace(config, launchd_domain=launchd_domain)
+    launchd_domain, launchd_profile = matched_profile
+    return replace(
+        config,
+        launchd_domain=launchd_domain,
+        launchd_profile=launchd_profile,
+    )
 
 
 def _plist_value_matches_exactly(actual: Any, expected: Any) -> bool:
@@ -26252,6 +27921,29 @@ def _legacy_gui_launchd_plist(
 
 
 def _launchd_plist(
+    home: Path,
+    repo: str,
+    interval_minutes: int,
+    runner: Path,
+    *,
+    mode: str = "public",
+    base_repo: str = DEFAULT_PUBLIC_RELEASE_REPO,
+    owner: str = "private",
+) -> dict[str, Any]:
+    payload = _legacy_background_launchd_plist(
+        home,
+        repo,
+        interval_minutes,
+        runner,
+        mode=mode,
+        base_repo=base_repo,
+        owner=owner,
+    )
+    payload["LimitLoadToSessionType"] = MACOS_AQUA_SESSION_TYPE
+    return payload
+
+
+def _legacy_background_launchd_plist(
     home: Path,
     repo: str,
     interval_minutes: int,
@@ -27982,8 +29674,8 @@ def _scheduler_daemon_enabled(
         return SchedulerDaemonQuery(
             "enabled",
             (
-                "launchd scheduler is loaded in the legacy GUI domain"
-                if loaded_domain == MACOS_LEGACY_GUI_LAUNCHD_DOMAIN
+                "launchd scheduler is loaded in the legacy Background domain"
+                if loaded_domain == MACOS_BACKGROUND_LAUNCHD_DOMAIN
                 else None
             ),
         )
@@ -30300,7 +31992,7 @@ def _install_scheduler_transaction_with_bindings(
         and existing.owner == desired_owner
         and (
             selected_platform != "macos"
-            or existing.launchd_domain == MACOS_BACKGROUND_LAUNCHD_DOMAIN
+            or existing.launchd_profile == MACOS_LAUNCHD_PROFILE_AQUA
         )
     )
     if config_matches:
@@ -30375,7 +32067,7 @@ def _install_scheduler_transaction_with_bindings(
                     [
                         "launchctl",
                         "bootout",
-                        f"{gui_domain}/{LAUNCHD_LABEL}",
+                        f"{background_domain}/{LAUNCHD_LABEL}",
                     ],
                     dry_run=dry_run,
                     allow_fail=NATIVE_FAILURE_ALREADY_ABSENT,
@@ -30385,7 +32077,7 @@ def _install_scheduler_transaction_with_bindings(
                     [
                         "launchctl",
                         "disable",
-                        f"{gui_domain}/{LAUNCHD_LABEL}",
+                        f"{background_domain}/{LAUNCHD_LABEL}",
                     ],
                     dry_run=dry_run,
                     allow_fail=NATIVE_FAILURE_ALREADY_ABSENT,
@@ -30395,7 +32087,7 @@ def _install_scheduler_transaction_with_bindings(
                     [
                         "launchctl",
                         "bootout",
-                        f"{background_domain}/{LAUNCHD_LABEL}",
+                        f"{gui_domain}/{LAUNCHD_LABEL}",
                     ],
                     dry_run=dry_run,
                     allow_fail=NATIVE_FAILURE_ALREADY_ABSENT,
@@ -30405,7 +32097,7 @@ def _install_scheduler_transaction_with_bindings(
                     [
                         "launchctl",
                         "enable",
-                        f"{background_domain}/{LAUNCHD_LABEL}",
+                        f"{gui_domain}/{LAUNCHD_LABEL}",
                     ],
                     dry_run=dry_run,
                     activation_bindings=bindings,
@@ -30414,7 +32106,7 @@ def _install_scheduler_transaction_with_bindings(
                     [
                         "launchctl",
                         "bootstrap",
-                        background_domain,
+                        gui_domain,
                         str(paths.launchd_plist),
                     ],
                     dry_run=dry_run,
@@ -30424,7 +32116,7 @@ def _install_scheduler_transaction_with_bindings(
                     [
                         "launchctl",
                         "enable",
-                        f"{background_domain}/{LAUNCHD_LABEL}",
+                        f"{gui_domain}/{LAUNCHD_LABEL}",
                     ],
                     dry_run=dry_run,
                     activation_bindings=bindings,
@@ -33018,27 +34710,143 @@ def _capture_scheduler_release_trees(
     mode: str,
     owner: str,
 ) -> dict[str, dict[str, str]]:
+    expected_owner_uid = os.geteuid() if sys.platform == "darwin" else None
     owners = [PUBLIC_OWNER]
     if mode == "private":
         owners.append(owner)
-    evidence: dict[str, dict[str, str]] = {}
+    initial_shas: dict[str, str] = {}
     for release_owner in owners:
-        sha = _current_sha(home, release_owner)
+        sha = _current_sha(
+            home,
+            release_owner,
+            release_identity_owner_uid=expected_owner_uid,
+        )
         if sha is None:
             raise SyncError(
                 f"scheduler current release is missing for owner {release_owner}",
                 code="current-release-unverifiable",
             )
-        _payload, _manifest, tree_sha256 = _installed_release_identity(
-            home,
-            release_owner,
-            sha,
+        initial_shas[release_owner] = sha
+    initial_expectations: dict[str, ReleaseTreeDirectoryEvidence] = {}
+    for release_owner in owners:
+        sha = initial_shas[release_owner]
+        initial_expectations[release_owner] = (
+            _installed_release_identity_and_directory_evidence(
+                home,
+                release_owner,
+                sha,
+                release_identity_owner_uid=expected_owner_uid,
+            )
+        )
+    terminal_expectations: dict[str, ReleaseTreeDirectoryEvidence] = {}
+    for release_owner in owners:
+        sha = initial_shas[release_owner]
+        terminal_expectations[release_owner] = (
+            _installed_release_identity_and_directory_evidence(
+                home,
+                release_owner,
+                sha,
+                release_identity_owner_uid=expected_owner_uid,
+            )
+        )
+    for release_owner in owners:
+        sha = initial_shas[release_owner]
+        if terminal_expectations[release_owner] != initial_expectations[release_owner]:
+            raise SyncError(
+                "scheduler release tree changed during identity validation: "
+                f"{release_owner}@{sha}",
+                code="current-release-unverifiable",
+            )
+    validation_expectations: dict[str, ReleaseTreeDirectoryEvidence] = {}
+    for release_owner in owners:
+        sha = initial_shas[release_owner]
+        validation_expectations[release_owner] = (
+            _installed_release_identity_and_directory_evidence(
+                home,
+                release_owner,
+                sha,
+                release_identity_owner_uid=expected_owner_uid,
+            )
+        )
+    for release_owner in owners:
+        sha = initial_shas[release_owner]
+        if (
+            validation_expectations[release_owner]
+            != terminal_expectations[release_owner]
+        ):
+            raise SyncError(
+                "scheduler release tree changed during identity validation: "
+                f"{release_owner}@{sha}",
+                code="current-release-unverifiable",
+            )
+    evidence: dict[str, dict[str, str]] = {}
+    for release_owner in owners:
+        sha = initial_shas[release_owner]
+        terminal_identity, _directory_identity_value, _directory_access_policy = (
+            terminal_expectations[release_owner]
         )
         evidence[release_owner] = {
             "sha": sha,
-            "tree_sha256": tree_sha256,
+            "tree_sha256": terminal_identity[2],
         }
+    final_shas = {
+        release_owner: _current_sha(
+            home,
+            release_owner,
+            release_identity_owner_uid=expected_owner_uid,
+        )
+        for release_owner in owners
+    }
+    if final_shas != initial_shas:
+        raise SyncError(
+            "scheduler current release changed during identity validation",
+            code="current-release-unverifiable",
+        )
     return dict(sorted(evidence.items()))
+
+
+def release_identities(
+    home: Path,
+    *,
+    mode: str,
+    owner: str,
+) -> dict[str, Any]:
+    home = home.expanduser()
+    if mode not in {"public", "private"}:
+        raise SyncError(f"unsupported release identity mode: {mode}")
+    owner = _validate_owner(owner)
+    if mode == "public":
+        owner = PUBLIC_OWNER
+    elif owner == PUBLIC_OWNER:
+        raise SyncError("private release identity owner must not be public")
+    try:
+        lock = installation_lock(home, create=False)
+        with lock:
+            releases = _capture_scheduler_release_trees(
+                home,
+                mode=mode,
+                owner=owner,
+            )
+    except (FileNotFoundError, OSError) as error:
+        raise SyncError(
+            "release identity state is unavailable",
+            code="current-release-unverifiable",
+        ) from error
+    expected_owners = (
+        {PUBLIC_OWNER, owner}
+        if mode == "private"
+        else {PUBLIC_OWNER}
+    )
+    if set(releases) != expected_owners:
+        raise SyncError(
+            "active release identity owner set is incomplete",
+            code="current-release-unverifiable",
+        )
+    return {
+        "version": 1,
+        "mode": mode,
+        "release_trees": releases,
+    }
 
 
 def run_scheduled(
@@ -36202,7 +38010,7 @@ def scheduler_report(home: Path, platform_name: str) -> SchedulerReport:
                 config.command != "run-scheduled"
                 or (
                     config.platform == "macos"
-                    and config.launchd_domain != MACOS_BACKGROUND_LAUNCHD_DOMAIN
+                    and config.launchd_profile != MACOS_LAUNCHD_PROFILE_AQUA
                 )
             )
         ),
@@ -36602,6 +38410,17 @@ def build_parser() -> argparse.ArgumentParser:
     verify_overlay_parser.add_argument("--home", default="~/.codex")
     verify_overlay_parser.add_argument("--owner", default="private")
 
+    release_identities_parser = subparsers.add_parser(
+        "release-identities",
+        help="Validate and report active release identities",
+    )
+    release_identities_parser.add_argument(
+        "--mode", choices=("public", "private"), required=True
+    )
+    release_identities_parser.add_argument("--owner", default="private")
+    release_identities_parser.add_argument("--home", default="~/.codex")
+    release_identities_parser.add_argument("--json", action="store_true")
+
     uninstall_overlay_parser = subparsers.add_parser(
         "uninstall-overlay",
         help="Remove an overlay and restore public links for declared overrides",
@@ -36781,6 +38600,20 @@ def main(argv: list[str] | None = None) -> int:
             rollback(Path(args.home), args.to, args.owner)
         elif args.command == "verify-overlay":
             verify_overlay(Path(args.home), args.owner)
+        elif args.command == "release-identities":
+            payload = release_identities(
+                Path(args.home),
+                mode=args.mode,
+                owner=args.owner,
+            )
+            if args.json:
+                print(json.dumps(payload, indent=2, sort_keys=True))
+            else:
+                for release_owner, identity in payload["release_trees"].items():
+                    print(
+                        f"{release_owner} {identity['sha']} "
+                        f"{identity['tree_sha256']}"
+                    )
         elif args.command == "uninstall-overlay":
             uninstall_overlay(Path(args.home), args.owner, dry_run=args.dry_run)
         elif args.command == "install-scheduler":

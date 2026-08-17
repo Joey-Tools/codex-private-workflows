@@ -8117,7 +8117,7 @@ class PrivateOverlaySyncTests(unittest.TestCase):
         )
         self.assertEqual(
             receipt["canonical_commit"],
-            "b4e74d7f35226801483a63ebe605b1298d60dc8e",
+            "7803eebe63782f5539c22e1b7f0d7a7ec587ac3f",
         )
         self.assertEqual(receipt["mirror"], "toolbox")
         self.assertEqual(
@@ -9459,6 +9459,66 @@ jobs:
         self.assertIn("  pull_request:\n  push:", workflow)
         self.assertIn("    branches:\n      - master", workflow)
         self.assertIn('      - ".github/workflows/**"', workflow)
+
+    def test_release_workflow_gates_release_on_controller_compatibility(
+        self,
+    ) -> None:
+        workflow = (REPO_ROOT / ".github" / "workflows" / "release.yml").read_text(
+            encoding="utf-8"
+        )
+
+        def job_body(job_name: str) -> str:
+            job = re.search(
+                rf"(?ms)^  {re.escape(job_name)}:\n"
+                r"(?P<body>.*?)(?=^  [-a-zA-Z0-9_]+:\n|\Z)",
+                workflow,
+            )
+            self.assertIsNotNone(job, job_name)
+            return job.group("body")
+
+        controller_jobs = {
+            "controller_python_39": ("ubuntu-latest", 'python-version: "3.9"'),
+            "controller_macos": ("macos-latest", 'python-version: "3.13"'),
+        }
+        for job_name, (runner, python_version) in controller_jobs.items():
+            with self.subTest(job=job_name):
+                body = job_body(job_name)
+                self.assertIn(f"    runs-on: {runner}\n", body)
+                self.assertIn(python_version, body)
+                self.assertIn(
+                    "personal_codex/bin/codex-private-macos-sync",
+                    body,
+                )
+                self.assertIn(
+                    "python3 -m unittest tests.test_private_macos_sync_controller",
+                    body,
+                )
+                self.assertRegex(
+                    body,
+                    r"(?ms)- name: Require source-only Python tree\n"
+                    r"        if: always\(\)",
+                )
+
+        release_body = job_body("release")
+        self.assertIn("    name: Build private overlay release\n", release_body)
+        self.assertIn(
+            "    needs:\n"
+            "      - controller_python_39\n"
+            "      - controller_macos\n",
+            release_body,
+        )
+        self.assertIn("always() &&", release_body)
+        self.assertIn(
+            "PYTHON_39_RESULT: ${{ needs.controller_python_39.result }}",
+            release_body,
+        )
+        self.assertIn(
+            "MACOS_CONTROLLER_RESULT: ${{ needs.controller_macos.result }}",
+            release_body,
+        )
+        self.assertIn('test "$PYTHON_39_RESULT" = "success"', release_body)
+        self.assertIn('test "$MACOS_CONTROLLER_RESULT" = "success"', release_body)
+        self.assertIn("    needs: release\n", job_body("publish"))
 
 
 class PrivateOverlayReleaseTests(unittest.TestCase):

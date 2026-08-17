@@ -4,8 +4,8 @@
     {
       "name": "codex-toolbox",
       "repository": "Joey-Tools/codex-toolbox",
-      "sha": "2640fd1694ea4c685540d5ff4b6b1bb483524d58",
-      "tree": "b94c9704734e3b2b50a62224bb1fb663ee6dd4af"
+      "sha": "598671d0972193bf74f2b076227a269ebacf87b3",
+      "tree": "6764085d9e12adbf5185107bd456bd1d2c126441"
     },
     {
       "name": "codex-debug-triage",
@@ -34,7 +34,7 @@
   ],
   "toolbox_generated_provenance": {
     "repository": "Joey-Tools/codex-personal-sync",
-    "sha": "b4e74d7f35226801483a63ebe605b1298d60dc8e",
-    "receipt_sha256": "822a1d96512043149d9b95311a6009be69ac12a12821b38ec470349e9e5bfbd1"
+    "sha": "7803eebe63782f5539c22e1b7f0d7a7ec587ac3f",
+    "receipt_sha256": "9ea6cd232867fafaa7a72aa46586f8905dbb91ef97de2e5d2baeb75a918efa0a"
   }
 }

@@ -26,12 +26,77 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  controller_python_39:
+    name: controller-compatibility (python-3.9)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.9"
+
+      - name: Check controller syntax without bytecode
+        run: |
+          python3 -B -c 'import pathlib; path = pathlib.Path("personal_codex/bin/codex-private-macos-sync"); compile(path.read_bytes(), str(path), "exec")'
+
+      - name: Run controller compatibility tests
+        run: python3 -m unittest tests.test_private_macos_sync_controller
+
+      - name: Require source-only Python tree
+        if: always()
+        run: |
+          python3 -B -c 'import pathlib, sys; artifacts = [str(path) for path in pathlib.Path(".").rglob("*") if path.name == "__pycache__" or path.suffix in {".pyc", ".pyo"}][:20]; sys.exit("bytecode artifacts: " + ", ".join(artifacts)) if artifacts else None'
+
+  controller_macos:
+    name: controller-platform (macos, python-3.13)
+    runs-on: macos-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Check controller syntax without bytecode
+        run: |
+          python3 -B -c 'import pathlib; path = pathlib.Path("personal_codex/bin/codex-private-macos-sync"); compile(path.read_bytes(), str(path), "exec")'
+
+      - name: Run controller platform tests
+        run: python3 -m unittest tests.test_private_macos_sync_controller
+
+      - name: Require source-only Python tree
+        if: always()
+        run: |
+          python3 -B -c 'import pathlib, sys; artifacts = [str(path) for path in pathlib.Path(".").rglob("*") if path.name == "__pycache__" or path.suffix in {".pyc", ".pyo"}][:20]; sys.exit("bytecode artifacts: " + ", ".join(artifacts)) if artifacts else None'
+
   release:
     name: Build private overlay release
-    if: github.event_name != 'push' || github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    needs:
+      - controller_python_39
+      - controller_macos
+    if: ${{ always() && (github.event_name != 'push' || github.ref == format('refs/heads/{0}', github.event.repository.default_branch)) }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
+      - name: Require controller compatibility checks to pass
+        env:
+          PYTHON_39_RESULT: ${{ needs.controller_python_39.result }}
+          MACOS_CONTROLLER_RESULT: ${{ needs.controller_macos.result }}
+        run: |
+          test "$PYTHON_39_RESULT" = "success"
+          test "$MACOS_CONTROLLER_RESULT" = "success"
+
       - name: Check out repository
         uses: actions/checkout@v4
         with:
