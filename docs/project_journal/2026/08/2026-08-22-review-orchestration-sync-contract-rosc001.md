@@ -1,7 +1,7 @@
 ---
 id: 20260822-rosc001
 title: Review Orchestration Private Sync Contract
-status: active
+status: completed
 created: 2026-08-22
 updated: 2026-08-24
 branch: wip/review-orchestration-sync-contract
@@ -301,14 +301,20 @@ bounded ancestry contains the approved root remains eligible without a refresh.
   `test_canonical_claude_auth_control_plane_is_not_helper_broker` passes with
   the exact legacy pre-sync guidance restored.
 - Independent post-fix dirty-delta audit (`No findings.`)
+- Final feature commit `ee9f66b36fae499c420212ab3c236ca6e88be021`
+  and the two-parent base refresh merge
+  `c8bec03abc18b257e4d2fc1209600c6b35e96df0` are signed and verified. The
+  merge incorporates current `origin/master`
+  `284f0f54daba1e9e17e922e4fa87aa6b586e37a4` without rebasing or
+  linearizing the feature DAG.
 - `ruff 0.13.2 check scripts/sync_private_overlay_sources.py
   tests/test_private_overlay_sync.py` (pass)
 - `$project-journal` `validate` for the companion repository (pass)
-- `python3 -B -m unittest -q tests.test_private_overlay_sync` (`298` tests)
+- `python3 -B -m unittest -q tests.test_private_overlay_sync` (`308` tests)
 - `PYTHONDONTWRITEBYTECODE=1 python3 -B -m unittest discover -s tests -p
-  'test_*.py' -q` (`2,005` tests, `4` conditional skips)
+  'test_*.py' -q` (`2,020` tests, `4` conditional skips)
 - `PYTHONDONTWRITEBYTECODE=1 python3 -B -m unittest discover -s
   personal_codex/skills/review-orchestration-playbook/tests -p 'test_*.py' -q`
   (`2,965` tests: `2,949` pass, `15` conditional skips, one restricted-host
-  nested-`sandbox-exec` denial); the exact denied test passes outside the host
-  sandbox.
+  nested-`sandbox-exec` denial); the exact denied test passed in a single
+  approved outside-host-sandbox rerun (`1` test, `0` failures).
