@@ -24,7 +24,10 @@ superseded_by:
   seven-repo `skill-repo-codex-gate` exception in the `codex-workspace`
   mother-repository guidance or each affected repository, not globally. The
   mother-repository guidance landed through `Joey-Tools/codex-workspace#12`,
-  so that scoped ownership is now complete.
+  so that scoped ownership is now complete. The tracked private companion
+  temporarily retains the exact legacy review block while its source lock
+  still selects the legacy canonical skill; the successful canonical source
+  sync performs the final compact-guidance migration.
 
 ## Decisions and Rationale
 
@@ -74,7 +77,32 @@ superseded_by:
   delegates adapter choice, workspace preparation, Claude runtime validation,
   GitHub evidence and recovery, and PR-readiness behavior to
   `$review-orchestration-playbook`. One source of algorithmic policy reduces
-  drift between installed guidance and the canonical skill.
+  drift between installed guidance and the canonical skill. That compact form
+  is the post-sync state, not the pre-sync companion state.
+- The Ubuntu platform-test job runs the installed canonical review skill's own
+  test directory in addition to the private repository suite. The legacy
+  source pin still contains contract assertions over the detailed global
+  review block, so publishing the compact `AGENTS.md` before updating the
+  canonical tree caused 17 CI-only failures even though all 1,972 repository
+  tests passed locally.
+- The sync engine now recognizes exactly two personal-guidance states. The
+  legacy state binds the complete old review block by SHA-256
+  `6d093c17f2bbcaef9a085937891f5e029044b10dace7e3e7972aebb819630a62`
+  plus its complete old consent line; the current state binds the exact compact
+  three-line block plus its complete current consent line. Missing, mixed,
+  duplicated, half-migrated, or locally drifted states fail closed instead of
+  being guessed or repaired piecemeal.
+- Migration is triggered only by the exact authoritative canonical review sync
+  rule. The descriptor-bound new review tree is committed first; only then is
+  one owner-owned, single-link, mode-0644 `AGENTS.md` candidate written and
+  flushed. The prior file is revalidated, moved with no-replace semantics into
+  an owner-private recovery scope, and revalidated again before the candidate
+  is published with a second no-replace rename. The exact prior bytes remain a
+  recovery artifact after success. A failure can therefore leave a recoverable
+  “new tree plus retained legacy guidance” state, never “old tree plus compact
+  guidance,” and never overwrites a same-UID concurrent target replacement. A
+  current state is an inode-stable no-op with a final exact binding/content
+  revalidation after classification.
 - The seven-repository default gate is intentionally absent from global
   personal guidance. Its scoped mother-repository `AGENTS.md` change is now on
   the default branch through `Joey-Tools/codex-workspace#12`; a child
@@ -106,8 +134,9 @@ hand in this companion PR.
 
 ## Current State
 
-- The companion implementation is complete and updates only the sync contract,
-  its focused tests, global personal routing, and this journal.
+- The companion implementation now stages global personal routing safely: the
+  tracked file matches the exact legacy source pin, while the sync contract and
+  focused tests own the automatic final migration after canonical source sync.
 - Cross-repository ownership is complete: `Joey-Tools/codex-workspace#12`
   squash-merged the scoped `AGENTS.md` rule as
   `1c3b9c9662ef8c3ed5ddad2c3e272fb6a0eec526`.
@@ -124,10 +153,12 @@ hand in this companion PR.
   would reject the new canonical tree even though the synthetic tests still
   injected that retired token. The replacement and its artificial assertions
   are removed; the post-fix audit reports no findings.
-- The post-fix 260-test source-sync module and 1,972-test private repository
-  suite pass on Python 3.13.0, with four conditional skips in the repository
-  suite. These gates must run again if the companion branch changes while it
-  is refreshed for delivery.
+- The final transition follow-up passes the 271-test source-sync module and the
+  1,983-test private repository suite on Python 3.13.0, with four conditional
+  skips in the repository suite. The 2,965-test pinned canonical suite completed
+  2,949 tests successfully with 15 conditional skips in the restricted host
+  sandbox; its sole failure was the expected nested macOS `sandbox-exec` denial,
+  and that exact test passed in the approved unrestricted rerun.
 
 ## Next Steps
 
@@ -149,10 +180,23 @@ hand in this companion PR.
   regressions, pass)
 - Canonical target-content validation against the current `20260822-ros001`
   worktree, including the three new focused contract tests (pass)
+- Transition-focused tests cover locked and unlocked authoritative sync,
+  tree-before-guidance ordering, exact-state failure, validation-before-
+  migration, unrelated-rule isolation, inode-stable idempotence, concurrent
+  target replacement inside the publication primitive, current-state no-op
+  drift, failed publication, and retry (pass).
+- The previously failing pinned canonical contract test
+  `test_canonical_claude_auth_control_plane_is_not_helper_broker` passes with
+  the exact legacy pre-sync guidance restored.
 - Independent post-fix dirty-delta audit (`No findings.`)
 - `ruff 0.13.2 check scripts/sync_private_overlay_sources.py
   tests/test_private_overlay_sync.py` (pass)
 - `$project-journal` `validate` for the companion repository (pass)
-- `python3 -B -m unittest -q tests.test_private_overlay_sync` (`260` tests)
+- `python3 -B -m unittest -q tests.test_private_overlay_sync` (`271` tests)
 - `PYTHONDONTWRITEBYTECODE=1 python3 -B -m unittest discover -s tests -p
-  'test_*.py' -q` (`1,972` tests, `4` conditional skips)
+  'test_*.py' -q` (`1,983` tests, `4` conditional skips)
+- `PYTHONDONTWRITEBYTECODE=1 python3 -B -m unittest discover -s
+  personal_codex/skills/review-orchestration-playbook/tests -p 'test_*.py' -q`
+  (`2,965` tests: `2,949` pass, `15` conditional skips, one restricted-host
+  nested-`sandbox-exec` denial); the exact denied test passes outside the host
+  sandbox.

@@ -54,14 +54,14 @@ FINAL_REVIEW_REQUIRED_ADDITIONS = frozenset(
 )
 
 
-def _legacy_live_review_overlay_missing_allowance(
+def _is_legacy_review_source_pin(
     source_lock: object,
-) -> frozenset[Path]:
+) -> bool:
     if not isinstance(source_lock, dict):
-        return frozenset()
+        return False
     sources = source_lock.get("sources")
     if not isinstance(sources, list):
-        return frozenset()
+        return False
     matches = [
         source
         for source in sources
@@ -69,11 +69,17 @@ def _legacy_live_review_overlay_missing_allowance(
         and source.get("name") == "codex-review-workflows"
     ]
     if len(matches) != 1:
-        return frozenset()
+        return False
     source = matches[0]
     if source.get("repository") != "Joey-Tools/codex-review-workflows":
-        return frozenset()
-    if (source.get("sha"), source.get("tree")) != LEGACY_REVIEW_SOURCE_PIN:
+        return False
+    return (source.get("sha"), source.get("tree")) == LEGACY_REVIEW_SOURCE_PIN
+
+
+def _legacy_live_review_overlay_missing_allowance(
+    source_lock: object,
+) -> frozenset[Path]:
+    if not _is_legacy_review_source_pin(source_lock):
         return frozenset()
     return FINAL_REVIEW_REQUIRED_ADDITIONS
 
@@ -94,6 +100,12 @@ SOURCE_LOCK_MODULE = load_module(
 )
 RELEASE_MODULE = load_module("private_overlay_release", RELEASE_SCRIPT)
 RUNTIME_MODULE = load_module("codex_personal_sync_private_overlay_sync", RUNTIME_SCRIPT)
+
+
+def _final_personal_agents_text() -> str:
+    data = (REPO_ROOT / SYNC_MODULE.PERSONAL_AGENTS_TARGET).read_bytes()
+    return SYNC_MODULE._migrated_personal_agents_bytes(data).decode("utf-8")
+
 
 # isolated_review synthetic-token IDs: access-a and access-b.
 GITHUB_TOKEN_FIXTURE = "codex_synth_v1_access_a"
@@ -697,30 +709,61 @@ class PrivateOverlaySyncTests(unittest.TestCase):
         self.assertEqual(len(bindings), 1)
         return stack, staging, bindings[0]
 
-    def _create_canonical_regular_file_overlay_rule(self):
-        source = self.source_root / "canonical-repo" / "skill"
+    def _create_canonical_regular_file_overlay_rule(
+        self,
+        *,
+        authoritative: bool = False,
+    ):
+        if authoritative:
+            rule = next(
+                candidate
+                for candidate in SYNC_MODULE.SYNC_RULES
+                if candidate.target == SYNC_MODULE.CANONICAL_REVIEW_TARGET
+            )
+        else:
+            rule = SYNC_MODULE.SyncRule(
+                repo="canonical-repo",
+                source=Path("skill"),
+                target=SYNC_MODULE.CANONICAL_REVIEW_TARGET,
+                regular_file_overlays=(
+                    SYNC_MODULE.RegularFileOverlay(
+                        source=Path("private/catalog.json"),
+                        target=Path(
+                            "scripts/review_runtime/synthetic-token-catalog.json"
+                        ),
+                    ),
+                ),
+            )
+        source = self.source_root / rule.repo / rule.source
         for relative in SYNC_MODULE.CANONICAL_REVIEW_REQUIRED_FILES:
             path = source / relative
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text("public\n", encoding="utf-8")
-        private_catalog = self.repo_root / "private" / "catalog.json"
-        private_catalog.parent.mkdir()
+        private_catalog = self.repo_root / rule.regular_file_overlays[0].source
+        private_catalog.parent.mkdir(parents=True)
         private_catalog.write_text("private\n", encoding="utf-8")
         target = self.repo_root / SYNC_MODULE.CANONICAL_REVIEW_TARGET
         target.mkdir(parents=True)
         (target / "old-marker").write_text("old\n", encoding="utf-8")
-        rule = SYNC_MODULE.SyncRule(
-            repo="canonical-repo",
-            source=Path("skill"),
-            target=SYNC_MODULE.CANONICAL_REVIEW_TARGET,
-            regular_file_overlays=(
-                SYNC_MODULE.RegularFileOverlay(
-                    source=Path("private/catalog.json"),
-                    target=Path("scripts/review_runtime/synthetic-token-catalog.json"),
-                ),
-            ),
-        )
         return rule, target
+
+    def _synthetic_legacy_personal_agents(self) -> tuple[Path, bytes, str]:
+        legacy_block = (
+            SYNC_MODULE.PERSONAL_AGENTS_LEGACY_REVIEW_BLOCK_START
+            + b" Synthetic legacy review detail.\n"
+        )
+        data = (
+            b"# Personal Guidelines\n\n"
+            + SYNC_MODULE.PERSONAL_AGENTS_LEGACY_CONSENT_LINE
+            + legacy_block
+            + SYNC_MODULE.PERSONAL_AGENTS_REVIEW_BLOCK_BOUNDARY
+            + b"review evidence may span hosts.\n"
+        )
+        target = self.repo_root / SYNC_MODULE.PERSONAL_AGENTS_TARGET
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(data)
+        target.chmod(0o644)
+        return target, data, hashlib.sha256(legacy_block).hexdigest()
 
     def _write_current_bug_triage_source(
         self,
@@ -1039,12 +1082,23 @@ class PrivateOverlaySyncTests(unittest.TestCase):
         private_catalog = self.repo_root / review_rule.regular_file_overlays[0].source
         private_catalog.parent.mkdir(parents=True)
         private_catalog.write_bytes(b'{"pool":"private"}\n')
-
-        SYNC_MODULE.sync_sources(
-            self.repo_root,
-            self.source_root,
-            (review_rule, ci_rule),
+        agents, legacy_agents, legacy_digest = (
+            self._synthetic_legacy_personal_agents()
         )
+
+        with mock.patch.object(
+            SYNC_MODULE,
+            "PERSONAL_AGENTS_LEGACY_REVIEW_BLOCK_SHA256",
+            legacy_digest,
+        ):
+            expected_agents = SYNC_MODULE._migrated_personal_agents_bytes(
+                legacy_agents
+            )
+            SYNC_MODULE.sync_sources(
+                self.repo_root,
+                self.source_root,
+                (review_rule, ci_rule),
+            )
 
         live_ci = self.repo_root / ci_rule.target
         nested_fixture = self.repo_root / review_rule.target / fixture_relative
@@ -1055,6 +1109,7 @@ class PrivateOverlaySyncTests(unittest.TestCase):
             synced_skill.read_text(encoding="utf-8"),
             "Use this when Joey asks.\n",
         )
+        self.assertEqual(agents.read_bytes(), expected_agents)
 
     def test_validator_sync_rule_replaces_legacy_mutable_release_identity(
         self,
@@ -1404,6 +1459,404 @@ class PrivateOverlaySyncTests(unittest.TestCase):
                 / "tests/test_supervisor.py"
             ).is_file()
         )
+
+    def test_authoritative_review_sync_migrates_personal_agents_after_tree(
+        self,
+    ) -> None:
+        rule, target = self._create_canonical_regular_file_overlay_rule(
+            authoritative=True
+        )
+        agents, legacy, legacy_digest = self._synthetic_legacy_personal_agents()
+        observed_installed_tree: list[bool] = []
+        real_migrate = (
+            SYNC_MODULE._migrate_personal_agents_after_canonical_review_sync
+        )
+
+        def migrate_after_tree(repo_binding):
+            observed_installed_tree.append(
+                not (target / "old-marker").exists()
+                and (target / "SKILL.md").read_bytes() == b"public\n"
+            )
+            return real_migrate(repo_binding)
+
+        with (
+            mock.patch.object(
+                SYNC_MODULE,
+                "PERSONAL_AGENTS_LEGACY_REVIEW_BLOCK_SHA256",
+                legacy_digest,
+            ),
+            mock.patch.object(
+                SYNC_MODULE,
+                "_migrate_personal_agents_after_canonical_review_sync",
+                side_effect=migrate_after_tree,
+            ),
+        ):
+            expected = SYNC_MODULE._migrated_personal_agents_bytes(legacy)
+            SYNC_MODULE.sync_sources(self.repo_root, self.source_root, (rule,))
+
+        self.assertEqual(observed_installed_tree, [True])
+        self.assertEqual(agents.read_bytes(), expected)
+        self.assertEqual(
+            SYNC_MODULE._personal_agents_review_guidance_state(expected),
+            "current",
+        )
+
+    def test_locked_authoritative_review_sync_migrates_personal_agents(
+        self,
+    ) -> None:
+        rule, _target = self._create_canonical_regular_file_overlay_rule(
+            authoritative=True
+        )
+        agents, legacy, legacy_digest = self._synthetic_legacy_personal_agents()
+        source = self.source_root / rule.repo / rule.source
+        locked_sources = self._locked_bug_triage_source(rule, source)
+
+        with mock.patch.object(
+            SYNC_MODULE,
+            "PERSONAL_AGENTS_LEGACY_REVIEW_BLOCK_SHA256",
+            legacy_digest,
+        ):
+            expected = SYNC_MODULE._migrated_personal_agents_bytes(legacy)
+            SYNC_MODULE.sync_sources(
+                self.repo_root,
+                self.source_root,
+                (rule,),
+                locked_sources=locked_sources,
+            )
+
+        self.assertEqual(agents.read_bytes(), expected)
+
+    def test_current_personal_agents_migration_is_inode_stable(self) -> None:
+        rule, _target = self._create_canonical_regular_file_overlay_rule(
+            authoritative=True
+        )
+        agents, legacy, legacy_digest = self._synthetic_legacy_personal_agents()
+
+        with mock.patch.object(
+            SYNC_MODULE,
+            "PERSONAL_AGENTS_LEGACY_REVIEW_BLOCK_SHA256",
+            legacy_digest,
+        ):
+            SYNC_MODULE.sync_sources(self.repo_root, self.source_root, (rule,))
+            migrated = agents.read_bytes()
+            migrated_inode = agents.stat().st_ino
+            SYNC_MODULE.sync_sources(self.repo_root, self.source_root, (rule,))
+
+        self.assertEqual(agents.read_bytes(), migrated)
+        self.assertEqual(agents.stat().st_ino, migrated_inode)
+
+    def test_personal_agents_unknown_states_fail_closed(self) -> None:
+        _agents, legacy, legacy_digest = self._synthetic_legacy_personal_agents()
+        with mock.patch.object(
+            SYNC_MODULE,
+            "PERSONAL_AGENTS_LEGACY_REVIEW_BLOCK_SHA256",
+            legacy_digest,
+        ):
+            current = SYNC_MODULE._migrated_personal_agents_bytes(legacy)
+            cases = {
+                "legacy-drift": legacy.replace(
+                    b"Synthetic legacy review detail",
+                    b"Synthetic legacy review detaiL",
+                    1,
+                ),
+                "half-migrated": legacy.replace(
+                    SYNC_MODULE.PERSONAL_AGENTS_LEGACY_CONSENT_LINE,
+                    SYNC_MODULE.PERSONAL_AGENTS_CURRENT_CONSENT_LINE,
+                    1,
+                ),
+                "legacy-consent-suffix-drift": legacy.replace(
+                    SYNC_MODULE.PERSONAL_AGENTS_LEGACY_CONSENT_LINE,
+                    SYNC_MODULE.PERSONAL_AGENTS_LEGACY_CONSENT_LINE.rstrip(b"\n")
+                    + b" Extra authorization.\n",
+                    1,
+                ),
+                "legacy-consent-prefix-drift": legacy.replace(
+                    SYNC_MODULE.PERSONAL_AGENTS_LEGACY_CONSENT_LINE,
+                    b"Extra authorization. "
+                    + SYNC_MODULE.PERSONAL_AGENTS_LEGACY_CONSENT_LINE,
+                    1,
+                ),
+                "current-consent-suffix-drift": current.replace(
+                    SYNC_MODULE.PERSONAL_AGENTS_CURRENT_CONSENT_LINE,
+                    SYNC_MODULE.PERSONAL_AGENTS_CURRENT_CONSENT_LINE.rstrip(b"\n")
+                    + b" Extra authorization.\n",
+                    1,
+                ),
+                "current-consent-prefix-drift": current.replace(
+                    SYNC_MODULE.PERSONAL_AGENTS_CURRENT_CONSENT_LINE,
+                    b"Extra authorization. "
+                    + SYNC_MODULE.PERSONAL_AGENTS_CURRENT_CONSENT_LINE,
+                    1,
+                ),
+                "legacy-consent-reordered": legacy.replace(
+                    SYNC_MODULE.PERSONAL_AGENTS_LEGACY_CONSENT_LINE,
+                    b"",
+                    1,
+                )
+                + SYNC_MODULE.PERSONAL_AGENTS_LEGACY_CONSENT_LINE,
+                "legacy-block-prefix-drift": legacy.replace(
+                    SYNC_MODULE.PERSONAL_AGENTS_LEGACY_REVIEW_BLOCK_START,
+                    b"Extra policy. "
+                    + SYNC_MODULE.PERSONAL_AGENTS_LEGACY_REVIEW_BLOCK_START,
+                    1,
+                ),
+                "current-block-prefix-drift": current.replace(
+                    SYNC_MODULE.PERSONAL_AGENTS_CURRENT_REVIEW_BLOCK,
+                    b"Extra policy. "
+                    + SYNC_MODULE.PERSONAL_AGENTS_CURRENT_REVIEW_BLOCK,
+                    1,
+                ),
+                "mixed": legacy + current,
+                "duplicate-current": current.replace(
+                    SYNC_MODULE.PERSONAL_AGENTS_REVIEW_BLOCK_BOUNDARY,
+                    SYNC_MODULE.PERSONAL_AGENTS_CURRENT_REVIEW_BLOCK
+                    + SYNC_MODULE.PERSONAL_AGENTS_REVIEW_BLOCK_BOUNDARY,
+                    1,
+                ),
+            }
+            for name, data in cases.items():
+                with self.subTest(name=name), self.assertRaisesRegex(
+                    SYNC_MODULE.SyncError,
+                    "exact legacy or migrated state",
+                ):
+                    SYNC_MODULE._migrated_personal_agents_bytes(data)
+
+    def test_personal_agents_drift_fails_after_new_review_tree_is_installed(
+        self,
+    ) -> None:
+        rule, target = self._create_canonical_regular_file_overlay_rule(
+            authoritative=True
+        )
+        agents, legacy, legacy_digest = self._synthetic_legacy_personal_agents()
+        drifted = legacy.replace(
+            b"Synthetic legacy review detail",
+            b"Synthetic legacy review detaiL",
+            1,
+        )
+        agents.write_bytes(drifted)
+
+        with (
+            mock.patch.object(
+                SYNC_MODULE,
+                "PERSONAL_AGENTS_LEGACY_REVIEW_BLOCK_SHA256",
+                legacy_digest,
+            ),
+            self.assertRaisesRegex(
+                SYNC_MODULE.SyncError,
+                "exact legacy or migrated state",
+            ),
+        ):
+            SYNC_MODULE.sync_sources(self.repo_root, self.source_root, (rule,))
+
+        self.assertEqual(agents.read_bytes(), drifted)
+        self.assertFalse((target / "old-marker").exists())
+        self.assertEqual((target / "SKILL.md").read_bytes(), b"public\n")
+
+    def test_personal_agents_migration_does_not_overwrite_rebound_target(
+        self,
+    ) -> None:
+        agents, legacy, legacy_digest = self._synthetic_legacy_personal_agents()
+        moved = agents.with_name("AGENTS.old.md")
+        replacement = b"concurrent replacement\n"
+        real_rename = SYNC_MODULE._rename_regular_file_overlay_noreplace
+        rebound = False
+
+        def rebind_inside_publish(*args, **kwargs):
+            nonlocal rebound
+            if not rebound:
+                agents.rename(moved)
+                agents.write_bytes(replacement)
+                agents.chmod(0o644)
+                rebound = True
+            return real_rename(*args, **kwargs)
+
+        with contextlib.ExitStack() as stack:
+            repo_binding = SYNC_MODULE._pin_regular_file_overlay_directory(
+                stack,
+                self.repo_root,
+                label="repository root",
+            )
+            with (
+                mock.patch.object(
+                    SYNC_MODULE,
+                    "PERSONAL_AGENTS_LEGACY_REVIEW_BLOCK_SHA256",
+                    legacy_digest,
+                ),
+                mock.patch.object(
+                    SYNC_MODULE,
+                    "_rename_regular_file_overlay_noreplace",
+                    side_effect=rebind_inside_publish,
+                ),
+                self.assertRaisesRegex(
+                    SYNC_MODULE.SyncError,
+                    "binding changed",
+                ),
+            ):
+                SYNC_MODULE._migrate_personal_agents_after_canonical_review_sync(
+                    repo_binding
+                )
+
+        self.assertTrue(rebound)
+        self.assertFalse(agents.exists())
+        self.assertEqual(moved.read_bytes(), legacy)
+        recovery_root = self.repo_root / SYNC_MODULE.REGULAR_FILE_OVERLAY_RECOVERY_ROOT
+        retained_payloads = [
+            path.read_bytes()
+            for path in recovery_root.rglob("*")
+            if path.is_file()
+        ]
+        self.assertIn(replacement, retained_payloads)
+
+    def test_current_personal_agents_noop_revalidates_after_classification(
+        self,
+    ) -> None:
+        agents, legacy, legacy_digest = self._synthetic_legacy_personal_agents()
+        replacement = b"concurrent current-state replacement\n"
+        moved = agents.with_name("AGENTS.current.md")
+
+        with contextlib.ExitStack() as stack:
+            repo_binding = SYNC_MODULE._pin_regular_file_overlay_directory(
+                stack,
+                self.repo_root,
+                label="repository root",
+            )
+            with mock.patch.object(
+                SYNC_MODULE,
+                "PERSONAL_AGENTS_LEGACY_REVIEW_BLOCK_SHA256",
+                legacy_digest,
+            ):
+                SYNC_MODULE._migrate_personal_agents_after_canonical_review_sync(
+                    repo_binding
+                )
+
+        real_migrate_bytes = SYNC_MODULE._migrated_personal_agents_bytes
+        replaced = False
+
+        def replace_after_classification(data):
+            nonlocal replaced
+            result = real_migrate_bytes(data)
+            if not replaced:
+                agents.rename(moved)
+                agents.write_bytes(replacement)
+                agents.chmod(0o644)
+                replaced = True
+            return result
+
+        with contextlib.ExitStack() as stack:
+            repo_binding = SYNC_MODULE._pin_regular_file_overlay_directory(
+                stack,
+                self.repo_root,
+                label="repository root",
+            )
+            with (
+                mock.patch.object(
+                    SYNC_MODULE,
+                    "_migrated_personal_agents_bytes",
+                    side_effect=replace_after_classification,
+                ),
+                self.assertRaisesRegex(SYNC_MODULE.SyncError, "binding changed"),
+            ):
+                SYNC_MODULE._migrate_personal_agents_after_canonical_review_sync(
+                    repo_binding
+                )
+
+        self.assertTrue(replaced)
+        self.assertEqual(agents.read_bytes(), replacement)
+        self.assertEqual(
+            SYNC_MODULE._personal_agents_review_guidance_state(moved.read_bytes()),
+            "current",
+        )
+
+    def test_personal_agents_publish_failure_is_retryable(self) -> None:
+        agents, legacy, legacy_digest = self._synthetic_legacy_personal_agents()
+        real_rename = SYNC_MODULE._rename_regular_file_overlay_noreplace
+        failed = False
+
+        def fail_first_publish(*args, **kwargs):
+            nonlocal failed
+            if not failed:
+                failed = True
+                raise OSError("simulated publish failure")
+            return real_rename(*args, **kwargs)
+
+        with contextlib.ExitStack() as stack:
+            repo_binding = SYNC_MODULE._pin_regular_file_overlay_directory(
+                stack,
+                self.repo_root,
+                label="repository root",
+            )
+            with (
+                mock.patch.object(
+                    SYNC_MODULE,
+                    "PERSONAL_AGENTS_LEGACY_REVIEW_BLOCK_SHA256",
+                    legacy_digest,
+                ),
+                mock.patch.object(
+                    SYNC_MODULE,
+                    "_rename_regular_file_overlay_noreplace",
+                    side_effect=fail_first_publish,
+                ),
+            ):
+                expected = SYNC_MODULE._migrated_personal_agents_bytes(legacy)
+                with self.assertRaisesRegex(
+                    SYNC_MODULE.SyncError,
+                    "simulated publish failure",
+                ):
+                    SYNC_MODULE._migrate_personal_agents_after_canonical_review_sync(
+                        repo_binding
+                    )
+                self.assertEqual(agents.read_bytes(), legacy)
+                self.assertTrue(
+                    SYNC_MODULE._migrate_personal_agents_after_canonical_review_sync(
+                        repo_binding
+                    )
+                )
+
+        self.assertTrue(failed)
+        self.assertEqual(agents.read_bytes(), expected)
+
+    def test_canonical_validation_failure_does_not_migrate_personal_agents(
+        self,
+    ) -> None:
+        rule, target = self._create_canonical_regular_file_overlay_rule(
+            authoritative=True
+        )
+        agents, legacy, _legacy_digest = self._synthetic_legacy_personal_agents()
+        missing = self.source_root / rule.repo / rule.source / "SKILL.md"
+        missing.unlink()
+
+        with (
+            mock.patch.object(
+                SYNC_MODULE,
+                "_migrate_personal_agents_after_canonical_review_sync",
+            ) as migrate,
+            self.assertRaisesRegex(SYNC_MODULE.SyncError, "missing required file"),
+        ):
+            SYNC_MODULE.sync_sources(self.repo_root, self.source_root, (rule,))
+
+        migrate.assert_not_called()
+        self.assertEqual(agents.read_bytes(), legacy)
+        self.assertTrue((target / "old-marker").is_file())
+
+    def test_unrelated_sync_does_not_migrate_personal_agents(self) -> None:
+        agents, legacy, _legacy_digest = self._synthetic_legacy_personal_agents()
+        source = self.source_root / "example-repo" / "skill" / "SKILL.md"
+        source.parent.mkdir(parents=True)
+        source.write_text("example\n", encoding="utf-8")
+        rule = SYNC_MODULE.SyncRule(
+            repo="example-repo",
+            source=Path("skill"),
+            target=Path("personal_codex/skills/example"),
+        )
+
+        with mock.patch.object(
+            SYNC_MODULE,
+            "_migrate_personal_agents_after_canonical_review_sync",
+        ) as migrate:
+            SYNC_MODULE.sync_sources(self.repo_root, self.source_root, (rule,))
+
+        migrate.assert_not_called()
+        self.assertEqual(agents.read_bytes(), legacy)
 
     def test_sync_rejects_ignored_upstream_independent_supervisor_file(
         self,
@@ -8886,10 +9339,22 @@ jobs:
         readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
         self.assertNotIn("private session retrospective automation routing", readme)
 
-    def test_personal_agents_delegate_workspace_contract_to_review_skill(self) -> None:
-        agents = (REPO_ROOT / "personal_codex" / "AGENTS.md").read_text(
-            encoding="utf-8"
+    def test_personal_agents_state_matches_review_source_transition(self) -> None:
+        source_lock = json.loads(
+            (REPO_ROOT / "private-overlay-source-lock.json").read_text(
+                encoding="utf-8"
+            )
         )
+        actual = SYNC_MODULE._personal_agents_review_guidance_state(
+            (REPO_ROOT / SYNC_MODULE.PERSONAL_AGENTS_TARGET).read_bytes()
+        )
+        expected = (
+            "legacy" if _is_legacy_review_source_pin(source_lock) else "current"
+        )
+        self.assertEqual(actual, expected)
+
+    def test_personal_agents_delegate_workspace_contract_to_review_skill(self) -> None:
+        agents = _final_personal_agents_text()
         source_lock = json.loads(
             (REPO_ROOT / "private-overlay-source-lock.json").read_text(
                 encoding="utf-8"
@@ -9022,9 +9487,7 @@ jobs:
         self.assertIn("longer single waits are valid", agents)
 
     def test_agents_guidance_uses_canonical_named_review_policy(self) -> None:
-        agents = (REPO_ROOT / "personal_codex" / "AGENTS.md").read_text(
-            encoding="utf-8"
-        )
+        agents = _final_personal_agents_text()
 
         for anchor in (
             "Use `$review-orchestration-playbook` as the only entrypoint",
@@ -9058,9 +9521,7 @@ jobs:
                 self.assertNotIn(retired, agents)
 
     def test_agents_guidance_leaves_skill_repo_gate_to_scoped_guidance(self) -> None:
-        agents = (REPO_ROOT / "personal_codex" / "AGENTS.md").read_text(
-            encoding="utf-8"
-        )
+        agents = _final_personal_agents_text()
         self.assertNotIn("skill-repo-codex-gate", agents)
         for repository in (
             "codex-toolbox",

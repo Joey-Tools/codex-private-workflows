@@ -707,6 +707,58 @@ RETIRED_TARGETS = tuple(
 )
 
 CANONICAL_REVIEW_TARGET = _path("personal_codex/skills/review-orchestration-playbook")
+PERSONAL_AGENTS_TARGET = _path("personal_codex/AGENTS.md")
+_CANONICAL_REVIEW_SYNC_RULE = next(
+    rule for rule in SYNC_RULES if rule.target == CANONICAL_REVIEW_TARGET
+)
+PERSONAL_AGENTS_LEGACY_CONSENT_LINE = (
+    b"- For Joey-requested Codex/GitHub PR or repo workflows, treat OpenAI Codex "
+    b"services and GitHub-owned PR/review APIs as trusted destinations for scoped "
+    b"repo/PR data: PR diffs, changed files, necessary nearby context, review "
+    b"prompts/results, PR comments, statuses, and same-PR fix-loop reruns. This "
+    b"standing consent excludes secrets, credentials, untracked private files, "
+    b"unrelated repositories, broad workspace dumps, and non-Codex external "
+    b"reviewers; approval justifications must still name the exact repo/PR and data "
+    b"scope.\n"
+)
+PERSONAL_AGENTS_CURRENT_CONSENT_LINE = (
+    b"- For Joey-requested Codex/GitHub PR or repo workflows, treat OpenAI Codex "
+    b"services and GitHub-owned PR/review APIs as trusted destinations for scoped "
+    b"repo/PR data: PR diffs, changed files, necessary nearby context, review "
+    b"prompts/results, PR comments, statuses, and same-PR fix-loop reruns. This "
+    b"standing consent excludes runtime secrets and credentials, untracked private "
+    b"files, unrelated repositories, broad workspace dumps, and non-Codex external "
+    b"reviewers; approval justifications must still name the exact repo/PR and data "
+    b"scope.\n"
+)
+PERSONAL_AGENTS_LEGACY_REVIEW_BLOCK_START = (
+    b"- For catalogued low-level-helper Claude local-login artifacts,"
+)
+PERSONAL_AGENTS_REVIEW_BLOCK_BOUNDARY = b"- Use `$remote-host-context` when "
+PERSONAL_AGENTS_LEGACY_REVIEW_BLOCK_SHA256 = (
+    "6d093c17f2bbcaef9a085937891f5e029044b10dace7e3e7972aebb819630a62"
+)
+PERSONAL_AGENTS_CURRENT_REVIEW_BLOCK = (
+    b"- Use `$review-orchestration-playbook` as the only entrypoint for named "
+    b"single, double, and triple review plus PR readiness. Single uses one "
+    b"fresh-context local Codex review session, double adds actual Claude Code, "
+    b"and triple adds current-head GitHub Codex. The skill owns adapter selection, "
+    b"clean-workspace preparation, reviewer runtime checks, GitHub evidence and "
+    b"recovery, and PR-readiness algorithms; do not duplicate those contracts "
+    b"here.\n"
+    b"- An unambiguous named single, double, or triple request is contemporaneous "
+    b"consent for scoped review egress to that shape: OpenAI Codex for single, "
+    b"Anthropic Claude Code additionally for double, and GitHub Codex on an exact "
+    b"`github.com` PR additionally for triple. Reviewers may inspect the named "
+    b"repository tracked diff, necessary tracked context, bounded derived evidence, "
+    b"and review prompt/results, including tracked repository secrets. This excludes "
+    b"untracked files, unrelated repositories, broad workspace or home-directory "
+    b"content, credential discovery, GitHub Copilot, and substitute reviewers.\n"
+    b"- A bare named-review request is report-only and does not authorize branch "
+    b"creation, commits, push, PR creation/update, or merge. Exact `@codex review` "
+    b"on an already-existing eligible PR is the only mutation implied by bare "
+    b"triple.\n"
+)
 INDEPENDENT_CODEX_REVIEW_ROOT = _path("scripts/independent_codex_pr_review")
 INDEPENDENT_CODEX_REVIEW_REQUIRED_FILES = tuple(
     _path(path)
@@ -1156,6 +1208,90 @@ def _validate_canonical_review_target_contents(target: Path) -> None:
 
 def _validate_canonical_review_target(repo_root: Path) -> None:
     _validate_canonical_review_target_contents(repo_root / CANONICAL_REVIEW_TARGET)
+
+
+def _personal_agents_review_guidance_state(data: bytes) -> str:
+    try:
+        data.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise SyncError("personal AGENTS guidance is not valid UTF-8") from exc
+
+    legacy_consent_count = data.count(PERSONAL_AGENTS_LEGACY_CONSENT_LINE)
+    current_consent_count = data.count(PERSONAL_AGENTS_CURRENT_CONSENT_LINE)
+    legacy_start_count = data.count(PERSONAL_AGENTS_LEGACY_REVIEW_BLOCK_START)
+    current_block_count = data.count(PERSONAL_AGENTS_CURRENT_REVIEW_BLOCK)
+    boundary_count = data.count(PERSONAL_AGENTS_REVIEW_BLOCK_BOUNDARY)
+
+    if (
+        legacy_consent_count == 1
+        and current_consent_count == 0
+        and legacy_start_count == 1
+        and current_block_count == 0
+        and boundary_count == 1
+    ):
+        consent = data.index(PERSONAL_AGENTS_LEGACY_CONSENT_LINE)
+        start = data.index(PERSONAL_AGENTS_LEGACY_REVIEW_BLOCK_START)
+        boundary = data.index(PERSONAL_AGENTS_REVIEW_BLOCK_BOUNDARY)
+        consent_starts_line = consent == 0 or data[consent - 1 : consent] == b"\n"
+        block_starts_line = start == 0 or data[start - 1 : start] == b"\n"
+        if (
+            consent_starts_line
+            and block_starts_line
+            and consent < start < boundary
+        ):
+            legacy_block = data[start:boundary]
+            if (
+                hashlib.sha256(legacy_block).hexdigest()
+                == PERSONAL_AGENTS_LEGACY_REVIEW_BLOCK_SHA256
+            ):
+                return "legacy"
+
+    if (
+        legacy_consent_count == 0
+        and current_consent_count == 1
+        and legacy_start_count == 0
+        and current_block_count == 1
+        and boundary_count == 1
+    ):
+        consent = data.index(PERSONAL_AGENTS_CURRENT_CONSENT_LINE)
+        start = data.index(PERSONAL_AGENTS_CURRENT_REVIEW_BLOCK)
+        boundary = data.index(PERSONAL_AGENTS_REVIEW_BLOCK_BOUNDARY)
+        consent_starts_line = consent == 0 or data[consent - 1 : consent] == b"\n"
+        block_starts_line = start == 0 or data[start - 1 : start] == b"\n"
+        if (
+            consent_starts_line
+            and block_starts_line
+            and consent < start
+            and start + len(PERSONAL_AGENTS_CURRENT_REVIEW_BLOCK) == boundary
+        ):
+            return "current"
+
+    raise SyncError(
+        "personal AGENTS review guidance must be the exact legacy or migrated "
+        "state; restore or reconcile personal_codex/AGENTS.md, then rerun sync"
+    )
+
+
+def _migrated_personal_agents_bytes(data: bytes) -> bytes:
+    state = _personal_agents_review_guidance_state(data)
+    if state == "current":
+        return data
+
+    start = data.index(PERSONAL_AGENTS_LEGACY_REVIEW_BLOCK_START)
+    boundary = data.index(PERSONAL_AGENTS_REVIEW_BLOCK_BOUNDARY)
+    migrated = (
+        data[:start]
+        + PERSONAL_AGENTS_CURRENT_REVIEW_BLOCK
+        + data[boundary:]
+    )
+    migrated = migrated.replace(
+        PERSONAL_AGENTS_LEGACY_CONSENT_LINE,
+        PERSONAL_AGENTS_CURRENT_CONSENT_LINE,
+        1,
+    )
+    if _personal_agents_review_guidance_state(migrated) != "current":
+        raise SyncError("personal AGENTS review-guidance migration did not converge")
+    return migrated
 
 
 def _validate_no_retired_review_references(
@@ -5672,6 +5808,220 @@ def _assert_bound_plain_file(
         raise SyncError(f"{label} bytes or binding changed")
 
 
+def _is_authoritative_canonical_review_rule(rule: SyncRule) -> bool:
+    return rule == _CANONICAL_REVIEW_SYNC_RULE
+
+
+def _migrate_personal_agents_after_canonical_review_sync(
+    repo_binding: _PinnedRegularFileOverlayDirectory,
+) -> Path | None:
+    target = repo_binding.path / PERSONAL_AGENTS_TARGET
+    with contextlib.ExitStack() as source_stack:
+        target_parent_chain = _pin_or_create_regular_file_overlay_descendant_chain(
+            source_stack,
+            repo_binding,
+            PERSONAL_AGENTS_TARGET.parent,
+            label="personal AGENTS parent",
+        )
+        target_parent = target_parent_chain[-1]
+        prior = _pin_regular_file_overlay_entry(
+            source_stack,
+            target_parent.descriptor,
+            target.name,
+            label="personal AGENTS source",
+        )
+        prior_metadata = os.fstat(prior.descriptor)
+        _validate_overlay_regular_file(
+            prior_metadata,
+            label="personal AGENTS source",
+            path=target,
+        )
+        prior_mode = stat.S_IMODE(prior_metadata.st_mode)
+        if prior_mode != 0o644:
+            raise SyncError("personal AGENTS source mode must be 0644")
+        if prior_metadata.st_size > MAX_REGULAR_FILE_OVERLAY_BYTES:
+            raise SyncError(
+                "personal AGENTS source exceeds the bounded migration size"
+            )
+        prior_data = _read_regular_file_overlay_descriptor(
+            prior.descriptor,
+            byte_limit=MAX_REGULAR_FILE_OVERLAY_BYTES,
+        )
+        after_read = os.fstat(prior.descriptor)
+        if (
+            len(prior_data) != prior_metadata.st_size
+            or _overlay_file_content_identity(after_read)
+            != _overlay_file_content_identity(prior_metadata)
+        ):
+            raise SyncError("personal AGENTS source changed while being read")
+        _assert_bound_plain_file(
+            target_parent.descriptor,
+            target.name,
+            prior,
+            prior_data,
+            prior_mode,
+            label="personal AGENTS pre-migration source",
+        )
+        migrated_data = _migrated_personal_agents_bytes(prior_data)
+        if migrated_data == prior_data:
+            _assert_bound_plain_file(
+                target_parent.descriptor,
+                target.name,
+                prior,
+                prior_data,
+                prior_mode,
+                label="current personal AGENTS no-op state",
+            )
+            return None
+        if len(migrated_data) > MAX_REGULAR_FILE_OVERLAY_BYTES:
+            raise SyncError(
+                "migrated personal AGENTS exceeds the bounded migration size"
+            )
+
+        primitive = _load_regular_file_overlay_noreplace_primitive()
+        with _regular_file_overlay_staging_directory(
+            repo_binding,
+            PERSONAL_AGENTS_TARGET,
+        ) as staging_scope:
+            staging_name = target.name
+            create_flags = (
+                os.O_RDWR
+                | os.O_CREAT
+                | os.O_EXCL
+                | os.O_NOFOLLOW
+                | getattr(os, "O_CLOEXEC", 0)
+            )
+            try:
+                descriptor = os.open(
+                    staging_name,
+                    create_flags,
+                    0o600,
+                    dir_fd=staging_scope.container.descriptor,
+                )
+            except OSError as exc:
+                raise SyncError(
+                    f"cannot create personal AGENTS migration candidate: {exc}"
+                ) from exc
+            try:
+                _write_all(
+                    descriptor,
+                    migrated_data,
+                    label="personal AGENTS migration candidate",
+                )
+                os.fchmod(descriptor, prior_mode)
+                os.fsync(descriptor)
+            except BaseException:
+                os.close(descriptor)
+                raise
+            else:
+                os.close(descriptor)
+
+            with contextlib.ExitStack() as candidate_stack:
+                candidate = _pin_regular_file_overlay_entry(
+                    candidate_stack,
+                    staging_scope.container.descriptor,
+                    staging_name,
+                    label="personal AGENTS migration candidate",
+                )
+                _assert_regular_file_overlay_scope_binding(
+                    staging_scope,
+                    operation="personal AGENTS migration preparation",
+                )
+                _assert_regular_file_overlay_retained_entries(
+                    staging_scope,
+                    exact_names={staging_name},
+                )
+                _assert_bound_plain_file(
+                    staging_scope.container.descriptor,
+                    staging_name,
+                    candidate,
+                    migrated_data,
+                    prior_mode,
+                    label="personal AGENTS migration candidate",
+                )
+                _assert_bound_plain_file(
+                    target_parent.descriptor,
+                    target.name,
+                    prior,
+                    prior_data,
+                    prior_mode,
+                    label="personal AGENTS pre-publish source",
+                )
+                backup_name = _regular_file_overlay_absent_name(
+                    staging_scope.container.descriptor,
+                    prefix=REGULAR_FILE_OVERLAY_BACKUP_PREFIX,
+                )
+                _rename_regular_file_overlay_noreplace(
+                    primitive,
+                    target_parent.descriptor,
+                    target.name,
+                    staging_scope.container.descriptor,
+                    backup_name,
+                )
+                _assert_bound_plain_file(
+                    staging_scope.container.descriptor,
+                    backup_name,
+                    prior,
+                    prior_data,
+                    prior_mode,
+                    label="retained personal AGENTS prior state",
+                )
+                _register_regular_file_overlay_retained_entry(
+                    staging_scope,
+                    backup_name,
+                    prior,
+                )
+                _assert_regular_file_overlay_scope_binding(
+                    staging_scope,
+                    operation="personal AGENTS candidate publication",
+                )
+                _assert_regular_file_overlay_retained_entries(
+                    staging_scope,
+                    exact_names={staging_name, backup_name},
+                )
+                _assert_bound_plain_file(
+                    staging_scope.container.descriptor,
+                    staging_name,
+                    candidate,
+                    migrated_data,
+                    prior_mode,
+                    label="personal AGENTS migration candidate before publication",
+                )
+                _rename_regular_file_overlay_noreplace(
+                    primitive,
+                    staging_scope.container.descriptor,
+                    staging_name,
+                    target_parent.descriptor,
+                    target.name,
+                )
+                _assert_bound_plain_file(
+                    target_parent.descriptor,
+                    target.name,
+                    candidate,
+                    migrated_data,
+                    prior_mode,
+                    label="installed personal AGENTS migration",
+                )
+                _assert_bound_plain_file(
+                    staging_scope.container.descriptor,
+                    backup_name,
+                    prior,
+                    prior_data,
+                    prior_mode,
+                    label="retained personal AGENTS prior state",
+                )
+                _assert_regular_file_overlay_directory_binding(
+                    target_parent,
+                    label="personal AGENTS parent",
+                )
+                _assert_regular_file_overlay_retained_entries(
+                    staging_scope,
+                    exact_names={backup_name},
+                )
+            staging_scope.completed = True
+            return staging_scope.recovery_path
+
+
 def _install_locked_plain_file(
     repo_binding: _PinnedRegularFileOverlayDirectory,
     target: Path,
@@ -6005,6 +6355,14 @@ def _sync_sources_with_repo_binding(
                     else:
                         _attach_base_exception_detail(primary_error, detail)
                     raise
+            if _is_authoritative_canonical_review_rule(rule):
+                recovery_path = (
+                    _migrate_personal_agents_after_canonical_review_sync(
+                        repo_binding
+                    )
+                )
+                if recovery_path is not None:
+                    recovery_paths.append(recovery_path)
             continue
 
         target.parent.mkdir(parents=True, exist_ok=True)
