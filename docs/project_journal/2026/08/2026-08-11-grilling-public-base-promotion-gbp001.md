@@ -1,21 +1,21 @@
 ---
 id: 20260811-gbp001
-title: Promote Public Base for Grilling
+title: Promote Adaptive Grilling Public Base
 status: completed
 created: 2026-08-11
-updated: 2026-08-11
-branch: codex/toolbox-8b9cc67-private-sync
+updated: 2026-08-24
+branch: wip/grilling-public-base-promotion
 pr:
 supersedes: []
 superseded_by:
 ---
 
-# Promote Public Base for Grilling
+# Promote Adaptive Grilling Public Base
 
 ## Summary
 
 - Advance the private overlay's immutable public base to the toolbox release
-  that contains the explicit-only `grilling` skill.
+  that lets `grilling` adapt between proposal and alternatives mode.
 - Keep `grilling` public-owned; do not duplicate it in the private manifest.
 - Preserve all four non-toolbox source pins and the receipt-bound generated
   toolbox provenance.
@@ -23,38 +23,33 @@ superseded_by:
 ## Current State
 
 - The private base release points to toolbox commit
-  `8b9cc676601e7e4de408d1e8fe3090b510fcb22d` and tree
-  `5b583827448dabaa7be2fb76e9a75557193c667e`.
-- Public release `personal-codex-20260811-163740-8b9cc67` is immutable and
+  `b5694a8057b03b8e7e5dba56083a738383ad463a` and tree
+  `92b53d7ddb5e3c26f002bffd72ff00585788e765`.
+- Public release `personal-codex-20260824-092257-b5694a8` is immutable and
   targets that exact commit.
-- The layered installer will obtain `skills/grilling` from the public base
-  before applying the private overlay.
+- The layered installer obtains the adaptive `skills/grilling` from the public
+  base before applying the private overlay.
 
 ## Evidence
 
-- Toolbox PR #23 passed required CI and the current-head Codex review gate,
-  then squash-merged with the same reviewed tree.
-- The public release uploaded the archive and checksum assets with GitHub
-  SHA-256 digests.
-- Source-lock verification passed before and after canonical source sync; the
-  sync produced no additional tracked change.
-- Layered-install coverage now proves that `skills/grilling` is present in the
-  public fixture, absent from private package targets, and still linked through
-  `personal-sync/current` after both supported private installation paths.
-- The two focused pin/package modules passed 89 tests with one expected skip.
-  Root discovery passed 2,023 tests with three expected skips under Python
-  3.13.
-- Review-runtime discovery exercised 2,924 tests with 15 expected skips. Its
-  sole local failure is a macOS dynamic-library limitation when `venv` copies
-  the uv-managed interpreter; the exact failure reproduces on unchanged base
-  `183fc4713459192e5188920dbb863f811371a502`, so hosted clean-runner CI remains
-  authoritative for that environment-specific test.
-- Source-only compilation, project-journal validation, and `git diff --check`
-  passed.
+- Toolbox PR #29 passed required CI and both current-head review processors,
+  then squash-merged with the reviewed tree.
+- The fresh-context local processor used the pending strongest-default fallback
+  contract because the dedicated reviewer role was unavailable; GPT-5.6 Sol
+  Ultra returned no findings.
+- The current-head GitHub Codex terminal comment was clean and accepted as
+  positive evidence under the pending evidence-authority rule.
+- The public release uploaded an archive and checksum asset bound to the exact
+  merge commit.
+- The private manifest, release verifier, source lock, and contract tests bind
+  the same public commit while leaving every non-toolbox pin unchanged.
+- The focused source-lock, package, and macOS controller suites passed 329 tests
+  with two expected skips under Python 3.13.
+- Root discovery passed 1,971 tests with four expected skips under Python 3.13.
+- Source-only compilation, project-journal validation, source-lock provenance
+  validation, and `git diff --check` passed.
 
 ## Next Steps
 
 - None within the tracked change. Default-branch release publication and
   scheduler convergence are downstream delivery gates.
-- Toolbox PR #22's collaboration guardrails still require the separate private
-  AGENTS reconciliation tracked by `20260721-rpm001`.
