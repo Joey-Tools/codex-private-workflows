@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+import base64
 import contextlib
 from collections.abc import Callable, Iterator
 import ctypes
@@ -77,6 +78,47 @@ class RegularFileOverlay:
 
 
 @dataclass(frozen=True)
+class CanonicalReviewMigrationPolicy:
+    repository: str
+    reviewed_candidate_revision: str
+    reviewed_candidate_commit_payload_base64: str
+    approved_root_tree: str
+    approved_review_subtree_tree: str
+    legacy_revision: str
+    legacy_root_tree: str
+
+
+CANONICAL_REVIEW_MIGRATION_POLICY = CanonicalReviewMigrationPolicy(
+    repository="Joey-Tools/codex-review-workflows",
+    reviewed_candidate_revision="cd5ccd2ddd2a0975db6c5286765d4aab838bc736",
+    reviewed_candidate_commit_payload_base64=(
+        "dHJlZSBhZWY0YmVmN2E0NWFkYWI3NjJhMWI2NzFkYTQ4ZmJjMmQxZjQ0MDY0CnBhcmVudCBhNjc4"
+        "MmU2Y2VlYTZhYzFkNmQwMmUwYmQyMjlmMjJkNzU1MGZlNzY4CmF1dGhvciBKb2V5IFRlbmcgPGpv"
+        "ZXkudGVuZy5kZXZAZ21haWwuY29tPiAxNzg3NjA4NjUzICswMTAwCmNvbW1pdHRlciBKb2V5IFRl"
+        "bmcgPGpvZXkudGVuZy5kZXZAZ21haWwuY29tPiAxNzg3NjA4NjUzICswMTAwCmdwZ3NpZyAtLS0t"
+        "LUJFR0lOIFBHUCBTSUdOQVRVUkUtLS0tLQogCiBpSFVFQUJZS0FCMFdJUVR2dThrVDlKcGZiZ3J3"
+        "MGtqM0FrWVVQY0tQTWdVQ2FveStUUUFLQ1JEM0FrWVVQY0tQCiBNdmg5QVA5L3U2aGVGSU5SNEhQ"
+        "RGI5ekRuVXNpWnFDZFp5by9pa0lrQXh1MkdvVFNpd0VBeEZJQWxJdGtnNTBxCiB4L0RrNi8yOGU0"
+        "NjFIeVpybklYdkc0aitiWWd6Q0FrPQogPXB4WkIKIC0tLS0tRU5EIFBHUCBTSUdOQVRVUkUtLS0t"
+        "LQoKQ2xvc2UgcmV2aWV3IGV2aWRlbmNlIGFuZCB0ZWFyZG93biBnYXBzCgpCaW5kIHRoZSBsb2Nh"
+        "bCBDb2RleCBwcmVmaXggcmVjZWlwdCB0byB0aGUgdmFsaWRhdGVkIHdvcmtzcGFjZSBhbmQgc2Vs"
+        "ZWN0ZWQgR2l0IGlkZW50aXR5LiBNYWtlIHZlcmlmaWVyIHRlYXJkb3duIHNpZ25hbC1zYWZlLCBw"
+        "cmVzZXJ2ZSBtdWx0aS1mYWlsdXJlIGNhdXNhbGl0eSwgY2xvc2UgZXZlcnkgb3duZWQgcmVjb3Zl"
+        "cnkgZGVzY3JpcHRvciwgYW5kIGNvdmVyIFB5dGhvbiAzLjEwIGRpYWdub3N0aWNzIHBsdXMgcmV0"
+        "YWluZWQgcmVjb3ZlcnkgdG9tYnN0b25lcy4KCkNvLWF1dGhvcmVkLWJ5OiBDb2RleCAodG9vbD1D"
+        "b2RleCBEZXNrdG9wOyBtb2RlbD1HUFQtNS42IFNvbCBVbHRyYSkgPGNvZGV4QG9wZW5haS5jb20+"
+        "Cg=="
+    ),
+    approved_root_tree="aef4bef7a45adab762a1b671da48fbc2d1f44064",
+    approved_review_subtree_tree="6dab70713244598e3aaaa132eb082211b348bcdf",
+    legacy_revision="c8df0f5d17e93a7b22d5fe5294baf9884ab2ba51",
+    legacy_root_tree="e4081b640384cd885783637fa5aad8d21d4499d5",
+)
+MAX_CANONICAL_REVIEW_MIGRATION_ANCESTRY_COMMITS = 4096
+MAX_CANONICAL_REVIEW_COMMIT_PROOF_BYTES = 16 * 1024
+
+
+@dataclass(frozen=True)
 class SyncRule:
     repo: str
     source: Path
@@ -87,6 +129,51 @@ class SyncRule:
     forbidden_residuals: tuple[str, ...] = ()
     regular_file_overlays: tuple[RegularFileOverlay, ...] = ()
     replacement_excluded_paths: tuple[Path, ...] = ()
+    canonical_review_migration_policy: CanonicalReviewMigrationPolicy | None = None
+
+
+@dataclass(frozen=True)
+class _VerifiedLockedSourcePin:
+    repository: str
+    revision: str
+    root_tree: str
+
+
+_COMPLETE_CHECKOUT_VERIFICATION_SEAL = object()
+
+
+@dataclass(frozen=True)
+class _CompleteCheckoutVerification:
+    source_root: Path
+    repo_root: Path
+    source_lock: object = field(repr=False, compare=False)
+    source_lock_module: object = field(repr=False, compare=False)
+    source_lock_digest: str
+    pins: tuple[tuple[object, object, object, object], ...]
+    checkout_receipt: object
+    event: object = field(repr=False, compare=False)
+    seal: object = field(repr=False, compare=False)
+
+
+@dataclass(frozen=True)
+class _CanonicalReviewMigrationReceipt:
+    policy: CanonicalReviewMigrationPolicy
+    source_pin: _VerifiedLockedSourcePin
+    live_review_subtree_tree: str
+    activation_basis: str
+
+
+_CANONICAL_REVIEW_INSTALLED_RECEIPT_SEAL = object()
+
+
+@dataclass(frozen=True)
+class _CanonicalReviewInstalledMigrationReceipt:
+    migration: _CanonicalReviewMigrationReceipt
+    expected_target: Path
+    prepared_source_manifest: object
+    expected_manifest: object
+    installed_receipt: object = field(repr=False, compare=False)
+    seal: object = field(repr=False, compare=False)
 
 
 @dataclass(frozen=True)
@@ -94,6 +181,9 @@ class _LockedRuleSource:
     checkout: Path
     manifest: object
     read_blob: Callable[[Path, str], bytes]
+    source_pin: _VerifiedLockedSourcePin | None = None
+    canonical_review_migration_receipt: _CanonicalReviewMigrationReceipt | None = None
+    prewrite_checkout_verification: _CompleteCheckoutVerification | None = None
 
 
 def _path(raw: str) -> Path:
@@ -223,16 +313,16 @@ PRIVATE_BUG_TRIAGE_RECIPES_SCOPE = (
 )
 
 
-PUBLIC_BUG_TRIAGE_CONFIG_BLOCK = '''DEFAULT_ALLOWED_HOSTS = frozenset({"jenkins.example.com"})
+PUBLIC_BUG_TRIAGE_CONFIG_BLOCK = """DEFAULT_ALLOWED_HOSTS = frozenset({"jenkins.example.com"})
 AUTH_PROFILES = {
     "default": (
         "JENKINS_ARTIFACT_USER",
         "JENKINS_ARTIFACT_TOKEN",
     ),
-}'''
+}"""
 
 
-PRIVATE_BUG_TRIAGE_CONFIG_BLOCK = '''ALLOWED_HOSTS = frozenset({"engci-private-sjc.cisco.com"})
+PRIVATE_BUG_TRIAGE_CONFIG_BLOCK = """ALLOWED_HOSTS = frozenset({"engci-private-sjc.cisco.com"})
 AUTH_PROFILES = {
     "jenkins_mbpm2_codex": (
         "Jenkins_mbpM2_codex_username",
@@ -246,10 +336,10 @@ AUTH_PROFILES = {
         "wme_jenkins_jobs_artifact_user",
         "wme_jenkins_jobs_artifact_token",
     ),
-}'''
+}"""
 
 
-PUBLIC_BUG_TRIAGE_BUILD_REMOTE_REQUEST_BLOCK = '''def _build_remote_request(
+PUBLIC_BUG_TRIAGE_BUILD_REMOTE_REQUEST_BLOCK = """def _build_remote_request(
     url: str,
     *,
     method: str,
@@ -258,10 +348,10 @@ PUBLIC_BUG_TRIAGE_BUILD_REMOTE_REQUEST_BLOCK = '''def _build_remote_request(
     _ensure_allowed_url(url)
     request = urllib.request.Request(url, method=method)
     auth_state = _add_basic_auth(request, auth_profile)
-    return request, auth_state'''
+    return request, auth_state"""
 
 
-PRIVATE_BUG_TRIAGE_BUILD_REMOTE_REQUEST_BLOCK = '''def _build_remote_request(
+PRIVATE_BUG_TRIAGE_BUILD_REMOTE_REQUEST_BLOCK = """def _build_remote_request(
     url: str,
     *,
     method: str,
@@ -270,7 +360,7 @@ PRIVATE_BUG_TRIAGE_BUILD_REMOTE_REQUEST_BLOCK = '''def _build_remote_request(
     parsed = _ensure_allowed_url(url)
     request = urllib.request.Request(parsed.geturl(), method=method)
     auth_state = _add_basic_auth(request, auth_profile)
-    return request, auth_state'''
+    return request, auth_state"""
 
 
 PUBLIC_BUG_TRIAGE_REDIRECT_REQUEST_CONSTRUCTION = (
@@ -281,33 +371,33 @@ PRIVATE_BUG_TRIAGE_REDIRECT_REQUEST_CONSTRUCTION = (
 )
 
 
-PUBLIC_BUG_TRIAGE_BUILD_OPENER_BLOCK = '''def _build_opener(initial_url: str, max_redirects: int) -> urllib.request.OpenerDirector:
+PUBLIC_BUG_TRIAGE_BUILD_OPENER_BLOCK = """def _build_opener(initial_url: str, max_redirects: int) -> urllib.request.OpenerDirector:
     return urllib.request.build_opener(
         SameOriginRedirectHandler(initial_url, max_redirects)
-    )'''
+    )"""
 
 
-PRIVATE_BUG_TRIAGE_BUILD_OPENER_BLOCK = '''def _build_opener(initial_url: str, max_redirects: int) -> urllib.request.OpenerDirector:
+PRIVATE_BUG_TRIAGE_BUILD_OPENER_BLOCK = """def _build_opener(initial_url: str, max_redirects: int) -> urllib.request.OpenerDirector:
     return urllib.request.build_opener(
         urllib.request.ProxyHandler({}),
         SameOriginRedirectHandler(initial_url, max_redirects),
-    )'''
+    )"""
 
 
-PUBLIC_BUG_TRIAGE_BLOCKABLE_SIGNALS_BLOCK = '''def _blockable_signals() -> frozenset:
+PUBLIC_BUG_TRIAGE_BLOCKABLE_SIGNALS_BLOCK = """def _blockable_signals() -> frozenset:
     blocked = set(signal.valid_signals())
     for name in ("SIGKILL", "SIGSTOP"):
         unmaskable = getattr(signal, name, None)
         if unmaskable is not None:
             blocked.discard(unmaskable)
-    return frozenset(blocked)'''
+    return frozenset(blocked)"""
 
 
-PRIVATE_BUG_TRIAGE_BLOCKABLE_SIGNALS_BLOCK = '''def _blockable_signals() -> frozenset:
+PRIVATE_BUG_TRIAGE_BLOCKABLE_SIGNALS_BLOCK = """def _blockable_signals() -> frozenset:
     blocked = set(signal.valid_signals())
     blocked.discard(signal.SIGKILL)
     blocked.discard(signal.SIGSTOP)
-    return frozenset(blocked)'''
+    return frozenset(blocked)"""
 
 
 PRIVATE_BUG_TRIAGE_TARGET = _path("personal_codex/skills/bug-triage-playbook")
@@ -342,6 +432,7 @@ def _rule(
     exclude_names: tuple[str, ...] = (),
     forbidden_residuals: tuple[str, ...] = (),
     regular_file_overlays: tuple[RegularFileOverlay, ...] = (),
+    canonical_review_migration_policy: CanonicalReviewMigrationPolicy | None = None,
 ) -> SyncRule:
     if common_joey_text:
         replacements = replacements + COMMON_JOEY_TEXT_REPLACEMENTS
@@ -356,6 +447,7 @@ def _rule(
         exclude_names=exclude_names,
         forbidden_residuals=forbidden_residuals,
         regular_file_overlays=regular_file_overlays,
+        canonical_review_migration_policy=canonical_review_migration_policy,
     )
 
 
@@ -675,6 +767,7 @@ SYNC_RULES = (
         "personal_codex/skills/review-orchestration-playbook",
         common_joey_text=True,
         replacement_excluded_paths=("tests/fixtures/ci/private.yml",),
+        canonical_review_migration_policy=CANONICAL_REVIEW_MIGRATION_POLICY,
         regular_file_overlays=(
             RegularFileOverlay(
                 Path(
@@ -755,9 +848,18 @@ PERSONAL_AGENTS_CURRENT_REVIEW_BLOCK = (
     b"untracked files, unrelated repositories, broad workspace or home-directory "
     b"content, credential discovery, GitHub Copilot, and substitute reviewers.\n"
     b"- A bare named-review request is report-only and does not authorize branch "
-    b"creation, commits, push, PR creation/update, or merge. Exact `@codex review` "
-    b"on an already-existing eligible PR is the only mutation implied by bare "
-    b"triple.\n"
+    b"creation or mutation, commits, push, PR creation/update or metadata changes, "
+    b"merge, any GitHub Actions rerun, dispatch, or reconciliation, or unrelated "
+    b"mutation. Bare triple authorizes only the scoped exact `@codex review` "
+    b"producer operation on an already-existing eligible PR, including the skill's "
+    b"single-owner, single-flight recovery after ambiguous delivery by repeating "
+    b"that exact POST for the same logical request; it never authorizes a second "
+    b"logical request. "
+    b"Any GitHub Actions rerun, dispatch, or reconciliation requires both a "
+    b"repository-predeclared exact idempotent or reentrant contract for the frozen "
+    b"scope and exact inputs, and separate current-task delivery or readiness "
+    b"authorization for that external mutation; it never authorizes a different "
+    b"workflow, input, scope, destination, PR, repository, or unrelated action.\n"
 )
 INDEPENDENT_CODEX_REVIEW_ROOT = _path("scripts/independent_codex_pr_review")
 INDEPENDENT_CODEX_REVIEW_REQUIRED_FILES = tuple(
@@ -1234,11 +1336,7 @@ def _personal_agents_review_guidance_state(data: bytes) -> str:
         boundary = data.index(PERSONAL_AGENTS_REVIEW_BLOCK_BOUNDARY)
         consent_starts_line = consent == 0 or data[consent - 1 : consent] == b"\n"
         block_starts_line = start == 0 or data[start - 1 : start] == b"\n"
-        if (
-            consent_starts_line
-            and block_starts_line
-            and consent < start < boundary
-        ):
+        if consent_starts_line and block_starts_line and consent < start < boundary:
             legacy_block = data[start:boundary]
             if (
                 hashlib.sha256(legacy_block).hexdigest()
@@ -1279,11 +1377,7 @@ def _migrated_personal_agents_bytes(data: bytes) -> bytes:
 
     start = data.index(PERSONAL_AGENTS_LEGACY_REVIEW_BLOCK_START)
     boundary = data.index(PERSONAL_AGENTS_REVIEW_BLOCK_BOUNDARY)
-    migrated = (
-        data[:start]
-        + PERSONAL_AGENTS_CURRENT_REVIEW_BLOCK
-        + data[boundary:]
-    )
+    migrated = data[:start] + PERSONAL_AGENTS_CURRENT_REVIEW_BLOCK + data[boundary:]
     migrated = migrated.replace(
         PERSONAL_AGENTS_LEGACY_CONSENT_LINE,
         PERSONAL_AGENTS_CURRENT_CONSENT_LINE,
@@ -1462,9 +1556,7 @@ def _private_bug_triage_direct_assignments(
     tree: ast.Module,
 ) -> tuple[dict[str, ast.Assign], set[int]]:
     protected = {"ALLOWED_HOSTS", "AUTH_PROFILES"}
-    assignments: dict[str, list[ast.Assign]] = {
-        name: [] for name in protected
-    }
+    assignments: dict[str, list[ast.Assign]] = {name: [] for name in protected}
     allowed_target_ids: set[int] = set()
     for statement in tree.body:
         if not isinstance(statement, ast.Assign) or len(statement.targets) != 1:
@@ -1520,11 +1612,15 @@ def _private_bug_triage_validate_policy_values(
     if not isinstance(auth_value, ast.Dict) or len(auth_value.keys) != len(
         PRIVATE_BUG_TRIAGE_AUTH_PROFILES
     ):
-        raise SyncError("private bug-triage AUTH_PROFILES must be one exact dict literal")
+        raise SyncError(
+            "private bug-triage AUTH_PROFILES must be one exact dict literal"
+        )
     profiles: dict[str, tuple[str, str]] = {}
     for key_node, value_node in zip(auth_value.keys, auth_value.values, strict=True):
         if key_node is None:
-            raise SyncError("private bug-triage AUTH_PROFILES cannot use dict unpacking")
+            raise SyncError(
+                "private bug-triage AUTH_PROFILES cannot use dict unpacking"
+            )
         key = _private_bug_triage_literal_string(key_node, label="auth profile name")
         if (
             not isinstance(value_node, ast.Tuple)
@@ -1588,10 +1684,11 @@ def _private_bug_triage_is_allowed_direct_reflection_call(
     node: ast.Call,
     forbidden_reflection_attributes: frozenset[str],
 ) -> bool:
-    if (
-        not isinstance(node.func, ast.Name)
-        or node.func.id not in {"delattr", "getattr", "setattr"}
-    ):
+    if not isinstance(node.func, ast.Name) or node.func.id not in {
+        "delattr",
+        "getattr",
+        "setattr",
+    }:
         return False
     if _private_bug_triage_is_allowed_dynamic_reflection_call(node):
         return True
@@ -1615,9 +1712,7 @@ def _private_bug_triage_validate_no_policy_mutation(
     forbidden_dynamic_calls = frozenset(
         {"__import__", "compile", "eval", "exec", "globals", "locals", "vars"}
     )
-    bounded_reflection_calls = frozenset(
-        {"delattr", "getattr", "setattr"}
-    )
+    bounded_reflection_calls = frozenset({"delattr", "getattr", "setattr"})
     indirect_reflection_attributes = frozenset(
         {
             "__delattr__",
@@ -1659,17 +1754,13 @@ def _private_bug_triage_validate_no_policy_mutation(
             and isinstance(node.ctx, (ast.Store, ast.Del))
             and id(node) not in allowed_target_ids
         ):
-            raise SyncError(
-                f"private bug-triage policy forbids rebinding {node.id}"
-            )
+            raise SyncError(f"private bug-triage policy forbids rebinding {node.id}")
         if (
             isinstance(node, ast.Name)
             and node.id in reserved_builtins
             and isinstance(node.ctx, (ast.Store, ast.Del))
         ):
-            raise SyncError(
-                f"private bug-triage policy forbids shadowing {node.id}"
-            )
+            raise SyncError(f"private bug-triage policy forbids shadowing {node.id}")
         if isinstance(node, ast.Attribute) and node.attr in reserved:
             raise SyncError("private bug-triage policy forbids reserved attributes")
         if (
@@ -1683,10 +1774,7 @@ def _private_bug_triage_validate_no_policy_mutation(
         if (
             isinstance(node, ast.Attribute)
             and isinstance(node.ctx, ast.Load)
-            and (
-                node.attr in indirect_reflection_attributes
-                or node.attr == "modules"
-            )
+            and (node.attr in indirect_reflection_attributes or node.attr == "modules")
         ):
             raise SyncError(
                 "private bug-triage policy forbids indirect builtin namespace/reflection access"
@@ -1705,7 +1793,9 @@ def _private_bug_triage_validate_no_policy_mutation(
         if isinstance(node, (ast.Global, ast.Nonlocal)) and reserved.intersection(
             node.names
         ):
-            raise SyncError("private bug-triage policy forbids global/nonlocal policy names")
+            raise SyncError(
+                "private bug-triage policy forbids global/nonlocal policy names"
+            )
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
             if node.name in reserved and id(node) not in allowed_definition_ids:
                 raise SyncError(
@@ -1725,20 +1815,12 @@ def _private_bug_triage_validate_no_policy_mutation(
             raise SyncError(
                 "private bug-triage policy forbids importing the builtins module"
             )
-        if (
-            isinstance(node, ast.ImportFrom)
-            and node.module == "builtins"
+        if isinstance(node, ast.ImportFrom) and node.module == "builtins":
+            raise SyncError("private bug-triage policy forbids importing from builtins")
+        if isinstance(node, ast.ImportFrom) and any(
+            alias.name == "*" for alias in node.names
         ):
-            raise SyncError(
-                "private bug-triage policy forbids importing from builtins"
-            )
-        if (
-            isinstance(node, ast.ImportFrom)
-            and any(alias.name == "*" for alias in node.names)
-        ):
-            raise SyncError(
-                "private bug-triage policy forbids wildcard imports"
-            )
+            raise SyncError("private bug-triage policy forbids wildcard imports")
         if (
             isinstance(node, ast.ImportFrom)
             and node.module == "sys"
@@ -1751,15 +1833,16 @@ def _private_bug_triage_validate_no_policy_mutation(
             isinstance(node, ast.ImportFrom)
             and node.module == "sys"
             and any(
-                alias.name in {"_current_frames", "_getframe"}
-                for alias in node.names
+                alias.name in {"_current_frames", "_getframe"} for alias in node.names
             )
         ):
             raise SyncError(
                 "private bug-triage policy forbids importing sys frame reflection"
             )
         if isinstance(node, ast.ExceptHandler) and node.name in reserved:
-            raise SyncError("private bug-triage policy forbids exception-name shadowing")
+            raise SyncError(
+                "private bug-triage policy forbids exception-name shadowing"
+            )
         if isinstance(node, (ast.MatchAs, ast.MatchStar)) and node.name in reserved:
             raise SyncError("private bug-triage policy forbids pattern capture")
         if isinstance(node, ast.MatchMapping) and node.rest in reserved:
@@ -1811,15 +1894,12 @@ def _private_bug_triage_validate_no_policy_mutation(
             raise SyncError(
                 f"private bug-triage policy forbids dynamic call {node.func.id}()"
             )
-        if (
-            isinstance(node.func, ast.Attribute)
-            and (
-                node.func.attr in bounded_reflection_calls
-                or (
-                    node.func.attr in forbidden_dynamic_calls
-                    and isinstance(node.func.value, ast.Name)
-                    and node.func.value.id in {"builtins", "__builtins__"}
-                )
+        if isinstance(node.func, ast.Attribute) and (
+            node.func.attr in bounded_reflection_calls
+            or (
+                node.func.attr in forbidden_dynamic_calls
+                and isinstance(node.func.value, ast.Name)
+                and node.func.value.id in {"builtins", "__builtins__"}
             )
         ):
             raise SyncError(
@@ -1949,14 +2029,8 @@ def _private_bug_triage_validate_url_guard(
         raise SyncError(
             "private bug-triage URL parse assignment must precede the host guard"
         )
-    if (
-        guard.orelse
-        or len(guard.body) != 1
-        or not isinstance(guard.body[0], ast.Raise)
-    ):
-        raise SyncError(
-            "private bug-triage ALLOWED_HOSTS guard must directly raise"
-        )
+    if guard.orelse or len(guard.body) != 1 or not isinstance(guard.body[0], ast.Raise):
+        raise SyncError("private bug-triage ALLOWED_HOSTS guard must directly raise")
 
     returns = [node for node in ast.walk(function) if isinstance(node, ast.Return)]
     if (
@@ -1970,12 +2044,8 @@ def _private_bug_triage_validate_url_guard(
             "private bug-triage ALLOWED_HOSTS guard must precede the sole "
             "direct parsed return"
         )
-    if any(
-        isinstance(node, (ast.Yield, ast.YieldFrom)) for node in ast.walk(function)
-    ):
-        raise SyncError(
-            "private bug-triage _ensure_allowed_url cannot be a generator"
-        )
+    if any(isinstance(node, (ast.Yield, ast.YieldFrom)) for node in ast.walk(function)):
+        raise SyncError("private bug-triage _ensure_allowed_url cannot be a generator")
     return guard.test
 
 
@@ -1993,7 +2063,9 @@ def _private_bug_triage_validate_policy_loads(
         and statement.name == "_add_basic_auth"
     ]
     if len(auth_functions) != 1:
-        raise SyncError("private bug-triage policy requires exactly one _add_basic_auth")
+        raise SyncError(
+            "private bug-triage policy requires exactly one _add_basic_auth"
+        )
     auth_lookups = [
         node
         for node in ast.walk(auth_functions[0])
@@ -2036,8 +2108,7 @@ def _private_bug_triage_validate_policy_loads(
             f"{node.id}@{getattr(node, 'lineno', '?')}" for node in unexpected
         )
         raise SyncError(
-            "private bug-triage policy forbids unexpected policy loads: "
-            f"{locations}"
+            f"private bug-triage policy forbids unexpected policy loads: {locations}"
         )
 
 
@@ -2090,11 +2161,7 @@ def _validate_private_bug_triage_target_contents(target: Path) -> None:
     for entry in scripts_dir.iterdir():
         if entry == script:
             continue
-        if (
-            entry.name == "__pycache__"
-            and entry.is_dir()
-            and not entry.is_symlink()
-        ):
+        if entry.name == "__pycache__" and entry.is_dir() and not entry.is_symlink():
             continue
         unexpected_entries.append(entry.name)
     if unexpected_entries:
@@ -2133,9 +2200,40 @@ def _overlay_file_identity(metadata: os.stat_result) -> tuple[int, int, int, int
     )
 
 
+def _overlay_file_object_identity(
+    metadata: os.stat_result,
+) -> tuple[int, int, int]:
+    return (
+        metadata.st_dev,
+        metadata.st_ino,
+        stat.S_IFMT(metadata.st_mode),
+    )
+
+
+def _overlay_file_access_policy(
+    metadata: os.stat_result,
+) -> tuple[int, int, int]:
+    return (
+        metadata.st_uid,
+        stat.S_IMODE(metadata.st_mode),
+        metadata.st_nlink,
+    )
+
+
+def _overlay_plain_file_content_identity(data: bytes) -> tuple[int, str]:
+    return len(data), hashlib.sha256(data).hexdigest()
+
+
+def _overlay_file_timestamp_hint(metadata: os.stat_result) -> tuple[int, int]:
+    return metadata.st_mtime_ns, metadata.st_ctime_ns
+
+
 def _overlay_file_content_identity(
     metadata: os.stat_result,
 ) -> tuple[int, int, int, int, int, int, int, int]:
+    # Legacy copy and manifest callers still use timestamps as a change signal.
+    # A caller may ignore that signal only when it performs a bounded semantic
+    # reread of object identity, content, and access policy instead.
     return (
         *_overlay_file_identity(metadata),
         metadata.st_size,
@@ -3210,6 +3308,153 @@ class _RegularFileOverlayStagingScope:
         return self.path
 
 
+@dataclass(frozen=True)
+class _InstalledRegularFileOverlayReceipt:
+    target: Path
+    target_parent: _PinnedRegularFileOverlayDirectory
+    root_descriptor: int
+    root_identity: tuple[int, int, int, int]
+    manifest: _RegularFileOverlayTreeManifest
+
+
+@dataclass(frozen=True)
+class _RegularFileOverlayInstallResult:
+    recovery_path: Path | None
+    installed_receipt: _InstalledRegularFileOverlayReceipt
+
+
+def _assert_installed_regular_file_overlay_receipt(
+    receipt: _InstalledRegularFileOverlayReceipt,
+    *,
+    label: str,
+) -> None:
+    if receipt.target.parent != receipt.target_parent.path:
+        raise SyncError(
+            f"regular-file overlay {label} installed receipt target disagrees"
+        )
+    _assert_regular_file_overlay_directory_binding(
+        receipt.target_parent,
+        label=f"{label} target parent",
+    )
+    held_identity = _regular_file_overlay_directory_identity(
+        receipt.root_descriptor,
+        label=label,
+        path=receipt.target,
+    )
+    if held_identity != receipt.root_identity:
+        raise SyncError(f"regular-file overlay {label} installed root identity changed")
+    held_manifest = _capture_regular_file_overlay_tree_manifest(
+        receipt.root_descriptor,
+        label=f"{label} held installed target",
+    )
+    if held_manifest != receipt.manifest:
+        raise SyncError(f"regular-file overlay {label} installed held manifest changed")
+    if not _regular_file_overlay_named_root_matches(
+        receipt.target_parent.descriptor,
+        receipt.target.name,
+        receipt.root_identity,
+        label=label,
+    ):
+        raise SyncError(
+            f"regular-file overlay {label} installed target root binding changed"
+        )
+    _assert_regular_file_overlay_tree_manifest(
+        receipt.target_parent.descriptor,
+        receipt.target.name,
+        receipt.manifest,
+        label=f"{label} live installed target",
+    )
+    if _regular_file_overlay_directory_identity(
+        receipt.root_descriptor,
+        label=label,
+        path=receipt.target,
+    ) != receipt.root_identity or not _regular_file_overlay_named_root_matches(
+        receipt.target_parent.descriptor,
+        receipt.target.name,
+        receipt.root_identity,
+        label=label,
+    ):
+        raise SyncError(
+            f"regular-file overlay {label} installed target binding changed"
+        )
+    _assert_regular_file_overlay_directory_binding(
+        receipt.target_parent,
+        label=f"{label} target parent",
+    )
+
+
+def _bind_canonical_review_installed_migration_receipt(
+    rule: SyncRule,
+    locked_source: _LockedRuleSource,
+    expected_target: Path,
+    prepared_source_manifest: _RegularFileOverlayTreeManifest,
+    expected_target_manifest: _RegularFileOverlayTreeManifest,
+    installed_receipt: _InstalledRegularFileOverlayReceipt,
+) -> _CanonicalReviewInstalledMigrationReceipt:
+    if not _canonical_review_personal_agents_migration_required(
+        rule,
+        locked_source,
+    ):
+        raise SyncError("canonical review install is not migration-authorized")
+    migration = locked_source.canonical_review_migration_receipt
+    if migration is None:
+        raise SyncError("canonical review migration receipt is missing at install")
+    if (
+        getattr(locked_source.manifest, "root_object_id", None)
+        != migration.live_review_subtree_tree
+    ):
+        raise SyncError("canonical review locked manifest changed before install")
+    if (
+        installed_receipt.target != expected_target
+        or expected_target.parts[-len(rule.target.parts) :] != rule.target.parts
+    ):
+        raise SyncError("canonical review installed target path differs")
+    if installed_receipt.manifest != expected_target_manifest:
+        raise SyncError("canonical review installed manifest differs from candidate")
+    _assert_installed_regular_file_overlay_receipt(
+        installed_receipt,
+        label="canonical review install receipt binding",
+    )
+    return _CanonicalReviewInstalledMigrationReceipt(
+        migration=migration,
+        expected_target=expected_target,
+        prepared_source_manifest=prepared_source_manifest,
+        expected_manifest=expected_target_manifest,
+        installed_receipt=installed_receipt,
+        seal=_CANONICAL_REVIEW_INSTALLED_RECEIPT_SEAL,
+    )
+
+
+def _assert_canonical_review_installed_migration_receipt(
+    receipt: _CanonicalReviewInstalledMigrationReceipt,
+    rule: SyncRule,
+    locked_source: _LockedRuleSource,
+    *,
+    label: str,
+) -> None:
+    if (
+        type(receipt) is not _CanonicalReviewInstalledMigrationReceipt
+        or receipt.seal is not _CANONICAL_REVIEW_INSTALLED_RECEIPT_SEAL
+        or receipt.migration is not locked_source.canonical_review_migration_receipt
+        or receipt.migration.policy != rule.canonical_review_migration_policy
+        or receipt.expected_target.parts[-len(rule.target.parts) :] != rule.target.parts
+        or receipt.installed_receipt.target != receipt.expected_target
+        or receipt.installed_receipt.manifest != receipt.expected_manifest
+        or not isinstance(
+            receipt.prepared_source_manifest,
+            _RegularFileOverlayTreeManifest,
+        )
+        or not isinstance(receipt.expected_manifest, _RegularFileOverlayTreeManifest)
+    ):
+        raise SyncError(
+            f"canonical review {label} installed migration receipt is invalid"
+        )
+    _assert_installed_regular_file_overlay_receipt(
+        receipt.installed_receipt,
+        label=label,
+    )
+
+
 def _register_regular_file_overlay_retained_entry(
     scope: _RegularFileOverlayStagingScope,
     name: str,
@@ -3806,7 +4051,7 @@ def _replace_target_with_regular_file_overlays(
     staging_scope: _RegularFileOverlayStagingScope,
     candidate_root: _PinnedRegularFileOverlayDirectory | None = None,
     candidate_manifest: _RegularFileOverlayTreeManifest | None = None,
-) -> Path | None:
+) -> _RegularFileOverlayInstallResult:
     primitive = _load_regular_file_overlay_noreplace_primitive()
     if bindings:
         expected_root_identity = bindings[0].chain.identities[0]
@@ -3828,11 +4073,17 @@ def _replace_target_with_regular_file_overlays(
             and candidate_manifest != expected_tree_manifest
         ):
             raise SyncError("regular-file overlay candidate manifest disagrees")
+        expected_root_descriptor = (
+            candidate_root.descriptor
+            if candidate_root is not None
+            else bindings[0].chain.descriptors[0]
+        )
     elif candidate_root is not None and candidate_manifest is not None:
         if candidate_root.path != staging:
             raise SyncError("regular-file overlay candidate root path disagrees")
         expected_root_identity = candidate_root.identity
         expected_tree_manifest = candidate_manifest
+        expected_root_descriptor = candidate_root.descriptor
     else:
         raise SyncError(
             "secure regular-file overlay install requires a bound candidate"
@@ -4164,8 +4415,22 @@ def _replace_target_with_regular_file_overlays(
                 f"transaction error: {transaction_detail}; "
                 f"{candidate_detail}; {prior_detail}; {live_detail}"
             ) from transaction_error
+        installed_receipt = _InstalledRegularFileOverlayReceipt(
+            target=target,
+            target_parent=target_parent,
+            root_descriptor=expected_root_descriptor,
+            root_identity=expected_root_identity,
+            manifest=expected_tree_manifest,
+        )
+        _assert_installed_regular_file_overlay_receipt(
+            installed_receipt,
+            label="post-install validation",
+        )
         staging_scope.completed = True
-        return staging_scope.recovery_path
+        return _RegularFileOverlayInstallResult(
+            recovery_path=staging_scope.recovery_path,
+            installed_receipt=installed_receipt,
+        )
 
 
 def _pin_or_create_regular_file_overlay_directory(
@@ -4486,13 +4751,11 @@ def _validate_private_bug_triage_reviewed_manifest(
         ("scripts", "jenkins_artifact_probe.py"): "file",
     }
     observed_kinds = {
-        relative_parts: entry.kind
-        for relative_parts, entry in scripts_entries.items()
+        relative_parts: entry.kind for relative_parts, entry in scripts_entries.items()
     }
     if observed_kinds != expected_scripts_entries:
         raise SyncError(
-            "private bug-triage reviewed scripts inventory differs at "
-            f"{surface}"
+            f"private bug-triage reviewed scripts inventory differs at {surface}"
         )
 
     helper = scripts_entries[("scripts", "jenkins_artifact_probe.py")]
@@ -5770,6 +6033,170 @@ def _write_all(descriptor: int, payload: bytes, *, label: str) -> None:
         written += count
 
 
+@dataclass(frozen=True)
+class _BoundPlainFileSnapshot:
+    data: bytes
+    object_identity: tuple[int, int, int]
+    access_policy: tuple[int, int, int]
+    content_identity: tuple[int, str]
+    initial_timestamp_hint: tuple[int, int]
+    final_timestamp_hint: tuple[int, int]
+    timestamp_changed: bool
+
+
+def _pinned_plain_file_object_identity(
+    pinned: _PinnedRegularFileOverlayEntry,
+) -> tuple[int, int, int]:
+    device, inode, mode, _link_count, _owner = pinned.identity
+    return device, inode, stat.S_IFMT(mode)
+
+
+def _pinned_plain_file_access_policy(
+    pinned: _PinnedRegularFileOverlayEntry,
+) -> tuple[int, int, int]:
+    _device, _inode, mode, link_count, owner = pinned.identity
+    return owner, stat.S_IMODE(mode), link_count
+
+
+def _stat_bound_plain_file_name(
+    parent_descriptor: int,
+    name: str,
+    *,
+    label: str,
+) -> os.stat_result:
+    try:
+        return os.stat(name, dir_fd=parent_descriptor, follow_symlinks=False)
+    except FileNotFoundError as exc:
+        raise SyncError(f"{label} pathname is missing during revalidation") from exc
+    except PermissionError as exc:
+        raise SyncError(f"{label} pathname is unreadable during revalidation") from exc
+    except OSError as exc:
+        raise SyncError(f"{label} pathname revalidation failed: {exc}") from exc
+
+
+def _assert_bound_plain_file_metadata(
+    metadata: os.stat_result,
+    pinned: _PinnedRegularFileOverlayEntry,
+    *,
+    expected_size: int | None,
+    label: str,
+) -> None:
+    if _overlay_file_object_identity(metadata) != _pinned_plain_file_object_identity(
+        pinned
+    ):
+        raise SyncError(f"{label} binding changed: object identity mismatch")
+    if _overlay_file_access_policy(metadata) != _pinned_plain_file_access_policy(
+        pinned
+    ):
+        raise SyncError(f"{label} access policy changed")
+    if expected_size is not None and metadata.st_size != expected_size:
+        raise SyncError(f"{label} content size changed")
+    _validate_overlay_regular_file(metadata, label=label, path=Path(pinned.name))
+
+
+def _read_bound_plain_file_pass(
+    parent_descriptor: int,
+    name: str,
+    pinned: _PinnedRegularFileOverlayEntry,
+    *,
+    byte_limit: int,
+    label: str,
+) -> _BoundPlainFileSnapshot:
+    try:
+        before = os.fstat(pinned.descriptor)
+    except OSError as exc:
+        raise SyncError(f"{label} descriptor revalidation failed: {exc}") from exc
+    _assert_bound_plain_file_metadata(
+        before,
+        pinned,
+        expected_size=None,
+        label=label,
+    )
+    if before.st_size > byte_limit:
+        raise SyncError(f"{label} exceeds its bounded content size")
+    named_before = _stat_bound_plain_file_name(
+        parent_descriptor,
+        name,
+        label=label,
+    )
+    _assert_bound_plain_file_metadata(
+        named_before,
+        pinned,
+        expected_size=before.st_size,
+        label=label,
+    )
+    try:
+        data = _read_regular_file_overlay_descriptor(
+            pinned.descriptor,
+            byte_limit=byte_limit,
+        )
+        after = os.fstat(pinned.descriptor)
+    except OSError as exc:
+        raise SyncError(f"cannot read or revalidate {label}: {exc}") from exc
+    named_after = _stat_bound_plain_file_name(
+        parent_descriptor,
+        name,
+        label=label,
+    )
+    for metadata in (after, named_after):
+        _assert_bound_plain_file_metadata(
+            metadata,
+            pinned,
+            expected_size=before.st_size,
+            label=label,
+        )
+    content_identity = _overlay_plain_file_content_identity(data)
+    if content_identity[0] != before.st_size:
+        raise SyncError(f"{label} content changed while being read")
+    timestamp_hints = tuple(
+        _overlay_file_timestamp_hint(metadata)
+        for metadata in (before, named_before, after, named_after)
+    )
+    return _BoundPlainFileSnapshot(
+        data=data,
+        object_identity=_overlay_file_object_identity(after),
+        access_policy=_overlay_file_access_policy(after),
+        content_identity=content_identity,
+        initial_timestamp_hint=timestamp_hints[0],
+        final_timestamp_hint=timestamp_hints[-1],
+        timestamp_changed=len(set(timestamp_hints)) != 1,
+    )
+
+
+def _read_bound_plain_file_semantically(
+    parent_descriptor: int,
+    name: str,
+    pinned: _PinnedRegularFileOverlayEntry,
+    *,
+    byte_limit: int,
+    label: str,
+) -> _BoundPlainFileSnapshot:
+    first = _read_bound_plain_file_pass(
+        parent_descriptor,
+        name,
+        pinned,
+        byte_limit=byte_limit,
+        label=label,
+    )
+    if not first.timestamp_changed:
+        return first
+    second = _read_bound_plain_file_pass(
+        parent_descriptor,
+        name,
+        pinned,
+        byte_limit=byte_limit,
+        label=label,
+    )
+    if second.data != first.data or second.content_identity != first.content_identity:
+        raise SyncError(f"{label} content changed during timestamp revalidation")
+    if (
+        second.initial_timestamp_hint != first.final_timestamp_hint
+        or second.timestamp_changed
+    ):
+        raise SyncError(f"{label} timestamp revalidation did not stabilize")
+    return second
+
+
 def _assert_bound_plain_file(
     parent_descriptor: int,
     name: str,
@@ -5779,42 +6206,604 @@ def _assert_bound_plain_file(
     *,
     label: str,
 ) -> None:
-    _assert_regular_file_overlay_entry_binding(
+    snapshot = _read_bound_plain_file_semantically(
         parent_descriptor,
+        name,
         pinned,
-        label=label,
-        name=name,
-    )
-    before = os.fstat(pinned.descriptor)
-    _validate_overlay_regular_file(before, label=label, path=Path(name))
-    if stat.S_IMODE(before.st_mode) != expected_mode or before.st_size != len(expected):
-        raise SyncError(f"{label} mode or size differs from the locked output")
-    payload = _read_regular_file_overlay_descriptor(
-        pinned.descriptor,
         byte_limit=len(expected),
+        label=label,
     )
-    after = os.fstat(pinned.descriptor)
-    try:
-        named_after = os.stat(name, dir_fd=parent_descriptor, follow_symlinks=False)
-    except OSError as exc:
-        raise SyncError(f"cannot revalidate {label}: {exc}") from exc
     if (
-        payload != expected
-        or _overlay_file_content_identity(after)
-        != _overlay_file_content_identity(before)
-        or _overlay_file_content_identity(named_after)
-        != _overlay_file_content_identity(after)
+        snapshot.data != expected
+        or snapshot.content_identity != _overlay_plain_file_content_identity(expected)
+        or snapshot.access_policy[1] != expected_mode
     ):
-        raise SyncError(f"{label} bytes or binding changed")
+        raise SyncError(f"{label} bytes or access policy differ from locked output")
 
 
 def _is_authoritative_canonical_review_rule(rule: SyncRule) -> bool:
     return rule == _CANONICAL_REVIEW_SYNC_RULE
 
 
-def _migrate_personal_agents_after_canonical_review_sync(
+def _source_lock_git_line(
+    source_lock_module: object,
+    checkout: Path,
+    *arguments: str,
+    label: str,
+) -> str:
+    git_path = source_lock_module._trusted_git_path()
+    completed = source_lock_module._git(git_path, checkout, *arguments)
+    return source_lock_module._single_line(completed, label=label)
+
+
+def _require_full_git_object_id(value: object, *, label: str) -> str:
+    if (
+        not isinstance(value, str)
+        or len(value) != 40
+        or any(character not in "0123456789abcdef" for character in value)
+    ):
+        raise SyncError(f"{label} is not a lowercase full Git object ID")
+    return value
+
+
+def _validate_reviewed_candidate_commit_proof(
+    policy: CanonicalReviewMigrationPolicy,
+) -> bytes:
+    revision = _require_full_git_object_id(
+        policy.reviewed_candidate_revision,
+        label="reviewed canonical candidate revision",
+    )
+    approved_root_tree = _require_full_git_object_id(
+        policy.approved_root_tree,
+        label="reviewed canonical candidate root tree",
+    )
+    _require_full_git_object_id(
+        policy.approved_review_subtree_tree,
+        label="reviewed canonical candidate review subtree tree",
+    )
+    encoded = policy.reviewed_candidate_commit_payload_base64
+    if (
+        not isinstance(encoded, str)
+        or not encoded
+        or len(encoded) > ((MAX_CANONICAL_REVIEW_COMMIT_PROOF_BYTES * 4 + 2) // 3)
+    ):
+        raise SyncError("reviewed canonical candidate commit proof is invalid")
+    try:
+        payload = base64.b64decode(encoded.encode("ascii"), validate=True)
+    except (UnicodeEncodeError, ValueError) as exc:
+        raise SyncError(
+            "reviewed canonical candidate commit proof is not strict Base64"
+        ) from exc
+    if not payload or len(payload) > MAX_CANONICAL_REVIEW_COMMIT_PROOF_BYTES:
+        raise SyncError("reviewed canonical candidate commit proof exceeds its limit")
+    object_bytes = f"commit {len(payload)}\0".encode("ascii") + payload
+    object_id = hashlib.sha1(object_bytes, usedforsecurity=False).hexdigest()
+    if object_id != revision:
+        raise SyncError(
+            "reviewed canonical candidate commit proof differs from its revision"
+        )
+    header, separator, _message = payload.partition(b"\n\n")
+    if not separator:
+        raise SyncError("reviewed canonical candidate commit proof is malformed")
+    header_lines = header.splitlines()
+    tree_lines = [line for line in header_lines if line.startswith(b"tree ")]
+    if len(tree_lines) != 1 or tree_lines[0] != (
+        b"tree " + approved_root_tree.encode("ascii")
+    ):
+        raise SyncError(
+            "reviewed canonical candidate commit proof does not bind the approved root tree"
+        )
+    if header_lines[0] != tree_lines[0]:
+        raise SyncError("reviewed canonical candidate commit tree header is malformed")
+    return payload
+
+
+def _validate_reviewed_candidate_tree_path_proof(
+    source_lock_module: object,
+    checkout: Path,
+    rule: SyncRule,
+    policy: CanonicalReviewMigrationPolicy,
+    proof_revision: str,
+) -> None:
+    proved_subtree = _source_lock_git_line(
+        source_lock_module,
+        checkout,
+        "rev-parse",
+        "--verify",
+        f"{proof_revision}:{rule.source.as_posix()}",
+        label="reviewed canonical candidate proved subtree tree",
+    )
+    if proved_subtree != policy.approved_review_subtree_tree:
+        raise SyncError(
+            "reviewed canonical candidate root tree does not bind the approved review subtree"
+        )
+
+
+def _bounded_ancestor_root_trees(
+    source_lock_module: object,
+    checkout: Path,
+    revision: str,
+) -> tuple[tuple[str, str], ...]:
+    git_path = source_lock_module._trusted_git_path()
+    completed = source_lock_module._git(
+        git_path,
+        checkout,
+        "log",
+        "--no-show-signature",
+        "--no-decorate",
+        "--format=%H %T",
+        f"--max-count={MAX_CANONICAL_REVIEW_MIGRATION_ANCESTRY_COMMITS + 1}",
+        revision,
+    )
+    try:
+        lines = completed.stdout.decode("ascii").splitlines()
+    except UnicodeDecodeError as exc:
+        raise SyncError("canonical review ancestry output is not ASCII") from exc
+    if len(lines) > MAX_CANONICAL_REVIEW_MIGRATION_ANCESTRY_COMMITS:
+        raise SyncError("canonical review migration ancestry exceeds its commit limit")
+    records: list[tuple[str, str]] = []
+    for line in lines:
+        fields = line.split(" ")
+        if len(fields) != 2:
+            raise SyncError("canonical review ancestry record is malformed")
+        records.append(
+            (
+                _require_full_git_object_id(
+                    fields[0],
+                    label="canonical review ancestry revision",
+                ),
+                _require_full_git_object_id(
+                    fields[1],
+                    label="canonical review ancestry root tree",
+                ),
+            )
+        )
+    if not records or records[0][0] != revision:
+        raise SyncError("canonical review ancestry does not start at the live revision")
+    return tuple(records)
+
+
+def _source_lock_pin_records(
+    source_lock: object,
+) -> tuple[tuple[object, object, object, object], ...]:
+    pins = getattr(source_lock, "pins", None)
+    if not isinstance(pins, tuple):
+        raise SyncError("verified source lock has an invalid pin collection")
+    return tuple(
+        (
+            getattr(pin, "name", None),
+            getattr(pin, "repository", None),
+            getattr(pin, "sha", None),
+            getattr(pin, "tree", None),
+        )
+        for pin in pins
+    )
+
+
+def _structured_checkout_receipt_is_complete(
+    receipt: object,
+    *,
+    source_root: Path,
+    pins: tuple[tuple[object, object, object, object], ...],
+) -> bool:
+    checkouts = getattr(receipt, "checkouts", None)
+    source_root_binding = getattr(receipt, "source_root_binding", None)
+    if (
+        not isinstance(checkouts, tuple)
+        or len(checkouts) != len(pins)
+        or not isinstance(source_root_binding, tuple)
+        or len(source_root_binding) != 4
+    ):
+        return False
+    required_true = (
+        "detached_head",
+        "clean_worktree_and_index",
+        "promisor_or_partial_clone_absent",
+        "alternates_absent",
+        "grafts_absent",
+        "replace_refs_absent",
+        "sparse_checkout_absent",
+        "unsafe_config_absent",
+        "tracked_modes_and_index_flags_safe",
+        "object_closure_complete",
+        "strict_fsck_complete",
+    )
+    for checkout, pin in zip(checkouts, pins, strict=True):
+        name, repository, head, tree = pin
+        if (
+            getattr(checkout, "name", None) != name
+            or getattr(checkout, "repository", None) != repository
+            or getattr(checkout, "checkout", None) != source_root / str(name)
+            or getattr(checkout, "git_directory", None)
+            != source_root / str(name) / ".git"
+            or getattr(checkout, "objects_directory", None)
+            != source_root / str(name) / ".git" / "objects"
+            or getattr(checkout, "head", None) != head
+            or getattr(checkout, "tree", None) != tree
+            or getattr(checkout, "shallow", None) is not False
+            or getattr(checkout, "bare", None) is not False
+            or any(
+                getattr(checkout, field, None) is not True for field in required_true
+            )
+            or getattr(checkout, "safety_contract", None)
+            != "private-overlay-complete-checkout-safety-v1"
+        ):
+            return False
+        for binding_name in (
+            "checkout_binding",
+            "git_directory_binding",
+            "objects_directory_binding",
+        ):
+            binding = getattr(checkout, binding_name, None)
+            if not isinstance(binding, tuple) or len(binding) != 4:
+                return False
+        expected_file_paths = {
+            "head_file": source_root / str(name) / ".git" / "HEAD",
+            "local_config_file": source_root / str(name) / ".git" / "config",
+        }
+        for file_state_name, expected_path in expected_file_paths.items():
+            file_state = getattr(checkout, file_state_name, None)
+            if (
+                file_state is None
+                or getattr(file_state, "path", None) != expected_path
+                or not isinstance(getattr(file_state, "object_identity", None), tuple)
+                or len(file_state.object_identity) != 3
+                or not isinstance(getattr(file_state, "access_policy", None), tuple)
+                or len(file_state.access_policy) != 3
+                or not isinstance(getattr(file_state, "size", None), int)
+                or not isinstance(getattr(file_state, "sha256", None), str)
+                or len(file_state.sha256) != 64
+            ):
+                return False
+    return True
+
+
+def _verify_complete_checkouts(
+    source_lock_module: object,
+    source_root: Path,
+    source_lock: object,
+    *,
+    repo_root: Path,
+    validate_generated_provenance: bool = False,
+) -> _CompleteCheckoutVerification:
+    pins_before = _source_lock_pin_records(source_lock)
+    source_lock_digest = getattr(source_lock, "digest", None)
+    if (
+        not isinstance(source_lock_digest, str)
+        or len(source_lock_digest) != 64
+        or any(character not in "0123456789abcdef" for character in source_lock_digest)
+    ):
+        raise SyncError("source-lock digest is invalid for checkout verification")
+    live_lock_before = source_lock_module.load_source_lock(repo_root)
+    if (
+        getattr(live_lock_before, "digest", None) != source_lock_digest
+        or _source_lock_pin_records(live_lock_before) != pins_before
+    ):
+        raise SyncError("live source lock differs before checkout verification")
+    checkout_receipt = source_lock_module.verify_checkouts(source_root, source_lock)
+    if checkout_receipt is None:
+        raise SyncError("checkout verifier did not return a structured receipt")
+    receipt_pins = tuple(
+        (
+            getattr(pin, "name", None),
+            getattr(pin, "repository", None),
+            getattr(pin, "sha", None),
+            getattr(pin, "tree", None),
+        )
+        for pin in getattr(checkout_receipt, "pins", ())
+    )
+    if (
+        getattr(checkout_receipt, "source_root", None) != source_root
+        or getattr(checkout_receipt, "safety_contract", None)
+        != "private-overlay-complete-checkout-safety-v1"
+        or receipt_pins != pins_before
+        or not _structured_checkout_receipt_is_complete(
+            checkout_receipt,
+            source_root=source_root,
+            pins=pins_before,
+        )
+    ):
+        raise SyncError("checkout verifier returned a mismatched structured receipt")
+    if validate_generated_provenance:
+        source_lock_module.validate_generated_provenance(
+            repo_root,
+            source_lock,
+            toolbox_checkout=source_root / source_lock.pins[0].name,
+        )
+    live_lock_after = source_lock_module.load_source_lock(repo_root)
+    pins_after = _source_lock_pin_records(source_lock)
+    if (
+        pins_after != pins_before
+        or getattr(live_lock_after, "digest", None) != source_lock_digest
+        or _source_lock_pin_records(live_lock_after) != pins_before
+    ):
+        raise SyncError("source-lock state changed during checkout verification")
+    return _CompleteCheckoutVerification(
+        source_root=source_root,
+        repo_root=repo_root,
+        source_lock=source_lock,
+        source_lock_module=source_lock_module,
+        source_lock_digest=source_lock_digest,
+        pins=pins_after,
+        checkout_receipt=checkout_receipt,
+        event=object(),
+        seal=_COMPLETE_CHECKOUT_VERIFICATION_SEAL,
+    )
+
+
+def _assert_complete_checkout_verification(
+    verification: _CompleteCheckoutVerification | None,
+    *,
+    source_root: Path,
+    repo_root: Path | None = None,
+    source_lock: object | None = None,
+) -> None:
+    if (
+        type(verification) is not _CompleteCheckoutVerification
+        or verification.seal is not _COMPLETE_CHECKOUT_VERIFICATION_SEAL
+        or verification.source_root != source_root
+        or (repo_root is not None and verification.repo_root != repo_root)
+        or not isinstance(verification.source_lock_digest, str)
+        or len(verification.source_lock_digest) != 64
+        or verification.checkout_receipt is None
+        or (
+            source_lock is not None
+            and (
+                verification.source_lock is not source_lock
+                or verification.pins != _source_lock_pin_records(source_lock)
+            )
+        )
+    ):
+        raise SyncError("locally complete checkout verification receipt is invalid")
+
+
+def _assert_matching_checkout_verification_scope(
+    initial: _CompleteCheckoutVerification,
+    prewrite: _CompleteCheckoutVerification,
+) -> None:
+    _assert_complete_checkout_verification(
+        initial,
+        source_root=initial.source_root,
+        repo_root=initial.repo_root,
+        source_lock=initial.source_lock,
+    )
+    _assert_complete_checkout_verification(
+        prewrite,
+        source_root=initial.source_root,
+        repo_root=initial.repo_root,
+        source_lock=initial.source_lock,
+    )
+    if (
+        prewrite.pins != initial.pins
+        or prewrite.source_lock_digest != initial.source_lock_digest
+        or prewrite.checkout_receipt != initial.checkout_receipt
+    ):
+        raise SyncError(
+            "source-lock or checkout structured state changed between verifications"
+        )
+    if prewrite.event is initial.event:
+        raise SyncError("prewrite checkout verification was not refreshed")
+
+
+def _revalidate_complete_checkout_verification(
+    verification: _CompleteCheckoutVerification | None,
+) -> None:
+    if verification is None:
+        raise SyncError("locally complete checkout verification receipt is missing")
+    _assert_complete_checkout_verification(
+        verification,
+        source_root=verification.source_root,
+        repo_root=verification.repo_root,
+        source_lock=verification.source_lock,
+    )
+    refreshed = _verify_complete_checkouts(
+        verification.source_lock_module,
+        verification.source_root,
+        verification.source_lock,
+        repo_root=verification.repo_root,
+    )
+    _assert_matching_checkout_verification_scope(verification, refreshed)
+
+
+def _assert_checkout_verification_covers_source(
+    verification: _CompleteCheckoutVerification | None,
+    checkout: Path,
+    source_pin: _VerifiedLockedSourcePin,
+) -> None:
+    _assert_complete_checkout_verification(
+        verification,
+        source_root=checkout.parent,
+        repo_root=verification.repo_root if verification is not None else None,
+    )
+    if verification is None:
+        raise SyncError("locally complete checkout verification receipt is missing")
+    matching = tuple(
+        record
+        for record in verification.pins
+        if record[0] == checkout.name
+        and record[1] == source_pin.repository
+        and record[2] == source_pin.revision
+        and record[3] == source_pin.root_tree
+    )
+    if len(matching) != 1:
+        raise SyncError(
+            "complete checkout verification does not cover the canonical source pin"
+        )
+
+
+def _bind_canonical_review_migration_source(
+    source_lock_module: object,
+    checkout: Path,
+    pin: object,
+    manifest: object,
+    rule: SyncRule,
+    *,
+    complete_checkout_verification: _CompleteCheckoutVerification,
+) -> tuple[_VerifiedLockedSourcePin, _CanonicalReviewMigrationReceipt | None]:
+    policy = rule.canonical_review_migration_policy
+    if policy is None or not _is_authoritative_canonical_review_rule(rule):
+        raise SyncError("canonical review migration policy is not authoritative")
+    _assert_complete_checkout_verification(
+        complete_checkout_verification,
+        source_root=checkout.parent,
+    )
+    repository = getattr(pin, "repository", None)
+    revision = _require_full_git_object_id(
+        getattr(pin, "sha", None),
+        label="canonical review source revision",
+    )
+    root_tree = _require_full_git_object_id(
+        getattr(pin, "tree", None),
+        label="canonical review source root tree",
+    )
+    if repository != policy.repository:
+        raise SyncError("canonical review source repository is not approved")
+    _validate_reviewed_candidate_commit_proof(policy)
+    actual_revision = _source_lock_git_line(
+        source_lock_module,
+        checkout,
+        "rev-parse",
+        "--verify",
+        "HEAD^{commit}",
+        label="canonical review live revision",
+    )
+    actual_root_tree = _source_lock_git_line(
+        source_lock_module,
+        checkout,
+        "rev-parse",
+        "--verify",
+        "HEAD^{tree}",
+        label="canonical review live root tree",
+    )
+    if actual_revision != revision:
+        raise SyncError("canonical review live revision differs from the source lock")
+    if actual_root_tree != root_tree:
+        raise SyncError("canonical review live root tree differs from the source lock")
+    actual_review_subtree_tree = _source_lock_git_line(
+        source_lock_module,
+        checkout,
+        "rev-parse",
+        "--verify",
+        f"{revision}:{rule.source.as_posix()}",
+        label="canonical review live subtree tree",
+    )
+    manifest_review_subtree_tree = _require_full_git_object_id(
+        getattr(manifest, "root_object_id", None),
+        label="canonical review locked manifest root tree",
+    )
+    if actual_review_subtree_tree != manifest_review_subtree_tree:
+        raise SyncError(
+            "canonical review live subtree differs from the locked manifest"
+        )
+
+    source_pin = _VerifiedLockedSourcePin(
+        repository=repository,
+        revision=actual_revision,
+        root_tree=actual_root_tree,
+    )
+    _assert_checkout_verification_covers_source(
+        complete_checkout_verification,
+        checkout,
+        source_pin,
+    )
+    if (
+        source_pin.revision == policy.legacy_revision
+        and source_pin.root_tree == policy.legacy_root_tree
+    ):
+        return source_pin, None
+    if actual_review_subtree_tree != policy.approved_review_subtree_tree:
+        raise SyncError("canonical review live subtree is not approved for migration")
+    if source_pin.root_tree == policy.approved_root_tree:
+        activation_basis = "exact-approved-root-tree"
+        proof_revision = source_pin.revision
+    else:
+        ancestry = _bounded_ancestor_root_trees(
+            source_lock_module,
+            checkout,
+            source_pin.revision,
+        )
+        approved_ancestors = tuple(
+            ancestor_revision
+            for ancestor_revision, ancestor_tree in ancestry
+            if ancestor_tree == policy.approved_root_tree
+        )
+        if not approved_ancestors:
+            raise SyncError(
+                "canonical review migration anchor-refresh-required: live root "
+                "is neither the approved root nor a bounded descendant that "
+                "retains it"
+            )
+        activation_basis = "bounded-approved-root-tree-ancestor"
+        proof_revision = approved_ancestors[0]
+    _validate_reviewed_candidate_tree_path_proof(
+        source_lock_module,
+        checkout,
+        rule,
+        policy,
+        proof_revision,
+    )
+    return source_pin, _CanonicalReviewMigrationReceipt(
+        policy=policy,
+        source_pin=source_pin,
+        live_review_subtree_tree=actual_review_subtree_tree,
+        activation_basis=activation_basis,
+    )
+
+
+def _canonical_review_personal_agents_migration_required(
+    rule: SyncRule,
+    locked_source: _LockedRuleSource | None,
+) -> bool:
+    if not _is_authoritative_canonical_review_rule(rule):
+        return False
+    policy = rule.canonical_review_migration_policy
+    if policy is None or locked_source is None or locked_source.source_pin is None:
+        raise SyncError(
+            "authoritative canonical review sync requires a verified source pin"
+        )
+    source_pin = locked_source.source_pin
+    if source_pin.repository != policy.repository:
+        raise SyncError("canonical review migration source repository differs")
+    _assert_checkout_verification_covers_source(
+        locked_source.prewrite_checkout_verification,
+        locked_source.checkout,
+        source_pin,
+    )
+    receipt = locked_source.canonical_review_migration_receipt
+    if (
+        source_pin.revision == policy.legacy_revision
+        and source_pin.root_tree == policy.legacy_root_tree
+    ):
+        if receipt is not None:
+            raise SyncError("legacy canonical review source has a migration receipt")
+        return False
+    if (
+        receipt is None
+        or receipt.policy != policy
+        or receipt.source_pin != source_pin
+        or receipt.live_review_subtree_tree != policy.approved_review_subtree_tree
+        or getattr(locked_source.manifest, "root_object_id", None)
+        != receipt.live_review_subtree_tree
+        or receipt.activation_basis
+        not in {
+            "exact-approved-root-tree",
+            "bounded-approved-root-tree-ancestor",
+        }
+    ):
+        raise SyncError("canonical review migration receipt does not match its source")
+    return True
+
+
+def _migrate_personal_agents_guidance(
     repo_binding: _PinnedRegularFileOverlayDirectory,
+    *,
+    installed_receipt: _InstalledRegularFileOverlayReceipt | None = None,
 ) -> Path | None:
+    if installed_receipt is not None:
+        _assert_installed_regular_file_overlay_receipt(
+            installed_receipt,
+            label="pre-AGENTS migration",
+        )
     target = repo_binding.path / PERSONAL_AGENTS_TARGET
     with contextlib.ExitStack() as source_stack:
         target_parent_chain = _pin_or_create_regular_file_overlay_descendant_chain(
@@ -5830,30 +6819,17 @@ def _migrate_personal_agents_after_canonical_review_sync(
             target.name,
             label="personal AGENTS source",
         )
-        prior_metadata = os.fstat(prior.descriptor)
-        _validate_overlay_regular_file(
-            prior_metadata,
+        prior_snapshot = _read_bound_plain_file_semantically(
+            target_parent.descriptor,
+            target.name,
+            prior,
+            byte_limit=MAX_REGULAR_FILE_OVERLAY_BYTES,
             label="personal AGENTS source",
-            path=target,
         )
-        prior_mode = stat.S_IMODE(prior_metadata.st_mode)
+        prior_data = prior_snapshot.data
+        prior_mode = prior_snapshot.access_policy[1]
         if prior_mode != 0o644:
             raise SyncError("personal AGENTS source mode must be 0644")
-        if prior_metadata.st_size > MAX_REGULAR_FILE_OVERLAY_BYTES:
-            raise SyncError(
-                "personal AGENTS source exceeds the bounded migration size"
-            )
-        prior_data = _read_regular_file_overlay_descriptor(
-            prior.descriptor,
-            byte_limit=MAX_REGULAR_FILE_OVERLAY_BYTES,
-        )
-        after_read = os.fstat(prior.descriptor)
-        if (
-            len(prior_data) != prior_metadata.st_size
-            or _overlay_file_content_identity(after_read)
-            != _overlay_file_content_identity(prior_metadata)
-        ):
-            raise SyncError("personal AGENTS source changed while being read")
         _assert_bound_plain_file(
             target_parent.descriptor,
             target.name,
@@ -5872,6 +6848,11 @@ def _migrate_personal_agents_after_canonical_review_sync(
                 prior_mode,
                 label="current personal AGENTS no-op state",
             )
+            if installed_receipt is not None:
+                _assert_installed_regular_file_overlay_receipt(
+                    installed_receipt,
+                    label="post-AGENTS no-op migration",
+                )
             return None
         if len(migrated_data) > MAX_REGULAR_FILE_OVERLAY_BYTES:
             raise SyncError(
@@ -5951,6 +6932,11 @@ def _migrate_personal_agents_after_canonical_review_sync(
                     staging_scope.container.descriptor,
                     prefix=REGULAR_FILE_OVERLAY_BACKUP_PREFIX,
                 )
+                if installed_receipt is not None:
+                    _assert_installed_regular_file_overlay_receipt(
+                        installed_receipt,
+                        label="immediate pre-AGENTS publication",
+                    )
                 _rename_regular_file_overlay_noreplace(
                     primitive,
                     target_parent.descriptor,
@@ -5987,6 +6973,11 @@ def _migrate_personal_agents_after_canonical_review_sync(
                     prior_mode,
                     label="personal AGENTS migration candidate before publication",
                 )
+                if installed_receipt is not None:
+                    _assert_installed_regular_file_overlay_receipt(
+                        installed_receipt,
+                        label="final pre-AGENTS publication",
+                    )
                 _rename_regular_file_overlay_noreplace(
                     primitive,
                     staging_scope.container.descriptor,
@@ -6002,6 +6993,11 @@ def _migrate_personal_agents_after_canonical_review_sync(
                     prior_mode,
                     label="installed personal AGENTS migration",
                 )
+                if installed_receipt is not None:
+                    _assert_installed_regular_file_overlay_receipt(
+                        installed_receipt,
+                        label="post-AGENTS publication",
+                    )
                 _assert_bound_plain_file(
                     staging_scope.container.descriptor,
                     backup_name,
@@ -6020,6 +7016,47 @@ def _migrate_personal_agents_after_canonical_review_sync(
                 )
             staging_scope.completed = True
             return staging_scope.recovery_path
+
+
+def _migrate_personal_agents_after_canonical_review_sync(
+    repo_binding: _PinnedRegularFileOverlayDirectory,
+    rule: SyncRule,
+    locked_source: _LockedRuleSource,
+    installed_migration_receipt: _CanonicalReviewInstalledMigrationReceipt,
+) -> Path | None:
+    if installed_migration_receipt.expected_target != (
+        repo_binding.path / CANONICAL_REVIEW_TARGET
+    ):
+        raise SyncError(
+            "canonical review migration installed receipt targets another tree"
+        )
+    _revalidate_complete_checkout_verification(
+        locked_source.prewrite_checkout_verification
+    )
+    _assert_canonical_review_installed_migration_receipt(
+        installed_migration_receipt,
+        rule,
+        locked_source,
+        label="pre-AGENTS exact target",
+    )
+    _assert_regular_file_overlay_directory_binding(
+        repo_binding,
+        label="canonical review migration repository root",
+    )
+    recovery_path = _migrate_personal_agents_guidance(
+        repo_binding,
+        installed_receipt=installed_migration_receipt.installed_receipt,
+    )
+    _assert_canonical_review_installed_migration_receipt(
+        installed_migration_receipt,
+        rule,
+        locked_source,
+        label="post-AGENTS exact target",
+    )
+    _revalidate_complete_checkout_verification(
+        locked_source.prewrite_checkout_verification
+    )
+    return recovery_path
 
 
 def _install_locked_plain_file(
@@ -6169,6 +7206,10 @@ def _sync_sources_with_repo_binding(
             None
             if locked_sources is None
             else locked_sources.get((rule.repo, rule.source))
+        )
+        migrate_personal_agents = _canonical_review_personal_agents_migration_required(
+            rule,
+            locked_source,
         )
         if not source.exists():
             raise SyncError(f"sync source missing for {rule.repo}: {source}")
@@ -6330,7 +7371,13 @@ def _sync_sources_with_repo_binding(
                                 prepared_source_manifest,
                                 label="retained external prepared source",
                             )
-                            recovery_path = _replace_target_with_regular_file_overlays(
+                            if migrate_personal_agents:
+                                _revalidate_complete_checkout_verification(
+                                    locked_source.prewrite_checkout_verification
+                                    if locked_source is not None
+                                    else None
+                                )
+                            install_result = _replace_target_with_regular_file_overlays(
                                 target,
                                 staging,
                                 bindings,
@@ -6338,8 +7385,43 @@ def _sync_sources_with_repo_binding(
                                 candidate_root=candidate.root,
                                 candidate_manifest=candidate.manifest,
                             )
-                    if recovery_path is not None:
-                        recovery_paths.append(recovery_path)
+                            agents_recovery_path = None
+                            if migrate_personal_agents:
+                                if not (
+                                    _canonical_review_personal_agents_migration_required(
+                                        rule,
+                                        locked_source,
+                                    )
+                                ):
+                                    raise SyncError(
+                                        "canonical review migration receipt changed "
+                                        "after tree install"
+                                    )
+                                if locked_source is None:
+                                    raise SyncError(
+                                        "canonical review locked source disappeared "
+                                        "after tree install"
+                                    )
+                                installed_migration_receipt = (
+                                    _bind_canonical_review_installed_migration_receipt(
+                                        rule,
+                                        locked_source,
+                                        target,
+                                        prepared_source_manifest,
+                                        candidate.manifest,
+                                        install_result.installed_receipt,
+                                    )
+                                )
+                                agents_recovery_path = _migrate_personal_agents_after_canonical_review_sync(
+                                    repo_binding,
+                                    rule,
+                                    locked_source,
+                                    installed_migration_receipt,
+                                )
+                    if install_result.recovery_path is not None:
+                        recovery_paths.append(install_result.recovery_path)
+                    if agents_recovery_path is not None:
+                        recovery_paths.append(agents_recovery_path)
                     recovery_paths.append(prepared_directory)
                 except BaseException as primary_error:
                     detail = f"external prepared tree retained at {prepared_directory}"
@@ -6355,14 +7437,6 @@ def _sync_sources_with_repo_binding(
                     else:
                         _attach_base_exception_detail(primary_error, detail)
                     raise
-            if _is_authoritative_canonical_review_rule(rule):
-                recovery_path = (
-                    _migrate_personal_agents_after_canonical_review_sync(
-                        repo_binding
-                    )
-                )
-                if recovery_path is not None:
-                    recovery_paths.append(recovery_path)
             continue
 
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -6399,6 +7473,29 @@ def sync_sources(
         expected_keys = {(rule.repo, rule.source) for rule in rules}
         if set(locked_sources) != expected_keys:
             raise SyncError("locked source manifests do not match the sync rules")
+        checkout_verifications = {
+            id(locked_source.prewrite_checkout_verification): (
+                locked_source.prewrite_checkout_verification
+            )
+            for locked_source in locked_sources.values()
+        }
+        if None in checkout_verifications.values():
+            raise SyncError(
+                "locked source is missing its prewrite checkout verification"
+            )
+        for verification in checkout_verifications.values():
+            _revalidate_complete_checkout_verification(verification)
+    for rule in rules:
+        locked_source = (
+            None
+            if locked_sources is None
+            else locked_sources.get((rule.repo, rule.source))
+        )
+        _canonical_review_personal_agents_migration_required(
+            rule,
+            locked_source,
+        )
+    if locked_sources is not None:
         with contextlib.ExitStack() as stack:
             repo_binding = _pin_regular_file_overlay_directory(
                 stack,
@@ -6423,14 +7520,12 @@ def sync_sources(
     plain_rules = tuple(
         rule
         for rule in rules
-        if not rule.regular_file_overlays
-        and rule.target != PRIVATE_BUG_TRIAGE_TARGET
+        if not rule.regular_file_overlays and rule.target != PRIVATE_BUG_TRIAGE_TARGET
     )
     secure_rules = tuple(
         rule
         for rule in rules
-        if rule.regular_file_overlays
-        or rule.target == PRIVATE_BUG_TRIAGE_TARGET
+        if rule.regular_file_overlays or rule.target == PRIVATE_BUG_TRIAGE_TARGET
     )
     recovery_paths = _sync_sources_with_repo_binding(
         repo_root,
@@ -6484,7 +7579,12 @@ def main(argv: list[str] | None = None) -> int:
     try:
         source_lock = source_lock_module.load_source_lock(repo_root)
         source_lock_module.validate_base_release_binding(repo_root, source_lock)
-        source_lock_module.verify_checkouts(source_root, source_lock)
+        initial_checkout_verification = _verify_complete_checkouts(
+            source_lock_module,
+            source_root,
+            source_lock,
+            repo_root=repo_root,
+        )
         source_lock_module.validate_generated_provenance(
             repo_root,
             source_lock,
@@ -6503,28 +7603,67 @@ def main(argv: list[str] | None = None) -> int:
                     f"duplicate locked sync source: {rule.repo}:{rule.source}"
                 )
             checkout = source_root / rule.repo
+            manifest = source_lock_module.load_locked_source_manifest(
+                checkout,
+                pin.sha,
+                rule.source,
+                exclude_names=tuple(
+                    sorted(EXCLUDED_NAMES | frozenset(rule.exclude_names))
+                ),
+                exclude_suffixes=EXCLUDED_SUFFIXES,
+            )
+            source_pin = None
+            migration_receipt = None
+            if _is_authoritative_canonical_review_rule(rule):
+                source_pin, migration_receipt = _bind_canonical_review_migration_source(
+                    source_lock_module,
+                    checkout,
+                    pin,
+                    manifest,
+                    rule,
+                    complete_checkout_verification=(initial_checkout_verification),
+                )
             locked_sources[key] = _LockedRuleSource(
                 checkout=checkout,
-                manifest=source_lock_module.load_locked_source_manifest(
-                    checkout,
-                    pin.sha,
-                    rule.source,
-                    exclude_names=tuple(
-                        sorted(EXCLUDED_NAMES | frozenset(rule.exclude_names))
-                    ),
-                    exclude_suffixes=EXCLUDED_SUFFIXES,
-                ),
+                manifest=manifest,
                 read_blob=source_lock_module.read_locked_source_blob,
+                source_pin=source_pin,
+                canonical_review_migration_receipt=migration_receipt,
             )
+        prewrite_checkout_verification = _verify_complete_checkouts(
+            source_lock_module,
+            source_root,
+            source_lock,
+            repo_root=repo_root,
+        )
+        _assert_matching_checkout_verification_scope(
+            initial_checkout_verification,
+            prewrite_checkout_verification,
+        )
+        locked_sources = {
+            key: _LockedRuleSource(
+                checkout=locked_source.checkout,
+                manifest=locked_source.manifest,
+                read_blob=locked_source.read_blob,
+                source_pin=locked_source.source_pin,
+                canonical_review_migration_receipt=(
+                    locked_source.canonical_review_migration_receipt
+                ),
+                prewrite_checkout_verification=prewrite_checkout_verification,
+            )
+            for key, locked_source in locked_sources.items()
+        }
         recovery_paths = sync_sources(
             repo_root,
             source_root,
             locked_sources=locked_sources,
         )
-        source_lock_module.verify_checkouts(
+        _verify_complete_checkouts(
+            source_lock_module,
             source_root,
             source_lock,
             repo_root=repo_root,
+            validate_generated_provenance=True,
         )
     except (SyncError, source_lock_module.SourceLockError) as error:
         print(f"error: {error}", file=sys.stderr)

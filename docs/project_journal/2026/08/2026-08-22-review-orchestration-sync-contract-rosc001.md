@@ -93,16 +93,72 @@ superseded_by:
   duplicated, half-migrated, or locally drifted states fail closed instead of
   being guessed or repaired piecemeal.
 - Migration is triggered only by the exact authoritative canonical review sync
-  rule. The descriptor-bound new review tree is committed first; only then is
-  one owner-owned, single-link, mode-0644 `AGENTS.md` candidate written and
-  flushed. The prior file is revalidated, moved with no-replace semantics into
-  an owner-private recovery scope, and revalidated again before the candidate
-  is published with a second no-replace rename. The exact prior bytes remain a
-  recovery artifact after success. A failure can therefore leave a recoverable
-  “new tree plus retained legacy guidance” state, never “old tree plus compact
-  guidance,” and never overwrites a same-UID concurrent target replacement. A
-  current state is an inode-stable no-op with a final exact binding/content
-  revalidation after classification.
+  rule and an immutable candidate/trees proof. Runtime policy binds reviewed
+  candidate revision `cd5ccd2ddd2a0975db6c5286765d4aab838bc736`, its
+  bounded raw commit payload, the approved repository tree
+  `aef4bef7a45adab762a1b671da48fbc2d1f44064` and approved review subtree
+  `6dab70713244598e3aaaa132eb082211b348bcdf`. Runtime recomputes the Git commit
+  object ID from the payload to prove candidate `C`, parses its exact `tree T`,
+  and, for nonlegacy activation, resolves the exact live or selected
+  root-`T` ancestor revision's `skills/review-orchestration-playbook` path to
+  prove `ST`. This is an offline immutable proof of `C -> T`; a post-squash
+  checkout need not retain the candidate commit object itself. The exact legacy
+  source pair continues to sync without migrating guidance even when candidate
+  `C` and root tree `T` are unreachable and pruned; it still rejects a malformed
+  or tampered offline `C -> T` proof. Activation requires either the approved
+  repository tree itself or a locally complete, bounded ancestry that contains
+  that tree while the live review subtree remains exact. The live source-lock
+  SHA/tree, checkout, and manifest subtree are bound into receipts before any
+  sync write; unknown, incomplete, non-descendant, missing/tampered candidate
+  proof, or subtree-drifted sources fail closed.
+- Checkout verification is a point-in-time proof of the exact immutable Git
+  identities and local completeness. A sealed structured receipt replaces the
+  former boolean and binds the live source-lock digest/pins, source-root,
+  checkout, `.git`, and object-directory identities, detached `HEAD` and local
+  config file identity/content/access policy, exact HEAD/tree, and the complete
+  source-safety contract. Each receipt is captured across two full verification
+  passes; the live source lock is reloaded before and after. Fresh receipts run
+  after manifest/receipt construction, again inside `sync_sources` before its
+  first write, and around the canonical install/AGENTS gate. Object deletion,
+  checkout replacement, same-inode config mutation, or source-lock drift in
+  those intervals is therefore rejected before the corresponding gate.
+- After source activation, the descriptor-bound new review tree is committed
+  first. A sealed install-migration receipt then binds the exact source
+  migration receipt, prepared source manifest, final candidate manifest,
+  pinned target parent/basename, installed root identity, and held descriptor;
+  only then is one owner-owned, single-link, mode-0644 `AGENTS.md`
+  candidate written and flushed. The prior file is revalidated, moved with
+  no-replace semantics into an owner-private recovery scope, and revalidated
+  again before the candidate is published with a second no-replace rename. The
+  exact prior bytes remain a recovery artifact after success. The installed
+  root descriptor, pinned parent, root identity, and exact candidate manifest
+  remain live through migration and are revalidated immediately before and
+  after AGENTS publication, including a final check directly before the second
+  no-replace rename that publishes compact guidance. A root replacement,
+  same-inode content mutation,
+  forged installed manifest, or source/target receipt mismatch injected after
+  tree install returns but before migration is rejected before AGENTS changes.
+  These checks
+  provide parent-controlled sequencing and bounded detection, not an atomic
+  cross-path invariant against an active same-UID mutation between two system
+  calls; a post-check failure can require recovery from the retained exact prior
+  guidance. A current state is an inode-stable no-op with a final exact
+  binding/content revalidation after classification.
+- Personal-guidance revalidation protects three properties explicitly: object
+  identity (`dev`, `ino`, and file type), content (bounded bytes, size, and
+  digest), and access policy (`uid`, exact mode, and link count). Timestamp
+  changes are hints that cause exactly one same-descriptor semantic reread and
+  pathname revalidation; they are not mutation evidence. Missing paths,
+  unreadable paths, other revalidation failures, and observed property
+  mismatches remain distinct outcomes.
+- Bare triple review authorizes one exact `@codex review` producer operation
+  and the skill's single-owner, single-flight ambiguous-delivery recovery by
+  repeating that exact POST for the same logical request. It does not authorize
+  GitHub Actions mutation. An Actions rerun,
+  dispatch, or reconciliation requires both repository-predeclared exact
+  frozen-scope idempotent/reentrant inputs and separate current-task delivery or
+  readiness authorization; branch, PR metadata, scope, and unrelated mutations
+  remain outside that authority.
 - The seven-repository default gate is intentionally absent from global
   personal guidance. Its scoped mother-repository `AGENTS.md` change is now on
   the default branch through `Joey-Tools/codex-workspace#12`; a child
@@ -114,29 +170,65 @@ superseded_by:
 1. Merge the independent `codex-workspace` mother-repository `AGENTS.md`
    change so the scoped seven-repository gate is present on the default
    branch.
-2. Merge the canonical `codex-review-workflows` PR that completes
-   `20260822-ros001`.
-3. Refresh this companion branch against the resulting canonical identity,
-   run focused and repository validation, and merge this private sync-contract
-   PR.
-4. Complete the private-overlay release for this companion commit so the
-   default branch has the updated sync engine and inventory contract.
-5. Only then force `scheduled-sync-release.yml`. Merge the generated source
+2. Merge this private sync-contract PR and complete its private-overlay release.
+   While the source lock remains on the exact legacy pair, sync continues to
+   install the legacy tree and keeps the legacy global guidance.
+3. Merge the canonical `codex-review-workflows` PR that completes
+   `20260822-ros001`. A same-tree squash commit is accepted without predicting
+   its future SHA.
+4. Force `scheduled-sync-release.yml`. Merge the generated source
    lock and overlay update after it proves the new canonical inventory and the
    private synthetic-token overlay.
-6. Confirm the post-sync default-branch private release, run the local
+5. Confirm the post-sync default-branch private release, run the local
    installer, and verify that the active review skill, reviewer role, and
    workspace helper come from that release.
 
-This ordering avoids asking the old private sync engine to interpret the new
-canonical layout and prevents generated overlay files from being edited by
-hand in this companion PR.
+This ordering installs the transition-aware private sync engine before the
+canonical squash can be selected, while the exact legacy pair keeps the old
+tree and guidance compatible until activation. Generated overlay files remain
+source-sync owned and are not edited by hand in this companion PR.
+
+If the canonical base moves, the final squash root can change without retaining
+the old approved root in its ancestry; matching only the review subtree is not
+sufficient. In that case rerun the Q44 merge-base and full delivery gate, derive
+the new approved root/subtree anchors, merge and release that companion anchor
+refresh, and only then squash the canonical PR. A final merge commit whose
+bounded ancestry contains the approved root remains eligible without a refresh.
+
+## Post-audit Migration Gate Remediation
+
+- A clean-context companion audit identified four fail-closed gaps: `C` was
+  journal-only provenance, installed-target identity was not explicitly coupled
+  to the source migration receipt, checkout completeness could outlive its
+  point-in-time proof, and base-move squash behavior lacked an explicit operator
+  result.
+- The candidate payload proof now survives an unreachable or pruned candidate
+  commit while still proving the exact reviewed `C/T/ST` relation. Missing,
+  malformed, tampered, wrong-C, wrong-T, and wrong-ST proofs fail before sync.
+- Live admission remains intentionally narrow: exact root `T`, or a bounded
+  full-DAG ancestry containing a commit with root `T`; unchanged `ST` alone is
+  never sufficient. Exact/ancestry classification precedes the `T -> ST` path
+  read, so a base-move squash whose clone has already pruned old `T` still
+  reports stable `anchor-refresh-required` rather than a raw missing-object
+  error. A legitimate merge commit that retains `T` in its ancestry remains
+  accepted.
+- The canonical delivery freeze selected signed candidate
+  `cd5ccd2ddd2a0975db6c5286765d4aab838bc736`, root tree
+  `aef4bef7a45adab762a1b671da48fbc2d1f44064`, and review subtree
+  `6dab70713244598e3aaaa132eb082211b348bcdf`. The companion stores that exact
+  commit object's 856 raw payload bytes as strict Base64; runtime recomputation
+  binds the payload back to the frozen candidate before any migration write.
+- Final focused validation counts are recorded after the post-audit fixes in
+  the Evidence section. The broader repository suite remains parent-owned final
+  delivery evidence and is not inferred from these focused runs.
 
 ## Current State
 
 - The companion implementation now stages global personal routing safely: the
   tracked file matches the exact legacy source pin, while the sync contract and
-  focused tests own the automatic final migration after canonical source sync.
+  focused tests own the source-identity-gated final migration after canonical
+  source sync. The companion may therefore merge and release before the
+  canonical squash without activating compact guidance early.
 - Cross-repository ownership is complete: `Joey-Tools/codex-workspace#12`
   squash-merged the scoped `AGENTS.md` rule as
   `1c3b9c9662ef8c3ed5ddad2c3e272fb6a0eec526`.
@@ -162,8 +254,8 @@ hand in this companion PR.
 
 ## Next Steps
 
-- Complete the canonical merge, then execute the remaining release sequence
-  above.
+- Merge and release this transition-aware companion, then complete the
+  canonical squash and execute the generated-sync activation sequence above.
 
 ## Evidence
 
@@ -181,10 +273,30 @@ hand in this companion PR.
 - Canonical target-content validation against the current `20260822-ros001`
   worktree, including the three new focused contract tests (pass)
 - Transition-focused tests cover locked and unlocked authoritative sync,
+  legacy no-migration, approved same-tree squash, bounded merge descendants,
+  base-move anchor refresh, non-descendants, wrong SHA/tree, changed subtrees,
+  missing ancestry objects, sealed checkout proof, second-verification object
+  deletion and checkout replacement before all writes,
   tree-before-guidance ordering, exact-state failure, validation-before-
-  migration, unrelated-rule isolation, inode-stable idempotence, concurrent
+  migration, installed-root replacement and content mutation before guidance,
+  successful install-validation/publication/revalidation ordering,
+  unrelated-rule isolation, inode-stable idempotence, concurrent
   target replacement inside the publication primitive, current-state no-op
   drift, failed publication, and retry (pass).
+- Post-audit migration-gate validation ran the source-lock and source-sync
+  modules together: 350 tests passed in 54.734 seconds with one conditional
+  skip. This includes pruned offline candidate/root proof, explicit
+  `anchor-refresh-required`, structured safety-state drift, exact installed
+  manifest/identity coupling, and final-prepublication tree-drift regressions.
+- The final fresh read-only migration-gate audit reported `No findings.` after
+  the legacy unreachable-tree and base-move missing-tree ordering fixes.
+- Property-scoped migration tests cover timestamp-only `utime`, a synthetic
+  materialization hint, bounded persistent timestamp churn, content mutation,
+  inode replacement, uid/mode/link-count drift, and distinct missing,
+  unreadable, and failed pathname revalidation outcomes (pass).
+- Cross-policy guidance assertions bind same-logical-request ambiguous-delivery
+  recovery, the absence of bare-review Actions authority, and the required
+  repository-policy plus current-task authorization gates (pass).
 - The previously failing pinned canonical contract test
   `test_canonical_claude_auth_control_plane_is_not_helper_broker` passes with
   the exact legacy pre-sync guidance restored.
@@ -192,9 +304,9 @@ hand in this companion PR.
 - `ruff 0.13.2 check scripts/sync_private_overlay_sources.py
   tests/test_private_overlay_sync.py` (pass)
 - `$project-journal` `validate` for the companion repository (pass)
-- `python3 -B -m unittest -q tests.test_private_overlay_sync` (`271` tests)
+- `python3 -B -m unittest -q tests.test_private_overlay_sync` (`298` tests)
 - `PYTHONDONTWRITEBYTECODE=1 python3 -B -m unittest discover -s tests -p
-  'test_*.py' -q` (`1,983` tests, `4` conditional skips)
+  'test_*.py' -q` (`2,005` tests, `4` conditional skips)
 - `PYTHONDONTWRITEBYTECODE=1 python3 -B -m unittest discover -s
   personal_codex/skills/review-orchestration-playbook/tests -p 'test_*.py' -q`
   (`2,965` tests: `2,949` pass, `15` conditional skips, one restricted-host

