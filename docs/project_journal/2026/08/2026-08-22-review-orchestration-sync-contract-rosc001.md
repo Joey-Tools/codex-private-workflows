@@ -5,7 +5,7 @@ status: active
 created: 2026-08-22
 updated: 2026-08-24
 branch: wip/review-orchestration-sync-contract
-pr:
+pr: https://github.com/Joey-Tools/codex-private-workflows/pull/177
 supersedes: []
 superseded_by:
 ---
