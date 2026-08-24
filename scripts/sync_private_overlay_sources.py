@@ -673,67 +673,6 @@ SYNC_RULES = (
         "codex-review-workflows",
         "skills/review-orchestration-playbook",
         "personal_codex/skills/review-orchestration-playbook",
-        (
-            Replacement(
-                "TOOL_REL=skills/review-orchestration-playbook/scripts/",
-                "TOOL_REL=personal_codex/skills/review-orchestration-playbook/scripts/",
-            ),
-            Replacement(
-                "`not-proved`, makes request policy unknown, and cannot be bypassed by an\n"
-                "independently trustworthy publication receipt. A future predeclared provider\n"
-                "profile with provider-authenticated input-base or request/run/artifact binding\n"
-                "may change this policy explicitly; the current accepted terminal-binding schema\n"
-                "set is empty.",
-                "`not-proved` and makes request policy unknown. An independently trustworthy\n"
-                "publication receipt may still support artifact-level terminal classification,\n"
-                "including blocking negative findings, but it cannot bypass the sidecar failure\n"
-                "to authorize triple completion or merge readiness. A future predeclared\n"
-                "provider profile with provider-authenticated input-base or\n"
-                "request/run/artifact binding may change this policy explicitly; the current\n"
-                "accepted terminal-binding schema set is empty.",
-                path=Path("references/github-pr-probes.md"),
-                required_count=1,
-            ),
-            Replacement(
-                "`scope_assurance: artifact-publication-only` and\n"
-                "`whole_pr_completion_action: audit-only-no-merge-ready`; receipt-bound terminal\n"
-                "findings supplies only blocking negative evidence with\n"
-                "`whole_pr_completion_action: block-and-report-no-whole-pr-completion`. Neither",
-                "`scope_assurance: artifact-publication-only` and\n"
-                "`clean_action: audit-only-no-merge-ready`; receipt-bound terminal\n"
-                "findings supplies only blocking negative evidence with\n"
-                "`negative_evidence_action: block-and-report-no-whole-pr-completion`. The\n"
-                "machine-readable `whole_pr_completion_action` remains\n"
-                "`triple-inconclusive` for both outcomes. Neither",
-                path=Path("references/github-pr-probes.md"),
-                required_count=1,
-            ),
-            Replacement(
-                "        self.assertIn(\n"
-                "            \"`whole_pr_completion_action: audit-only-no-merge-ready`\",\n"
-                "            normalized_probes,\n"
-                "        )\n"
-                "        self.assertIn(\n"
-                "            \"`whole_pr_completion_action: block-and-report-no-whole-pr-completion`\",\n"
-                "            normalized_probes,\n"
-                "        )",
-                "        self.assertIn(\n"
-                "            \"`clean_action: audit-only-no-merge-ready`\",\n"
-                "            normalized_probes,\n"
-                "        )\n"
-                "        self.assertIn(\n"
-                "            \"`negative_evidence_action: \"\n"
-                "            \"block-and-report-no-whole-pr-completion`\",\n"
-                "            normalized_probes,\n"
-                "        )\n"
-                "        self.assertIn(\n"
-                "            \"`whole_pr_completion_action` remains `triple-inconclusive`\",\n"
-                "            normalized_probes,\n"
-                "        )",
-                path=Path("tests/test_contracts.py"),
-                required_count=1,
-            ),
-        ),
         common_joey_text=True,
         replacement_excluded_paths=("tests/fixtures/ci/private.yml",),
         regular_file_overlays=(
@@ -774,8 +713,6 @@ INDEPENDENT_CODEX_REVIEW_REQUIRED_FILES = tuple(
     for path in (
         ".gitignore",
         "ACCOUNT_LOCAL_RETENTION_V1",
-        "README.md",
-        "independent-codex-pr-review",
         "review_supervisor/__init__.py",
         "review_supervisor/appserver_protocol.py",
         "review_supervisor/appserver_runtime.py",
@@ -810,6 +747,7 @@ INDEPENDENT_CODEX_REVIEW_REQUIRED_FILES = tuple(
         "review_supervisor/wire.py",
         "tests/__init__.py",
         "tests/async_fd_custody.py",
+        "tests/internal_supervisor_child_fixture.py",
         "tests/readonly_child_isolation.sb",
         "tests/readonly_no_child_contract.py",
         "tests/run_hosted_no_child_fail_closed.py",
@@ -866,17 +804,19 @@ CANONICAL_REVIEW_REQUIRED_FILES = tuple(
     for path in (
         "SKILL.md",
         "agents/openai.yaml",
-        "references/base-only-retarget-state-machine.json",
         "references/canonical-claude-lane.md",
         "references/cbth-agent-delivery.md",
         "references/claude-2.1.212-stream-schema.json",
-        "references/helper-contract.md",
         "references/claude-runtime-trust.md",
         "references/claude-stream-compatibility.json",
         "references/claude-stream-schema.json",
         "references/egress-consent.md",
+        "references/github-codex-evidence-authority.md",
+        "references/github-codex-terminal-carriers-v1.json",
         "references/github-pr-probes.md",
+        "references/local-codex-lane.md",
         "references/pr-readiness.md",
+        "references/review-workspace.md",
         "references/review-lane-contracts.md",
         "references/review-prompt-templates.md",
         "references/synthetic-token-fixtures.md",
@@ -906,6 +846,7 @@ CANONICAL_REVIEW_REQUIRED_FILES = tuple(
         "scripts/review_runtime/prompt.py",
         "scripts/review_runtime/providers.py",
         "scripts/review_runtime/review_result.py",
+        "scripts/review_runtime/review_workspace.py",
         "scripts/review_runtime/state.py",
         "scripts/review_runtime/synthetic-token-catalog.json",
         "scripts/review_runtime/synthetic_tokens.py",
@@ -922,12 +863,17 @@ CANONICAL_REVIEW_REQUIRED_FILES = tuple(
         "tests/fixtures/ci/private.yml",
         "tests/fixtures/compat/codex-review-gate.yml",
         "tests/test_fd_exec.py",
+        "tests/test_github_recovery_contracts.py",
+        "tests/test_github_terminal_carriers.py",
+        "tests/test_local_codex_lane_contracts.py",
         "tests/test_named_claude_preflight.py",
         "tests/test_named_lane.py",
         "tests/test_providers.py",
         "tests/test_review_result.py",
+        "tests/test_review_workspace.py",
         "tests/test_state.py",
         "tests/test_synthetic_tokens.py",
+        "tests/test_trusted_mac_gate_manifest.py",
         "tests/test_validate_claude_stream.py",
         "tests/test_workspace.py",
     )

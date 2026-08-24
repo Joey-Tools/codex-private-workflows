@@ -35,6 +35,47 @@ REVIEW_RUNTIME_ROOT = (
     / "scripts"
     / "review_runtime"
 )
+LEGACY_REVIEW_SOURCE_PIN = (
+    "c8df0f5d17e93a7b22d5fe5294baf9884ab2ba51",
+    "e4081b640384cd885783637fa5aad8d21d4499d5",
+)
+FINAL_REVIEW_REQUIRED_ADDITIONS = frozenset(
+    {
+        Path("references/github-codex-terminal-carriers-v1.json"),
+        Path("tests/test_github_recovery_contracts.py"),
+        Path("tests/test_github_terminal_carriers.py"),
+        Path("tests/test_local_codex_lane_contracts.py"),
+        Path("tests/test_trusted_mac_gate_manifest.py"),
+        Path(
+            "scripts/independent_codex_pr_review/"
+            "tests/internal_supervisor_child_fixture.py"
+        ),
+    }
+)
+
+
+def _legacy_live_review_overlay_missing_allowance(
+    source_lock: object,
+) -> frozenset[Path]:
+    if not isinstance(source_lock, dict):
+        return frozenset()
+    sources = source_lock.get("sources")
+    if not isinstance(sources, list):
+        return frozenset()
+    matches = [
+        source
+        for source in sources
+        if isinstance(source, dict)
+        and source.get("name") == "codex-review-workflows"
+    ]
+    if len(matches) != 1:
+        return frozenset()
+    source = matches[0]
+    if source.get("repository") != "Joey-Tools/codex-review-workflows":
+        return frozenset()
+    if (source.get("sha"), source.get("tree")) != LEGACY_REVIEW_SOURCE_PIN:
+        return frozenset()
+    return FINAL_REVIEW_REQUIRED_ADDITIONS
 
 
 def load_module(name: str, path: Path):
@@ -961,7 +1002,7 @@ class PrivateOverlaySyncTests(unittest.TestCase):
             }.issubset(toolbox_rules)
         )
 
-    def test_review_sync_preserves_private_ci_fixture_replacement_bytes(
+    def test_review_sync_preserves_private_ci_fixture_and_personalization(
         self,
     ) -> None:
         fixture_relative = Path("tests/fixtures/ci/private.yml")
@@ -985,41 +1026,8 @@ class PrivateOverlaySyncTests(unittest.TestCase):
             path = source / relative
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text("public\n", encoding="utf-8")
-        canonical_tool_prefix = "TOOL_REL=skills/review-orchestration-playbook/scripts/"
-        contract_relative = Path("tests/test_contracts.py")
-        contract_replacements = tuple(
-            replacement
-            for replacement in review_rule.replacements
-            if replacement.path == contract_relative
-        )
-        self.assertEqual(len(contract_replacements), 1)
-        for relative in (
-            Path("references/pr-readiness.md"),
-        ):
-            (source / relative).write_text(
-                f"{canonical_tool_prefix}independent_codex_pr_review\n",
-                encoding="utf-8",
-            )
-        (source / contract_relative).write_text(
-            f"{canonical_tool_prefix}independent_codex_pr_review\n"
-            + contract_replacements[0].old
-            + "\n",
-            encoding="utf-8",
-        )
         (source / "SKILL.md").write_text(
             "Use this when the user asks.\n",
-            encoding="utf-8",
-        )
-        probe_relative = Path("references/github-pr-probes.md")
-        probe_replacements = tuple(
-            replacement
-            for replacement in review_rule.replacements
-            if replacement.path == probe_relative
-        )
-        self.assertEqual(len(probe_replacements), 2)
-        (source / probe_relative).write_text(
-            "\n\n".join(replacement.old for replacement in probe_replacements)
-            + "\n",
             encoding="utf-8",
         )
         fixture_payload = (
@@ -1047,15 +1055,6 @@ class PrivateOverlaySyncTests(unittest.TestCase):
             synced_skill.read_text(encoding="utf-8"),
             "Use this when Joey asks.\n",
         )
-        synced_probe = self.repo_root / review_rule.target / probe_relative
-        synced_probe_text = synced_probe.read_text(encoding="utf-8")
-        for replacement in probe_replacements:
-            self.assertNotIn(replacement.old, synced_probe_text)
-            self.assertIn(replacement.new, synced_probe_text)
-        synced_contracts = self.repo_root / review_rule.target / contract_relative
-        synced_contracts_text = synced_contracts.read_text(encoding="utf-8")
-        self.assertNotIn(contract_replacements[0].old, synced_contracts_text)
-        self.assertIn(contract_replacements[0].new, synced_contracts_text)
 
     def test_validator_sync_rule_replaces_legacy_mutable_release_identity(
         self,
@@ -1168,15 +1167,21 @@ class PrivateOverlaySyncTests(unittest.TestCase):
         self,
     ) -> None:
         policy_required_files = (
-            Path("references/base-only-retarget-state-machine.json"),
             Path("references/canonical-claude-lane.md"),
             Path("references/claude-2.1.212-stream-schema.json"),
             Path("references/claude-stream-compatibility.json"),
             Path("references/claude-stream-schema.json"),
+            Path("references/github-codex-evidence-authority.md"),
+            Path("references/github-codex-terminal-carriers-v1.json"),
+            Path("references/local-codex-lane.md"),
+            Path("references/review-workspace.md"),
             Path("scripts/build_claude_keychain_broker_macos.sh"),
             Path("scripts/install_claude_keychain_broker_macos.sh"),
-            Path("scripts/independent_codex_pr_review/independent-codex-pr-review"),
             Path("scripts/independent_codex_pr_review/review_supervisor/supervisor.py"),
+            Path(
+                "scripts/independent_codex_pr_review/"
+                "tests/internal_supervisor_child_fixture.py"
+            ),
             Path(
                 "scripts/independent_codex_pr_review/"
                 "tests/run_required_no_child_profile.py"
@@ -1191,14 +1196,20 @@ class PrivateOverlaySyncTests(unittest.TestCase):
             Path("scripts/review_runtime/named_lane.py"),
             Path("scripts/review_runtime/claude_refresh_lock.py"),
             Path("scripts/review_runtime/review_result.py"),
+            Path("scripts/review_runtime/review_workspace.py"),
             Path("scripts/validate_claude_stream.py"),
             Path("tests/fixtures/compat/codex-review-gate.yml"),
             Path("tests/test_fd_exec.py"),
+            Path("tests/test_github_recovery_contracts.py"),
+            Path("tests/test_github_terminal_carriers.py"),
+            Path("tests/test_local_codex_lane_contracts.py"),
             Path("tests/test_claude_refresh_lock.py"),
             Path("tests/test_named_claude_preflight.py"),
             Path("tests/test_named_lane.py"),
             Path("tests/test_review_result.py"),
+            Path("tests/test_review_workspace.py"),
             Path("tests/test_installer.py"),
+            Path("tests/test_trusted_mac_gate_manifest.py"),
             Path("tests/test_validate_claude_stream.py"),
         )
         self.assertTrue(
@@ -1206,6 +1217,20 @@ class PrivateOverlaySyncTests(unittest.TestCase):
                 set(SYNC_MODULE.CANONICAL_REVIEW_REQUIRED_FILES)
             )
         )
+        self.assertNotIn(
+            Path("references/base-only-retarget-state-machine.json"),
+            SYNC_MODULE.CANONICAL_REVIEW_REQUIRED_FILES,
+        )
+        for retired_public_surface in (
+            Path("references/helper-contract.md"),
+            Path("scripts/independent_codex_pr_review/README.md"),
+            Path("scripts/independent_codex_pr_review/independent-codex-pr-review"),
+        ):
+            with self.subTest(retired_public_surface=retired_public_surface):
+                self.assertNotIn(
+                    retired_public_surface,
+                    SYNC_MODULE.CANONICAL_REVIEW_REQUIRED_FILES,
+                )
         complete_required_files = set(
             SYNC_MODULE.CANONICAL_REVIEW_REQUIRED_FILES
         ) | set(policy_required_files)
@@ -1226,33 +1251,55 @@ class PrivateOverlaySyncTests(unittest.TestCase):
                 ):
                     SYNC_MODULE._validate_canonical_review_target_contents(target)
 
-    def test_private_review_sync_rewrites_trusted_mac_gate_path(self) -> None:
-        review_root = REPO_ROOT / SYNC_MODULE.CANONICAL_REVIEW_TARGET
-        private_prefix = (
-            "TOOL_REL=personal_codex/skills/review-orchestration-playbook/scripts/"
-        )
-        canonical_prefix = "TOOL_REL=skills/review-orchestration-playbook/scripts/"
-
-        for relative in (
-            Path("references/pr-readiness.md"),
-            Path("tests/test_contracts.py"),
-        ):
-            with self.subTest(relative=relative):
-                text = (review_root / relative).read_text(encoding="utf-8")
-                self.assertIn(private_prefix, text)
-                self.assertNotIn(canonical_prefix, text)
-
     def test_independent_supervisor_sync_uses_exact_file_inventory(self) -> None:
         review_root = REPO_ROOT / SYNC_MODULE.CANONICAL_REVIEW_TARGET
         supervisor_root = review_root / SYNC_MODULE.INDEPENDENT_CODEX_REVIEW_ROOT
+        source_lock = json.loads(
+            (REPO_ROOT / "private-overlay-source-lock.json").read_text(encoding="utf-8")
+        )
+        transitional_missing = _legacy_live_review_overlay_missing_allowance(
+            source_lock
+        )
+        retired_public_entrypoints = {
+            Path("README.md"),
+            Path("independent-codex-pr-review"),
+        }
+        internal_child_fixture = Path("tests/internal_supervisor_child_fixture.py")
         actual = {
             path.relative_to(supervisor_root)
             for path in supervisor_root.rglob("*")
             if path.is_file() and path.name != "__pycache__" and path.suffix != ".pyc"
         }
-        self.assertEqual(
-            set(SYNC_MODULE.INDEPENDENT_CODEX_REVIEW_REQUIRED_FILES),
-            actual,
+        self.assertTrue(
+            retired_public_entrypoints.isdisjoint(
+                SYNC_MODULE.INDEPENDENT_CODEX_REVIEW_REQUIRED_FILES
+            )
+        )
+        required = set(SYNC_MODULE.INDEPENDENT_CODEX_REVIEW_REQUIRED_FILES)
+        normalized_actual = actual - retired_public_entrypoints
+        self.assertIn(internal_child_fixture, required)
+        allowed_supervisor_missing = {
+            relative.relative_to(SYNC_MODULE.INDEPENDENT_CODEX_REVIEW_ROOT)
+            for relative in transitional_missing
+            if relative.is_relative_to(SYNC_MODULE.INDEPENDENT_CODEX_REVIEW_ROOT)
+        }
+        self.assertTrue(
+            (required - normalized_actual).issubset(allowed_supervisor_missing)
+        )
+        self.assertEqual(normalized_actual - required, set())
+        live_missing = {
+            relative
+            for relative in FINAL_REVIEW_REQUIRED_ADDITIONS
+            if not (review_root / relative).is_file()
+        }
+        self.assertTrue(live_missing.issubset(transitional_missing))
+        self.assertIn(
+            Path("review_supervisor/supervisor.py"),
+            SYNC_MODULE.INDEPENDENT_CODEX_REVIEW_REQUIRED_FILES,
+        )
+        self.assertIn(
+            Path("tests/test_supervisor.py"),
+            SYNC_MODULE.INDEPENDENT_CODEX_REVIEW_REQUIRED_FILES,
         )
 
         target = self.repo_root / "canonical-review-exact-inventory"
@@ -1272,6 +1319,91 @@ class PrivateOverlaySyncTests(unittest.TestCase):
             "exact tree inventory mismatch",
         ):
             SYNC_MODULE._validate_canonical_review_target_contents(target)
+
+    def test_live_review_overlay_allowance_requires_exact_old_source_pin(
+        self,
+    ) -> None:
+        old_source = {
+            "name": "codex-review-workflows",
+            "repository": "Joey-Tools/codex-review-workflows",
+            "sha": LEGACY_REVIEW_SOURCE_PIN[0],
+            "tree": LEGACY_REVIEW_SOURCE_PIN[1],
+        }
+        self.assertEqual(
+            _legacy_live_review_overlay_missing_allowance({"sources": [old_source]}),
+            FINAL_REVIEW_REQUIRED_ADDITIONS,
+        )
+
+        cases = {
+            "new-sha": {**old_source, "sha": "a" * 40},
+            "new-tree": {**old_source, "tree": "b" * 40},
+            "wrong-repository": {
+                **old_source,
+                "repository": "Joey-Tools/other-review-workflows",
+            },
+            "wrong-name": {**old_source, "name": "other-review-workflows"},
+        }
+        for name, source in cases.items():
+            with self.subTest(name=name):
+                self.assertEqual(
+                    _legacy_live_review_overlay_missing_allowance(
+                        {"sources": [source]}
+                    ),
+                    frozenset(),
+                )
+        self.assertEqual(
+            _legacy_live_review_overlay_missing_allowance(
+                {"sources": [old_source, dict(old_source)]}
+            ),
+            frozenset(),
+        )
+        self.assertEqual(
+            _legacy_live_review_overlay_missing_allowance(
+                {
+                    "sources": [
+                        old_source,
+                        {
+                            **old_source,
+                            "repository": "Joey-Tools/other-review-workflows",
+                        },
+                    ]
+                }
+            ),
+            frozenset(),
+        )
+
+    def test_review_sync_removes_stale_public_surfaces(self) -> None:
+        rule, target = self._create_canonical_regular_file_overlay_rule()
+        stale_surfaces = (
+            target / SYNC_MODULE.INDEPENDENT_CODEX_REVIEW_ROOT / "README.md",
+            target
+            / SYNC_MODULE.INDEPENDENT_CODEX_REVIEW_ROOT
+            / "independent-codex-pr-review",
+            target / "references/helper-contract.md",
+        )
+        for stale_surface in stale_surfaces:
+            stale_surface.parent.mkdir(parents=True, exist_ok=True)
+            stale_surface.write_text("stale public surface\n", encoding="utf-8")
+
+        SYNC_MODULE.sync_sources(self.repo_root, self.source_root, (rule,))
+
+        for stale_surface in stale_surfaces:
+            with self.subTest(stale_surface=stale_surface.name):
+                self.assertFalse(stale_surface.exists())
+        self.assertTrue(
+            (
+                target
+                / SYNC_MODULE.INDEPENDENT_CODEX_REVIEW_ROOT
+                / "review_supervisor/supervisor.py"
+            ).is_file()
+        )
+        self.assertTrue(
+            (
+                target
+                / SYNC_MODULE.INDEPENDENT_CODEX_REVIEW_ROOT
+                / "tests/test_supervisor.py"
+            ).is_file()
+        )
 
     def test_sync_rejects_ignored_upstream_independent_supervisor_file(
         self,
@@ -7450,7 +7582,9 @@ class PrivateOverlaySyncTests(unittest.TestCase):
         with self.assertRaisesRegex(SYNC_MODULE.SyncError, "exceeds 65536 bytes"):
             SYNC_MODULE.sync_sources(self.repo_root, self.source_root, (rule,))
 
-    def test_review_sync_rule_wholesale_replaces_catalog_bytes(self) -> None:
+    def test_review_sync_rule_keeps_personalization_and_private_catalog(
+        self,
+    ) -> None:
         rule = next(
             rule
             for rule in SYNC_MODULE.SYNC_RULES
@@ -7459,51 +7593,20 @@ class PrivateOverlaySyncTests(unittest.TestCase):
         private_replacements = rule.replacements[
             : -len(SYNC_MODULE.COMMON_JOEY_TEXT_REPLACEMENTS)
         ]
-        self.assertEqual(
-            private_replacements[0],
-            SYNC_MODULE.Replacement(
-                "TOOL_REL=skills/review-orchestration-playbook/scripts/",
-                "TOOL_REL=personal_codex/skills/"
-                "review-orchestration-playbook/scripts/",
-            ),
-        )
-        probe_replacements = tuple(
-            replacement
-            for replacement in private_replacements
-            if replacement.path == Path("references/github-pr-probes.md")
-        )
-        self.assertEqual(len(probe_replacements), 2)
-        self.assertTrue(
-            all(
-                replacement.required and replacement.required_count == 1
-                for replacement in probe_replacements
+        self.assertEqual(private_replacements, ())
+        self.assertFalse(
+            any(
+                replacement.path
+                in {
+                    Path("references/github-pr-probes.md"),
+                    Path("tests/test_contracts.py"),
+                }
+                for replacement in rule.replacements
             )
-        )
-        contract_replacements = tuple(
-            replacement
-            for replacement in private_replacements
-            if replacement.path == Path("tests/test_contracts.py")
-        )
-        self.assertEqual(len(contract_replacements), 1)
-        self.assertTrue(contract_replacements[0].required)
-        self.assertEqual(contract_replacements[0].required_count, 1)
-        self.assertIn(
-            "`whole_pr_completion_action: block-and-report-no-whole-pr-completion`",
-            contract_replacements[0].old,
         )
         self.assertEqual(
             rule.replacements[-len(SYNC_MODULE.COMMON_JOEY_TEXT_REPLACEMENTS) :],
             SYNC_MODULE.COMMON_JOEY_TEXT_REPLACEMENTS,
-        )
-        obsolete_layout_replacements = {
-            "REPO_ROOT = SKILL_ROOT.parents[1]",
-            "(REPO_ROOT / relative).exists()",
-            'with (REPO_ROOT / "agents/reviewer.toml").open("rb") as handle:',
-        }
-        self.assertTrue(
-            obsolete_layout_replacements.isdisjoint(
-                replacement.old for replacement in rule.replacements
-            )
         )
         self.assertEqual(
             rule.replacement_excluded_paths,
@@ -8783,7 +8886,7 @@ jobs:
         readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
         self.assertNotIn("private session retrospective automation routing", readme)
 
-    def test_personal_agents_bind_materialization_contract_activation(self) -> None:
+    def test_personal_agents_delegate_workspace_contract_to_review_skill(self) -> None:
         agents = (REPO_ROOT / "personal_codex" / "AGENTS.md").read_text(
             encoding="utf-8"
         )
@@ -8801,53 +8904,18 @@ jobs:
             review_source["repository"],
             "Joey-Tools/codex-review-workflows",
         )
-        prior_identity = (
-            "9a90db95cebe2d66c669e2991a8ede62f66563aa",
-            "2fd8907b9dfb25fa1551a9e8bd023a6ca1d2649b",
-        )
-        supporting_identity = (
-            "fc2b38bd3001ff1784b3283d3822782b85e48755",
-            "c2159f1736cb1db258861386f857db2196fc6523",
-        )
-        activation = agents.split(
-            "- Materialization contract activation is a machine-bound two-state gate.",
-            1,
-        )[1].split("\n- Under the expanded contract", 1)[0]
-        cases = (
-            (
-                "prior",
-                prior_identity,
-                "uses the prior CLI and receipt contract",
-            ),
-            (
-                "first-supporting",
-                supporting_identity,
-                "The expanded contract may activate only after",
-            ),
-            (
-                "supporting-descendant",
-                (),
-                "fully present pinned descendant",
-            ),
-        )
-        for name, identity, semantic in cases:
-            with self.subTest(activation_state=name):
-                for value in identity:
-                    self.assertIn(value, activation)
-                self.assertIn(semantic, activation)
-        self.assertIn("machine-bound two-state gate", agents)
-        for anchor in (
-            "private-overlay-source-lock.json",
-            "git merge-base --is-ancestor",
+        self.assertIn("clean-workspace preparation", agents)
+        self.assertIn("The skill owns adapter selection", agents)
+        for retired_detail in (
+            "Materialization contract activation",
             "validate-worktree --help",
-            "blocks activation",
-            "retains the prior trusted installed bundle",
-            "commit_count",
-            "parent_edge_count",
             "parent_graph_sha256",
             "local_config_sha256",
+            "9a90db95cebe2d66c669e2991a8ede62f66563aa",
+            "fc2b38bd3001ff1784b3283d3822782b85e48755",
         ):
-            self.assertIn(anchor, activation)
+            with self.subTest(retired_detail=retired_detail):
+                self.assertNotIn(retired_detail, agents)
 
     def test_personal_agents_scopes_bug_triage_to_artifact_transport(self) -> None:
         agents = (REPO_ROOT / "personal_codex" / "AGENTS.md").read_text(
@@ -8959,30 +9027,28 @@ jobs:
         )
 
         for anchor in (
-            "A named single review is exactly one clear/fresh-context Codex `reviewer` agent",
-            "independently trusted bundle pinned outside the candidate head/range",
-            "never prebuild or inject the full diff into its prompt",
-            "A named double review is that single-review agent plus an actual Anthropic Claude Code process",
-            "Named double adds actual Claude Code",
-            "The canonical Claude Code compatibility range is `>=2.1.211,<3.0.0`",
-            "Claude Code `2.1.212` is the audited stream-schema baseline, not a global pin",
-            "outside-workspace read exclusion as prompt/model scope",
-            "Native `allowRead` is not a global host-read whitelist",
-            "global `denyWrite` and critical-sensitive-root `denyRead`",
-            "do not attest the final merged sandbox or managed permission arrays",
-            "require the trusted bundle's `named_lane_guard validate-claude-stream` profile",
-            "A named triple review is the named double review plus complete authenticated current-scope GitHub Codex evidence",
-            "every operating identity in `{hoteng, hoteng_cisco}` is unsupported",
-            'user.login == "chatgpt-codex-connector[bot]"',
-            "If GitHub Codex is unavailable because there is no PR or the host/identity is unsupported, report `effective double`; never claim triple",
-            "PR readiness adds CI, conversation, and branch/base gates, but no retired extra Codex gates",
-            "never count a supplied-diff helper as a named lane",
-            "possible cache or tool-result artifacts",
+            "Use `$review-orchestration-playbook` as the only entrypoint",
+            "Single uses one fresh-context local Codex review session",
+            "double adds actual Claude Code",
+            "triple adds current-head GitHub Codex",
+            "The skill owns adapter selection",
+            "do not duplicate those contracts here",
+            "contemporaneous consent for scoped review egress to that shape",
+            "including tracked repository secrets",
+            "excludes runtime secrets and credentials",
+            "A bare named-review request is report-only",
+            "Exact `@codex review` on an already-existing eligible PR",
         ):
             with self.subTest(anchor=anchor):
                 self.assertIn(anchor, agents)
 
         for retired in (
+            "Materialization contract activation",
+            "canonical Claude Code compatibility range",
+            "github-codex-evidence-authority.md",
+            "thumbs-up-clean",
+            "terminal-payload",
+            "`isolated_review`",
             "mandatory independent-codex-pr-review",
             "required `independent-codex-pr-review`",
             "$external-review-playbook",
@@ -8991,16 +9057,11 @@ jobs:
             with self.subTest(retired=retired):
                 self.assertNotIn(retired, agents)
 
-    def test_agents_guidance_defines_skill_repo_codex_review_gate(self) -> None:
+    def test_agents_guidance_leaves_skill_repo_gate_to_scoped_guidance(self) -> None:
         agents = (REPO_ROOT / "personal_codex" / "AGENTS.md").read_text(
             encoding="utf-8"
         )
-        gate_start = agents.index(
-            "- For PR-bound delivery in the Joey-Tools skill repositories"
-        )
-        gate_end = agents.index("\n- Legacy receipt migration", gate_start)
-        gate = agents[gate_start:gate_end]
-
+        self.assertNotIn("skill-repo-codex-gate", agents)
         for repository in (
             "codex-toolbox",
             "codex-debug-triage",
@@ -9011,29 +9072,7 @@ jobs:
             "codex-private-workflows",
         ):
             with self.subTest(repository=repository):
-                self.assertIn(f"`{repository}`", gate)
-
-        for anchor in (
-            "when Joey has not explicitly requested a named single, double, or triple review",
-            "use the `skill-repo-codex-gate`: exactly two review processors",
-            "one fresh-context local Codex reviewer",
-            "current-head GitHub Codex through exact `@codex review`",
-            "This default is not a named review shape",
-            "keeps its canonical meaning and overrides this default",
-            "a named double or triple request is such an opt-in",
-            "A separately requested Claude diagnostic remains outside the default gate",
-            "does not replace either required Codex processor",
-            "run the sole local Codex processor under the named single-lane workspace, prompt, and evidence contract",
-            "interpret the GitHub producer precondition `both local lanes are terminal` as satisfied by this gate's one required local lane",
-            "Report the requested and effective shape as `skill-repo-codex-gate`",
-            "There is no local-only fallback",
-            "leaves the gate incomplete and the PR not ready",
-            "terminal findings block",
-            "only an accepted `thumbs-up-clean` basis completes the GitHub processor",
-            "terminal-payload clean remains classification-only and inconclusive for readiness",
-        ):
-            with self.subTest(anchor=anchor):
-                self.assertIn(anchor, gate)
+                self.assertNotIn(f"`{repository}`", agents)
 
     def test_codex_review_gate_is_compatibility_status_only(self) -> None:
         workflow_path = REPO_ROOT / ".github" / "workflows" / "codex-review-gate.yml"
