@@ -93,6 +93,54 @@ class LockedSourceManifest:
 
 
 @dataclass(frozen=True)
+class VerifiedCheckoutFileState:
+    path: Path
+    object_identity: tuple[int, int, int]
+    access_policy: tuple[int, int, int]
+    size: int
+    sha256: str
+
+
+@dataclass(frozen=True)
+class VerifiedCheckoutState:
+    name: str
+    repository: str
+    checkout: Path
+    checkout_binding: tuple[int, int, int, int]
+    git_directory: Path
+    git_directory_binding: tuple[int, int, int, int]
+    objects_directory: Path
+    objects_directory_binding: tuple[int, int, int, int]
+    head: str
+    tree: str
+    head_file: VerifiedCheckoutFileState
+    local_config_file: VerifiedCheckoutFileState
+    shallow: bool
+    bare: bool
+    detached_head: bool
+    clean_worktree_and_index: bool
+    promisor_or_partial_clone_absent: bool
+    alternates_absent: bool
+    grafts_absent: bool
+    replace_refs_absent: bool
+    sparse_checkout_absent: bool
+    unsafe_config_absent: bool
+    tracked_modes_and_index_flags_safe: bool
+    object_closure_complete: bool
+    strict_fsck_complete: bool
+    safety_contract: str
+
+
+@dataclass(frozen=True)
+class CompleteCheckoutVerificationReceipt:
+    source_root: Path
+    source_root_binding: tuple[int, int, int, int]
+    pins: tuple[SourcePin, ...]
+    checkouts: tuple[VerifiedCheckoutState, ...]
+    safety_contract: str
+
+
+@dataclass(frozen=True)
 class _GitPathBinding:
     path: Path
     device: int
@@ -299,7 +347,7 @@ def _validate_generated_receipt(
 
 def _read_bounded_regular(path: Path, *, label: str) -> tuple[bytes, os.stat_result]:
     flags = os.O_RDONLY
-    for required_flag in ("O_CLOEXEC", "O_NOFOLLOW"):
+    for required_flag in ("O_CLOEXEC", "O_NOFOLLOW", "O_NONBLOCK"):
         if not hasattr(os, required_flag):
             raise SourceLockError(f"platform lacks required flag: {required_flag}")
         flags |= getattr(os, required_flag)
@@ -330,6 +378,7 @@ def _read_bounded_regular(path: Path, *, label: str) -> tuple[bytes, os.stat_res
             before.st_ino,
             before.st_uid,
             stat.S_IMODE(before.st_mode),
+            before.st_nlink,
             before.st_size,
         )
         protected_after = (
@@ -337,6 +386,7 @@ def _read_bounded_regular(path: Path, *, label: str) -> tuple[bytes, os.stat_res
             after.st_ino,
             after.st_uid,
             stat.S_IMODE(after.st_mode),
+            after.st_nlink,
             after.st_size,
         )
         if protected_after != protected_before or len(payload) != before.st_size:
@@ -1305,20 +1355,147 @@ def _verify_source_root(
     return tuple(pins), root_binding
 
 
+def _verified_checkout_file_state(
+    path: Path,
+    *,
+    label: str,
+) -> VerifiedCheckoutFileState:
+    payload, metadata = _read_bounded_regular(path, label=label)
+    mode = stat.S_IMODE(metadata.st_mode)
+    access_policy_violations: list[str] = []
+    if metadata.st_nlink != 1:
+        access_policy_violations.append("exactly one hard link")
+    if mode & 0o022:
+        access_policy_violations.append("no group- or world-writable bits")
+    if access_policy_violations:
+        raise SourceLockError(
+            f"{label} checkout control file access policy is unsafe; requires "
+            + " and ".join(access_policy_violations)
+        )
+    return VerifiedCheckoutFileState(
+        path=path,
+        object_identity=(
+            metadata.st_dev,
+            metadata.st_ino,
+            stat.S_IFMT(metadata.st_mode),
+        ),
+        access_policy=(
+            metadata.st_uid,
+            mode,
+            metadata.st_nlink,
+        ),
+        size=len(payload),
+        sha256=hashlib.sha256(payload).hexdigest(),
+    )
+
+
+def _capture_complete_checkout_verification_receipt(
+    source_root: Path,
+    pins: tuple[SourcePin, ...],
+    source_root_binding: tuple[int, int, int, int],
+) -> CompleteCheckoutVerificationReceipt:
+    checkouts: list[VerifiedCheckoutState] = []
+    for pin in pins:
+        checkout = source_root / pin.name
+        git_directory = checkout / ".git"
+        objects_directory = git_directory / "objects"
+        checkouts.append(
+            VerifiedCheckoutState(
+                name=pin.name,
+                repository=pin.repository,
+                checkout=checkout,
+                checkout_binding=_directory_binding(
+                    checkout,
+                    label=f"{pin.name} checkout receipt",
+                ),
+                git_directory=git_directory,
+                git_directory_binding=_directory_binding(
+                    git_directory,
+                    label=f"{pin.name} Git directory receipt",
+                ),
+                objects_directory=objects_directory,
+                objects_directory_binding=_directory_binding(
+                    objects_directory,
+                    label=f"{pin.name} object directory receipt",
+                ),
+                head=pin.sha,
+                tree=pin.tree,
+                head_file=_verified_checkout_file_state(
+                    git_directory / "HEAD",
+                    label=f"{pin.name} detached HEAD receipt",
+                ),
+                local_config_file=_verified_checkout_file_state(
+                    git_directory / "config",
+                    label=f"{pin.name} local config receipt",
+                ),
+                shallow=False,
+                bare=False,
+                detached_head=True,
+                clean_worktree_and_index=True,
+                promisor_or_partial_clone_absent=True,
+                alternates_absent=True,
+                grafts_absent=True,
+                replace_refs_absent=True,
+                sparse_checkout_absent=True,
+                unsafe_config_absent=True,
+                tracked_modes_and_index_flags_safe=True,
+                object_closure_complete=True,
+                strict_fsck_complete=True,
+                safety_contract="private-overlay-complete-checkout-safety-v1",
+            )
+        )
+    _revalidate_directory_binding(source_root, source_root_binding, label="source root")
+    return CompleteCheckoutVerificationReceipt(
+        source_root=source_root,
+        source_root_binding=source_root_binding,
+        pins=pins,
+        checkouts=tuple(checkouts),
+        safety_contract="private-overlay-complete-checkout-safety-v1",
+    )
+
+
 def verify_checkouts(
     source_root: Path,
     source_lock: SourceLock,
     *,
     repo_root: Path | None = None,
-) -> None:
+) -> CompleteCheckoutVerificationReceipt:
     source_root = _absolute_lexical(source_root)
-    _verify_source_root(source_root, source_lock, refresh_non_toolbox=False)
+    pins, root_binding = _verify_source_root(
+        source_root,
+        source_lock,
+        refresh_non_toolbox=False,
+    )
+    receipt = _capture_complete_checkout_verification_receipt(
+        source_root,
+        pins,
+        root_binding,
+    )
+    # Bind the exact HEAD/config and directory state to the full safety pass.
+    # Re-running the complete verifier after capture prevents a mutated state
+    # from being recorded merely because it appeared after its corresponding
+    # safety check. The second capture must remain type-preserving equal.
+    final_pins, final_root_binding = _verify_source_root(
+        source_root,
+        source_lock,
+        refresh_non_toolbox=False,
+    )
+    final_receipt = _capture_complete_checkout_verification_receipt(
+        source_root,
+        final_pins,
+        final_root_binding,
+    )
+    if final_receipt != receipt:
+        raise SourceLockError(
+            "source checkout structured receipt changed during verification"
+        )
     if repo_root is not None:
         validate_generated_provenance(
             repo_root,
             source_lock,
             toolbox_checkout=source_root / source_lock.pins[0].name,
         )
+    return final_receipt
 
 
 def _source_lock_bytes(
