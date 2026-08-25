@@ -1903,15 +1903,15 @@ class PrivateOverlaySyncTests(unittest.TestCase):
         )
         self.assertEqual(
             policy.reviewed_candidate_revision,
-            "cd5ccd2ddd2a0975db6c5286765d4aab838bc736",
+            "6f404532fe39df560ce2898430ed15aedf4fe6ae",
         )
         self.assertEqual(
             policy.approved_root_tree,
-            "aef4bef7a45adab762a1b671da48fbc2d1f44064",
+            "798e0664d7bad309f70a38f80cf9e6946341229a",
         )
         self.assertEqual(
             policy.approved_review_subtree_tree,
-            "6dab70713244598e3aaaa132eb082211b348bcdf",
+            "ca734bab16cf3e3ae04cbfb5844213941eeda6eb",
         )
 
     def test_canonical_review_migration_accepts_same_tree_squash(self) -> None:

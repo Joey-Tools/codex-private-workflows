@@ -3,7 +3,7 @@ id: 20260822-rosc001
 title: Review Orchestration Private Sync Contract
 status: completed
 created: 2026-08-22
-updated: 2026-08-24
+updated: 2026-08-25
 branch: wip/review-orchestration-sync-contract
 pr: https://github.com/Joey-Tools/codex-private-workflows/pull/177
 supersedes: []
@@ -94,10 +94,10 @@ superseded_by:
   being guessed or repaired piecemeal.
 - Migration is triggered only by the exact authoritative canonical review sync
   rule and an immutable candidate/trees proof. Runtime policy binds reviewed
-  candidate revision `cd5ccd2ddd2a0975db6c5286765d4aab838bc736`, its
+  candidate revision `6f404532fe39df560ce2898430ed15aedf4fe6ae`, its
   bounded raw commit payload, the approved repository tree
-  `aef4bef7a45adab762a1b671da48fbc2d1f44064` and approved review subtree
-  `6dab70713244598e3aaaa132eb082211b348bcdf`. Runtime recomputes the Git commit
+  `798e0664d7bad309f70a38f80cf9e6946341229a` and approved review subtree
+  `ca734bab16cf3e3ae04cbfb5844213941eeda6eb`. Runtime recomputes the Git commit
   object ID from the payload to prove candidate `C`, parses its exact `tree T`,
   and, for nonlegacy activation, resolves the exact live or selected
   root-`T` ancestor revision's `skills/review-orchestration-playbook` path to
@@ -212,12 +212,14 @@ bounded ancestry contains the approved root remains eligible without a refresh.
   reports stable `anchor-refresh-required` rather than a raw missing-object
   error. A legitimate merge commit that retains `T` in its ancestry remains
   accepted.
-- The canonical delivery freeze selected signed candidate
-  `cd5ccd2ddd2a0975db6c5286765d4aab838bc736`, root tree
-  `aef4bef7a45adab762a1b671da48fbc2d1f44064`, and review subtree
-  `6dab70713244598e3aaaa132eb082211b348bcdf`. The companion stores that exact
-  commit object's 856 raw payload bytes as strict Base64; runtime recomputation
+- The final delivery freeze advanced to signed candidate
+  `6f404532fe39df560ce2898430ed15aedf4fe6ae`, root tree
+  `798e0664d7bad309f70a38f80cf9e6946341229a`, and review subtree
+  `ca734bab16cf3e3ae04cbfb5844213941eeda6eb`. The companion stores that exact
+  commit object's 793 raw payload bytes as strict Base64; runtime recomputation
   binds the payload back to the frozen candidate before any migration write.
+  Exact-head secret admission returned clean with complete cleanup, and the
+  final whole-range GPT-5.6 Sol Ultra reviewer returned `No findings.`
 - Final focused validation counts are recorded after the post-audit fixes in
   the Evidence section. The broader repository suite remains parent-owned final
   delivery evidence and is not inferred from these focused runs.
@@ -311,10 +313,16 @@ bounded ancestry contains the approved root remains eligible without a refresh.
   tests/test_private_overlay_sync.py` (pass)
 - `$project-journal` `validate` for the companion repository (pass)
 - `python3 -B -m unittest -q tests.test_private_overlay_sync` (`308` tests)
-- `PYTHONDONTWRITEBYTECODE=1 python3 -B -m unittest discover -s tests -p
-  'test_*.py' -q` (`2,020` tests, `4` conditional skips)
-- `PYTHONDONTWRITEBYTECODE=1 python3 -B -m unittest discover -s
+- `PYTHONDONTWRITEBYTECODE=1 PYTHONWARNINGS=error::ResourceWarning python3 -B
+  -m unittest discover -s tests -p 'test_*.py' -q` (`2,020` tests, `4`
+  conditional skips, `266.382` seconds)
+- After advancing the migration authorization to signed canonical candidate
+  `6f404532fe39df560ce2898430ed15aedf4fe6ae`, focused migration-policy
+  validation passed all `11` selected tests in `7.207` seconds.
+- `PYTHONDONTWRITEBYTECODE=1 PYTHONWARNINGS=error::ResourceWarning python3 -B
+  -m unittest discover -s
   personal_codex/skills/review-orchestration-playbook/tests -p 'test_*.py' -q`
   (`2,965` tests: `2,949` pass, `15` conditional skips, one restricted-host
   nested-`sandbox-exec` denial); the exact denied test passed in a single
-  approved outside-host-sandbox rerun (`1` test, `0` failures).
+  approved outside-host-sandbox rerun (`1` test, `0` failures, `2.044`
+  seconds).

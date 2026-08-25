@@ -90,27 +90,25 @@ class CanonicalReviewMigrationPolicy:
 
 CANONICAL_REVIEW_MIGRATION_POLICY = CanonicalReviewMigrationPolicy(
     repository="Joey-Tools/codex-review-workflows",
-    reviewed_candidate_revision="cd5ccd2ddd2a0975db6c5286765d4aab838bc736",
+    reviewed_candidate_revision="6f404532fe39df560ce2898430ed15aedf4fe6ae",
     reviewed_candidate_commit_payload_base64=(
-        "dHJlZSBhZWY0YmVmN2E0NWFkYWI3NjJhMWI2NzFkYTQ4ZmJjMmQxZjQ0MDY0CnBhcmVudCBhNjc4"
-        "MmU2Y2VlYTZhYzFkNmQwMmUwYmQyMjlmMjJkNzU1MGZlNzY4CmF1dGhvciBKb2V5IFRlbmcgPGpv"
-        "ZXkudGVuZy5kZXZAZ21haWwuY29tPiAxNzg3NjA4NjUzICswMTAwCmNvbW1pdHRlciBKb2V5IFRl"
-        "bmcgPGpvZXkudGVuZy5kZXZAZ21haWwuY29tPiAxNzg3NjA4NjUzICswMTAwCmdwZ3NpZyAtLS0t"
+        "dHJlZSA3OThlMDY2NGQ3YmFkMzA5ZjcwYTM4ZjgwY2Y5ZTY5NDYzNDEyMjlhCnBhcmVudCA1NjVj"
+        "ZjI1Mjc3ZGUyMWQ1MDM3N2IzYjA4NjgwYTZlNjY0YjQ1ZDVlCmF1dGhvciBKb2V5IFRlbmcgPGpv"
+        "ZXkudGVuZy5kZXZAZ21haWwuY29tPiAxNzg3NjgyOTI5ICswMTAwCmNvbW1pdHRlciBKb2V5IFRl"
+        "bmcgPGpvZXkudGVuZy5kZXZAZ21haWwuY29tPiAxNzg3NjgyOTI5ICswMTAwCmdwZ3NpZyAtLS0t"
         "LUJFR0lOIFBHUCBTSUdOQVRVUkUtLS0tLQogCiBpSFVFQUJZS0FCMFdJUVR2dThrVDlKcGZiZ3J3"
-        "MGtqM0FrWVVQY0tQTWdVQ2FveStUUUFLQ1JEM0FrWVVQY0tQCiBNdmg5QVA5L3U2aGVGSU5SNEhQ"
-        "RGI5ekRuVXNpWnFDZFp5by9pa0lrQXh1MkdvVFNpd0VBeEZJQWxJdGtnNTBxCiB4L0RrNi8yOGU0"
-        "NjFIeVpybklYdkc0aitiWWd6Q0FrPQogPXB4WkIKIC0tLS0tRU5EIFBHUCBTSUdOQVRVUkUtLS0t"
-        "LQoKQ2xvc2UgcmV2aWV3IGV2aWRlbmNlIGFuZCB0ZWFyZG93biBnYXBzCgpCaW5kIHRoZSBsb2Nh"
-        "bCBDb2RleCBwcmVmaXggcmVjZWlwdCB0byB0aGUgdmFsaWRhdGVkIHdvcmtzcGFjZSBhbmQgc2Vs"
-        "ZWN0ZWQgR2l0IGlkZW50aXR5LiBNYWtlIHZlcmlmaWVyIHRlYXJkb3duIHNpZ25hbC1zYWZlLCBw"
-        "cmVzZXJ2ZSBtdWx0aS1mYWlsdXJlIGNhdXNhbGl0eSwgY2xvc2UgZXZlcnkgb3duZWQgcmVjb3Zl"
-        "cnkgZGVzY3JpcHRvciwgYW5kIGNvdmVyIFB5dGhvbiAzLjEwIGRpYWdub3N0aWNzIHBsdXMgcmV0"
-        "YWluZWQgcmVjb3ZlcnkgdG9tYnN0b25lcy4KCkNvLWF1dGhvcmVkLWJ5OiBDb2RleCAodG9vbD1D"
-        "b2RleCBEZXNrdG9wOyBtb2RlbD1HUFQtNS42IFNvbCBVbHRyYSkgPGNvZGV4QG9wZW5haS5jb20+"
-        "Cg=="
+        "MGtqM0FrWVVQY0tQTWdVQ2FvM2djUUFLQ1JEM0FrWVVQY0tQCiBNaExFQVAwWUxySTBCZUgrZWFs"
+        "VTVTQ3RKSHB2eTNUODFzTktXVHNraWN4OWFLU0dSZ0VBem8yeGc1T1NQblNqCiB2NHZIWktyWVR1"
+        "b0hSWlhxdm0wSWhVNFVTeTQwWmdjPQogPVBCdEwKIC0tLS0tRU5EIFBHUCBTSUdOQVRVUkUtLS0t"
+        "LQoKUmVzdG9yZSBmcm96ZW4gcmV2aWV3IHJlc291cmNlIGNlaWxpbmdzCgpSZXN0b3JlIHRoZSB0"
+        "cnVzdGVkIDI1MGsgb2JqZWN0IGFuZCBwYXJlbnQtZWRnZSBidWRnZXRzIHBsdXMgdGhlIDIgR2lC"
+        "IGxvZ2ljYWwtb2JqZWN0IGNlaWxpbmcsIGJpbmQgdGhlIHB1Ymxpc2hlZCByZWZlcmVuY2UgYW5k"
+        "IGVycm9ycyB0byB0aG9zZSBsaW1pdHMsIGFuZCBhZGQgcmVncmVzc2lvbiBjb3ZlcmFnZSBmb3Ig"
+        "dGhlIGFjdGl2ZSBjb250cmFjdC4KCkNvLWF1dGhvcmVkLWJ5OiBDb2RleCAodG9vbD1Db2RleCBE"
+        "ZXNrdG9wOyBtb2RlbD1HUFQtNS42IFNvbCBVbHRyYSkgPGNvZGV4QG9wZW5haS5jb20+Cg=="
     ),
-    approved_root_tree="aef4bef7a45adab762a1b671da48fbc2d1f44064",
-    approved_review_subtree_tree="6dab70713244598e3aaaa132eb082211b348bcdf",
+    approved_root_tree="798e0664d7bad309f70a38f80cf9e6946341229a",
+    approved_review_subtree_tree="ca734bab16cf3e3ae04cbfb5844213941eeda6eb",
     legacy_revision="c8df0f5d17e93a7b22d5fe5294baf9884ab2ba51",
     legacy_root_tree="e4081b640384cd885783637fa5aad8d21d4499d5",
 )
