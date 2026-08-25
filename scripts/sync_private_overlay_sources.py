@@ -90,30 +90,28 @@ class CanonicalReviewMigrationPolicy:
 
 CANONICAL_REVIEW_MIGRATION_POLICY = CanonicalReviewMigrationPolicy(
     repository="Joey-Tools/codex-review-workflows",
-    reviewed_candidate_revision="6f404532fe39df560ce2898430ed15aedf4fe6ae",
+    reviewed_candidate_revision="b160b6fd0b3a0da4e25a74fbdb6bd3750c7a9bb2",
     reviewed_candidate_commit_payload_base64=(
-        "dHJlZSA3OThlMDY2NGQ3YmFkMzA5ZjcwYTM4ZjgwY2Y5ZTY5NDYzNDEyMjlhCnBhcmVudCA1NjVj"
-        "ZjI1Mjc3ZGUyMWQ1MDM3N2IzYjA4NjgwYTZlNjY0YjQ1ZDVlCmF1dGhvciBKb2V5IFRlbmcgPGpv"
-        "ZXkudGVuZy5kZXZAZ21haWwuY29tPiAxNzg3NjgyOTI5ICswMTAwCmNvbW1pdHRlciBKb2V5IFRl"
-        "bmcgPGpvZXkudGVuZy5kZXZAZ21haWwuY29tPiAxNzg3NjgyOTI5ICswMTAwCmdwZ3NpZyAtLS0t"
+        "dHJlZSA2OTQ3NWRhODg5NDEwODJlMjU1N2NhODc1YzgyZTRhMGQzOGExNzNmCnBhcmVudCA3MTNl"
+        "Mjk2ZDM3NjhkOTY3YTQzZTZmZjhkNzNkZDBlMWQ5OGY0ZDQ0CmF1dGhvciBKb2V5IFRlbmcgPGpv"
+        "ZXkudGVuZy5kZXZAZ21haWwuY29tPiAxNzg3Njk4NTIzICswMTAwCmNvbW1pdHRlciBKb2V5IFRl"
+        "bmcgPGpvZXkudGVuZy5kZXZAZ21haWwuY29tPiAxNzg3Njk4NTIzICswMTAwCmdwZ3NpZyAtLS0t"
         "LUJFR0lOIFBHUCBTSUdOQVRVUkUtLS0tLQogCiBpSFVFQUJZS0FCMFdJUVR2dThrVDlKcGZiZ3J3"
-        "MGtqM0FrWVVQY0tQTWdVQ2FvM2djUUFLQ1JEM0FrWVVQY0tQCiBNaExFQVAwWUxySTBCZUgrZWFs"
-        "VTVTQ3RKSHB2eTNUODFzTktXVHNraWN4OWFLU0dSZ0VBem8yeGc1T1NQblNqCiB2NHZIWktyWVR1"
-        "b0hSWlhxdm0wSWhVNFVTeTQwWmdjPQogPVBCdEwKIC0tLS0tRU5EIFBHUCBTSUdOQVRVUkUtLS0t"
-        "LQoKUmVzdG9yZSBmcm96ZW4gcmV2aWV3IHJlc291cmNlIGNlaWxpbmdzCgpSZXN0b3JlIHRoZSB0"
-        "cnVzdGVkIDI1MGsgb2JqZWN0IGFuZCBwYXJlbnQtZWRnZSBidWRnZXRzIHBsdXMgdGhlIDIgR2lC"
-        "IGxvZ2ljYWwtb2JqZWN0IGNlaWxpbmcsIGJpbmQgdGhlIHB1Ymxpc2hlZCByZWZlcmVuY2UgYW5k"
-        "IGVycm9ycyB0byB0aG9zZSBsaW1pdHMsIGFuZCBhZGQgcmVncmVzc2lvbiBjb3ZlcmFnZSBmb3Ig"
-        "dGhlIGFjdGl2ZSBjb250cmFjdC4KCkNvLWF1dGhvcmVkLWJ5OiBDb2RleCAodG9vbD1Db2RleCBE"
-        "ZXNrdG9wOyBtb2RlbD1HUFQtNS42IFNvbCBVbHRyYSkgPGNvZGV4QG9wZW5haS5jb20+Cg=="
+        "MGtqM0FrWVVQY0tQTWdVQ2FvNGRXd0FLQ1JEM0FrWVVQY0tQCiBNbjZVQVA0cFNyL1BtcUdxVnpW"
+        "ZFN5OERKQndmckVscHZzNnNqWFNQSWRjTHlsU0RPZ0VBOWZoSU1Sc3RXSjBtCiB5RXFqa3N5NGtk"
+        "TEJkb1JPNGxSWER4QTFoN1NFK1E0PQogPXhleHEKIC0tLS0tRU5EIFBHUCBTSUdOQVRVUkUtLS0t"
+        "LQoKQ2xhcmlmeSB3b3Jrc3BhY2UgbGF6eS1mZXRjaCBjb250cm9scwoKQ28tYXV0aG9yZWQtYnk6"
+        "IENvZGV4ICh0b29sPUNvZGV4IERlc2t0b3A7IG1vZGVsPUdQVC01LjYgU29sIFVsdHJhKSA8Y29k"
+        "ZXhAb3BlbmFpLmNvbT4K"
     ),
-    approved_root_tree="798e0664d7bad309f70a38f80cf9e6946341229a",
-    approved_review_subtree_tree="ca734bab16cf3e3ae04cbfb5844213941eeda6eb",
+    approved_root_tree="69475da88941082e2557ca875c82e4a0d38a173f",
+    approved_review_subtree_tree="7b08cb84a07c4a846d26ecde538c740e7772f9e7",
     legacy_revision="c8df0f5d17e93a7b22d5fe5294baf9884ab2ba51",
     legacy_root_tree="e4081b640384cd885783637fa5aad8d21d4499d5",
 )
 MAX_CANONICAL_REVIEW_MIGRATION_ANCESTRY_COMMITS = 4096
 MAX_CANONICAL_REVIEW_COMMIT_PROOF_BYTES = 16 * 1024
+MAX_COMPLETE_CHECKOUT_RECEIPT_FILE_BYTES = 32 * 1024 * 1024
 
 
 @dataclass(frozen=True)
@@ -3455,6 +3453,31 @@ class _RegularFileOverlayInstallResult:
     installed_receipt: _InstalledRegularFileOverlayReceipt
 
 
+_CANONICAL_REVIEW_PERSONAL_AGENTS_PLAN_SEAL = object()
+_PERSONAL_AGENTS_ACTION_LEGACY_NOOP = "legacy-noop"
+_PERSONAL_AGENTS_ACTION_MIGRATE = "migrate-legacy-to-current"
+_PERSONAL_AGENTS_ACTION_CURRENT_NOOP = "current-noop"
+
+
+@dataclass(frozen=True)
+class _PinnedPersonalAgentsFile:
+    target: Path
+    target_parent: _PinnedRegularFileOverlayDirectory
+    entry: _PinnedRegularFileOverlayEntry = field(repr=False, compare=False)
+    snapshot: _BoundPlainFileSnapshot
+    guidance_state: str
+
+
+@dataclass(frozen=True)
+class _CanonicalReviewPersonalAgentsPlan:
+    policy: CanonicalReviewMigrationPolicy
+    source_pin: _VerifiedLockedSourcePin
+    source_migration_receipt: _CanonicalReviewMigrationReceipt | None
+    pinned_file: _PinnedPersonalAgentsFile = field(repr=False, compare=False)
+    action: str
+    seal: object = field(repr=False, compare=False)
+
+
 def _assert_installed_regular_file_overlay_receipt(
     receipt: _InstalledRegularFileOverlayReceipt,
     *,
@@ -4622,6 +4645,7 @@ def _pin_regular_file_overlay_child_directory(
     *,
     path: Path,
     label: str,
+    require_safe_access_policy: bool = False,
 ) -> _PinnedRegularFileOverlayDirectory:
     try:
         descriptor = os.open(
@@ -4632,6 +4656,14 @@ def _pin_regular_file_overlay_child_directory(
     except OSError as exc:
         raise SyncError(f"cannot pin regular-file overlay {label}: {exc}") from exc
     stack.callback(os.close, descriptor)
+    if require_safe_access_policy:
+        try:
+            metadata = os.fstat(descriptor)
+        except OSError as exc:
+            raise SyncError(
+                f"cannot inspect regular-file overlay {label} access policy: {exc}"
+            ) from exc
+        _validate_regular_file_overlay_tree_directory(metadata, label=label)
     pinned = _PinnedRegularFileOverlayDirectory(
         path=path,
         descriptor=descriptor,
@@ -4648,7 +4680,30 @@ def _pin_regular_file_overlay_child_directory(
         label=label,
     ):
         raise SyncError(f"regular-file overlay {label} binding changed: {path}")
+    if require_safe_access_policy:
+        _assert_regular_file_overlay_directory_access_policy(
+            pinned,
+            label=label,
+        )
     return pinned
+
+
+def _assert_regular_file_overlay_directory_access_policy(
+    pinned: _PinnedRegularFileOverlayDirectory,
+    *,
+    label: str,
+) -> None:
+    try:
+        metadata = os.fstat(pinned.descriptor)
+    except OSError as exc:
+        raise SyncError(
+            f"cannot revalidate regular-file overlay {label} access policy: {exc}"
+        ) from exc
+    _validate_regular_file_overlay_tree_directory(metadata, label=label)
+    if _overlay_root_identity(metadata) != pinned.identity:
+        raise SyncError(
+            f"regular-file overlay {label} identity or access policy changed"
+        )
 
 
 def _external_prepared_regular_file_overlay_parent_path() -> Path:
@@ -6384,6 +6439,120 @@ def _assert_bound_plain_file(
         raise SyncError(f"{label} bytes or access policy differ from locked output")
 
 
+def _pin_personal_agents_file(
+    stack: contextlib.ExitStack,
+    repo_binding: _PinnedRegularFileOverlayDirectory,
+) -> _PinnedPersonalAgentsFile:
+    target = repo_binding.path / PERSONAL_AGENTS_TARGET
+    target_parent = _pin_regular_file_overlay_child_directory(
+        stack,
+        repo_binding,
+        PERSONAL_AGENTS_TARGET.parent.name,
+        path=target.parent,
+        label="personal AGENTS parent",
+        require_safe_access_policy=True,
+    )
+    entry = _pin_regular_file_overlay_entry(
+        stack,
+        target_parent.descriptor,
+        target.name,
+        label="personal AGENTS source",
+    )
+    snapshot = _read_bound_plain_file_semantically(
+        target_parent.descriptor,
+        target.name,
+        entry,
+        byte_limit=MAX_REGULAR_FILE_OVERLAY_BYTES,
+        label="personal AGENTS source",
+    )
+    if snapshot.access_policy[1] != 0o644:
+        raise SyncError("personal AGENTS source mode must be 0644")
+    pinned = _PinnedPersonalAgentsFile(
+        target=target,
+        target_parent=target_parent,
+        entry=entry,
+        snapshot=snapshot,
+        guidance_state=_personal_agents_review_guidance_state(snapshot.data),
+    )
+    _assert_pinned_personal_agents_file(
+        repo_binding,
+        pinned,
+        label="initial personal AGENTS binding",
+    )
+    return pinned
+
+
+def _assert_pinned_personal_agents_file(
+    repo_binding: _PinnedRegularFileOverlayDirectory,
+    pinned: _PinnedPersonalAgentsFile,
+    *,
+    label: str,
+) -> None:
+    expected_target = repo_binding.path / PERSONAL_AGENTS_TARGET
+    if (
+        type(pinned) is not _PinnedPersonalAgentsFile
+        or pinned.target != expected_target
+        or pinned.target_parent.path != expected_target.parent
+        or pinned.entry.name != expected_target.name
+        or pinned.snapshot.access_policy[1] != 0o644
+        or pinned.guidance_state not in {"legacy", "current"}
+        or _personal_agents_review_guidance_state(pinned.snapshot.data)
+        != pinned.guidance_state
+    ):
+        raise SyncError(f"canonical review {label} personal AGENTS binding is invalid")
+    _assert_regular_file_overlay_directory_binding(
+        repo_binding,
+        label=f"{label} repository root",
+    )
+    _assert_regular_file_overlay_directory_binding(
+        pinned.target_parent,
+        label=f"{label} personal AGENTS parent",
+    )
+    _assert_regular_file_overlay_directory_access_policy(
+        pinned.target_parent,
+        label=f"{label} personal AGENTS parent",
+    )
+    if not _regular_file_overlay_named_root_matches(
+        repo_binding.descriptor,
+        PERSONAL_AGENTS_TARGET.parent.name,
+        pinned.target_parent.identity,
+        label=label,
+    ):
+        raise SyncError(
+            f"canonical review {label} personal AGENTS parent binding changed"
+        )
+    _assert_bound_plain_file(
+        pinned.target_parent.descriptor,
+        pinned.target.name,
+        pinned.entry,
+        pinned.snapshot.data,
+        0o644,
+        label=f"canonical review {label} personal AGENTS",
+    )
+    _assert_regular_file_overlay_directory_binding(
+        pinned.target_parent,
+        label=f"{label} post-file-read personal AGENTS parent",
+    )
+    _assert_regular_file_overlay_directory_access_policy(
+        pinned.target_parent,
+        label=f"{label} post-file-read personal AGENTS parent",
+    )
+    if not _regular_file_overlay_named_root_matches(
+        repo_binding.descriptor,
+        PERSONAL_AGENTS_TARGET.parent.name,
+        pinned.target_parent.identity,
+        label=f"{label} post-file-read",
+    ):
+        raise SyncError(
+            f"canonical review {label} post-file-read personal AGENTS parent "
+            "binding changed"
+        )
+    _assert_regular_file_overlay_directory_binding(
+        repo_binding,
+        label=f"{label} repository root",
+    )
+
+
 def _is_authoritative_canonical_review_rule(rule: SyncRule) -> bool:
     return rule == _CANONICAL_REVIEW_SYNC_RULE
 
@@ -6551,11 +6720,23 @@ def _structured_checkout_receipt_is_complete(
 ) -> bool:
     checkouts = getattr(receipt, "checkouts", None)
     source_root_binding = getattr(receipt, "source_root_binding", None)
+
+    def directory_binding_is_complete(binding: object) -> bool:
+        return (
+            isinstance(binding, tuple)
+            and len(binding) == 4
+            and all(type(value) is int for value in binding)
+            and binding[0] >= 0
+            and binding[1] > 0
+            and binding[2] == os.getuid()
+            and 0 <= binding[3] <= 0o7777
+            and binding[3] & 0o022 == 0
+        )
+
     if (
         not isinstance(checkouts, tuple)
         or len(checkouts) != len(pins)
-        or not isinstance(source_root_binding, tuple)
-        or len(source_root_binding) != 4
+        or not directory_binding_is_complete(source_root_binding)
     ):
         return False
     required_true = (
@@ -6598,7 +6779,7 @@ def _structured_checkout_receipt_is_complete(
             "objects_directory_binding",
         ):
             binding = getattr(checkout, binding_name, None)
-            if not isinstance(binding, tuple) or len(binding) != 4:
+            if not directory_binding_is_complete(binding):
                 return False
         expected_file_paths = {
             "head_file": source_root / str(name) / ".git" / "HEAD",
@@ -6606,16 +6787,31 @@ def _structured_checkout_receipt_is_complete(
         }
         for file_state_name, expected_path in expected_file_paths.items():
             file_state = getattr(checkout, file_state_name, None)
+            object_identity = getattr(file_state, "object_identity", None)
+            access_policy = getattr(file_state, "access_policy", None)
+            size = getattr(file_state, "size", None)
+            digest = getattr(file_state, "sha256", None)
             if (
                 file_state is None
                 or getattr(file_state, "path", None) != expected_path
-                or not isinstance(getattr(file_state, "object_identity", None), tuple)
-                or len(file_state.object_identity) != 3
-                or not isinstance(getattr(file_state, "access_policy", None), tuple)
-                or len(file_state.access_policy) != 3
-                or not isinstance(getattr(file_state, "size", None), int)
-                or not isinstance(getattr(file_state, "sha256", None), str)
-                or len(file_state.sha256) != 64
+                or not isinstance(object_identity, tuple)
+                or len(object_identity) != 3
+                or any(type(value) is not int for value in object_identity)
+                or object_identity[0] < 0
+                or object_identity[1] <= 0
+                or object_identity[2] != stat.S_IFREG
+                or not isinstance(access_policy, tuple)
+                or len(access_policy) != 3
+                or any(type(value) is not int for value in access_policy)
+                or access_policy[0] != os.getuid()
+                or not 0 <= access_policy[1] <= 0o7777
+                or access_policy[1] & 0o022 != 0
+                or access_policy[2] != 1
+                or type(size) is not int
+                or not 0 <= size <= MAX_COMPLETE_CHECKOUT_RECEIPT_FILE_BYTES
+                or not isinstance(digest, str)
+                or len(digest) != 64
+                or any(character not in "0123456789abcdef" for character in digest)
             ):
                 return False
     return True
@@ -6968,42 +7164,147 @@ def _select_canonical_review_inventory_profile(
     return _CANONICAL_REVIEW_LEGACY_INVENTORY
 
 
+def _bind_canonical_review_personal_agents_plan(
+    stack: contextlib.ExitStack,
+    repo_binding: _PinnedRegularFileOverlayDirectory,
+    rule: SyncRule,
+    locked_source: _LockedRuleSource,
+) -> _CanonicalReviewPersonalAgentsPlan:
+    policy = rule.canonical_review_migration_policy
+    source_pin = locked_source.source_pin
+    if policy is None or source_pin is None:
+        raise SyncError(
+            "authoritative canonical review sync requires a verified source pin"
+        )
+    migration_source = _canonical_review_personal_agents_migration_required(
+        rule,
+        locked_source,
+    )
+    pinned_file = _pin_personal_agents_file(stack, repo_binding)
+    if not migration_source:
+        if pinned_file.guidance_state != "legacy":
+            raise SyncError(
+                "exact legacy canonical review source requires exact legacy "
+                "personal AGENTS review guidance; restore the legacy guidance "
+                "or advance the canonical source lock"
+            )
+        action = _PERSONAL_AGENTS_ACTION_LEGACY_NOOP
+    elif pinned_file.guidance_state == "legacy":
+        action = _PERSONAL_AGENTS_ACTION_MIGRATE
+    else:
+        action = _PERSONAL_AGENTS_ACTION_CURRENT_NOOP
+    plan = _CanonicalReviewPersonalAgentsPlan(
+        policy=policy,
+        source_pin=source_pin,
+        source_migration_receipt=(locked_source.canonical_review_migration_receipt),
+        pinned_file=pinned_file,
+        action=action,
+        seal=_CANONICAL_REVIEW_PERSONAL_AGENTS_PLAN_SEAL,
+    )
+    _assert_canonical_review_personal_agents_plan(
+        plan,
+        repo_binding,
+        rule,
+        locked_source,
+        label="prewrite",
+    )
+    return plan
+
+
+def _assert_canonical_review_personal_agents_plan(
+    plan: _CanonicalReviewPersonalAgentsPlan,
+    repo_binding: _PinnedRegularFileOverlayDirectory,
+    rule: SyncRule,
+    locked_source: _LockedRuleSource,
+    *,
+    label: str,
+) -> None:
+    if (
+        type(plan) is not _CanonicalReviewPersonalAgentsPlan
+        or plan.seal is not _CANONICAL_REVIEW_PERSONAL_AGENTS_PLAN_SEAL
+        or plan.policy != rule.canonical_review_migration_policy
+        or plan.source_pin != locked_source.source_pin
+        or plan.source_migration_receipt
+        is not locked_source.canonical_review_migration_receipt
+        or plan.action
+        not in {
+            _PERSONAL_AGENTS_ACTION_LEGACY_NOOP,
+            _PERSONAL_AGENTS_ACTION_MIGRATE,
+            _PERSONAL_AGENTS_ACTION_CURRENT_NOOP,
+        }
+    ):
+        raise SyncError(f"canonical review {label} personal AGENTS plan is invalid")
+    migration_source = _canonical_review_personal_agents_migration_required(
+        rule,
+        locked_source,
+    )
+    state = plan.pinned_file.guidance_state
+    expected_action = (
+        _PERSONAL_AGENTS_ACTION_LEGACY_NOOP
+        if not migration_source and state == "legacy"
+        else _PERSONAL_AGENTS_ACTION_MIGRATE
+        if migration_source and state == "legacy"
+        else _PERSONAL_AGENTS_ACTION_CURRENT_NOOP
+        if migration_source and state == "current"
+        else None
+    )
+    if expected_action is None or plan.action != expected_action:
+        raise SyncError(
+            f"canonical review {label} personal AGENTS plan disagrees with its source"
+        )
+    _assert_pinned_personal_agents_file(
+        repo_binding,
+        plan.pinned_file,
+        label=label,
+    )
+
+
+def _assert_current_personal_agents_state(
+    repo_binding: _PinnedRegularFileOverlayDirectory,
+    *,
+    label: str,
+) -> None:
+    with contextlib.ExitStack() as stack:
+        pinned = _pin_personal_agents_file(stack, repo_binding)
+        if pinned.guidance_state != "current":
+            raise SyncError(
+                f"canonical review {label} personal AGENTS state is not current"
+            )
+        _assert_pinned_personal_agents_file(
+            repo_binding,
+            pinned,
+            label=label,
+        )
+
+
 def _migrate_personal_agents_guidance(
     repo_binding: _PinnedRegularFileOverlayDirectory,
     *,
     installed_receipt: _InstalledRegularFileOverlayReceipt | None = None,
+    pinned_personal_agents: _PinnedPersonalAgentsFile | None = None,
 ) -> Path | None:
     if installed_receipt is not None:
         _assert_installed_regular_file_overlay_receipt(
             installed_receipt,
             label="pre-AGENTS migration",
         )
-    target = repo_binding.path / PERSONAL_AGENTS_TARGET
     with contextlib.ExitStack() as source_stack:
-        target_parent_chain = _pin_or_create_regular_file_overlay_descendant_chain(
-            source_stack,
+        if pinned_personal_agents is None:
+            pinned_personal_agents = _pin_personal_agents_file(
+                source_stack,
+                repo_binding,
+            )
+        _assert_pinned_personal_agents_file(
             repo_binding,
-            PERSONAL_AGENTS_TARGET.parent,
-            label="personal AGENTS parent",
+            pinned_personal_agents,
+            label="pre-migration",
         )
-        target_parent = target_parent_chain[-1]
-        prior = _pin_regular_file_overlay_entry(
-            source_stack,
-            target_parent.descriptor,
-            target.name,
-            label="personal AGENTS source",
-        )
-        prior_snapshot = _read_bound_plain_file_semantically(
-            target_parent.descriptor,
-            target.name,
-            prior,
-            byte_limit=MAX_REGULAR_FILE_OVERLAY_BYTES,
-            label="personal AGENTS source",
-        )
+        target = pinned_personal_agents.target
+        target_parent = pinned_personal_agents.target_parent
+        prior = pinned_personal_agents.entry
+        prior_snapshot = pinned_personal_agents.snapshot
         prior_data = prior_snapshot.data
         prior_mode = prior_snapshot.access_policy[1]
-        if prior_mode != 0o644:
-            raise SyncError("personal AGENTS source mode must be 0644")
         _assert_bound_plain_file(
             target_parent.descriptor,
             target.name,
@@ -7111,6 +7412,10 @@ def _migrate_personal_agents_guidance(
                         installed_receipt,
                         label="immediate pre-AGENTS publication",
                     )
+                _assert_regular_file_overlay_scope_binding(
+                    staging_scope,
+                    operation="personal AGENTS prior-state retention",
+                )
                 _rename_regular_file_overlay_noreplace(
                     primitive,
                     target_parent.descriptor,
@@ -7152,6 +7457,10 @@ def _migrate_personal_agents_guidance(
                         installed_receipt,
                         label="final pre-AGENTS publication",
                     )
+                _assert_regular_file_overlay_scope_binding(
+                    staging_scope,
+                    operation="personal AGENTS current-state publication",
+                )
                 _rename_regular_file_overlay_noreplace(
                     primitive,
                     staging_scope.container.descriptor,
@@ -7197,6 +7506,7 @@ def _migrate_personal_agents_after_canonical_review_sync(
     rule: SyncRule,
     locked_source: _LockedRuleSource,
     installed_migration_receipt: _CanonicalReviewInstalledMigrationReceipt,
+    personal_agents_plan: _CanonicalReviewPersonalAgentsPlan,
 ) -> Path | None:
     if installed_migration_receipt.expected_target != (
         repo_binding.path / CANONICAL_REVIEW_TARGET
@@ -7217,9 +7527,21 @@ def _migrate_personal_agents_after_canonical_review_sync(
         repo_binding,
         label="canonical review migration repository root",
     )
+    _assert_canonical_review_personal_agents_plan(
+        personal_agents_plan,
+        repo_binding,
+        rule,
+        locked_source,
+        label="pre-AGENTS migration",
+    )
+    if personal_agents_plan.action != _PERSONAL_AGENTS_ACTION_MIGRATE:
+        raise SyncError(
+            "canonical review installed migration receipt has no AGENTS migration"
+        )
     recovery_path = _migrate_personal_agents_guidance(
         repo_binding,
         installed_receipt=installed_migration_receipt.installed_receipt,
+        pinned_personal_agents=personal_agents_plan.pinned_file,
     )
     _assert_canonical_review_installed_migration_receipt(
         installed_migration_receipt,
@@ -7230,7 +7552,66 @@ def _migrate_personal_agents_after_canonical_review_sync(
     _revalidate_complete_checkout_verification(
         locked_source.prewrite_checkout_verification
     )
+    _assert_current_personal_agents_state(
+        repo_binding,
+        label="post-migration",
+    )
     return recovery_path
+
+
+def _verify_current_personal_agents_after_canonical_review_sync(
+    repo_binding: _PinnedRegularFileOverlayDirectory,
+    rule: SyncRule,
+    locked_source: _LockedRuleSource,
+    installed_migration_receipt: _CanonicalReviewInstalledMigrationReceipt,
+    personal_agents_plan: _CanonicalReviewPersonalAgentsPlan,
+) -> None:
+    if installed_migration_receipt.expected_target != (
+        repo_binding.path / CANONICAL_REVIEW_TARGET
+    ):
+        raise SyncError(
+            "canonical review current no-op installed receipt targets another tree"
+        )
+    _revalidate_complete_checkout_verification(
+        locked_source.prewrite_checkout_verification
+    )
+    _assert_canonical_review_installed_migration_receipt(
+        installed_migration_receipt,
+        rule,
+        locked_source,
+        label="pre-AGENTS current no-op exact target",
+    )
+    _assert_regular_file_overlay_directory_binding(
+        repo_binding,
+        label="canonical review current no-op repository root",
+    )
+    _assert_canonical_review_personal_agents_plan(
+        personal_agents_plan,
+        repo_binding,
+        rule,
+        locked_source,
+        label="pre-AGENTS current no-op",
+    )
+    if personal_agents_plan.action != _PERSONAL_AGENTS_ACTION_CURRENT_NOOP:
+        raise SyncError(
+            "canonical review current no-op receipt has another AGENTS action"
+        )
+    _assert_canonical_review_installed_migration_receipt(
+        installed_migration_receipt,
+        rule,
+        locked_source,
+        label="post-AGENTS current no-op exact target",
+    )
+    _assert_canonical_review_personal_agents_plan(
+        personal_agents_plan,
+        repo_binding,
+        rule,
+        locked_source,
+        label="post-AGENTS current no-op",
+    )
+    _revalidate_complete_checkout_verification(
+        locked_source.prewrite_checkout_verification
+    )
 
 
 def _install_locked_plain_file(
@@ -7368,6 +7749,9 @@ def _sync_sources_with_repo_binding(
     canonical_review_inventory_profiles: (
         dict[tuple[str, Path], _CanonicalReviewInventoryProfile] | None
     ) = None,
+    canonical_review_personal_agents_plans: (
+        dict[tuple[str, Path], _CanonicalReviewPersonalAgentsPlan] | None
+    ) = None,
 ) -> tuple[Path, ...]:
     recovery_paths: list[Path] = []
     for rule in rules:
@@ -7400,9 +7784,44 @@ def _sync_sources_with_repo_binding(
                 _CANONICAL_REVIEW_CURRENT_INVENTORY,
             )
         )
-        migrate_personal_agents = _canonical_review_personal_agents_migration_required(
+        migration_source = _canonical_review_personal_agents_migration_required(
             rule,
             locked_source,
+        )
+        personal_agents_plan = (
+            None
+            if canonical_review_personal_agents_plans is None
+            else canonical_review_personal_agents_plans.get(profile_key)
+        )
+        if _is_authoritative_canonical_review_rule(rule):
+            if (
+                personal_agents_plan is None
+                or locked_source is None
+                or repo_binding is None
+            ):
+                raise SyncError(
+                    "authoritative canonical review personal AGENTS plan is missing"
+                )
+            _assert_canonical_review_personal_agents_plan(
+                personal_agents_plan,
+                repo_binding,
+                rule,
+                locked_source,
+                label="sync-entry",
+            )
+            if migration_source != (
+                personal_agents_plan.action
+                in {
+                    _PERSONAL_AGENTS_ACTION_MIGRATE,
+                    _PERSONAL_AGENTS_ACTION_CURRENT_NOOP,
+                }
+            ):
+                raise SyncError(
+                    "canonical review personal AGENTS plan source class changed"
+                )
+        migrate_personal_agents = (
+            personal_agents_plan is not None
+            and personal_agents_plan.action == _PERSONAL_AGENTS_ACTION_MIGRATE
         )
         if not source.exists():
             raise SyncError(f"sync source missing for {rule.repo}: {source}")
@@ -7566,7 +7985,7 @@ def _sync_sources_with_repo_binding(
                                 prepared_source_manifest,
                                 label="retained external prepared source",
                             )
-                            if migrate_personal_agents:
+                            if migration_source:
                                 _revalidate_complete_checkout_verification(
                                     locked_source.prewrite_checkout_verification
                                     if locked_source is not None
@@ -7581,7 +8000,7 @@ def _sync_sources_with_repo_binding(
                                 candidate_manifest=candidate.manifest,
                             )
                             agents_recovery_path = None
-                            if migrate_personal_agents:
+                            if migration_source:
                                 if not (
                                     _canonical_review_personal_agents_migration_required(
                                         rule,
@@ -7607,11 +8026,41 @@ def _sync_sources_with_repo_binding(
                                         install_result.installed_receipt,
                                     )
                                 )
-                                agents_recovery_path = _migrate_personal_agents_after_canonical_review_sync(
+                                if migrate_personal_agents:
+                                    agents_recovery_path = _migrate_personal_agents_after_canonical_review_sync(
+                                        repo_binding,
+                                        rule,
+                                        locked_source,
+                                        installed_migration_receipt,
+                                        personal_agents_plan,
+                                    )
+                                else:
+                                    _verify_current_personal_agents_after_canonical_review_sync(
+                                        repo_binding,
+                                        rule,
+                                        locked_source,
+                                        installed_migration_receipt,
+                                        personal_agents_plan,
+                                    )
+                            elif personal_agents_plan is not None:
+                                if locked_source is None:
+                                    raise SyncError(
+                                        "canonical review locked source disappeared "
+                                        "after tree install"
+                                    )
+                                _assert_installed_regular_file_overlay_receipt(
+                                    install_result.installed_receipt,
+                                    label="post-AGENTS no-op exact target",
+                                )
+                                _assert_canonical_review_personal_agents_plan(
+                                    personal_agents_plan,
                                     repo_binding,
                                     rule,
                                     locked_source,
-                                    installed_migration_receipt,
+                                    label="post-install no-op",
+                                )
+                                _revalidate_complete_checkout_verification(
+                                    locked_source.prewrite_checkout_verification
                                 )
                     if install_result.recovery_path is not None:
                         recovery_paths.append(install_result.recovery_path)
@@ -7708,6 +8157,26 @@ def sync_sources(
                 repo_root,
                 label="repository root",
             )
+            canonical_review_personal_agents_plans: dict[
+                tuple[str, Path], _CanonicalReviewPersonalAgentsPlan
+            ] = {}
+            for rule in rules:
+                if not _is_authoritative_canonical_review_rule(rule):
+                    continue
+                key = (rule.repo, rule.source)
+                locked_source = locked_sources.get(key)
+                if locked_source is None:
+                    raise SyncError(
+                        "authoritative canonical review locked source is missing"
+                    )
+                canonical_review_personal_agents_plans[key] = (
+                    _bind_canonical_review_personal_agents_plan(
+                        stack,
+                        repo_binding,
+                        rule,
+                        locked_source,
+                    )
+                )
             _require_retired_targets_absent(stack, repo_binding)
             recovery_paths = _sync_sources_with_repo_binding(
                 repo_root,
@@ -7716,6 +8185,7 @@ def sync_sources(
                 repo_binding,
                 locked_sources,
                 canonical_review_inventory_profiles,
+                canonical_review_personal_agents_plans,
             )
             _validate_canonical_review_target(
                 repo_root,
@@ -7731,6 +8201,25 @@ def sync_sources(
                 repo_binding,
                 label="repository root",
             )
+            for rule in rules:
+                if not _is_authoritative_canonical_review_rule(rule):
+                    continue
+                key = (rule.repo, rule.source)
+                plan = canonical_review_personal_agents_plans[key]
+                locked_source = locked_sources[key]
+                if plan.action == _PERSONAL_AGENTS_ACTION_MIGRATE:
+                    _assert_current_personal_agents_state(
+                        repo_binding,
+                        label="final migrated state",
+                    )
+                else:
+                    _assert_canonical_review_personal_agents_plan(
+                        plan,
+                        repo_binding,
+                        rule,
+                        locked_source,
+                        label="final no-op state",
+                    )
         return recovery_paths
     plain_rules = tuple(
         rule
@@ -7749,6 +8238,7 @@ def sync_sources(
         None,
         None,
         canonical_review_inventory_profiles,
+        None,
     )
     _remove_retired_targets(repo_root)
     if secure_rules:
@@ -7772,6 +8262,7 @@ def sync_sources(
                 repo_binding,
                 None,
                 canonical_review_inventory_profiles,
+                None,
             )
     else:
         _validate_canonical_review_target(repo_root)

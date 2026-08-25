@@ -9,9 +9,11 @@ import json
 import os
 from pathlib import Path
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from unittest import mock
 
@@ -392,6 +394,251 @@ class CheckoutVerifierTests(unittest.TestCase):
 
     def test_accepts_five_complete_clean_detached_checkouts(self) -> None:
         SOURCE_LOCK.verify_checkouts(self.source_root, self.source_lock)
+
+    def test_accepts_safe_checkout_control_file_access_policy(self) -> None:
+        git_directory = self._checkout() / ".git"
+        (git_directory / "HEAD").chmod(0o600)
+        (git_directory / "config").chmod(0o644)
+
+        receipt = SOURCE_LOCK.verify_checkouts(self.source_root, self.source_lock)
+
+        self.assertEqual(receipt.checkouts[0].head_file.access_policy[1:], (0o600, 1))
+        self.assertEqual(
+            receipt.checkouts[0].local_config_file.access_policy[1:],
+            (0o644, 1),
+        )
+
+    def test_rejects_writable_checkout_control_file_access_policy(self) -> None:
+        git_directory = self._checkout() / ".git"
+        for name, label in (("HEAD", "detached HEAD"), ("config", "local config")):
+            target = git_directory / name
+            original_mode = stat.S_IMODE(target.stat().st_mode)
+            for unsafe_mode in (0o666, 0o620):
+                with self.subTest(name=name, mode=oct(unsafe_mode)):
+                    target.chmod(unsafe_mode)
+                    try:
+                        with self.assertRaisesRegex(
+                            SOURCE_LOCK.SourceLockError,
+                            rf"{label} receipt checkout control file access policy "
+                            r"is unsafe; requires no group- or world-writable bits",
+                        ):
+                            SOURCE_LOCK.verify_checkouts(
+                                self.source_root,
+                                self.source_lock,
+                            )
+                    finally:
+                        target.chmod(original_mode)
+
+    def test_rejects_multi_link_checkout_control_file_access_policy(self) -> None:
+        git_directory = self._checkout() / ".git"
+        for name, label in (("HEAD", "detached HEAD"), ("config", "local config")):
+            target = git_directory / name
+            alias = self.root / f"{name.lower()}-control-file-alias"
+            try:
+                os.link(target, alias)
+            except OSError as error:
+                self.skipTest(f"platform cannot create a hard-link fixture: {error}")
+            try:
+                with self.subTest(name=name):
+                    with self.assertRaisesRegex(
+                        SOURCE_LOCK.SourceLockError,
+                        rf"{label} receipt checkout control file access policy "
+                        r"is unsafe; requires exactly one hard link",
+                    ):
+                        SOURCE_LOCK.verify_checkouts(
+                            self.source_root,
+                            self.source_lock,
+                        )
+            finally:
+                alias.unlink()
+
+    def test_rejects_fifo_checkout_control_file_without_a_writer(self) -> None:
+        root_binding = SOURCE_LOCK._directory_binding(
+            self.source_root,
+            label="FIFO fixture source root",
+        )
+        verified_source = (tuple(self.pins), root_binding)
+        real_open = os.open
+        for name, label in (("HEAD", "detached HEAD"), ("config", "local config")):
+            target = self._checkout() / ".git" / name
+            regular = target.with_name(f"{name}.regular-fixture")
+            target.rename(regular)
+            try:
+                os.mkfifo(target, mode=0o600)
+            except OSError as error:
+                regular.rename(target)
+                self.skipTest(f"platform cannot create a FIFO fixture: {error}")
+            opened_fifo = False
+
+            def guarded_open(path, flags, *args, **kwargs):
+                nonlocal opened_fifo
+                if Path(path) == target:
+                    self.assertTrue(flags & os.O_NONBLOCK)
+                    opened_fifo = True
+                return real_open(path, flags, *args, **kwargs)
+
+            started = time.monotonic()
+            try:
+                with (
+                    mock.patch.object(
+                        SOURCE_LOCK,
+                        "_verify_source_root",
+                        return_value=verified_source,
+                    ),
+                    mock.patch.object(
+                        SOURCE_LOCK.os,
+                        "open",
+                        side_effect=guarded_open,
+                    ),
+                    self.assertRaisesRegex(
+                        SOURCE_LOCK.SourceLockError,
+                        rf"{label} receipt is not a regular file",
+                    ),
+                ):
+                    SOURCE_LOCK.verify_checkouts(
+                        self.source_root,
+                        self.source_lock,
+                    )
+                self.assertTrue(opened_fifo)
+                self.assertLess(time.monotonic() - started, 5.0)
+            finally:
+                target.unlink()
+                regular.rename(target)
+
+    def test_bounded_read_rejects_in_flight_mode_policy_drift(self) -> None:
+        target = self.root / "mode-drift-control-file"
+        target.write_bytes(b"control\n")
+        real_fstat = os.fstat
+        for initial_mode, final_mode in ((0o600, 0o620), (0o620, 0o600)):
+            with self.subTest(initial=oct(initial_mode), final=oct(final_mode)):
+                target.chmod(initial_mode)
+                calls = 0
+
+                def mutate_after_first_fstat(descriptor):
+                    nonlocal calls
+                    metadata = real_fstat(descriptor)
+                    calls += 1
+                    if calls == 1:
+                        target.chmod(final_mode)
+                    return metadata
+
+                with (
+                    mock.patch.object(
+                        SOURCE_LOCK.os,
+                        "fstat",
+                        side_effect=mutate_after_first_fstat,
+                    ),
+                    self.assertRaisesRegex(
+                        SOURCE_LOCK.SourceLockError,
+                        "identity, content size, or policy changed",
+                    ),
+                ):
+                    SOURCE_LOCK._read_bounded_regular(
+                        target,
+                        label="mode drift control file",
+                    )
+                self.assertEqual(calls, 2)
+        target.chmod(0o600)
+
+    def test_bounded_read_rejects_in_flight_link_policy_drift(self) -> None:
+        target = self.root / "link-drift-control-file"
+        alias = self.root / "link-drift-control-file-alias"
+        target.write_bytes(b"control\n")
+        target.chmod(0o600)
+        real_fstat = os.fstat
+        for initial_links, final_links in ((1, 2), (2, 1)):
+            with self.subTest(initial=initial_links, final=final_links):
+                if initial_links == 2:
+                    os.link(target, alias)
+                calls = 0
+
+                def mutate_after_first_fstat(descriptor):
+                    nonlocal calls
+                    metadata = real_fstat(descriptor)
+                    calls += 1
+                    if calls == 1:
+                        if final_links == 2:
+                            os.link(target, alias)
+                        else:
+                            alias.unlink()
+                    return metadata
+
+                try:
+                    with (
+                        mock.patch.object(
+                            SOURCE_LOCK.os,
+                            "fstat",
+                            side_effect=mutate_after_first_fstat,
+                        ),
+                        self.assertRaisesRegex(
+                            SOURCE_LOCK.SourceLockError,
+                            "identity, content size, or policy changed",
+                        ),
+                    ):
+                        SOURCE_LOCK._read_bounded_regular(
+                            target,
+                            label="link drift control file",
+                        )
+                    self.assertEqual(calls, 2)
+                finally:
+                    if alias.exists():
+                        alias.unlink()
+
+    def test_rejects_safe_checkout_control_file_drift_between_receipts(
+        self,
+    ) -> None:
+        git_directory = self._checkout() / ".git"
+        original_capture = SOURCE_LOCK._capture_complete_checkout_verification_receipt
+        mutations = (
+            (
+                "HEAD mode",
+                git_directory / "HEAD",
+                lambda target, payload, mode: target.chmod(
+                    0o600 if mode != 0o600 else 0o644
+                ),
+            ),
+            (
+                "config content",
+                git_directory / "config",
+                lambda target, payload, mode: target.write_bytes(
+                    payload + b"\n# receipt drift fixture\n"
+                ),
+            ),
+        )
+        for case, target, mutate in mutations:
+            with self.subTest(case=case):
+                original_payload = target.read_bytes()
+                original_mode = stat.S_IMODE(target.stat().st_mode)
+                captures = 0
+
+                def capture_then_mutate(*args, **kwargs):
+                    nonlocal captures
+                    receipt = original_capture(*args, **kwargs)
+                    captures += 1
+                    if captures == 1:
+                        mutate(target, original_payload, original_mode)
+                    return receipt
+
+                try:
+                    with (
+                        mock.patch.object(
+                            SOURCE_LOCK,
+                            "_capture_complete_checkout_verification_receipt",
+                            side_effect=capture_then_mutate,
+                        ),
+                        self.assertRaisesRegex(
+                            SOURCE_LOCK.SourceLockError,
+                            "structured receipt changed during verification",
+                        ),
+                    ):
+                        SOURCE_LOCK.verify_checkouts(
+                            self.source_root,
+                            self.source_lock,
+                        )
+                    self.assertEqual(captures, 2)
+                finally:
+                    target.write_bytes(original_payload)
+                    target.chmod(original_mode)
 
     def test_fixture_disables_background_git_maintenance(self) -> None:
         for checkout in (self._checkout(index) for index in range(len(self.pins))):

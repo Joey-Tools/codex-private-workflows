@@ -127,11 +127,11 @@ def _synthetic_complete_checkout_receipt(source_root: Path, pins: tuple[object, 
                 name=pin.name,
                 repository=pin.repository,
                 checkout=source_root / pin.name,
-                checkout_binding=(1, 2, 3, 0o700),
+                checkout_binding=(1, 2, os.getuid(), 0o700),
                 git_directory=source_root / pin.name / ".git",
-                git_directory_binding=(1, 3, 3, 0o700),
+                git_directory_binding=(1, 3, os.getuid(), 0o700),
                 objects_directory=source_root / pin.name / ".git" / "objects",
-                objects_directory_binding=(1, 4, 3, 0o700),
+                objects_directory_binding=(1, 4, os.getuid(), 0o700),
                 head=pin.sha,
                 tree=pin.tree,
                 head_file=file_state(source_root / pin.name / ".git" / "HEAD"),
@@ -761,6 +761,133 @@ class PrivateOverlaySyncTests(unittest.TestCase):
         self.assertEqual(len(bindings), 1)
         return stack, staging, bindings[0]
 
+    @contextlib.contextmanager
+    def _valid_installed_regular_file_overlay_receipt(self, name: str):
+        target = self._create_regular_file_overlay_target(name)
+        with self._regular_file_overlay_staging_directory(target) as scope:
+            stack, staging, binding = (
+                self._prepare_scoped_regular_file_overlay_candidate(scope)
+            )
+            with stack:
+                result = SYNC_MODULE._replace_target_with_regular_file_overlays(
+                    target,
+                    staging,
+                    (binding,),
+                    staging_scope=scope,
+                )
+                yield result.installed_receipt
+
+    def _trace_personal_agents_migration_order(
+        self,
+        *,
+        agents: Path,
+        legacy: bytes,
+        legacy_digest: str,
+        receipt_name: str,
+        final_file_label: str,
+        receipt_label: str,
+        scope_operation: str,
+        rename_endpoint: str,
+    ) -> list[str]:
+        events: list[str] = []
+        file_event = f"file:{final_file_label}"
+        receipt_event = f"receipt:{receipt_label}"
+        scope_event = f"scope:{scope_operation}"
+        rename_event = f"rename:{scope_operation}"
+        real_assert_file = SYNC_MODULE._assert_bound_plain_file
+        real_assert_installed = (
+            SYNC_MODULE._assert_installed_regular_file_overlay_receipt
+        )
+        real_assert_scope = SYNC_MODULE._assert_regular_file_overlay_scope_binding
+        real_rename = SYNC_MODULE._rename_regular_file_overlay_noreplace
+
+        def record_file(*args, **kwargs):
+            result = real_assert_file(*args, **kwargs)
+            if kwargs.get("label") == final_file_label:
+                events.append(file_event)
+            return result
+
+        def record_receipt(receipt, *, label):
+            result = real_assert_installed(receipt, label=label)
+            if label == receipt_label:
+                events.append(receipt_event)
+            return result
+
+        def record_scope(scope, *, operation):
+            if operation == scope_operation:
+                events.append(scope_event)
+            return real_assert_scope(scope, operation=operation)
+
+        def record_rename(*args, **kwargs):
+            relevant = (
+                args[2] == agents.name
+                if rename_endpoint == "source"
+                else args[4] == agents.name
+            )
+            if relevant:
+                events.append(rename_event)
+            return real_rename(*args, **kwargs)
+
+        self.assertIn(rename_endpoint, {"source", "target"})
+        with (
+            self._valid_installed_regular_file_overlay_receipt(
+                receipt_name
+            ) as installed_receipt,
+            contextlib.ExitStack() as stack,
+        ):
+            repo_binding = SYNC_MODULE._pin_regular_file_overlay_directory(
+                stack,
+                self.repo_root,
+                label="repository root",
+            )
+            with (
+                mock.patch.object(
+                    SYNC_MODULE,
+                    "PERSONAL_AGENTS_LEGACY_REVIEW_BLOCK_SHA256",
+                    legacy_digest,
+                ),
+                mock.patch.object(
+                    SYNC_MODULE,
+                    "_assert_bound_plain_file",
+                    side_effect=record_file,
+                ),
+                mock.patch.object(
+                    SYNC_MODULE,
+                    "_assert_installed_regular_file_overlay_receipt",
+                    side_effect=record_receipt,
+                ),
+                mock.patch.object(
+                    SYNC_MODULE,
+                    "_assert_regular_file_overlay_scope_binding",
+                    side_effect=record_scope,
+                ),
+                mock.patch.object(
+                    SYNC_MODULE,
+                    "_rename_regular_file_overlay_noreplace",
+                    side_effect=record_rename,
+                ),
+            ):
+                SYNC_MODULE._migrate_personal_agents_guidance(
+                    repo_binding,
+                    installed_receipt=installed_receipt,
+                )
+
+        agents.write_bytes(legacy)
+        agents.chmod(0o644)
+        return events
+
+    def _assert_ordered_event_subsequence(
+        self,
+        events: list[str],
+        expected: list[str],
+    ) -> None:
+        cursor = 0
+        for event in expected:
+            try:
+                cursor = events.index(event, cursor) + 1
+            except ValueError:
+                self.fail(f"missing ordered event {event!r} in trace {events!r}")
+
     def _create_canonical_regular_file_overlay_rule(
         self,
         *,
@@ -1111,6 +1238,106 @@ class PrivateOverlaySyncTests(unittest.TestCase):
             source_lock,
             repo_root=self.repo_root,
         )
+
+    def test_structured_checkout_receipt_rejects_forged_file_access_policy(
+        self,
+    ) -> None:
+        pin = SimpleNamespace(
+            name="example",
+            repository="Joey-Tools/example",
+            sha="a" * 40,
+            tree="b" * 40,
+        )
+        receipt = _synthetic_complete_checkout_receipt(
+            self.source_root,
+            (pin,),
+        )
+        checkout = receipt.checkouts[0]
+        file_state = checkout.head_file
+        cases = {
+            "wrong-uid": (os.getuid() + 1, 0o644, 1),
+            "writable-mode": (os.getuid(), 0o666, 1),
+            "multiple-links": (os.getuid(), 0o644, 2),
+        }
+        pin_records = ((pin.name, pin.repository, pin.sha, pin.tree),)
+
+        for name, access_policy in cases.items():
+            forged_file_state = SimpleNamespace(
+                **{
+                    **vars(file_state),
+                    "access_policy": access_policy,
+                }
+            )
+            forged_checkout = SimpleNamespace(
+                **{
+                    **vars(checkout),
+                    "head_file": forged_file_state,
+                }
+            )
+            forged_receipt = SimpleNamespace(
+                **{
+                    **vars(receipt),
+                    "checkouts": (forged_checkout,),
+                }
+            )
+            with self.subTest(name=name):
+                self.assertFalse(
+                    SYNC_MODULE._structured_checkout_receipt_is_complete(
+                        forged_receipt,
+                        source_root=self.source_root,
+                        pins=pin_records,
+                    )
+                )
+
+    def test_structured_checkout_receipt_rejects_nonprimitive_file_state(
+        self,
+    ) -> None:
+        pin = SimpleNamespace(
+            name="example",
+            repository="Joey-Tools/example",
+            sha="a" * 40,
+            tree="b" * 40,
+        )
+        receipt = _synthetic_complete_checkout_receipt(
+            self.source_root,
+            (pin,),
+        )
+        checkout = receipt.checkouts[0]
+        file_state = checkout.head_file
+        cases = {
+            "boolean-object-identity": {"object_identity": (1, 5, True)},
+            "boolean-size": {"size": True},
+            "nonhex-digest": {"sha256": "g" * 64},
+        }
+        pin_records = ((pin.name, pin.repository, pin.sha, pin.tree),)
+
+        for name, replacement in cases.items():
+            forged_file_state = SimpleNamespace(
+                **{
+                    **vars(file_state),
+                    **replacement,
+                }
+            )
+            forged_checkout = SimpleNamespace(
+                **{
+                    **vars(checkout),
+                    "head_file": forged_file_state,
+                }
+            )
+            forged_receipt = SimpleNamespace(
+                **{
+                    **vars(receipt),
+                    "checkouts": (forged_checkout,),
+                }
+            )
+            with self.subTest(name=name):
+                self.assertFalse(
+                    SYNC_MODULE._structured_checkout_receipt_is_complete(
+                        forged_receipt,
+                        source_root=self.source_root,
+                        pins=pin_records,
+                    )
+                )
 
     def _locked_canonical_review_source(
         self,
@@ -2004,15 +2231,15 @@ class PrivateOverlaySyncTests(unittest.TestCase):
         )
         self.assertEqual(
             policy.reviewed_candidate_revision,
-            "6f404532fe39df560ce2898430ed15aedf4fe6ae",
+            "b160b6fd0b3a0da4e25a74fbdb6bd3750c7a9bb2",
         )
         self.assertEqual(
             policy.approved_root_tree,
-            "798e0664d7bad309f70a38f80cf9e6946341229a",
+            "69475da88941082e2557ca875c82e4a0d38a173f",
         )
         self.assertEqual(
             policy.approved_review_subtree_tree,
-            "ca734bab16cf3e3ae04cbfb5844213941eeda6eb",
+            "7b08cb84a07c4a846d26ecde538c740e7772f9e7",
         )
 
     def test_canonical_review_migration_accepts_same_tree_squash(self) -> None:
@@ -2530,6 +2757,7 @@ class PrivateOverlaySyncTests(unittest.TestCase):
             migrated_rule,
             locked_source,
             installed_migration_receipt,
+            personal_agents_plan,
         ):
             observed_installed_tree.append(
                 not (target / "old-marker").exists()
@@ -2543,6 +2771,7 @@ class PrivateOverlaySyncTests(unittest.TestCase):
                 migrated_rule,
                 locked_source,
                 installed_migration_receipt,
+                personal_agents_plan,
             )
 
         def record_installed_validation(receipt, *, label):
@@ -2627,7 +2856,7 @@ class PrivateOverlaySyncTests(unittest.TestCase):
             authoritative=True,
             legacy_inventory=True,
         )
-        agents, legacy, _legacy_digest = self._synthetic_legacy_personal_agents()
+        agents, legacy, legacy_digest = self._synthetic_legacy_personal_agents()
         source = self.source_root / rule.repo / rule.source
         locked_sources = self._locked_canonical_review_source(
             rule,
@@ -2635,16 +2864,706 @@ class PrivateOverlaySyncTests(unittest.TestCase):
             legacy=True,
         )
 
-        SYNC_MODULE.sync_sources(
-            self.repo_root,
-            self.source_root,
-            (rule,),
-            locked_sources=locked_sources,
-        )
+        with mock.patch.object(
+            SYNC_MODULE,
+            "PERSONAL_AGENTS_LEGACY_REVIEW_BLOCK_SHA256",
+            legacy_digest,
+        ):
+            SYNC_MODULE.sync_sources(
+                self.repo_root,
+                self.source_root,
+                (rule,),
+                locked_sources=locked_sources,
+            )
 
         self.assertEqual(agents.read_bytes(), legacy)
         self.assertFalse((target / "old-marker").exists())
         self.assertEqual((target / "SKILL.md").read_bytes(), b"public\n")
+
+    def test_legacy_review_source_rejects_nonlegacy_agents_before_any_write(
+        self,
+    ) -> None:
+        rule, target = self._create_canonical_regular_file_overlay_rule(
+            authoritative=True,
+            legacy_inventory=True,
+        )
+        agents, legacy, legacy_digest = self._synthetic_legacy_personal_agents()
+        source = self.source_root / rule.repo / rule.source
+        locked_sources = self._locked_canonical_review_source(
+            rule,
+            source,
+            legacy=True,
+        )
+
+        with mock.patch.object(
+            SYNC_MODULE,
+            "PERSONAL_AGENTS_LEGACY_REVIEW_BLOCK_SHA256",
+            legacy_digest,
+        ):
+            current = SYNC_MODULE._migrated_personal_agents_bytes(legacy)
+            cases = {
+                "current": (
+                    current,
+                    "exact legacy canonical review source requires exact legacy",
+                ),
+                "mixed": (legacy + current, "exact legacy or migrated state"),
+                "compact-current": (
+                    current.replace(
+                        SYNC_MODULE.PERSONAL_AGENTS_CURRENT_REVIEW_BLOCK,
+                        SYNC_MODULE.PERSONAL_AGENTS_CURRENT_REVIEW_BLOCK.rstrip(b"\n"),
+                        1,
+                    ),
+                    "exact legacy or migrated state",
+                ),
+                "legacy-byte-drift": (
+                    legacy.replace(
+                        b"Synthetic legacy review detail",
+                        b"Synthetic legacy review detaiL",
+                        1,
+                    ),
+                    "exact legacy or migrated state",
+                ),
+            }
+            for name, (payload, error_pattern) in cases.items():
+                agents.write_bytes(payload)
+                agents.chmod(0o644)
+                with (
+                    self.subTest(name=name),
+                    mock.patch.object(
+                        SYNC_MODULE,
+                        "_sync_sources_with_repo_binding",
+                    ) as sync_impl,
+                    self.assertRaisesRegex(
+                        SYNC_MODULE.SyncError,
+                        error_pattern,
+                    ),
+                ):
+                    SYNC_MODULE.sync_sources(
+                        self.repo_root,
+                        self.source_root,
+                        (rule,),
+                        locked_sources=locked_sources,
+                    )
+                sync_impl.assert_not_called()
+                self.assertTrue((target / "old-marker").is_file())
+
+    def test_candidate_review_source_rejects_unknown_agents_before_any_write(
+        self,
+    ) -> None:
+        rule, target = self._create_canonical_regular_file_overlay_rule(
+            authoritative=True
+        )
+        agents, legacy, legacy_digest = self._synthetic_legacy_personal_agents()
+        source = self.source_root / rule.repo / rule.source
+        locked_sources = self._locked_canonical_review_source(rule, source)
+
+        with mock.patch.object(
+            SYNC_MODULE,
+            "PERSONAL_AGENTS_LEGACY_REVIEW_BLOCK_SHA256",
+            legacy_digest,
+        ):
+            current = SYNC_MODULE._migrated_personal_agents_bytes(legacy)
+            cases = {
+                "mixed": legacy + current,
+                "legacy-byte-drift": legacy.replace(
+                    b"Synthetic legacy review detail",
+                    b"Synthetic legacy review detaiL",
+                    1,
+                ),
+            }
+            for name, payload in cases.items():
+                agents.write_bytes(payload)
+                agents.chmod(0o644)
+                with (
+                    self.subTest(name=name),
+                    mock.patch.object(
+                        SYNC_MODULE,
+                        "_sync_sources_with_repo_binding",
+                    ) as sync_impl,
+                    self.assertRaisesRegex(
+                        SYNC_MODULE.SyncError,
+                        "exact legacy or migrated state",
+                    ),
+                ):
+                    SYNC_MODULE.sync_sources(
+                        self.repo_root,
+                        self.source_root,
+                        (rule,),
+                        locked_sources=locked_sources,
+                    )
+                sync_impl.assert_not_called()
+                self.assertTrue((target / "old-marker").is_file())
+
+    def test_candidate_review_source_accepts_current_agents_without_migration(
+        self,
+    ) -> None:
+        rule, target = self._create_canonical_regular_file_overlay_rule(
+            authoritative=True
+        )
+        agents, legacy, legacy_digest = self._synthetic_legacy_personal_agents()
+        source = self.source_root / rule.repo / rule.source
+        locked_sources = self._locked_canonical_review_source(rule, source)
+
+        with mock.patch.object(
+            SYNC_MODULE,
+            "PERSONAL_AGENTS_LEGACY_REVIEW_BLOCK_SHA256",
+            legacy_digest,
+        ):
+            current = SYNC_MODULE._migrated_personal_agents_bytes(legacy)
+            agents.write_bytes(current)
+            initial_inode = agents.stat().st_ino
+            real_assert_installed = (
+                SYNC_MODULE._assert_canonical_review_installed_migration_receipt
+            )
+            installed_labels: list[str] = []
+
+            def record_installed_gate(*args, label):
+                result = real_assert_installed(*args, label=label)
+                installed_labels.append(label)
+                return result
+
+            with (
+                mock.patch.object(
+                    SYNC_MODULE,
+                    "_migrate_personal_agents_after_canonical_review_sync",
+                ) as migrate,
+                mock.patch.object(
+                    SYNC_MODULE,
+                    "_bind_canonical_review_installed_migration_receipt",
+                    wraps=SYNC_MODULE._bind_canonical_review_installed_migration_receipt,
+                ) as bind_installed,
+                mock.patch.object(
+                    SYNC_MODULE,
+                    "_verify_current_personal_agents_after_canonical_review_sync",
+                    wraps=SYNC_MODULE._verify_current_personal_agents_after_canonical_review_sync,
+                ) as verify_current,
+                mock.patch.object(
+                    SYNC_MODULE,
+                    "_assert_canonical_review_installed_migration_receipt",
+                    side_effect=record_installed_gate,
+                ),
+            ):
+                SYNC_MODULE.sync_sources(
+                    self.repo_root,
+                    self.source_root,
+                    (rule,),
+                    locked_sources=locked_sources,
+                )
+
+        migrate.assert_not_called()
+        bind_installed.assert_called_once()
+        verify_current.assert_called_once()
+        self.assertIn("pre-AGENTS current no-op exact target", installed_labels)
+        self.assertIn("post-AGENTS current no-op exact target", installed_labels)
+        self.assertEqual(agents.read_bytes(), current)
+        self.assertEqual(agents.stat().st_ino, initial_inode)
+        self.assertFalse((target / "old-marker").exists())
+        self.assertEqual((target / "SKILL.md").read_bytes(), b"public\n")
+
+    def test_candidate_current_noop_fails_on_post_install_checkout_drift(
+        self,
+    ) -> None:
+        rule, target = self._create_canonical_regular_file_overlay_rule(
+            authoritative=True
+        )
+        agents, legacy, legacy_digest = self._synthetic_legacy_personal_agents()
+        source = self.source_root / rule.repo / rule.source
+        locked_sources = self._locked_canonical_review_source(rule, source)
+        real_replace = SYNC_MODULE._replace_target_with_regular_file_overlays
+        real_revalidate = SYNC_MODULE._revalidate_complete_checkout_verification
+        installed = False
+
+        def replace_then_mark_installed(*args, **kwargs):
+            nonlocal installed
+            result = real_replace(*args, **kwargs)
+            installed = True
+            return result
+
+        def reject_post_install_checkout(verification):
+            if installed:
+                raise SYNC_MODULE.SyncError("synthetic current-noop checkout drift")
+            return real_revalidate(verification)
+
+        with mock.patch.object(
+            SYNC_MODULE,
+            "PERSONAL_AGENTS_LEGACY_REVIEW_BLOCK_SHA256",
+            legacy_digest,
+        ):
+            current = SYNC_MODULE._migrated_personal_agents_bytes(legacy)
+            agents.write_bytes(current)
+            initial_inode = agents.stat().st_ino
+            with (
+                mock.patch.object(
+                    SYNC_MODULE,
+                    "_replace_target_with_regular_file_overlays",
+                    side_effect=replace_then_mark_installed,
+                ),
+                mock.patch.object(
+                    SYNC_MODULE,
+                    "_revalidate_complete_checkout_verification",
+                    side_effect=reject_post_install_checkout,
+                ),
+                mock.patch.object(
+                    SYNC_MODULE,
+                    "_bind_canonical_review_installed_migration_receipt",
+                    wraps=SYNC_MODULE._bind_canonical_review_installed_migration_receipt,
+                ) as bind_installed,
+                mock.patch.object(
+                    SYNC_MODULE,
+                    "_migrate_personal_agents_after_canonical_review_sync",
+                ) as migrate,
+                self.assertRaisesRegex(
+                    SYNC_MODULE.SyncError,
+                    "synthetic current-noop checkout drift",
+                ),
+            ):
+                SYNC_MODULE.sync_sources(
+                    self.repo_root,
+                    self.source_root,
+                    (rule,),
+                    locked_sources=locked_sources,
+                )
+
+        self.assertTrue(installed)
+        bind_installed.assert_called_once()
+        migrate.assert_not_called()
+        self.assertEqual(agents.read_bytes(), current)
+        self.assertEqual(agents.stat().st_ino, initial_inode)
+        self.assertFalse((target / "old-marker").exists())
+        self.assertEqual((target / "SKILL.md").read_bytes(), b"public\n")
+
+    def test_candidate_current_noop_fails_on_installed_receipt_gate(self) -> None:
+        rule, target = self._create_canonical_regular_file_overlay_rule(
+            authoritative=True
+        )
+        agents, legacy, legacy_digest = self._synthetic_legacy_personal_agents()
+        source = self.source_root / rule.repo / rule.source
+        locked_sources = self._locked_canonical_review_source(rule, source)
+        real_assert_installed = (
+            SYNC_MODULE._assert_canonical_review_installed_migration_receipt
+        )
+
+        def reject_current_noop_receipt(*args, label):
+            if label == "pre-AGENTS current no-op exact target":
+                raise SYNC_MODULE.SyncError(
+                    "synthetic current-noop installed receipt failure"
+                )
+            return real_assert_installed(*args, label=label)
+
+        with mock.patch.object(
+            SYNC_MODULE,
+            "PERSONAL_AGENTS_LEGACY_REVIEW_BLOCK_SHA256",
+            legacy_digest,
+        ):
+            current = SYNC_MODULE._migrated_personal_agents_bytes(legacy)
+            agents.write_bytes(current)
+            initial_inode = agents.stat().st_ino
+            with (
+                mock.patch.object(
+                    SYNC_MODULE,
+                    "_assert_canonical_review_installed_migration_receipt",
+                    side_effect=reject_current_noop_receipt,
+                ),
+                mock.patch.object(
+                    SYNC_MODULE,
+                    "_revalidate_complete_checkout_verification",
+                    wraps=SYNC_MODULE._revalidate_complete_checkout_verification,
+                ) as revalidate,
+                mock.patch.object(
+                    SYNC_MODULE,
+                    "_migrate_personal_agents_after_canonical_review_sync",
+                ) as migrate,
+                self.assertRaisesRegex(
+                    SYNC_MODULE.SyncError,
+                    "synthetic current-noop installed receipt failure",
+                ),
+            ):
+                SYNC_MODULE.sync_sources(
+                    self.repo_root,
+                    self.source_root,
+                    (rule,),
+                    locked_sources=locked_sources,
+                )
+
+        self.assertGreaterEqual(revalidate.call_count, 3)
+        migrate.assert_not_called()
+        self.assertEqual(agents.read_bytes(), current)
+        self.assertEqual(agents.stat().st_ino, initial_inode)
+        self.assertFalse((target / "old-marker").exists())
+        self.assertEqual((target / "SKILL.md").read_bytes(), b"public\n")
+
+    def test_personal_agents_parent_missing_is_not_created_by_preflight(self) -> None:
+        repo_root = self.root / "missing-personal-parent"
+        repo_root.mkdir()
+        with contextlib.ExitStack() as stack:
+            repo_binding = SYNC_MODULE._pin_regular_file_overlay_directory(
+                stack,
+                repo_root,
+                label="repository root",
+            )
+            with self.assertRaisesRegex(
+                SYNC_MODULE.SyncError,
+                "cannot pin regular-file overlay personal AGENTS parent",
+            ):
+                SYNC_MODULE._pin_personal_agents_file(stack, repo_binding)
+        self.assertFalse(
+            (repo_root / SYNC_MODULE.PERSONAL_AGENTS_TARGET.parent).exists()
+        )
+
+    def test_personal_agents_file_missing_is_not_created_by_preflight(self) -> None:
+        repo_root = self.root / "missing-personal-file"
+        personal_root = repo_root / SYNC_MODULE.PERSONAL_AGENTS_TARGET.parent
+        personal_root.mkdir(parents=True)
+        with contextlib.ExitStack() as stack:
+            repo_binding = SYNC_MODULE._pin_regular_file_overlay_directory(
+                stack,
+                repo_root,
+                label="repository root",
+            )
+            with self.assertRaisesRegex(
+                SYNC_MODULE.SyncError,
+                "cannot inspect regular-file overlay personal AGENTS source",
+            ):
+                SYNC_MODULE._pin_personal_agents_file(stack, repo_binding)
+        self.assertFalse((repo_root / SYNC_MODULE.PERSONAL_AGENTS_TARGET).exists())
+
+    def test_personal_agents_parent_rejects_wrong_owner(self) -> None:
+        agents, _legacy, _legacy_digest = self._synthetic_legacy_personal_agents()
+        parent_inode = agents.parent.stat().st_ino
+        real_fstat = SYNC_MODULE.os.fstat
+
+        def wrong_owner_fstat(descriptor):
+            metadata = real_fstat(descriptor)
+            if stat.S_ISDIR(metadata.st_mode) and metadata.st_ino == parent_inode:
+                return SimpleNamespace(
+                    st_dev=metadata.st_dev,
+                    st_ino=metadata.st_ino,
+                    st_mode=metadata.st_mode,
+                    st_uid=os.getuid() + 1,
+                )
+            return metadata
+
+        with contextlib.ExitStack() as stack:
+            repo_binding = SYNC_MODULE._pin_regular_file_overlay_directory(
+                stack,
+                self.repo_root,
+                label="repository root",
+            )
+            with (
+                mock.patch.object(
+                    SYNC_MODULE.os,
+                    "fstat",
+                    side_effect=wrong_owner_fstat,
+                ),
+                self.assertRaisesRegex(
+                    SYNC_MODULE.SyncError,
+                    "directory must be owned by the current user",
+                ),
+            ):
+                SYNC_MODULE._pin_personal_agents_file(stack, repo_binding)
+
+    def test_personal_agents_parent_rejects_world_writable_mode_before_write(
+        self,
+    ) -> None:
+        rule, target = self._create_canonical_regular_file_overlay_rule(
+            authoritative=True
+        )
+        agents, _legacy, legacy_digest = self._synthetic_legacy_personal_agents()
+        source = self.source_root / rule.repo / rule.source
+        locked_sources = self._locked_canonical_review_source(rule, source)
+        original_mode = stat.S_IMODE(agents.parent.stat().st_mode)
+        agents.parent.chmod(0o777)
+        try:
+            with (
+                mock.patch.object(
+                    SYNC_MODULE,
+                    "PERSONAL_AGENTS_LEGACY_REVIEW_BLOCK_SHA256",
+                    legacy_digest,
+                ),
+                mock.patch.object(
+                    SYNC_MODULE,
+                    "_sync_sources_with_repo_binding",
+                ) as sync_impl,
+                self.assertRaisesRegex(
+                    SYNC_MODULE.SyncError,
+                    "directory must not be group or other writable",
+                ),
+            ):
+                SYNC_MODULE.sync_sources(
+                    self.repo_root,
+                    self.source_root,
+                    (rule,),
+                    locked_sources=locked_sources,
+                )
+            sync_impl.assert_not_called()
+            self.assertTrue((target / "old-marker").is_file())
+        finally:
+            agents.parent.chmod(original_mode)
+
+    def test_personal_agents_parent_mode_drift_after_preflight_blocks_write(
+        self,
+    ) -> None:
+        rule, target = self._create_canonical_regular_file_overlay_rule(
+            authoritative=True
+        )
+        agents, _legacy, legacy_digest = self._synthetic_legacy_personal_agents()
+        source = self.source_root / rule.repo / rule.source
+        locked_sources = self._locked_canonical_review_source(rule, source)
+        original_mode = stat.S_IMODE(agents.parent.stat().st_mode)
+
+        def drift_parent_mode(*_args, **_kwargs):
+            agents.parent.chmod(original_mode | 0o022)
+
+        try:
+            with (
+                mock.patch.object(
+                    SYNC_MODULE,
+                    "PERSONAL_AGENTS_LEGACY_REVIEW_BLOCK_SHA256",
+                    legacy_digest,
+                ),
+                mock.patch.object(
+                    SYNC_MODULE,
+                    "_require_retired_targets_absent",
+                    side_effect=drift_parent_mode,
+                ),
+                mock.patch.object(
+                    SYNC_MODULE,
+                    "_create_external_prepared_regular_file_overlay_container",
+                ) as prepare,
+                self.assertRaisesRegex(
+                    SYNC_MODULE.SyncError,
+                    "directory binding changed|access policy changed",
+                ),
+            ):
+                SYNC_MODULE.sync_sources(
+                    self.repo_root,
+                    self.source_root,
+                    (rule,),
+                    locked_sources=locked_sources,
+                )
+            prepare.assert_not_called()
+            self.assertTrue((target / "old-marker").is_file())
+        finally:
+            agents.parent.chmod(original_mode)
+
+    def test_personal_agents_parent_replacement_after_file_read_fails(self) -> None:
+        agents, legacy, legacy_digest = self._synthetic_legacy_personal_agents()
+        detached_parent = agents.parent.with_name("personal_codex.detached")
+        real_assert_file = SYNC_MODULE._assert_bound_plain_file
+        replaced = False
+
+        def assert_file_then_replace(*args, **kwargs):
+            nonlocal replaced
+            result = real_assert_file(*args, **kwargs)
+            if not replaced:
+                agents.parent.rename(detached_parent)
+                agents.parent.mkdir(mode=0o755)
+                agents.write_bytes(legacy)
+                agents.chmod(0o644)
+                replaced = True
+            return result
+
+        with (
+            contextlib.ExitStack() as stack,
+            mock.patch.object(
+                SYNC_MODULE,
+                "PERSONAL_AGENTS_LEGACY_REVIEW_BLOCK_SHA256",
+                legacy_digest,
+            ),
+        ):
+            repo_binding = SYNC_MODULE._pin_regular_file_overlay_directory(
+                stack,
+                self.repo_root,
+                label="repository root",
+            )
+            pinned = SYNC_MODULE._pin_personal_agents_file(stack, repo_binding)
+            with (
+                mock.patch.object(
+                    SYNC_MODULE,
+                    "_assert_bound_plain_file",
+                    side_effect=assert_file_then_replace,
+                ),
+                self.assertRaisesRegex(
+                    SYNC_MODULE.SyncError,
+                    "post-file-read personal AGENTS parent directory binding changed",
+                ),
+            ):
+                SYNC_MODULE._assert_pinned_personal_agents_file(
+                    repo_binding,
+                    pinned,
+                    label="replacement race",
+                )
+
+        self.assertTrue(replaced)
+        self.assertEqual(
+            (detached_parent / agents.name).read_bytes(),
+            legacy,
+        )
+        self.assertEqual(agents.read_bytes(), legacy)
+
+    def test_personal_agents_parent_mode_drift_after_file_read_fails(self) -> None:
+        agents, _legacy, legacy_digest = self._synthetic_legacy_personal_agents()
+        original_mode = stat.S_IMODE(agents.parent.stat().st_mode)
+        real_assert_file = SYNC_MODULE._assert_bound_plain_file
+        drifted = False
+
+        def assert_file_then_drift_mode(*args, **kwargs):
+            nonlocal drifted
+            result = real_assert_file(*args, **kwargs)
+            if not drifted:
+                agents.parent.chmod(original_mode | 0o022)
+                drifted = True
+            return result
+
+        try:
+            with (
+                contextlib.ExitStack() as stack,
+                mock.patch.object(
+                    SYNC_MODULE,
+                    "PERSONAL_AGENTS_LEGACY_REVIEW_BLOCK_SHA256",
+                    legacy_digest,
+                ),
+            ):
+                repo_binding = SYNC_MODULE._pin_regular_file_overlay_directory(
+                    stack,
+                    self.repo_root,
+                    label="repository root",
+                )
+                pinned = SYNC_MODULE._pin_personal_agents_file(stack, repo_binding)
+                with (
+                    mock.patch.object(
+                        SYNC_MODULE,
+                        "_assert_bound_plain_file",
+                        side_effect=assert_file_then_drift_mode,
+                    ),
+                    self.assertRaisesRegex(
+                        SYNC_MODULE.SyncError,
+                        "post-file-read personal AGENTS parent directory binding changed",
+                    ),
+                ):
+                    SYNC_MODULE._assert_pinned_personal_agents_file(
+                        repo_binding,
+                        pinned,
+                        label="mode race",
+                    )
+        finally:
+            agents.parent.chmod(original_mode)
+
+        self.assertTrue(drifted)
+
+    def _assert_legacy_noop_post_install_agents_mutation_fails(
+        self,
+        mutate,
+        *,
+        error_pattern: str,
+    ) -> tuple[Path, bytes]:
+        rule, target = self._create_canonical_regular_file_overlay_rule(
+            authoritative=True,
+            legacy_inventory=True,
+        )
+        agents, legacy, legacy_digest = self._synthetic_legacy_personal_agents()
+        source = self.source_root / rule.repo / rule.source
+        locked_sources = self._locked_canonical_review_source(
+            rule,
+            source,
+            legacy=True,
+        )
+        real_replace = SYNC_MODULE._replace_target_with_regular_file_overlays
+        mutation_ran = False
+
+        def replace_then_mutate(*args, **kwargs):
+            nonlocal mutation_ran
+            result = real_replace(*args, **kwargs)
+            mutate(agents, legacy)
+            mutation_ran = True
+            return result
+
+        with (
+            mock.patch.object(
+                SYNC_MODULE,
+                "PERSONAL_AGENTS_LEGACY_REVIEW_BLOCK_SHA256",
+                legacy_digest,
+            ),
+            mock.patch.object(
+                SYNC_MODULE,
+                "_replace_target_with_regular_file_overlays",
+                side_effect=replace_then_mutate,
+            ),
+            mock.patch.object(
+                SYNC_MODULE,
+                "_migrate_personal_agents_after_canonical_review_sync",
+            ) as migrate,
+            self.assertRaisesRegex(
+                SYNC_MODULE.SyncError,
+                error_pattern,
+            ) as raised,
+        ):
+            SYNC_MODULE.sync_sources(
+                self.repo_root,
+                self.source_root,
+                (rule,),
+                locked_sources=locked_sources,
+            )
+
+        self.assertTrue(mutation_ran)
+        migrate.assert_not_called()
+        self.assertFalse((target / "old-marker").exists())
+        self.assertEqual((target / "SKILL.md").read_bytes(), b"public\n")
+        self.assertIn("external prepared tree retained at", str(raised.exception))
+        recovery_root = self.repo_root / SYNC_MODULE.REGULAR_FILE_OVERLAY_RECOVERY_ROOT
+        self.assertIn(
+            b"old\n",
+            [path.read_bytes() for path in recovery_root.rglob("*") if path.is_file()],
+        )
+        return agents, legacy
+
+    def test_legacy_noop_rejects_post_preflight_content_change(self) -> None:
+        agents, legacy = self._assert_legacy_noop_post_install_agents_mutation_fails(
+            lambda target, payload: target.write_bytes(
+                payload.replace(b"Synthetic", b"synthetiC", 1)
+            ),
+            error_pattern="bytes or access policy differ",
+        )
+        self.assertNotEqual(agents.read_bytes(), legacy)
+
+    def test_legacy_noop_rejects_post_preflight_object_replacement(self) -> None:
+        moved: list[Path] = []
+
+        def replace_agents(target: Path, _payload: bytes) -> None:
+            prior = target.with_name("AGENTS.preflight.md")
+            target.rename(prior)
+            target.write_bytes(b"concurrent replacement\n")
+            target.chmod(0o644)
+            moved.append(prior)
+
+        agents, legacy = self._assert_legacy_noop_post_install_agents_mutation_fails(
+            replace_agents,
+            error_pattern="binding changed",
+        )
+        self.assertEqual(agents.read_bytes(), b"concurrent replacement\n")
+        self.assertEqual(moved[0].read_bytes(), legacy)
+
+    def test_legacy_noop_rejects_post_preflight_mode_change(self) -> None:
+        agents, _legacy = self._assert_legacy_noop_post_install_agents_mutation_fails(
+            lambda target, _payload: target.chmod(0o600),
+            error_pattern="access policy changed",
+        )
+        self.assertEqual(stat.S_IMODE(agents.stat().st_mode), 0o600)
+
+    def test_legacy_noop_rejects_post_preflight_link_policy_change(self) -> None:
+        alias: list[Path] = []
+
+        def add_alias(target: Path, _payload: bytes) -> None:
+            linked = target.with_name("AGENTS.alias.md")
+            os.link(target, linked)
+            alias.append(linked)
+
+        agents, legacy = self._assert_legacy_noop_post_install_agents_mutation_fails(
+            add_alias,
+            error_pattern="access policy changed",
+        )
+        self.assertEqual(agents.read_bytes(), legacy)
+        self.assertEqual(alias[0].read_bytes(), legacy)
 
     def test_canonical_review_inventory_selector_fails_closed_on_drift(
         self,
@@ -2701,7 +3620,7 @@ class PrivateOverlaySyncTests(unittest.TestCase):
         rule, target = self._create_canonical_regular_file_overlay_rule(
             authoritative=True
         )
-        agents, legacy, _legacy_digest = self._synthetic_legacy_personal_agents()
+        agents, legacy, legacy_digest = self._synthetic_legacy_personal_agents()
         prior_source = self.source_root / "prior-repo" / "prior-source"
         prior_source.mkdir(parents=True)
         (prior_source / "marker.txt").write_text("prior\n", encoding="utf-8")
@@ -2729,7 +3648,7 @@ class PrivateOverlaySyncTests(unittest.TestCase):
         rule, target = self._create_canonical_regular_file_overlay_rule(
             authoritative=True
         )
-        agents, legacy, _legacy_digest = self._synthetic_legacy_personal_agents()
+        agents, legacy, legacy_digest = self._synthetic_legacy_personal_agents()
         source = self.source_root / rule.repo / rule.source
         source_pin = SYNC_MODULE._VerifiedLockedSourcePin(
             repository=SYNC_MODULE.CANONICAL_REVIEW_MIGRATION_POLICY.repository,
@@ -3329,7 +4248,7 @@ class PrivateOverlaySyncTests(unittest.TestCase):
                 ):
                     SYNC_MODULE._migrated_personal_agents_bytes(data)
 
-    def test_personal_agents_drift_fails_after_new_review_tree_is_installed(
+    def test_personal_agents_drift_fails_before_new_review_tree_is_installed(
         self,
     ) -> None:
         rule, target = self._create_canonical_regular_file_overlay_rule(
@@ -3364,8 +4283,8 @@ class PrivateOverlaySyncTests(unittest.TestCase):
             )
 
         self.assertEqual(agents.read_bytes(), drifted)
-        self.assertFalse((target / "old-marker").exists())
-        self.assertEqual((target / "SKILL.md").read_bytes(), b"public\n")
+        self.assertTrue((target / "old-marker").is_file())
+        self.assertFalse((target / "SKILL.md").exists())
 
     def test_personal_agents_migration_does_not_overwrite_rebound_target(
         self,
@@ -3417,6 +4336,273 @@ class PrivateOverlaySyncTests(unittest.TestCase):
             path.read_bytes() for path in recovery_root.rglob("*") if path.is_file()
         ]
         self.assertIn(replacement, retained_payloads)
+
+    def test_personal_agents_parent_replacement_before_retention_rename_fails(
+        self,
+    ) -> None:
+        agents, legacy, legacy_digest = self._synthetic_legacy_personal_agents()
+        detached_parent = agents.parent.with_name("personal_codex.detached")
+        replacement = b"concurrent parent replacement\n"
+        final_file_label = "personal AGENTS pre-publish source"
+        receipt_label = "immediate pre-AGENTS publication"
+        scope_operation = "personal AGENTS prior-state retention"
+        file_event = f"file:{final_file_label}"
+        receipt_event = f"receipt:{receipt_label}"
+        scope_event = f"scope:{scope_operation}"
+        rename_event = f"rename:{scope_operation}"
+        with mock.patch.object(
+            SYNC_MODULE,
+            "PERSONAL_AGENTS_LEGACY_REVIEW_BLOCK_SHA256",
+            legacy_digest,
+        ):
+            expected = SYNC_MODULE._migrated_personal_agents_bytes(legacy)
+        control_events = self._trace_personal_agents_migration_order(
+            agents=agents,
+            legacy=legacy,
+            legacy_digest=legacy_digest,
+            receipt_name="personal-agents-retention-order-receipt",
+            final_file_label=final_file_label,
+            receipt_label=receipt_label,
+            scope_operation=scope_operation,
+            rename_endpoint="source",
+        )
+        self._assert_ordered_event_subsequence(
+            control_events,
+            [file_event, receipt_event, scope_event, rename_event],
+        )
+        events: list[str] = []
+        real_assert_file = SYNC_MODULE._assert_bound_plain_file
+        real_assert_installed = (
+            SYNC_MODULE._assert_installed_regular_file_overlay_receipt
+        )
+        real_assert_scope = SYNC_MODULE._assert_regular_file_overlay_scope_binding
+        real_rename = SYNC_MODULE._rename_regular_file_overlay_noreplace
+        replaced = False
+
+        def record_file(*args, **kwargs):
+            result = real_assert_file(*args, **kwargs)
+            if kwargs.get("label") == final_file_label:
+                events.append(file_event)
+            return result
+
+        def replace_parent_after_receipt(receipt, *, label):
+            nonlocal replaced
+            result = real_assert_installed(receipt, label=label)
+            if label == receipt_label:
+                events.append(receipt_event)
+            if label == receipt_label and not replaced:
+                agents.parent.rename(detached_parent)
+                agents.parent.mkdir(mode=0o755)
+                agents.write_bytes(replacement)
+                agents.chmod(0o644)
+                replaced = True
+            return result
+
+        def record_scope(scope, *, operation):
+            if operation == scope_operation:
+                events.append(scope_event)
+            return real_assert_scope(scope, operation=operation)
+
+        def record_rename(*args, **kwargs):
+            if args[2] == agents.name:
+                events.append(rename_event)
+            return real_rename(*args, **kwargs)
+
+        with (
+            self._valid_installed_regular_file_overlay_receipt(
+                "personal-agents-retention-receipt"
+            ) as installed_receipt,
+            contextlib.ExitStack() as stack,
+        ):
+            repo_binding = SYNC_MODULE._pin_regular_file_overlay_directory(
+                stack,
+                self.repo_root,
+                label="repository root",
+            )
+            with (
+                mock.patch.object(
+                    SYNC_MODULE,
+                    "PERSONAL_AGENTS_LEGACY_REVIEW_BLOCK_SHA256",
+                    legacy_digest,
+                ),
+                mock.patch.object(
+                    SYNC_MODULE,
+                    "_assert_bound_plain_file",
+                    side_effect=record_file,
+                ),
+                mock.patch.object(
+                    SYNC_MODULE,
+                    "_assert_installed_regular_file_overlay_receipt",
+                    side_effect=replace_parent_after_receipt,
+                ),
+                mock.patch.object(
+                    SYNC_MODULE,
+                    "_assert_regular_file_overlay_scope_binding",
+                    side_effect=record_scope,
+                ),
+                mock.patch.object(
+                    SYNC_MODULE,
+                    "_rename_regular_file_overlay_noreplace",
+                    side_effect=record_rename,
+                ) as rename_mock,
+                self.assertRaisesRegex(
+                    SYNC_MODULE.SyncError,
+                    "target parent lineage changed before personal AGENTS "
+                    "prior-state retention",
+                ),
+            ):
+                SYNC_MODULE._migrate_personal_agents_guidance(
+                    repo_binding,
+                    installed_receipt=installed_receipt,
+                )
+
+        self.assertTrue(replaced)
+        rename_mock.assert_not_called()
+        self._assert_ordered_event_subsequence(
+            events,
+            [file_event, receipt_event, scope_event],
+        )
+        self.assertNotIn(rename_event, events)
+        self.assertEqual((detached_parent / agents.name).read_bytes(), legacy)
+        self.assertEqual(agents.read_bytes(), replacement)
+        recovery_root = self.repo_root / SYNC_MODULE.REGULAR_FILE_OVERLAY_RECOVERY_ROOT
+        retained_payloads = [
+            path.read_bytes() for path in recovery_root.rglob("*") if path.is_file()
+        ]
+        self.assertIn(expected, retained_payloads)
+
+    def test_personal_agents_parent_mode_drift_before_publish_rename_fails(
+        self,
+    ) -> None:
+        agents, legacy, legacy_digest = self._synthetic_legacy_personal_agents()
+        final_file_label = "personal AGENTS migration candidate before publication"
+        receipt_label = "final pre-AGENTS publication"
+        scope_operation = "personal AGENTS current-state publication"
+        file_event = f"file:{final_file_label}"
+        receipt_event = f"receipt:{receipt_label}"
+        scope_event = f"scope:{scope_operation}"
+        rename_event = f"rename:{scope_operation}"
+        with mock.patch.object(
+            SYNC_MODULE,
+            "PERSONAL_AGENTS_LEGACY_REVIEW_BLOCK_SHA256",
+            legacy_digest,
+        ):
+            expected = SYNC_MODULE._migrated_personal_agents_bytes(legacy)
+        original_mode = stat.S_IMODE(agents.parent.stat().st_mode)
+        control_events = self._trace_personal_agents_migration_order(
+            agents=agents,
+            legacy=legacy,
+            legacy_digest=legacy_digest,
+            receipt_name="personal-agents-publication-order-receipt",
+            final_file_label=final_file_label,
+            receipt_label=receipt_label,
+            scope_operation=scope_operation,
+            rename_endpoint="target",
+        )
+        self._assert_ordered_event_subsequence(
+            control_events,
+            [file_event, receipt_event, scope_event, rename_event],
+        )
+        events: list[str] = []
+        real_assert_file = SYNC_MODULE._assert_bound_plain_file
+        real_assert_installed = (
+            SYNC_MODULE._assert_installed_regular_file_overlay_receipt
+        )
+        real_assert_scope = SYNC_MODULE._assert_regular_file_overlay_scope_binding
+        real_rename = SYNC_MODULE._rename_regular_file_overlay_noreplace
+        drifted = False
+
+        def record_file(*args, **kwargs):
+            result = real_assert_file(*args, **kwargs)
+            if kwargs.get("label") == final_file_label:
+                events.append(file_event)
+            return result
+
+        def drift_parent_after_receipt(receipt, *, label):
+            nonlocal drifted
+            result = real_assert_installed(receipt, label=label)
+            if label == receipt_label:
+                events.append(receipt_event)
+            if label == receipt_label and not drifted:
+                agents.parent.chmod(original_mode | 0o022)
+                drifted = True
+            return result
+
+        def record_scope(scope, *, operation):
+            if operation == scope_operation:
+                events.append(scope_event)
+            return real_assert_scope(scope, operation=operation)
+
+        def record_rename(*args, **kwargs):
+            if args[4] == agents.name:
+                events.append(rename_event)
+            return real_rename(*args, **kwargs)
+
+        try:
+            with (
+                self._valid_installed_regular_file_overlay_receipt(
+                    "personal-agents-publication-receipt"
+                ) as installed_receipt,
+                contextlib.ExitStack() as stack,
+            ):
+                repo_binding = SYNC_MODULE._pin_regular_file_overlay_directory(
+                    stack,
+                    self.repo_root,
+                    label="repository root",
+                )
+                with (
+                    mock.patch.object(
+                        SYNC_MODULE,
+                        "PERSONAL_AGENTS_LEGACY_REVIEW_BLOCK_SHA256",
+                        legacy_digest,
+                    ),
+                    mock.patch.object(
+                        SYNC_MODULE,
+                        "_assert_bound_plain_file",
+                        side_effect=record_file,
+                    ),
+                    mock.patch.object(
+                        SYNC_MODULE,
+                        "_assert_installed_regular_file_overlay_receipt",
+                        side_effect=drift_parent_after_receipt,
+                    ),
+                    mock.patch.object(
+                        SYNC_MODULE,
+                        "_assert_regular_file_overlay_scope_binding",
+                        side_effect=record_scope,
+                    ),
+                    mock.patch.object(
+                        SYNC_MODULE,
+                        "_rename_regular_file_overlay_noreplace",
+                        side_effect=record_rename,
+                    ) as rename_mock,
+                    self.assertRaisesRegex(
+                        SYNC_MODULE.SyncError,
+                        "target parent lineage changed before personal AGENTS "
+                        "current-state publication",
+                    ),
+                ):
+                    SYNC_MODULE._migrate_personal_agents_guidance(
+                        repo_binding,
+                        installed_receipt=installed_receipt,
+                    )
+        finally:
+            agents.parent.chmod(original_mode)
+
+        self.assertTrue(drifted)
+        self.assertEqual(rename_mock.call_count, 1)
+        self._assert_ordered_event_subsequence(
+            events,
+            [file_event, receipt_event, scope_event],
+        )
+        self.assertNotIn(rename_event, events)
+        self.assertFalse(agents.exists())
+        recovery_root = self.repo_root / SYNC_MODULE.REGULAR_FILE_OVERLAY_RECOVERY_ROOT
+        retained_payloads = [
+            path.read_bytes() for path in recovery_root.rglob("*") if path.is_file()
+        ]
+        self.assertIn(legacy, retained_payloads)
+        self.assertIn(expected, retained_payloads)
 
     def test_current_personal_agents_noop_revalidates_after_classification(
         self,
@@ -3524,13 +4710,18 @@ class PrivateOverlaySyncTests(unittest.TestCase):
         rule, target = self._create_canonical_regular_file_overlay_rule(
             authoritative=True
         )
-        agents, legacy, _legacy_digest = self._synthetic_legacy_personal_agents()
+        agents, legacy, legacy_digest = self._synthetic_legacy_personal_agents()
         missing = self.source_root / rule.repo / rule.source / "SKILL.md"
         missing.unlink()
         source = self.source_root / rule.repo / rule.source
         locked_sources = self._locked_canonical_review_source(rule, source)
 
         with (
+            mock.patch.object(
+                SYNC_MODULE,
+                "PERSONAL_AGENTS_LEGACY_REVIEW_BLOCK_SHA256",
+                legacy_digest,
+            ),
             mock.patch.object(
                 SYNC_MODULE,
                 "_migrate_personal_agents_after_canonical_review_sync",

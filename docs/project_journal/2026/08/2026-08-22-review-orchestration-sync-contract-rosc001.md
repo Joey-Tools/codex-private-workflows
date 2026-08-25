@@ -92,12 +92,33 @@ superseded_by:
   three-line block plus its complete current consent line. Missing, mixed,
   duplicated, half-migrated, or locally drifted states fail closed instead of
   being guessed or repaired piecemeal.
+- Every locked authoritative review sync now classifies `personal_codex/AGENTS.md`
+  through one descriptor-bound snapshot before any sync implementation can
+  write a target. A sealed plan couples that file binding to the validated
+  source pin and source-migration receipt: the exact legacy source accepts only
+  exact legacy guidance and keeps it unchanged; an approved candidate or
+  descendant accepts exact legacy and migrates it after skill installation, or
+  accepts exact current as an inode-stable idempotent no-op. Mixed, compacted,
+  byte-drifted, missing, or unsafe states fail before target replacement.
+  Preflight opens the already-existing `personal_codex` directory without
+  creation or symlink following and requires current-user ownership plus no
+  group/world write permission. Its held identity and access policy remain
+  part of every later plan revalidation; a missing parent/file or a `0022`
+  permission-bit drift cannot be repaired or accepted implicitly.
+  After every bounded AGENTS reread, sync repeats the parent identity/access
+  check and its repo-relative named-root match before the final repository-root
+  check, so post-read directory replacement or mode drift also fails closed.
+  Legacy/current no-op plans retain the original descriptor, bytes, and access
+  policy through skill installation and revalidate them again at the final
+  sync boundary. Content, object replacement, mode, or link-policy drift after
+  preflight therefore fails without overwriting the concurrent state, while
+  the already committed skill replacement keeps its ordinary recovery copy.
 - Migration is triggered only by the exact authoritative canonical review sync
   rule and an immutable candidate/trees proof. Runtime policy binds reviewed
-  candidate revision `6f404532fe39df560ce2898430ed15aedf4fe6ae`, its
+  candidate revision `b160b6fd0b3a0da4e25a74fbdb6bd3750c7a9bb2`, its
   bounded raw commit payload, the approved repository tree
-  `798e0664d7bad309f70a38f80cf9e6946341229a` and approved review subtree
-  `ca734bab16cf3e3ae04cbfb5844213941eeda6eb`. Runtime recomputes the Git commit
+  `69475da88941082e2557ca875c82e4a0d38a173f` and approved review subtree
+  `7b08cb84a07c4a846d26ecde538c740e7772f9e7`. Runtime recomputes the Git commit
   object ID from the payload to prove candidate `C`, parses its exact `tree T`,
   and, for nonlegacy activation, resolves the exact live or selected
   root-`T` ancestor revision's `skills/review-orchestration-playbook` path to
@@ -116,12 +137,26 @@ superseded_by:
   former boolean and binds the live source-lock digest/pins, source-root,
   checkout, `.git`, and object-directory identities, detached `HEAD` and local
   config file identity/content/access policy, exact HEAD/tree, and the complete
-  source-safety contract. Each receipt is captured across two full verification
-  passes; the live source lock is reloaded before and after. Fresh receipts run
-  after manifest/receipt construction, again inside `sync_sources` before its
-  first write, and around the canonical install/AGENTS gate. Object deletion,
-  checkout replacement, same-inode config mutation, or source-lock drift in
-  those intervals is therefore rejected before the corresponding gate.
+  source-safety contract. Before receipt publication, both checkout control
+  files are opened with required no-follow, close-on-exec, and nonblocking
+  flags, then must be regular, current-user-owned, single-link, and free of
+  group or world write permission. Nonblocking open makes a raced FIFO fail at
+  the regular-file check without waiting for a writer; mode and link count are
+  stable across each bounded read. Each receipt is captured across two full
+  verification passes; the live source lock is reloaded before and after. Fresh
+  receipts run after manifest/receipt construction, again inside `sync_sources`
+  before its first write, and around the canonical install/AGENTS gate. Object
+  deletion, checkout replacement, same-inode config mutation, access-policy
+  drift, or source-lock drift in those intervals is therefore rejected before
+  the corresponding gate.
+- The sync consumer independently validates each structured checkout receipt
+  instead of trusting tuple arity: directory bindings and control-file object
+  identities contain exact integer primitives, file size is a bounded
+  non-boolean integer, and the digest is lowercase hexadecimal SHA-256.
+  `.git/HEAD` and `.git/config` access policy must name the current uid, contain
+  no group/world write bit, and retain exactly one hard link. A producer-side
+  or test-double forged receipt cannot authorize migration merely by preserving
+  the outer receipt shape.
 - After source activation, the descriptor-bound new review tree is committed
   first. A sealed install-migration receipt then binds the exact source
   migration receipt, prepared source manifest, final candidate manifest,
@@ -143,7 +178,11 @@ superseded_by:
   cross-path invariant against an active same-UID mutation between two system
   calls; a post-check failure can require recovery from the retained exact prior
   guidance. A current state is an inode-stable no-op with a final exact
-  binding/content revalidation after classification.
+  binding/content revalidation after classification. It is still a candidate
+  migration-source epoch: before tree install it refreshes checkout proof, then
+  binds the same sealed installed-target migration receipt as legacy-to-current,
+  revalidates that receipt and checkout before and after the AGENTS no-op, and
+  only skips the file-publication operation itself.
 - Personal-guidance revalidation protects three properties explicitly: object
   identity (`dev`, `ino`, and file type), content (bounded bytes, size, and
   digest), and access policy (`uid`, exact mode, and link count). Timestamp
@@ -213,13 +252,18 @@ bounded ancestry contains the approved root remains eligible without a refresh.
   error. A legitimate merge commit that retains `T` in its ancestry remains
   accepted.
 - The final delivery freeze advanced to signed candidate
-  `6f404532fe39df560ce2898430ed15aedf4fe6ae`, root tree
-  `798e0664d7bad309f70a38f80cf9e6946341229a`, and review subtree
-  `ca734bab16cf3e3ae04cbfb5844213941eeda6eb`. The companion stores that exact
-  commit object's 793 raw payload bytes as strict Base64; runtime recomputation
-  binds the payload back to the frozen candidate before any migration write.
-  Exact-head secret admission returned clean with complete cleanup, and the
-  final whole-range GPT-5.6 Sol Ultra reviewer returned `No findings.`
+  `b160b6fd0b3a0da4e25a74fbdb6bd3750c7a9bb2`, root tree
+  `69475da88941082e2557ca875c82e4a0d38a173f`, and review subtree
+  `7b08cb84a07c4a846d26ecde538c740e7772f9e7`. The companion stores that exact
+  signed commit object's 585 raw payload bytes as strict Base64; runtime
+  recomputation binds the payload back to the frozen candidate before any
+  migration write. The raw payload's SHA-256 is
+  `6926de8605af7c3bbccb7fd94a4386c878d7400196bf84a52e3a96f01a1c8103`.
+  The last canonical delta changed only documentation, tests, and its project
+  journal; this companion therefore changes no sync runtime logic beyond
+  advancing the immutable source anchor and payload. Exact final-anchor/legacy
+  transition validation passed below; the prior full-suite results remain
+  historical evidence for their recorded heads.
 - Final focused validation counts are recorded after the post-audit fixes in
   the Evidence section. The broader repository suite remains parent-owned final
   delivery evidence and is not inferred from these focused runs.
@@ -272,6 +316,35 @@ bounded ancestry contains the approved root remains eligible without a refresh.
   chain does not contain that commit, while the live review subtree remains
   exact. Acceptance therefore exercises the complete DAG and cannot regress to
   linear-history or first-parent-only inference.
+- Complete checkout receipts now reject group/world-writable or multiply linked
+  `.git/HEAD` and `.git/config` control files before publishing access-policy
+  proof. Owner-private and ordinary owner-writable read-only-to-others modes
+  remain accepted, and the existing two-pass structured-state comparison stays
+  authoritative for later mutation detection. A nonblocking descriptor open
+  prevents a FIFO replacement from stalling the verifier, while directed tests
+  bind in-flight mode/link drift and individually safe cross-capture drift to
+  their respective failure boundaries.
+- The authoritative sync now binds guidance and source identity before entering
+  any per-rule writer. Exact legacy/current source-and-guidance combinations
+  follow the sealed three-action plan above; legacy with current guidance and
+  either source with mixed or byte-drifted guidance fail before the old target
+  marker is touched. Post-install content, inode, mode, and link-count races all
+  fail at descriptor revalidation while preserving the installed-tree recovery
+  state and leaving the concurrent guidance object untouched.
+- The existing `personal_codex` parent is now a read-only precondition rather
+  than a create-if-missing traversal. Missing directory/file, synthetic wrong
+  owner, initial mode `0777`, and post-preflight `mode | 0022` drift all stop
+  before prepared-tree creation. Candidate current-noop additionally proves
+  that checkout refresh and installed-target receipt gates execute and block
+  independently while the original AGENTS inode and bytes remain unchanged.
+- The two AGENTS migration renames now repeat the parent identity, access-policy,
+  and repository-root-to-`personal_codex` lineage check immediately before the
+  mutation, after the corresponding final file read and installed-tree receipt
+  check. Deterministic replacement and mode-drift tests bind the exact event
+  order `final read -> receipt -> scope guard -> rename`; their race variants
+  mutate only after receipt return, prove the guard stops the matching rename,
+  and retain exact legacy and migrated recovery payloads. A final independent
+  read-only audit reported `No findings.`.
 
 ## Next Steps
 
@@ -330,14 +403,38 @@ bounded ancestry contains the approved root remains eligible without a refresh.
   linearizing the feature DAG.
 - `ruff 0.13.2 check scripts/sync_private_overlay_sources.py
   tests/test_private_overlay_sync.py` (pass)
+- Focused authoritative guidance and checkout-consumer validation:
+  `personal_agents` (`33` tests), `canonical_review` (`15`), `review_sync`
+  (`6`), `migration` (`25`), `locked_authoritative` (`2`), and `checkout`
+  (`5`) filters, plus `candidate_review_source` (`2`) and `current_noop` (`2`)
+  filters (pass). These include legacy/current source-state ordering,
+  candidate idempotence, descriptor-bound post-install content/object/mode/link
+  races, retained target recovery, and forged checkout uid/mode/link-count plus
+  primitive-type rejection. They also cover read-only parent admission and
+  candidate-current checkout/install-receipt failure gates, plus deterministic
+  post-file-read parent replacement and access-policy drift. The two final race
+  tests additionally pass a live installed-tree receipt and assert the complete
+  final-read/receipt/scope/rename ordering in a clean control plus fail-closed
+  race run.
+- `PYTHONDONTWRITEBYTECODE=1 PYTHONWARNINGS=error::ResourceWarning python3 -B
+  -m unittest -q tests.test_private_overlay_source_lock` (`49` tests, one
+  conditional skip, pass); HEAD/config safe-mode, writable-mode, real hard-link,
+  writer-free FIFO, in-flight policy drift, and cross-capture safe-state drift
+  regressions are included.
+- `ruff check scripts/private_overlay_source_lock.py
+  tests/test_private_overlay_source_lock.py` and matching `ruff format --check`
+  (pass)
 - `$project-journal` `validate` for the companion repository (pass)
 - `python3 -B -m unittest -q tests.test_private_overlay_sync` (`308` tests)
 - `PYTHONDONTWRITEBYTECODE=1 PYTHONWARNINGS=error::ResourceWarning python3 -B
   -m unittest discover -s tests -p 'test_*.py' -q` (`2,020` tests, `4`
   conditional skips, `266.382` seconds)
-- After advancing the migration authorization to signed canonical candidate
-  `6f404532fe39df560ce2898430ed15aedf4fe6ae`, focused migration-policy
-  validation passed all `11` selected tests in `7.207` seconds.
+- The earlier `6f404532fe39df560ce2898430ed15aedf4fe6ae`
+  migration authorization passed all `11` selected policy tests in `7.207`
+  seconds. After advancing authorization to signed candidate
+  `0c58178f8d7999c35f71d255720d9703825a8839`, the exact candidate-payload/tree,
+  exact legacy-source allowance, and live transition-state tests passed all
+  `3` cases in `0.010` seconds.
 - Post-final-review focused validation: `15` canonical-review tests passed in
   `10.402` seconds; `24` migration tests passed in `9.152` seconds; the six
   review-sync tests, exact legacy/current inventory regression, selector drift,
@@ -347,6 +444,32 @@ bounded ancestry contains the approved root remains eligible without a refresh.
   forward the selected profile, warning-strict repository discovery passed all
   `2,022` tests in `247.827` seconds with `4` conditional skips. Project-journal
   validation and `git diff --check` also passed.
+- After the checkout-control and AGENTS mutation-boundary remediations,
+  warning-strict repository discovery passed all `2,049` tests in `281.476`
+  seconds with `4` conditional skips. The final two trace-hardened race tests
+  and all `33` `personal_agents` tests then passed independently under the same
+  `ResourceWarning` policy.
+- After replacing the offline authorization with signed candidate
+  `0c58178f8d7999c35f71d255720d9703825a8839`, the final warning-strict
+  repository discovery again passed all `2,049` tests in `255.450` seconds with
+  `4` conditional skips.
+- The final CLI-policy repair advanced the authorization to signed candidate
+  `929cfc8daf1b5111ac7059567687a02718ea1475`. Its exact
+  candidate-payload/tree, legacy-source allowance, and live transition-state
+  tests passed all `3` cases in `0.006` seconds; no sync runtime logic changed
+  after the preceding full discovery.
+- The final authority-carrier correction then advanced only the immutable
+  authorization anchor to signed candidate
+  `713e296d3768d967a43e6ff8d73dd0e1d98f4d44`; its exact candidate-payload/tree,
+  legacy-source allowance, and live transition-state tests passed all `3`
+  cases in `1.477` seconds. No new full-suite result is inferred for this final
+  anchor.
+- The final lazy-fetch documentation clarification advanced only the immutable
+  authorization anchor to signed candidate
+  `b160b6fd0b3a0da4e25a74fbdb6bd3750c7a9bb2`; its exact
+  candidate-payload/tree, legacy-source allowance, and live transition-state
+  tests passed all `3` cases in `1.380` seconds. No full private suite was rerun
+  for this anchor.
 - Broad-test follow-up preserved the internal helper ABI by giving low-level
   prepared-file and prepared-directory copy calls an explicit CURRENT-profile
   default. Test seams now accept and transparently forward the selected profile,

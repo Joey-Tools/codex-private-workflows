@@ -347,7 +347,7 @@ def _validate_generated_receipt(
 
 def _read_bounded_regular(path: Path, *, label: str) -> tuple[bytes, os.stat_result]:
     flags = os.O_RDONLY
-    for required_flag in ("O_CLOEXEC", "O_NOFOLLOW"):
+    for required_flag in ("O_CLOEXEC", "O_NOFOLLOW", "O_NONBLOCK"):
         if not hasattr(os, required_flag):
             raise SourceLockError(f"platform lacks required flag: {required_flag}")
         flags |= getattr(os, required_flag)
@@ -378,6 +378,7 @@ def _read_bounded_regular(path: Path, *, label: str) -> tuple[bytes, os.stat_res
             before.st_ino,
             before.st_uid,
             stat.S_IMODE(before.st_mode),
+            before.st_nlink,
             before.st_size,
         )
         protected_after = (
@@ -385,6 +386,7 @@ def _read_bounded_regular(path: Path, *, label: str) -> tuple[bytes, os.stat_res
             after.st_ino,
             after.st_uid,
             stat.S_IMODE(after.st_mode),
+            after.st_nlink,
             after.st_size,
         )
         if protected_after != protected_before or len(payload) != before.st_size:
@@ -1359,6 +1361,17 @@ def _verified_checkout_file_state(
     label: str,
 ) -> VerifiedCheckoutFileState:
     payload, metadata = _read_bounded_regular(path, label=label)
+    mode = stat.S_IMODE(metadata.st_mode)
+    access_policy_violations: list[str] = []
+    if metadata.st_nlink != 1:
+        access_policy_violations.append("exactly one hard link")
+    if mode & 0o022:
+        access_policy_violations.append("no group- or world-writable bits")
+    if access_policy_violations:
+        raise SourceLockError(
+            f"{label} checkout control file access policy is unsafe; requires "
+            + " and ".join(access_policy_violations)
+        )
     return VerifiedCheckoutFileState(
         path=path,
         object_identity=(
@@ -1368,7 +1381,7 @@ def _verified_checkout_file_state(
         ),
         access_policy=(
             metadata.st_uid,
-            stat.S_IMODE(metadata.st_mode),
+            mode,
             metadata.st_nlink,
         ),
         size=len(payload),
