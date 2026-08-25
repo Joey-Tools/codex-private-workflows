@@ -765,6 +765,7 @@ class PrivateOverlaySyncTests(unittest.TestCase):
         self,
         *,
         authoritative: bool = False,
+        legacy_inventory: bool = False,
     ):
         if authoritative:
             rule = next(
@@ -787,10 +788,20 @@ class PrivateOverlaySyncTests(unittest.TestCase):
                 ),
             )
         source = self.source_root / rule.repo / rule.source
-        for relative in SYNC_MODULE.CANONICAL_REVIEW_REQUIRED_FILES:
+        inventory_profile = (
+            SYNC_MODULE._CANONICAL_REVIEW_LEGACY_INVENTORY
+            if legacy_inventory
+            else SYNC_MODULE._CANONICAL_REVIEW_CURRENT_INVENTORY
+        )
+        for relative in inventory_profile.exact_files:
             path = source / relative
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text("public\n", encoding="utf-8")
+        if legacy_inventory:
+            (source / "references/helper-contract.md").write_text(
+                "Use external-review-playbook compatibility.\n",
+                encoding="utf-8",
+            )
         private_catalog = self.repo_root / rule.regular_file_overlays[0].source
         private_catalog.parent.mkdir(parents=True)
         private_catalog.write_text("private\n", encoding="utf-8")
@@ -1255,7 +1266,7 @@ class PrivateOverlaySyncTests(unittest.TestCase):
             approved_root_tree,
         )
 
-        self._fixture_git(checkout, "switch", "--quiet", "-c", "future", squash)
+        self._fixture_git(checkout, "switch", "--quiet", "-c", "future", common)
         (checkout / "future-a.txt").write_text("future a\n", encoding="utf-8")
         self._fixture_git(checkout, "add", ".")
         self._fixture_git(checkout, "commit", "--quiet", "-m", "future a")
@@ -1274,6 +1285,31 @@ class PrivateOverlaySyncTests(unittest.TestCase):
             "future merge",
         )
         future_merge = self._fixture_git(checkout, "rev-parse", "HEAD")
+        self.assertNotIn(
+            squash,
+            self._fixture_git(
+                checkout,
+                "rev-list",
+                "--first-parent",
+                future_merge,
+            ).splitlines(),
+        )
+        self.assertIn(
+            squash,
+            self._fixture_git(
+                checkout,
+                "rev-list",
+                f"{future_merge}^2",
+            ).splitlines(),
+        )
+        self.assertEqual(
+            self._fixture_git(
+                checkout,
+                "rev-parse",
+                f"{future_merge}:skills/review-orchestration-playbook",
+            ),
+            approved_review_subtree_tree,
+        )
 
         self._fixture_git(checkout, "switch", "--quiet", "-c", "fork", common)
         (review_root / "SKILL.md").write_text("approved\n", encoding="utf-8")
@@ -1522,7 +1558,7 @@ class PrivateOverlaySyncTests(unittest.TestCase):
         )
 
         source = self.source_root / review_rule.repo / review_rule.source
-        for relative in SYNC_MODULE.CANONICAL_REVIEW_REQUIRED_FILES:
+        for relative in SYNC_MODULE._CANONICAL_REVIEW_CURRENT_INVENTORY.exact_files:
             path = source / relative
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text("public\n", encoding="utf-8")
@@ -1629,7 +1665,7 @@ class PrivateOverlaySyncTests(unittest.TestCase):
             (retired / "SKILL.md").write_text("retired\n", encoding="utf-8")
 
         existing = self.repo_root / SYNC_MODULE.CANONICAL_REVIEW_TARGET
-        for relative in SYNC_MODULE.CANONICAL_REVIEW_REQUIRED_FILES:
+        for relative in SYNC_MODULE._CANONICAL_REVIEW_CURRENT_INVENTORY.exact_files:
             path = existing / relative
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text("existing\n", encoding="utf-8")
@@ -1666,7 +1702,7 @@ class PrivateOverlaySyncTests(unittest.TestCase):
         with self.assertRaisesRegex(SYNC_MODULE.SyncError, "missing required file"):
             SYNC_MODULE.sync_sources(self.repo_root, self.source_root, ())
 
-        for relative in SYNC_MODULE.CANONICAL_REVIEW_REQUIRED_FILES:
+        for relative in SYNC_MODULE._CANONICAL_REVIEW_CURRENT_INVENTORY.exact_files:
             path = target / relative
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text("canonical\n", encoding="utf-8")
@@ -1679,6 +1715,71 @@ class PrivateOverlaySyncTests(unittest.TestCase):
 
         (target / "SKILL.md").write_text("canonical\n", encoding="utf-8")
         SYNC_MODULE.sync_sources(self.repo_root, self.source_root, ())
+
+    def test_canonical_review_inventory_profiles_are_exact_and_disjoint(
+        self,
+    ) -> None:
+        current = SYNC_MODULE._CANONICAL_REVIEW_CURRENT_INVENTORY
+        legacy = SYNC_MODULE._CANONICAL_REVIEW_LEGACY_INVENTORY
+        self.assertEqual(len(current.required_files), 151)
+        self.assertEqual(len(current.exact_files), 156)
+        self.assertEqual(len(current.independent_required_files), 77)
+        self.assertEqual(len(legacy.required_files), 145)
+        self.assertEqual(len(legacy.exact_files), 150)
+        self.assertEqual(len(legacy.independent_required_files), 78)
+        self.assertEqual(
+            legacy.exact_files - current.exact_files,
+            SYNC_MODULE._CANONICAL_REVIEW_LEGACY_ONLY_FILES,
+        )
+        self.assertEqual(
+            current.exact_files - legacy.exact_files,
+            SYNC_MODULE._CANONICAL_REVIEW_CURRENT_ONLY_FILES,
+        )
+
+        def build_target(name: str, profile) -> Path:
+            target = self.repo_root / name
+            for relative in profile.exact_files:
+                path = target / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("canonical\n", encoding="utf-8")
+            return target
+
+        legacy_target = build_target("legacy-inventory", legacy)
+        (legacy_target / "references/helper-contract.md").write_text(
+            "Use external-review-playbook compatibility.\n",
+            encoding="utf-8",
+        )
+        SYNC_MODULE._validate_canonical_review_target_contents(
+            legacy_target,
+            inventory_profile=legacy,
+        )
+        with self.assertRaisesRegex(SYNC_MODULE.SyncError, "exact tree inventory"):
+            SYNC_MODULE._validate_canonical_review_target_contents(legacy_target)
+
+        current_target = build_target("current-inventory", current)
+        SYNC_MODULE._validate_canonical_review_target_contents(current_target)
+        with self.assertRaisesRegex(SYNC_MODULE.SyncError, "exact tree inventory"):
+            SYNC_MODULE._validate_canonical_review_target_contents(
+                current_target,
+                inventory_profile=legacy,
+            )
+
+        independent_root = legacy_target / SYNC_MODULE.INDEPENDENT_CODEX_REVIEW_ROOT
+        unexpected = independent_root / "review_supervisor/unreviewed.py"
+        unexpected.write_text("unexpected\n", encoding="utf-8")
+        with self.assertRaisesRegex(SYNC_MODULE.SyncError, "exact tree inventory"):
+            SYNC_MODULE._validate_canonical_review_target_contents(
+                legacy_target,
+                inventory_profile=legacy,
+            )
+        unexpected.unlink()
+        missing = independent_root / "README.md"
+        missing.unlink()
+        with self.assertRaisesRegex(SYNC_MODULE.SyncError, "missing required file"):
+            SYNC_MODULE._validate_canonical_review_target_contents(
+                legacy_target,
+                inventory_profile=legacy,
+            )
 
     def test_canonical_review_target_requires_policy_runtime_and_tests(
         self,
@@ -1749,7 +1850,7 @@ class PrivateOverlaySyncTests(unittest.TestCase):
                     SYNC_MODULE.CANONICAL_REVIEW_REQUIRED_FILES,
                 )
         complete_required_files = set(
-            SYNC_MODULE.CANONICAL_REVIEW_REQUIRED_FILES
+            SYNC_MODULE._CANONICAL_REVIEW_CURRENT_INVENTORY.exact_files
         ) | set(policy_required_files)
 
         for missing in policy_required_files:
@@ -1820,7 +1921,7 @@ class PrivateOverlaySyncTests(unittest.TestCase):
         )
 
         target = self.repo_root / "canonical-review-exact-inventory"
-        for relative in SYNC_MODULE.CANONICAL_REVIEW_REQUIRED_FILES:
+        for relative in SYNC_MODULE._CANONICAL_REVIEW_CURRENT_INVENTORY.exact_files:
             path = target / relative
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text("canonical\n", encoding="utf-8")
@@ -2123,6 +2224,21 @@ class PrivateOverlaySyncTests(unittest.TestCase):
         history = self._canonical_migration_history()
         pin = self._verified_migration_fixture_pin(history, history.future_merge)
         self.assertNotEqual(pin.tree, history.policy.approved_root_tree)
+        first_parent_history = self._fixture_git(
+            history.checkout,
+            "rev-list",
+            "--first-parent",
+            history.future_merge,
+        ).splitlines()
+        self.assertNotIn(history.squash, first_parent_history)
+        self.assertIn(
+            history.squash,
+            self._fixture_git(
+                history.checkout,
+                "rev-list",
+                f"{history.future_merge}^2",
+            ).splitlines(),
+        )
 
         source_pin, receipt = self._bind_migration_fixture(history, pin)
 
@@ -2508,7 +2624,8 @@ class PrivateOverlaySyncTests(unittest.TestCase):
 
     def test_legacy_review_source_sync_keeps_legacy_personal_agents(self) -> None:
         rule, target = self._create_canonical_regular_file_overlay_rule(
-            authoritative=True
+            authoritative=True,
+            legacy_inventory=True,
         )
         agents, legacy, _legacy_digest = self._synthetic_legacy_personal_agents()
         source = self.source_root / rule.repo / rule.source
@@ -2528,6 +2645,57 @@ class PrivateOverlaySyncTests(unittest.TestCase):
         self.assertEqual(agents.read_bytes(), legacy)
         self.assertFalse((target / "old-marker").exists())
         self.assertEqual((target / "SKILL.md").read_bytes(), b"public\n")
+
+    def test_canonical_review_inventory_selector_fails_closed_on_drift(
+        self,
+    ) -> None:
+        rule, _target = self._create_canonical_regular_file_overlay_rule(
+            authoritative=True
+        )
+        source = self.source_root / rule.repo / rule.source
+        key = (rule.repo, rule.source)
+        current = self._locked_canonical_review_source(rule, source)[key]
+        legacy = self._locked_canonical_review_source(
+            rule,
+            source,
+            legacy=True,
+        )[key]
+        self.assertIs(
+            SYNC_MODULE._select_canonical_review_inventory_profile(rule, current),
+            SYNC_MODULE._CANONICAL_REVIEW_CURRENT_INVENTORY,
+        )
+        self.assertIs(
+            SYNC_MODULE._select_canonical_review_inventory_profile(rule, legacy),
+            SYNC_MODULE._CANONICAL_REVIEW_LEGACY_INVENTORY,
+        )
+
+        missing_receipt = dataclasses.replace(
+            current,
+            canonical_review_migration_receipt=None,
+        )
+        with self.assertRaisesRegex(
+            SYNC_MODULE.SyncError,
+            "migration receipt does not match",
+        ):
+            SYNC_MODULE._select_canonical_review_inventory_profile(
+                rule,
+                missing_receipt,
+            )
+
+        legacy_with_receipt = dataclasses.replace(
+            legacy,
+            canonical_review_migration_receipt=(
+                current.canonical_review_migration_receipt
+            ),
+        )
+        with self.assertRaisesRegex(
+            SYNC_MODULE.SyncError,
+            "legacy canonical review source has a migration receipt",
+        ):
+            SYNC_MODULE._select_canonical_review_inventory_profile(
+                rule,
+                legacy_with_receipt,
+            )
 
     def test_unlocked_authoritative_review_sync_fails_before_write(self) -> None:
         rule, target = self._create_canonical_regular_file_overlay_rule(
@@ -6645,6 +6813,7 @@ class PrivateOverlaySyncTests(unittest.TestCase):
             ),
         )
         events: list[str] = []
+        observed_profiles = []
         prepared_secure: Path | None = None
         real_public_copy = (
             SYNC_MODULE._copy_regular_file_overlay_public_source_to_prepared
@@ -6653,13 +6822,24 @@ class PrivateOverlaySyncTests(unittest.TestCase):
         real_load = SYNC_MODULE._load_regular_file_overlay_data
         real_validate = SYNC_MODULE._validate_no_retired_review_references
 
-        def record_public_prepare(source, staging, *, prepared_root, rule):
+        def record_public_prepare(
+            source,
+            staging,
+            *,
+            prepared_root,
+            rule,
+            locked_source=None,
+            inventory_profile=SYNC_MODULE._CANONICAL_REVIEW_CURRENT_INVENTORY,
+        ):
             nonlocal prepared_secure
+            observed_profiles.append(inventory_profile)
             result = real_public_copy(
                 source,
                 staging,
                 prepared_root=prepared_root,
                 rule=rule,
+                locked_source=locked_source,
+                inventory_profile=inventory_profile,
             )
             if source == secure_source:
                 prepared_secure = staging
@@ -6735,6 +6915,10 @@ class PrivateOverlaySyncTests(unittest.TestCase):
             ],
         )
         self.assertEqual(
+            observed_profiles,
+            [SYNC_MODULE._CANONICAL_REVIEW_CURRENT_INVENTORY],
+        )
+        self.assertEqual(
             (self.repo_root / secure_target / "catalog.json").read_text(
                 encoding="utf-8"
             ),
@@ -6746,6 +6930,7 @@ class PrivateOverlaySyncTests(unittest.TestCase):
     ) -> None:
         rule, target = self._create_canonical_regular_file_overlay_rule()
         events: list[str] = []
+        observed_profiles = []
         real_validate = (
             SYNC_MODULE._validate_regular_file_overlay_required_manifest_paths
         )
@@ -6753,7 +6938,14 @@ class PrivateOverlaySyncTests(unittest.TestCase):
         real_manifest_assert = SYNC_MODULE._assert_regular_file_overlay_tree_manifest
         real_rename = SYNC_MODULE._rename_regular_file_overlay_noreplace
 
-        def record_validation(manifest, policy_target, *, surface):
+        def record_validation(
+            manifest,
+            policy_target,
+            *,
+            inventory_profile=SYNC_MODULE._CANONICAL_REVIEW_CURRENT_INVENTORY,
+            surface,
+        ):
+            observed_profiles.append(inventory_profile)
             events.append(
                 "staging-validation"
                 if surface == "staged target"
@@ -6762,6 +6954,7 @@ class PrivateOverlaySyncTests(unittest.TestCase):
             return real_validate(
                 manifest,
                 policy_target,
+                inventory_profile=inventory_profile,
                 surface=surface,
             )
 
@@ -6818,6 +7011,13 @@ class PrivateOverlaySyncTests(unittest.TestCase):
             ],
         )
         self.assertEqual(
+            observed_profiles,
+            [
+                SYNC_MODULE._CANONICAL_REVIEW_CURRENT_INVENTORY,
+                SYNC_MODULE._CANONICAL_REVIEW_CURRENT_INVENTORY,
+            ],
+        )
+        self.assertEqual(
             (
                 target / "scripts/review_runtime/synthetic-token-catalog.json"
             ).read_bytes(),
@@ -6834,10 +7034,21 @@ class PrivateOverlaySyncTests(unittest.TestCase):
         )
         validations = 0
 
-        def fail_staging_validation(manifest, policy_target, *, surface):
+        def fail_staging_validation(
+            manifest,
+            policy_target,
+            *,
+            inventory_profile=SYNC_MODULE._CANONICAL_REVIEW_CURRENT_INVENTORY,
+            surface,
+        ):
             nonlocal validations
             validations += 1
-            real_validate(manifest, policy_target, surface=surface)
+            real_validate(
+                manifest,
+                policy_target,
+                inventory_profile=inventory_profile,
+                surface=surface,
+            )
             if surface == "staged target":
                 raise SYNC_MODULE.SyncError("injected staging validation failure")
 
@@ -6899,7 +7110,14 @@ class PrivateOverlaySyncTests(unittest.TestCase):
         real_validate = SYNC_MODULE._validate_regular_file_overlay_policy_bytes
         swapped_during_validation = False
 
-        def validate_with_decoy(data, relative, policy_target, *, surface):
+        def validate_with_decoy(
+            data,
+            relative,
+            policy_target,
+            *,
+            inventory_profile=SYNC_MODULE._CANONICAL_REVIEW_CURRENT_INVENTORY,
+            surface,
+        ):
             nonlocal swapped_during_validation
             if surface == "staged target" and relative == Path("README.md"):
                 recovery_root = (
@@ -6921,6 +7139,7 @@ class PrivateOverlaySyncTests(unittest.TestCase):
                         data,
                         relative,
                         policy_target,
+                        inventory_profile=inventory_profile,
                         surface=surface,
                     )
                 finally:
@@ -6930,6 +7149,7 @@ class PrivateOverlaySyncTests(unittest.TestCase):
                 data,
                 relative,
                 policy_target,
+                inventory_profile=inventory_profile,
                 surface=surface,
             )
 
@@ -6972,7 +7192,14 @@ class PrivateOverlaySyncTests(unittest.TestCase):
         real_validate = SYNC_MODULE._validate_regular_file_overlay_policy_bytes
         swapped_during_validation = False
 
-        def validate_with_decoy(data, relative, policy_target, *, surface):
+        def validate_with_decoy(
+            data,
+            relative,
+            policy_target,
+            *,
+            inventory_profile=SYNC_MODULE._CANONICAL_REVIEW_CURRENT_INVENTORY,
+            surface,
+        ):
             nonlocal swapped_during_validation
             if surface == "prepared public source" and relative == Path("SKILL.md"):
                 saved = source.with_name(f".{source.name}.expected")
@@ -6988,6 +7215,7 @@ class PrivateOverlaySyncTests(unittest.TestCase):
                         data,
                         relative,
                         policy_target,
+                        inventory_profile=inventory_profile,
                         surface=surface,
                     )
                 finally:
@@ -6997,6 +7225,7 @@ class PrivateOverlaySyncTests(unittest.TestCase):
                 data,
                 relative,
                 policy_target,
+                inventory_profile=inventory_profile,
                 surface=surface,
             )
 
@@ -7550,8 +7779,26 @@ class PrivateOverlaySyncTests(unittest.TestCase):
         if soft_target <= open_descriptors + 16:
             self.skipTest("soft descriptor limit has insufficient test headroom")
 
-        rule, target = self._create_canonical_regular_file_overlay_rule()
-        source = self.source_root / rule.repo / rule.source
+        source = self.source_root / "descriptor-depth-repo" / "skill"
+        source.mkdir(parents=True)
+        (source / "catalog.json").write_bytes(b"public\n")
+        private_catalog = self.repo_root / "private/catalog.json"
+        private_catalog.parent.mkdir()
+        private_catalog.write_bytes(b"private\n")
+        rule = SYNC_MODULE.SyncRule(
+            repo="descriptor-depth-repo",
+            source=Path("skill"),
+            target=Path("personal_codex/skills/descriptor-depth"),
+            regular_file_overlays=(
+                SYNC_MODULE.RegularFileOverlay(
+                    source=Path("private/catalog.json"),
+                    target=Path("catalog.json"),
+                ),
+            ),
+        )
+        target = self.repo_root / rule.target
+        target.mkdir(parents=True)
+        (target / "old-marker").write_bytes(b"old\n")
         for index in range(soft_target):
             sibling = source / f"wide-{index:03d}"
             sibling.mkdir()
@@ -7622,8 +7869,21 @@ class PrivateOverlaySyncTests(unittest.TestCase):
         retained_container: Path | None = None
         marker: Path | None = None
 
-        def inject_unproven_entry(source, prepared, *, prepared_root, rule):
+        def inject_unproven_entry(
+            source,
+            prepared,
+            *,
+            prepared_root,
+            rule,
+            locked_source=None,
+            inventory_profile=SYNC_MODULE._CANONICAL_REVIEW_CURRENT_INVENTORY,
+        ):
             nonlocal retained_container, marker
+            self.assertIsNone(locked_source)
+            self.assertIs(
+                inventory_profile,
+                SYNC_MODULE._CANONICAL_REVIEW_CURRENT_INVENTORY,
+            )
             retained_container = prepared.parent
             marker = prepared / "unproven-marker"
             marker.write_bytes(b"must-survive\n")

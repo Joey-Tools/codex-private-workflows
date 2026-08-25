@@ -1033,6 +1033,104 @@ CANONICAL_REVIEW_REQUIRED_FILES = tuple(
     INDEPENDENT_CODEX_REVIEW_ROOT / relative
     for relative in INDEPENDENT_CODEX_REVIEW_REQUIRED_FILES
 )
+
+
+@dataclass(frozen=True)
+class _CanonicalReviewInventoryProfile:
+    name: str
+    required_files: frozenset[Path]
+    exact_files: frozenset[Path]
+    independent_required_files: frozenset[Path]
+    reject_retired_references: bool
+
+    @property
+    def exact_file_parts(self) -> frozenset[tuple[str, ...]]:
+        return frozenset(relative.parts for relative in self.exact_files)
+
+    @property
+    def exact_directory_parts(self) -> frozenset[tuple[str, ...]]:
+        return frozenset(
+            parent.parts
+            for relative in self.exact_files
+            for parent in relative.parents
+            if parent != Path(".")
+        )
+
+
+_CANONICAL_REVIEW_LEGACY_ONLY_FILES = frozenset(
+    _path(path)
+    for path in (
+        "references/base-only-retarget-state-machine.json",
+        "references/helper-contract.md",
+        "scripts/independent_codex_pr_review/README.md",
+        "scripts/independent_codex_pr_review/independent-codex-pr-review",
+    )
+)
+_CANONICAL_REVIEW_CURRENT_ONLY_FILES = frozenset(
+    _path(path)
+    for path in (
+        "references/github-codex-terminal-carriers-v1.json",
+        "references/local-codex-lane.md",
+        "references/review-workspace.md",
+        "scripts/independent_codex_pr_review/tests/internal_supervisor_child_fixture.py",
+        "scripts/review_runtime/review_workspace.py",
+        "tests/test_github_recovery_contracts.py",
+        "tests/test_github_terminal_carriers.py",
+        "tests/test_local_codex_lane_contracts.py",
+        "tests/test_review_workspace.py",
+        "tests/test_trusted_mac_gate_manifest.py",
+    )
+)
+_CANONICAL_REVIEW_COMMON_NONREQUIRED_FILES = frozenset(
+    _path(path)
+    for path in (
+        "tests/fixtures/trust-root-bad-key-usage.pem",
+        "tests/fixtures/trust-root-expired.pem",
+        "tests/fixtures/trust-root-no-key-usage.pem",
+        "tests/fixtures/trust-root-non-ca.pem",
+        "tests/fixtures/trust-root-valid.pem",
+    )
+)
+_CANONICAL_REVIEW_CURRENT_INVENTORY = _CanonicalReviewInventoryProfile(
+    name="current",
+    required_files=frozenset(CANONICAL_REVIEW_REQUIRED_FILES),
+    exact_files=(
+        frozenset(CANONICAL_REVIEW_REQUIRED_FILES)
+        | _CANONICAL_REVIEW_COMMON_NONREQUIRED_FILES
+    ),
+    independent_required_files=frozenset(INDEPENDENT_CODEX_REVIEW_REQUIRED_FILES),
+    reject_retired_references=True,
+)
+_CANONICAL_REVIEW_LEGACY_INVENTORY = _CanonicalReviewInventoryProfile(
+    name="legacy",
+    required_files=(
+        frozenset(CANONICAL_REVIEW_REQUIRED_FILES)
+        - _CANONICAL_REVIEW_CURRENT_ONLY_FILES
+        | _CANONICAL_REVIEW_LEGACY_ONLY_FILES
+    ),
+    exact_files=(
+        (
+            frozenset(CANONICAL_REVIEW_REQUIRED_FILES)
+            - _CANONICAL_REVIEW_CURRENT_ONLY_FILES
+            | _CANONICAL_REVIEW_LEGACY_ONLY_FILES
+        )
+        | _CANONICAL_REVIEW_COMMON_NONREQUIRED_FILES
+    ),
+    independent_required_files=(
+        frozenset(INDEPENDENT_CODEX_REVIEW_REQUIRED_FILES)
+        - {
+            relative.relative_to(INDEPENDENT_CODEX_REVIEW_ROOT)
+            for relative in _CANONICAL_REVIEW_CURRENT_ONLY_FILES
+            if relative.is_relative_to(INDEPENDENT_CODEX_REVIEW_ROOT)
+        }
+        | {
+            relative.relative_to(INDEPENDENT_CODEX_REVIEW_ROOT)
+            for relative in _CANONICAL_REVIEW_LEGACY_ONLY_FILES
+            if relative.is_relative_to(INDEPENDENT_CODEX_REVIEW_ROOT)
+        }
+    ),
+    reject_retired_references=False,
+)
 RETIRED_REVIEW_REFERENCES = (
     "pr-readiness-review-workflow",
     "external-review-playbook",
@@ -1233,15 +1331,27 @@ def _require_retired_targets_absent(
 def _validate_canonical_review_exact_tree_inventories(
     file_parts: set[tuple[str, ...]],
     *,
+    inventory_profile: _CanonicalReviewInventoryProfile,
     surface: str,
 ) -> None:
+    expected_files = {relative.parts for relative in inventory_profile.exact_files}
+    if file_parts != expected_files:
+        missing = sorted("/".join(parts) for parts in expected_files - file_parts)
+        unexpected = sorted("/".join(parts) for parts in file_parts - expected_files)
+        raise SyncError(
+            "canonical review exact file inventory mismatch at "
+            f"{surface}: missing={missing}; unexpected={unexpected}"
+        )
+
     prefix = INDEPENDENT_CODEX_REVIEW_ROOT.parts
     actual = {
         parts[len(prefix) :]
         for parts in file_parts
         if parts[: len(prefix)] == prefix and len(parts) > len(prefix)
     }
-    expected = {relative.parts for relative in INDEPENDENT_CODEX_REVIEW_REQUIRED_FILES}
+    expected = {
+        relative.parts for relative in inventory_profile.independent_required_files
+    }
     if actual == expected:
         return
 
@@ -1256,33 +1366,43 @@ def _validate_canonical_review_exact_tree_inventories(
 def _validate_canonical_review_raw_tree_entry(
     relative_parts: tuple[str, ...],
     *,
+    inventory_profile: _CanonicalReviewInventoryProfile,
     surface: str,
 ) -> None:
-    prefix = INDEPENDENT_CODEX_REVIEW_ROOT.parts
-    if relative_parts[: len(prefix)] != prefix or len(relative_parts) <= len(prefix):
-        return
-    independent_relative = relative_parts[len(prefix) :]
     if (
-        independent_relative in INDEPENDENT_CODEX_REVIEW_REQUIRED_FILE_PARTS
-        or independent_relative in INDEPENDENT_CODEX_REVIEW_REQUIRED_DIRECTORY_PARTS
+        relative_parts in inventory_profile.exact_file_parts
+        or relative_parts in inventory_profile.exact_directory_parts
     ):
         return
-    unexpected = "/".join(independent_relative)
+    prefix = INDEPENDENT_CODEX_REVIEW_ROOT.parts
+    unexpected_parts = (
+        relative_parts[len(prefix) :]
+        if relative_parts[: len(prefix)] == prefix
+        else relative_parts
+    )
+    unexpected = "/".join(unexpected_parts)
     raise SyncError(
         "canonical review raw exact tree inventory mismatch at "
         f"{surface}: unexpected={unexpected}"
     )
 
 
-def _validate_canonical_review_target_contents(target: Path) -> None:
+def _validate_canonical_review_target_contents(
+    target: Path,
+    *,
+    inventory_profile: _CanonicalReviewInventoryProfile = (
+        _CANONICAL_REVIEW_CURRENT_INVENTORY
+    ),
+) -> None:
     if not target.exists():
         return
     for path in target.rglob("*"):
         _validate_canonical_review_raw_tree_entry(
             path.relative_to(target).parts,
+            inventory_profile=inventory_profile,
             surface=str(target),
         )
-    for relative in CANONICAL_REVIEW_REQUIRED_FILES:
+    for relative in inventory_profile.required_files:
         if not (target / relative).is_file():
             raise SyncError(
                 f"canonical review target missing required file: {relative}"
@@ -1294,9 +1414,14 @@ def _validate_canonical_review_target_contents(target: Path) -> None:
     }
     _validate_canonical_review_exact_tree_inventories(
         file_parts,
+        inventory_profile=inventory_profile,
         surface=str(target),
     )
-    for path in sorted(target.rglob("*.md")):
+    for path in (
+        sorted(target.rglob("*.md"))
+        if inventory_profile.reject_retired_references
+        else ()
+    ):
         text = path.read_text(encoding="utf-8")
         for reference in RETIRED_REVIEW_REFERENCES:
             if reference in text:
@@ -1306,8 +1431,17 @@ def _validate_canonical_review_target_contents(target: Path) -> None:
                 )
 
 
-def _validate_canonical_review_target(repo_root: Path) -> None:
-    _validate_canonical_review_target_contents(repo_root / CANONICAL_REVIEW_TARGET)
+def _validate_canonical_review_target(
+    repo_root: Path,
+    *,
+    inventory_profile: _CanonicalReviewInventoryProfile = (
+        _CANONICAL_REVIEW_CURRENT_INVENTORY
+    ),
+) -> None:
+    _validate_canonical_review_target_contents(
+        repo_root / CANONICAL_REVIEW_TARGET,
+        inventory_profile=inventory_profile,
+    )
 
 
 def _personal_agents_review_guidance_state(data: bytes) -> str:
@@ -4688,9 +4822,15 @@ def _validate_regular_file_overlay_policy_bytes(
     relative: Path,
     target: Path,
     *,
+    inventory_profile: _CanonicalReviewInventoryProfile = (
+        _CANONICAL_REVIEW_CURRENT_INVENTORY
+    ),
     surface: str,
 ) -> None:
-    if relative.suffix != ".md":
+    if relative.suffix != ".md" or (
+        target == CANONICAL_REVIEW_TARGET
+        and not inventory_profile.reject_retired_references
+    ):
         return
     try:
         text = data.decode("utf-8")
@@ -4711,12 +4851,15 @@ def _validate_regular_file_overlay_required_manifest_paths(
     manifest: _RegularFileOverlayTreeManifest,
     target: Path,
     *,
+    inventory_profile: _CanonicalReviewInventoryProfile = (
+        _CANONICAL_REVIEW_CURRENT_INVENTORY
+    ),
     surface: str,
 ) -> None:
     if target != CANONICAL_REVIEW_TARGET:
         return
     files = {entry.relative_parts for entry in manifest.entries if entry.kind == "file"}
-    for relative in CANONICAL_REVIEW_REQUIRED_FILES:
+    for relative in inventory_profile.required_files:
         if relative.parts not in files:
             raise SyncError(
                 "canonical review target missing required file at "
@@ -4724,6 +4867,7 @@ def _validate_regular_file_overlay_required_manifest_paths(
             )
     _validate_canonical_review_exact_tree_inventories(
         files,
+        inventory_profile=inventory_profile,
         surface=surface,
     )
 
@@ -4772,6 +4916,9 @@ def _copy_regular_file_overlay_public_source_to_prepared(
     prepared_root: _PinnedRegularFileOverlayDirectory,
     rule: SyncRule,
     locked_source: _LockedRuleSource | None = None,
+    inventory_profile: _CanonicalReviewInventoryProfile = (
+        _CANONICAL_REVIEW_CURRENT_INVENTORY
+    ),
 ) -> _RegularFileOverlayTreeManifest:
     ignored_names = EXCLUDED_NAMES | frozenset(rule.exclude_names)
     raw_entry_validator: Callable[[tuple[str, ...]], None] | None = None
@@ -4780,6 +4927,7 @@ def _copy_regular_file_overlay_public_source_to_prepared(
         def validate_raw_entry(relative_parts: tuple[str, ...]) -> None:
             _validate_canonical_review_raw_tree_entry(
                 relative_parts,
+                inventory_profile=inventory_profile,
                 surface="public source",
             )
 
@@ -5101,6 +5249,7 @@ def _copy_regular_file_overlay_public_source_to_prepared(
                         output_data,
                         child_relative,
                         rule.target,
+                        inventory_profile=inventory_profile,
                         surface="prepared public source",
                     )
                     budget.reserve_bytes(len(output_data), label="prepared public")
@@ -5214,6 +5363,7 @@ def _copy_regular_file_overlay_public_source_to_prepared(
         _validate_regular_file_overlay_required_manifest_paths(
             manifest,
             rule.target,
+            inventory_profile=inventory_profile,
             surface="prepared public source",
         )
         if rule.target == PRIVATE_BUG_TRIAGE_TARGET:
@@ -5346,6 +5496,9 @@ def _copy_prepared_regular_file_overlay_file(
     staging_scope: _RegularFileOverlayStagingScope,
     copy_budget: _RegularFileOverlayCopyBudget,
     manifest_builder: _RegularFileOverlayManifestBuilder,
+    inventory_profile: _CanonicalReviewInventoryProfile = (
+        _CANONICAL_REVIEW_CURRENT_INVENTORY
+    ),
 ) -> None:
     copy_budget.reserve_bytes(expected.size, label="prepared target")
     source_data, source_metadata = _read_expected_prepared_regular_file_overlay_file(
@@ -5358,6 +5511,7 @@ def _copy_prepared_regular_file_overlay_file(
         source_data,
         relative,
         policy_target,
+        inventory_profile=inventory_profile,
         surface="staged target",
     )
     _assert_regular_file_overlay_scope_binding(
@@ -5509,6 +5663,9 @@ def _copy_prepared_regular_file_overlay_directory(
     applied_overlays: set[Path],
     copy_budget: _RegularFileOverlayCopyBudget,
     manifest_builder: _RegularFileOverlayManifestBuilder,
+    inventory_profile: _CanonicalReviewInventoryProfile = (
+        _CANONICAL_REVIEW_CURRENT_INVENTORY
+    ),
 ) -> None:
     child_names = _bounded_regular_file_overlay_tree_names(
         source.descriptor,
@@ -5594,6 +5751,7 @@ def _copy_prepared_regular_file_overlay_directory(
                     staging_scope=staging_scope,
                     relative=child_relative,
                     policy_target=policy_target,
+                    inventory_profile=inventory_profile,
                     expected_entries=expected_entries,
                     visited_entries=visited_entries,
                     overlay_data=overlay_data,
@@ -5659,6 +5817,7 @@ def _copy_prepared_regular_file_overlay_directory(
                     overlay_data[child_relative],
                     child_relative,
                     policy_target,
+                    inventory_profile=inventory_profile,
                     surface="staged target",
                 )
                 copy_budget.reserve_bytes(
@@ -5683,6 +5842,7 @@ def _copy_prepared_regular_file_overlay_directory(
                     relative=child_relative,
                     expected=expected,
                     policy_target=policy_target,
+                    inventory_profile=inventory_profile,
                     staging_scope=staging_scope,
                     copy_budget=copy_budget,
                     manifest_builder=manifest_builder,
@@ -5709,6 +5869,9 @@ def _copy_prepared_regular_file_overlay_staging(
     source_root: _PinnedRegularFileOverlayDirectory | None = None,
     staging_scope: _RegularFileOverlayStagingScope,
     policy_target: Path,
+    inventory_profile: _CanonicalReviewInventoryProfile = (
+        _CANONICAL_REVIEW_CURRENT_INVENTORY
+    ),
     overlay_data: dict[Path, bytes],
     expected_source_manifest: _RegularFileOverlayTreeManifest,
 ) -> _PreparedRegularFileOverlayCandidate:
@@ -5764,6 +5927,7 @@ def _copy_prepared_regular_file_overlay_staging(
         staging_scope=staging_scope,
         relative=Path(),
         policy_target=policy_target,
+        inventory_profile=inventory_profile,
         expected_entries=expected_entries,
         visited_entries=visited_entries,
         overlay_data=overlay_data,
@@ -5804,6 +5968,7 @@ def _copy_prepared_regular_file_overlay_staging(
     _validate_regular_file_overlay_required_manifest_paths(
         manifest,
         policy_target,
+        inventory_profile=inventory_profile,
         surface="staged target",
     )
     _validate_private_bug_triage_reviewed_manifest(
@@ -6792,6 +6957,17 @@ def _canonical_review_personal_agents_migration_required(
     return True
 
 
+def _select_canonical_review_inventory_profile(
+    rule: SyncRule,
+    locked_source: _LockedRuleSource | None,
+) -> _CanonicalReviewInventoryProfile:
+    if not _is_authoritative_canonical_review_rule(rule):
+        return _CANONICAL_REVIEW_CURRENT_INVENTORY
+    if _canonical_review_personal_agents_migration_required(rule, locked_source):
+        return _CANONICAL_REVIEW_CURRENT_INVENTORY
+    return _CANONICAL_REVIEW_LEGACY_INVENTORY
+
+
 def _migrate_personal_agents_guidance(
     repo_binding: _PinnedRegularFileOverlayDirectory,
     *,
@@ -7189,6 +7365,9 @@ def _sync_sources_with_repo_binding(
     rules: tuple[SyncRule, ...],
     repo_binding: _PinnedRegularFileOverlayDirectory | None,
     locked_sources: dict[tuple[str, Path], _LockedRuleSource] | None = None,
+    canonical_review_inventory_profiles: (
+        dict[tuple[str, Path], _CanonicalReviewInventoryProfile] | None
+    ) = None,
 ) -> tuple[Path, ...]:
     recovery_paths: list[Path] = []
     for rule in rules:
@@ -7204,6 +7383,22 @@ def _sync_sources_with_repo_binding(
             None
             if locked_sources is None
             else locked_sources.get((rule.repo, rule.source))
+        )
+        profile_key = (rule.repo, rule.source)
+        if _is_authoritative_canonical_review_rule(rule) and (
+            canonical_review_inventory_profiles is None
+            or profile_key not in canonical_review_inventory_profiles
+        ):
+            raise SyncError(
+                "authoritative canonical review inventory profile is missing"
+            )
+        inventory_profile = (
+            _CANONICAL_REVIEW_CURRENT_INVENTORY
+            if canonical_review_inventory_profiles is None
+            else canonical_review_inventory_profiles.get(
+                profile_key,
+                _CANONICAL_REVIEW_CURRENT_INVENTORY,
+            )
         )
         migrate_personal_agents = _canonical_review_personal_agents_migration_required(
             rule,
@@ -7292,6 +7487,7 @@ def _sync_sources_with_repo_binding(
                     copy_keywords = {}
                     if locked_source is not None:
                         copy_keywords["locked_source"] = locked_source
+                    copy_keywords["inventory_profile"] = inventory_profile
                     prepared_source_manifest = (
                         _copy_regular_file_overlay_public_source_to_prepared(
                             source,
@@ -7339,6 +7535,7 @@ def _sync_sources_with_repo_binding(
                                 source_root=prepared_root,
                                 staging_scope=staging_scope,
                                 policy_target=rule.target,
+                                inventory_profile=inventory_profile,
                                 overlay_data=overlay_data,
                                 expected_source_manifest=prepared_source_manifest,
                             )
@@ -7448,7 +7645,10 @@ def _sync_sources_with_repo_binding(
             if rule.target == PRIVATE_BUG_TRIAGE_TARGET:
                 _validate_private_bug_triage_target_contents(staging)
             if rule.target == CANONICAL_REVIEW_TARGET:
-                _validate_canonical_review_target_contents(staging)
+                _validate_canonical_review_target_contents(
+                    staging,
+                    inventory_profile=inventory_profile,
+                )
             _replace_target(target, staging)
     return tuple(recovery_paths)
 
@@ -7483,16 +7683,24 @@ def sync_sources(
             )
         for verification in checkout_verifications.values():
             _revalidate_complete_checkout_verification(verification)
+    canonical_review_inventory_profiles: dict[
+        tuple[str, Path], _CanonicalReviewInventoryProfile
+    ] = {}
+    final_canonical_review_inventory_profile = _CANONICAL_REVIEW_CURRENT_INVENTORY
     for rule in rules:
         locked_source = (
             None
             if locked_sources is None
             else locked_sources.get((rule.repo, rule.source))
         )
-        _canonical_review_personal_agents_migration_required(
-            rule,
-            locked_source,
+        inventory_profile = _select_canonical_review_inventory_profile(
+            rule, locked_source
         )
+        canonical_review_inventory_profiles[(rule.repo, rule.source)] = (
+            inventory_profile
+        )
+        if rule.target == CANONICAL_REVIEW_TARGET:
+            final_canonical_review_inventory_profile = inventory_profile
     if locked_sources is not None:
         with contextlib.ExitStack() as stack:
             repo_binding = _pin_regular_file_overlay_directory(
@@ -7507,9 +7715,18 @@ def sync_sources(
                 rules,
                 repo_binding,
                 locked_sources,
+                canonical_review_inventory_profiles,
             )
-            _validate_canonical_review_target(repo_root)
-            _validate_no_retired_review_references(repo_root)
+            _validate_canonical_review_target(
+                repo_root,
+                inventory_profile=final_canonical_review_inventory_profile,
+            )
+            _validate_no_retired_review_references(
+                repo_root,
+                excluded_targets=(CANONICAL_REVIEW_TARGET,)
+                if not final_canonical_review_inventory_profile.reject_retired_references
+                else (),
+            )
             _assert_regular_file_overlay_directory_binding(
                 repo_binding,
                 label="repository root",
@@ -7531,6 +7748,7 @@ def sync_sources(
         plain_rules,
         None,
         None,
+        canonical_review_inventory_profiles,
     )
     _remove_retired_targets(repo_root)
     if secure_rules:
@@ -7553,6 +7771,7 @@ def sync_sources(
                 secure_rules,
                 repo_binding,
                 None,
+                canonical_review_inventory_profiles,
             )
     else:
         _validate_canonical_review_target(repo_root)

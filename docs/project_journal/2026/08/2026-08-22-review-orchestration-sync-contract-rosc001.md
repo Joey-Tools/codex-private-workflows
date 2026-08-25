@@ -253,6 +253,25 @@ bounded ancestry contains the approved root remains eligible without a refresh.
   2,949 tests successfully with 15 conditional skips in the restricted host
   sandbox; its sole failure was the expected nested macOS `sandbox-exec` denial,
   and that exact test passed in the approved unrestricted rerun.
+- Final fresh review found that the exact legacy source pin was still evaluated
+  against the candidate inventory before it could take the intended no-migration
+  path. The sync now selects one frozen inventory profile from the authoritative
+  rule and its validated locked-source receipt, then carries that same profile
+  through raw source capture, prepared and staged manifests, Markdown policy,
+  installation, and the final target read. Exact legacy selects its 150-file
+  tree (145 required files and 78 files in the independent-review subtree);
+  an accepted candidate or descendant receipt selects the 156-file current
+  tree (151 required files and 77 independent-review files). Unknown identity,
+  a missing candidate receipt, or a receipt on the legacy pin fails closed.
+- Legacy-only Markdown may retain the old reference vocabulary during the
+  no-migration release, while current inventory still rejects it. This is an
+  inventory-profile property rather than a second migration boolean, so source,
+  staging, and post-install validators cannot silently disagree.
+- The bounded-descendant regression now places the reviewed approved-root commit
+  exclusively on the live merge commit's second-parent history. Its first-parent
+  chain does not contain that commit, while the live review subtree remains
+  exact. Acceptance therefore exercises the complete DAG and cannot regress to
+  linear-history or first-parent-only inference.
 
 ## Next Steps
 
@@ -319,6 +338,22 @@ bounded ancestry contains the approved root remains eligible without a refresh.
 - After advancing the migration authorization to signed canonical candidate
   `6f404532fe39df560ce2898430ed15aedf4fe6ae`, focused migration-policy
   validation passed all `11` selected tests in `7.207` seconds.
+- Post-final-review focused validation: `15` canonical-review tests passed in
+  `10.402` seconds; `24` migration tests passed in `9.152` seconds; the six
+  review-sync tests, exact legacy/current inventory regression, selector drift,
+  ignored-source inventory, and targeted secure-sync checks all passed. Ruff
+  format and lint validation covered the changed sync and test modules.
+- After restoring the low-level keyword-only defaults and making the test seams
+  forward the selected profile, warning-strict repository discovery passed all
+  `2,022` tests in `247.827` seconds with `4` conditional skips. Project-journal
+  validation and `git diff --check` also passed.
+- Broad-test follow-up preserved the internal helper ABI by giving low-level
+  prepared-file and prepared-directory copy calls an explicit CURRENT-profile
+  default. Test seams now accept and transparently forward the selected profile,
+  with ordering tests proving that public, prepared, and staged validation see
+  the same object. The descriptor-depth resource test now uses an ordinary
+  noncanonical secure tree instead of intentionally adding unreviewed files to
+  the closed canonical inventory. All `11` affected seam tests pass.
 - `PYTHONDONTWRITEBYTECODE=1 PYTHONWARNINGS=error::ResourceWarning python3 -B
   -m unittest discover -s
   personal_codex/skills/review-orchestration-playbook/tests -p 'test_*.py' -q`
