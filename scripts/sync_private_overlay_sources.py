@@ -649,8 +649,9 @@ SYNC_RULES = (
         "personal_codex/skills/change-delivery-workflow",
         (
             Replacement(
-                "Run a local pre-commit delivery gate",
-                "Run Joey's local pre-commit delivery gate",
+                "Run a local delivery gate",
+                "Run Joey's local delivery gate",
+                required_count=1,
             ),
         ),
         common_joey_text=True,

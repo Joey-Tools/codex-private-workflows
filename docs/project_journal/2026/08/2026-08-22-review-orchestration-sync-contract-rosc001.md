@@ -3,7 +3,7 @@ id: 20260822-rosc001
 title: Review Orchestration Private Sync Contract
 status: completed
 created: 2026-08-22
-updated: 2026-08-25
+updated: 2026-08-26
 branch: wip/review-orchestration-sync-contract
 pr: https://github.com/Joey-Tools/codex-private-workflows/pull/177
 supersedes: []
@@ -73,6 +73,14 @@ superseded_by:
   required replacement would reject the new canonical tree before staging.
   Common Joey text personalization and the exact-byte private synthetic-token
   catalog overlay remain unchanged.
+- The first scheduled source sync after the canonical merge exposed an exact
+  fail-closed frontmatter mismatch: the public change-delivery description now
+  says `Run a local delivery gate`, while the private specialization still
+  required the retired `pre-commit` phrase. The private rule now transforms
+  the current phrase exactly once to `Run Joey's local delivery gate`. This
+  preserves the canonical landing-commit-then-frozen-review sequence and keeps
+  the Joey-specific frontmatter specialization mandatory instead of weakening
+  it to an optional replacement.
 - The global personal guidance names review shapes and consent boundaries but
   delegates adapter choice, workspace preparation, Claude runtime validation,
   GitHub evidence and recovery, and PR-readiness behavior to
@@ -359,6 +367,13 @@ bounded ancestry contains the approved root remains eligible without a refresh.
 - `scripts/sync_private_overlay_sources.py`
 - `tests/test_private_overlay_sync.py`
 - `personal_codex/AGENTS.md`
+- The post-merge change-delivery replacement regression passed against the
+  actual `SYNC_RULES` entry and current canonical description. It proves the
+  exact one-count private frontmatter specialization, the preserved
+  landing-commit/frozen-review sequence, and the common `the user` to `Joey`
+  transform. The complete `tests.test_private_overlay_sync` module passed all
+  331 tests in 39.322 seconds; Ruff lint/format checks, project-journal
+  validation, and `git diff --check` also passed.
 - Targeted `tests.test_private_overlay_sync.PrivateOverlaySyncTests` checks for
   self-contained canonical sync, required policy inventory, exact internal
   compatibility inventory, stale public-surface removal, and canonical global

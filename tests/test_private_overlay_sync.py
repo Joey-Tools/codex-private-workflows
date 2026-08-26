@@ -4834,6 +4834,60 @@ class PrivateOverlaySyncTests(unittest.TestCase):
             "Use this when Joey asks.\nState the core Joey-visible behavior.\n",
         )
 
+    def test_change_delivery_sync_rule_builds_current_private_variant(
+        self,
+    ) -> None:
+        source = (
+            self.source_root
+            / "codex-review-workflows"
+            / "skills"
+            / "change-delivery-workflow"
+            / "SKILL.md"
+        )
+        source.parent.mkdir(parents=True)
+        source.write_text(
+            "---\n"
+            "name: change-delivery-workflow\n"
+            'description: "Run a local delivery gate for non-trivial repo '
+            "changes: implement, build, test, update docs, form the landing "
+            "commit, review its frozen exact head, then accept it. Use when "
+            "wrapping up local work, probing local gate readiness, or starting "
+            'a full workflow before PR readiness."\n'
+            "---\n\n"
+            "Ask the user before expanding scope.\n",
+            encoding="utf-8",
+        )
+        rule = next(
+            rule
+            for rule in SYNC_MODULE.SYNC_RULES
+            if rule.target == Path("personal_codex/skills/change-delivery-workflow")
+        )
+
+        self.assertEqual(
+            rule.replacements[0],
+            SYNC_MODULE.Replacement(
+                "Run a local delivery gate",
+                "Run Joey's local delivery gate",
+                required_count=1,
+            ),
+        )
+
+        SYNC_MODULE.sync_sources(self.repo_root, self.source_root, (rule,))
+
+        target = self.repo_root / rule.target / "SKILL.md"
+        self.assertEqual(
+            target.read_text(encoding="utf-8"),
+            "---\n"
+            "name: change-delivery-workflow\n"
+            "description: \"Run Joey's local delivery gate for non-trivial repo "
+            "changes: implement, build, test, update docs, form the landing "
+            "commit, review its frozen exact head, then accept it. Use when "
+            "wrapping up local work, probing local gate readiness, or starting "
+            'a full workflow before PR readiness."\n'
+            "---\n\n"
+            "Ask Joey before expanding scope.\n",
+        )
+
     def test_bug_triage_sync_rule_builds_current_private_transport_variant(
         self,
     ) -> None:
