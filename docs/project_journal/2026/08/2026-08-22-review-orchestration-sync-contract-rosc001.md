@@ -3,7 +3,7 @@ id: 20260822-rosc001
 title: Review Orchestration Private Sync Contract
 status: completed
 created: 2026-08-22
-updated: 2026-08-25
+updated: 2026-08-26
 branch: wip/review-orchestration-sync-contract
 pr: https://github.com/Joey-Tools/codex-private-workflows/pull/177
 supersedes: []
@@ -73,6 +73,25 @@ superseded_by:
   required replacement would reject the new canonical tree before staging.
   Common Joey text personalization and the exact-byte private synthetic-token
   catalog overlay remain unchanged.
+- The first scheduled source sync after the canonical merge exposed an exact
+  fail-closed frontmatter mismatch: the public change-delivery description now
+  says `Run a local delivery gate`, while the private specialization still
+  required the retired `pre-commit` phrase. The private rule now transforms the
+  shared legacy/current top-level description prefix exactly once through a
+  frontmatter-field-scoped transform shared by the plain and descriptor-bound
+  copy paths. The transform accepts only a closed flat opening YAML mapping:
+  every semantic field uses one unique unquoted, unindented ASCII simple key,
+  and every value is either a single-line JSON double-quoted string or a
+  single-line scalar from the declared plain-character set. Only exact empty
+  lines and column-zero comments are ignored. Quoted keys, explicit keys,
+  merge keys, YAML 1.1/1.2 implicit bool/null keys, nested or block values,
+  indented comments, decoded line separators, and duplicate keys fail closed
+  before transformation. It changes only the unique `description` field,
+  leaves body and cross-file wording untouched, and validates the private
+  legacy/current postcondition from the copied bytes. This keeps the exact
+  legacy source lock replayable, preserves the current landing-commit-then-
+  frozen-review sequence, and keeps the Joey-specific specialization mandatory
+  instead of weakening it to an optional replacement.
 - The global personal guidance names review shapes and consent boundaries but
   delegates adapter choice, workspace preparation, Claude runtime validation,
   GitHub evidence and recovery, and PR-readiness behavior to
@@ -348,8 +367,11 @@ bounded ancestry contains the approved root remains eligible without a refresh.
 
 ## Next Steps
 
-- Merge and release this transition-aware companion, then complete the
-  canonical squash and execute the generated-sync activation sequence above.
+- After this narrow fail-closed sync-rule repair reaches `master` and its
+  immutable release is verified, rerun scheduled source sync against canonical
+  `master`, review and merge the generated activation PR, verify its final
+  immutable release, and install plus strictly validate that release on the
+  current host.
 
 ## Evidence
 
@@ -359,6 +381,18 @@ bounded ancestry contains the approved root remains eligible without a refresh.
 - `scripts/sync_private_overlay_sources.py`
 - `tests/test_private_overlay_sync.py`
 - `personal_codex/AGENTS.md`
+- The post-merge change-delivery replacement regression passed against the
+  actual `SYNC_RULES` entry and current canonical description. It proves the
+  path- and frontmatter-field-scoped exact one-count private specialization,
+  locked legacy replay through the descriptor-bound copy path, unchanged body
+  and cross-file wording, fail-closed private, duplicate, quoted-key,
+  explicit-key, merge-key, implicit-typed-key, nested, block-scalar,
+  indented-comment, decoded-line-separator, or otherwise ambiguous frontmatter
+  inputs, the preserved landing-commit/frozen-review sequence, and the common
+  `the user` to `Joey` transform. The complete
+  `tests.test_private_overlay_sync` module passed all 338 tests in 29.711
+  seconds; Ruff lint/format checks, project-journal validation, and `git diff
+  --check` also passed.
 - Targeted `tests.test_private_overlay_sync.PrivateOverlaySyncTests` checks for
   self-contained canonical sync, required policy inventory, exact internal
   compatibility inventory, stale public-surface removal, and canonical global
