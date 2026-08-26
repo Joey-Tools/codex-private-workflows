@@ -5074,6 +5074,87 @@ class PrivateOverlaySyncTests(unittest.TestCase):
 
         self.assertFalse((self.repo_root / rule.target).exists())
 
+    def test_change_delivery_locked_sync_rejects_semantic_duplicate_descriptions(
+        self,
+    ) -> None:
+        source = (
+            self.source_root
+            / "codex-review-workflows"
+            / "skills"
+            / "change-delivery-workflow"
+            / "SKILL.md"
+        )
+        source.parent.mkdir(parents=True)
+        rule = next(
+            rule
+            for rule in SYNC_MODULE.SYNC_RULES
+            if rule.target == SYNC_MODULE.CHANGE_DELIVERY_TARGET
+        )
+        policy = SYNC_MODULE.CANONICAL_REVIEW_MIGRATION_POLICY
+        cases = (
+            (
+                "current-quoted",
+                'description: "Run a local delivery gate for current work."\n',
+                '"description": "Override current description."\n',
+                policy.reviewed_candidate_revision,
+                policy.approved_root_tree,
+            ),
+            (
+                "legacy-single-quoted",
+                'description: "Run a local pre-commit delivery gate for legacy work."\n',
+                "'description': \"Override legacy description.\"\n",
+                policy.legacy_revision,
+                policy.legacy_root_tree,
+            ),
+            (
+                "current-explicit",
+                'description: "Run a local delivery gate for current work."\n',
+                '? description\n: "Override current description."\n',
+                policy.reviewed_candidate_revision,
+                policy.approved_root_tree,
+            ),
+            (
+                "legacy-explicit-quoted",
+                'description: "Run a local pre-commit delivery gate for legacy work."\n',
+                '? "description"\n: "Override legacy description."\n',
+                policy.legacy_revision,
+                policy.legacy_root_tree,
+            ),
+        )
+        for label, description, duplicate, revision, root_tree in cases:
+            with self.subTest(label=label):
+                source.write_text(
+                    "---\n"
+                    "name: change-delivery-workflow\n"
+                    + description
+                    + duplicate
+                    + "---\n",
+                    encoding="utf-8",
+                )
+                source_pin = SYNC_MODULE._VerifiedLockedSourcePin(
+                    repository=policy.repository,
+                    revision=revision,
+                    root_tree=root_tree,
+                )
+                locked_sources = self._locked_bug_triage_source(
+                    rule,
+                    source.parent,
+                    source_pin=source_pin,
+                )
+
+                with self.assertRaisesRegex(
+                    SYNC_MODULE.SyncError,
+                    "frontmatter must use a flat simple-key mapping",
+                ):
+                    SYNC_MODULE.sync_sources(
+                        self.repo_root,
+                        self.source_root,
+                        (rule,),
+                        locked_sources=locked_sources,
+                    )
+
+                self.assertFalse((self.repo_root / rule.target).exists())
+
     def test_bug_triage_sync_rule_builds_current_private_transport_variant(
         self,
     ) -> None:
@@ -6587,6 +6668,10 @@ class PrivateOverlaySyncTests(unittest.TestCase):
             '---\ndescription: "public"\n',
             '---\ndescription: "public"\ndescription: "other"\n---\n',
             '---\n  description: "public"\n---\n',
+            '---\ndescription: "public"\n"description": "other"\n---\n',
+            '---\ndescription: "public"\n? description\n: "other"\n---\n',
+            '---\nbase: &base\n  description: "other"\n<<: *base\n'
+            'description: "public"\n---\n',
         )
         for content in cases:
             with self.subTest(content=content):

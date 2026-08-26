@@ -207,6 +207,9 @@ CHANGE_DELIVERY_PRIVATE_DESCRIPTION_PREFIXES = (
     "description: \"Run Joey's local pre-commit delivery gate for ",
     "description: \"Run Joey's local delivery gate for ",
 )
+FRONTMATTER_SAFE_KEY_CHARACTERS = frozenset(
+    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-"
+)
 
 
 PUBLIC_LEGACY_MUTABLE_RELEASE_BLOCK = """_LEGACY_MUTABLE_RELEASES = {
@@ -1567,19 +1570,39 @@ def _frontmatter_field_line_span(
         raise SyncError(f"frontmatter lacks closing delimiter at {surface}")
     frontmatter_start = len("---\n")
     frontmatter = text[frontmatter_start:closing]
-    prefix = f"{key}:"
-    matches: list[tuple[int, int, str]] = []
+    fields: dict[str, tuple[int, int, str]] = {}
     cursor = frontmatter_start
     for raw_line in frontmatter.splitlines(keepends=True):
         line = raw_line.removesuffix("\n")
-        if line.lstrip().startswith(prefix):
-            matches.append((cursor, cursor + len(line), line))
+        stripped = line.lstrip()
+        if not stripped or stripped.startswith("#"):
+            cursor += len(raw_line)
+            continue
+        raw_key, separator, _value = line.partition(":")
+        if (
+            line != stripped
+            or not separator
+            or not raw_key
+            or any(
+                character not in FRONTMATTER_SAFE_KEY_CHARACTERS
+                for character in raw_key
+            )
+        ):
+            raise SyncError(
+                f"frontmatter must use a flat simple-key mapping at {surface}"
+            )
+        if raw_key in fields:
+            raise SyncError(
+                f"frontmatter contains duplicate top-level {raw_key} at {surface}"
+            )
+        fields[raw_key] = (cursor, cursor + len(line), line)
         cursor += len(raw_line)
-    if len(matches) != 1 or matches[0][2] != matches[0][2].lstrip():
+    field = fields.get(key)
+    if field is None:
         raise SyncError(
             f"frontmatter must contain exactly one top-level {key} at {surface}"
         )
-    return matches[0]
+    return field
 
 
 def _apply_text_replacements(
@@ -1665,8 +1688,7 @@ def _validate_replacement_excluded_paths(rules: tuple[SyncRule, ...]) -> None:
             if (
                 not key
                 or any(
-                    character
-                    not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-"
+                    character not in FRONTMATTER_SAFE_KEY_CHARACTERS
                     for character in key
                 )
                 or replacement.path is None

@@ -79,12 +79,14 @@ superseded_by:
   required the retired `pre-commit` phrase. The private rule now transforms the
   shared legacy/current top-level description prefix exactly once through a
   frontmatter-field-scoped transform shared by the plain and descriptor-bound
-  copy paths. The transform requires one unindented `description` field in the
-  opening YAML block, changes only that field, leaves body and cross-file
-  wording untouched, and validates the private legacy/current postcondition
-  from the copied bytes. This keeps the exact legacy source lock replayable,
-  preserves the current landing-commit-then-frozen-review sequence, fails
-  closed on ambiguous frontmatter, and keeps the Joey-specific specialization
+  copy paths. The transform accepts only a closed flat opening YAML mapping:
+  every semantic field uses one unique unquoted, unindented simple key. Quoted
+  aliases, explicit keys, merge keys, nested values, and duplicate keys fail
+  closed before transformation. It changes only the unique `description`
+  field, leaves body and cross-file wording untouched, and validates the
+  private legacy/current postcondition from the copied bytes. This keeps the
+  exact legacy source lock replayable, preserves the current landing-commit-
+  then-frozen-review sequence, and keeps the Joey-specific specialization
   mandatory instead of weakening it to an optional replacement.
 - The global personal guidance names review shapes and consent boundaries but
   delegates adapter choice, workspace preparation, Claude runtime validation,
@@ -379,10 +381,11 @@ bounded ancestry contains the approved root remains eligible without a refresh.
   actual `SYNC_RULES` entry and current canonical description. It proves the
   path- and frontmatter-field-scoped exact one-count private specialization,
   locked legacy replay through the descriptor-bound copy path, unchanged body
-  and cross-file wording, fail-closed private or ambiguous frontmatter inputs,
+  and cross-file wording, fail-closed private, duplicate, quoted-key,
+  explicit-key, merge-key, nested, or otherwise ambiguous frontmatter inputs,
   the preserved landing-commit/frozen-review sequence, and the common `the
   user` to `Joey` transform. The complete
-  `tests.test_private_overlay_sync` module passed all 337 tests in 34.238
+  `tests.test_private_overlay_sync` module passed all 338 tests in 29.967
   seconds; Ruff lint/format checks, project-journal validation, and `git diff
   --check` also passed.
 - Targeted `tests.test_private_overlay_sync.PrivateOverlaySyncTests` checks for
