@@ -214,6 +214,9 @@ FRONTMATTER_SAFE_KEY_CHARACTERS = frozenset(
 FRONTMATTER_SAFE_KEY_INITIAL_CHARACTERS = frozenset(
     "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
 )
+FRONTMATTER_IMPLICIT_NON_STRING_KEYS = frozenset(
+    {"false", "n", "no", "null", "off", "on", "true", "y", "yes"}
+)
 FRONTMATTER_SAFE_PLAIN_VALUE_CHARACTERS = frozenset(
     "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 ._/-"
 )
@@ -1591,6 +1594,7 @@ def _frontmatter_field_line_span(
             or not separator
             or not raw_key
             or raw_key[0] not in FRONTMATTER_SAFE_KEY_INITIAL_CHARACTERS
+            or raw_key.casefold() in FRONTMATTER_IMPLICIT_NON_STRING_KEYS
             or any(
                 character not in FRONTMATTER_SAFE_KEY_CHARACTERS
                 for character in raw_key
@@ -1727,6 +1731,7 @@ def _validate_replacement_excluded_paths(rules: tuple[SyncRule, ...]) -> None:
             if (
                 not key
                 or key[0] not in FRONTMATTER_SAFE_KEY_INITIAL_CHARACTERS
+                or key.casefold() in FRONTMATTER_IMPLICIT_NON_STRING_KEYS
                 or any(
                     character not in FRONTMATTER_SAFE_KEY_CHARACTERS
                     for character in key

@@ -84,14 +84,14 @@ superseded_by:
   and every value is either a single-line JSON double-quoted string or a
   single-line scalar from the declared plain-character set. Only exact empty
   lines and column-zero comments are ignored. Quoted keys, explicit keys,
-  merge keys, nested or block values, indented comments, decoded line
-  separators, and duplicate keys fail closed before transformation. It changes
-  only the unique `description` field, leaves body and cross-file wording
-  untouched, and validates the private legacy/current postcondition from the
-  copied bytes. This keeps the exact legacy source lock replayable, preserves
-  the current landing-commit-then-frozen-review sequence, and keeps the
-  Joey-specific specialization mandatory instead of weakening it to an
-  optional replacement.
+  merge keys, YAML 1.1/1.2 implicit bool/null keys, nested or block values,
+  indented comments, decoded line separators, and duplicate keys fail closed
+  before transformation. It changes only the unique `description` field,
+  leaves body and cross-file wording untouched, and validates the private
+  legacy/current postcondition from the copied bytes. This keeps the exact
+  legacy source lock replayable, preserves the current landing-commit-then-
+  frozen-review sequence, and keeps the Joey-specific specialization mandatory
+  instead of weakening it to an optional replacement.
 - The global personal guidance names review shapes and consent boundaries but
   delegates adapter choice, workspace preparation, Claude runtime validation,
   GitHub evidence and recovery, and PR-readiness behavior to
@@ -386,11 +386,11 @@ bounded ancestry contains the approved root remains eligible without a refresh.
   path- and frontmatter-field-scoped exact one-count private specialization,
   locked legacy replay through the descriptor-bound copy path, unchanged body
   and cross-file wording, fail-closed private, duplicate, quoted-key,
-  explicit-key, merge-key, nested, block-scalar, indented-comment,
-  decoded-line-separator, or otherwise ambiguous frontmatter inputs, the
-  preserved landing-commit/frozen-review sequence, and the common `the user`
-  to `Joey` transform. The complete `tests.test_private_overlay_sync` module
-  passed all 338 tests in 29.377
+  explicit-key, merge-key, implicit-typed-key, nested, block-scalar,
+  indented-comment, decoded-line-separator, or otherwise ambiguous frontmatter
+  inputs, the preserved landing-commit/frozen-review sequence, and the common
+  `the user` to `Joey` transform. The complete
+  `tests.test_private_overlay_sync` module passed all 338 tests in 29.711
   seconds; Ruff lint/format checks, project-journal validation, and `git diff
   --check` also passed.
 - Targeted `tests.test_private_overlay_sync.PrivateOverlaySyncTests` checks for
