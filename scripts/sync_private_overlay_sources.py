@@ -7280,8 +7280,6 @@ def _bind_canonical_review_migration_source(
         and source_pin.root_tree == policy.legacy_root_tree
     ):
         return source_pin, None
-    if actual_review_subtree_tree != policy.approved_review_subtree_tree:
-        raise SyncError("canonical review live subtree is not approved for migration")
     if source_pin.root_tree == policy.approved_root_tree:
         activation_basis = "exact-approved-root-tree"
         proof_revision = source_pin.revision
@@ -7350,7 +7348,6 @@ def _canonical_review_personal_agents_migration_required(
         receipt is None
         or receipt.policy != policy
         or receipt.source_pin != source_pin
-        or receipt.live_review_subtree_tree != policy.approved_review_subtree_tree
         or getattr(locked_source.manifest, "root_object_id", None)
         != receipt.live_review_subtree_tree
         or receipt.activation_basis

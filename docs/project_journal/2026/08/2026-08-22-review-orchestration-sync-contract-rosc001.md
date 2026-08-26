@@ -146,11 +146,13 @@ superseded_by:
   source pair continues to sync without migrating guidance even when candidate
   `C` and root tree `T` are unreachable and pruned; it still rejects a malformed
   or tampered offline `C -> T` proof. Activation requires either the approved
-  repository tree itself or a locally complete, bounded ancestry that contains
-  that tree while the live review subtree remains exact. The live source-lock
-  SHA/tree, checkout, and manifest subtree are bound into receipts before any
-  sync write; unknown, incomplete, non-descendant, missing/tampered candidate
-  proof, or subtree-drifted sources fail closed.
+  repository tree itself or a locally complete, bounded full-DAG ancestry that
+  contains that tree. The selected anchor's review subtree must equal `ST`,
+  while a later descendant may evolve the live review subtree. The exact live
+  subtree must instead agree with both the locked manifest and the bound source
+  migration receipt. The live source-lock SHA/tree, checkout, and manifest
+  subtree are bound before any sync write; unknown, incomplete, non-descendant,
+  missing/tampered candidate proof, or receipt/manifest drift fails closed.
 - Checkout verification is a point-in-time proof of the exact immutable Git
   identities and local completeness. A sealed structured receipt replaces the
   former boolean and binds the live source-lock digest/pins, source-root,
@@ -264,12 +266,13 @@ bounded ancestry contains the approved root remains eligible without a refresh.
   commit while still proving the exact reviewed `C/T/ST` relation. Missing,
   malformed, tampered, wrong-C, wrong-T, and wrong-ST proofs fail before sync.
 - Live admission remains intentionally narrow: exact root `T`, or a bounded
-  full-DAG ancestry containing a commit with root `T`; unchanged `ST` alone is
-  never sufficient. Exact/ancestry classification precedes the `T -> ST` path
-  read, so a base-move squash whose clone has already pruned old `T` still
-  reports stable `anchor-refresh-required` rather than a raw missing-object
-  error. A legitimate merge commit that retains `T` in its ancestry remains
-  accepted.
+  full-DAG ancestry containing a commit with root `T`; matching either the
+  approved or a newer live subtree alone is never sufficient. Exact/ancestry
+  classification precedes the anchor's `T -> ST` path read, so a base-move
+  squash whose clone has already pruned old `T` still reports stable
+  `anchor-refresh-required` rather than a raw missing-object error. A legitimate
+  merge commit that retains `T` in its ancestry remains accepted, including
+  when later descendant commits intentionally change the live review subtree.
 - The final delivery freeze advanced to signed candidate
   `b160b6fd0b3a0da4e25a74fbdb6bd3750c7a9bb2`, root tree
   `69475da88941082e2557ca875c82e4a0d38a173f`, and review subtree
@@ -286,6 +289,40 @@ bounded ancestry contains the approved root remains eligible without a refresh.
 - Final focused validation counts are recorded after the post-audit fixes in
   the Evidence section. The broader repository suite remains parent-owned final
   delivery evidence and is not inferred from these focused runs.
+
+## Post-merge Descendant Sync Correction
+
+- Canonical journal `20260826-ros002` and portability PR
+  `Joey-Tools/codex-review-workflows#109` merged as
+  `4f634a18ba711a1d35c4c1c8841e0c9821b39c8a` after removing a repository-only
+  journal assertion from the distributed skill tests. Forced source-sync run
+  `32927762585`, on private workflow head
+  `d6e9583549a2b4395d377e96e1954533aa20b5f6`, then failed before any generated
+  PR or release write with
+  `canonical review live subtree is not approved for migration`.
+- The source checkout and lock were valid: the new head remained a bounded
+  full-DAG descendant of the reviewed approved-root tree, but its live review
+  subtree changed legitimately because PR #109 edited that subtree. The live
+  root tree was `4a9995aad7c38ebce55ff599713adf200307cb25`, and the live review
+  subtree was `29c43c3f5acc65b75c7d2548f0dae5617518e5c7`; its parent activation
+  squash `1483bf62400ee82ea7609cb553fddbb21f06640c` retained approved root tree
+  `69475da88941082e2557ca875c82e4a0d38a173f`. The sync gate had coupled
+  one-time activation proof to permanent byte equality with original subtree
+  `7b08cb84a07c4a846d26ecde538c740e7772f9e7`, which would reject every later
+  canonical skill update.
+- The repair preserves the immutable candidate payload, approved root/tree-path
+  proof, exact source-lock SHA/tree, complete non-shallow checkout receipt,
+  bounded full-DAG ancestry, and live manifest binding. It removes only the two
+  obsolete equalities between the current live subtree and the historical
+  approved subtree. The migration receipt now binds the exact current live
+  subtree, and downstream admission still requires type-preserving equality
+  with the locked manifest.
+- The positive regression puts the approved-root anchor exclusively behind a
+  merge commit's second-parent history and then changes the live review subtree
+  in a descendant. It proves that first-parent or linear-history inference
+  would fail while the complete DAG succeeds. Adjacent negative coverage keeps
+  non-descendants, base-move squashes without the anchor, incomplete history,
+  wrong source-lock SHA/tree, and receipt/manifest drift fail closed.
 
 ## Current State
 
@@ -330,11 +367,16 @@ bounded ancestry contains the approved root remains eligible without a refresh.
   no-migration release, while current inventory still rejects it. This is an
   inventory-profile property rather than a second migration boolean, so source,
   staging, and post-install validators cannot silently disagree.
-- The bounded-descendant regression now places the reviewed approved-root commit
-  exclusively on the live merge commit's second-parent history. Its first-parent
-  chain does not contain that commit, while the live review subtree remains
-  exact. Acceptance therefore exercises the complete DAG and cannot regress to
-  linear-history or first-parent-only inference.
+- The bounded-descendant regression places the reviewed approved-root commit
+  exclusively on a merge commit's second-parent history, then changes the live
+  review subtree in a later descendant. The descendant's first-parent chain does
+  not contain the approved-root commit, while its complete DAG does. Acceptance
+  therefore cannot regress to linear-history, first-parent-only inference, or a
+  permanent historical-subtree equality.
+- Post-activation canonical changes no longer require advancing the immutable
+  candidate payload merely because the live review subtree changed; advancing
+  the anchor remains necessary when the bounded full DAG no longer contains the
+  approved root tree.
 - Complete checkout receipts now reject group/world-writable or multiply linked
   `.git/HEAD` and `.git/config` control files before publishing access-policy
   proof. Owner-private and ordinary owner-writable read-only-to-others modes
@@ -367,11 +409,9 @@ bounded ancestry contains the approved root remains eligible without a refresh.
 
 ## Next Steps
 
-- After this narrow fail-closed sync-rule repair reaches `master` and its
-  immutable release is verified, rerun scheduled source sync against canonical
-  `master`, review and merge the generated activation PR, verify its final
-  immutable release, and install plus strictly validate that release on the
-  current host.
+- Rerun scheduled source sync against canonical `master`, review and merge the
+  generated activation PR, verify its final immutable release, and install plus
+  strictly validate that release on the current host.
 
 ## Evidence
 
@@ -381,6 +421,12 @@ bounded ancestry contains the approved root remains eligible without a refresh.
 - `scripts/sync_private_overlay_sources.py`
 - `tests/test_private_overlay_sync.py`
 - `personal_codex/AGENTS.md`
+- Descendant sync-gate repair validation: the changed-subtree/full-DAG,
+  second-parent merge, non-descendant, base-move, missing-object, and
+  receipt/manifest-drift focused cases passed; the complete source-sync module
+  passed all 338 tests in 39.451 seconds. Warning-strict repository discovery
+  passed all 2,057 tests in 321.643 seconds with four conditional skips. Ruff
+  lint/format checks, project-journal validation, and `git diff --check` passed.
 - The post-merge change-delivery replacement regression passed against the
   actual `SYNC_RULES` entry and current canonical description. It proves the
   path- and frontmatter-field-scoped exact one-count private specialization,
@@ -402,7 +448,8 @@ bounded ancestry contains the approved root remains eligible without a refresh.
   worktree, including the three new focused contract tests (pass)
 - Transition-focused tests cover locked and unlocked authoritative sync,
   legacy no-migration, approved same-tree squash, bounded merge descendants,
-  base-move anchor refresh, non-descendants, wrong SHA/tree, changed subtrees,
+  changed-subtree merge descendants, base-move anchor refresh, non-descendants,
+  wrong SHA/tree, receipt/manifest drift,
   missing ancestry objects, sealed checkout proof, second-verification object
   deletion and checkout replacement before all writes,
   tree-before-guidance ordering, exact-state failure, validation-before-

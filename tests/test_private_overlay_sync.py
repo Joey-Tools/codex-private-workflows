@@ -1538,31 +1538,55 @@ class PrivateOverlaySyncTests(unittest.TestCase):
             approved_review_subtree_tree,
         )
 
-        self._fixture_git(checkout, "switch", "--quiet", "-c", "fork", common)
-        (review_root / "SKILL.md").write_text("approved\n", encoding="utf-8")
-        (checkout / "repository.txt").write_text("fork\n", encoding="utf-8")
-        self._fixture_git(checkout, "add", ".")
-        self._fixture_git(checkout, "commit", "--quiet", "-m", "fork")
-        fork = self._fixture_git(checkout, "rev-parse", "HEAD")
-
         self._fixture_git(
             checkout,
             "switch",
             "--quiet",
             "-c",
-            "changed-subtree",
-            squash,
+            "changed-merge-descendant",
+            future_merge,
         )
-        (review_root / "SKILL.md").write_text("changed\n", encoding="utf-8")
+        (review_root / "SKILL.md").write_text(
+            "changed after merge\n",
+            encoding="utf-8",
+        )
         self._fixture_git(checkout, "add", ".")
         self._fixture_git(
             checkout,
             "commit",
             "--quiet",
             "-m",
-            "changed subtree",
+            "changed merge descendant",
         )
-        changed_subtree = self._fixture_git(checkout, "rev-parse", "HEAD")
+        changed_merge_descendant = self._fixture_git(
+            checkout,
+            "rev-parse",
+            "HEAD",
+        )
+        self.assertNotIn(
+            squash,
+            self._fixture_git(
+                checkout,
+                "rev-list",
+                "--first-parent",
+                changed_merge_descendant,
+            ).splitlines(),
+        )
+        self.assertIn(
+            squash,
+            self._fixture_git(
+                checkout,
+                "rev-list",
+                changed_merge_descendant,
+            ).splitlines(),
+        )
+
+        self._fixture_git(checkout, "switch", "--quiet", "-c", "fork", common)
+        (review_root / "SKILL.md").write_text("approved\n", encoding="utf-8")
+        (checkout / "repository.txt").write_text("fork\n", encoding="utf-8")
+        self._fixture_git(checkout, "add", ".")
+        self._fixture_git(checkout, "commit", "--quiet", "-m", "fork")
+        fork = self._fixture_git(checkout, "rev-parse", "HEAD")
 
         self._fixture_git(checkout, "switch", "--quiet", "-c", "moved-base", common)
         (checkout / "base-move.txt").write_text("moved base\n", encoding="utf-8")
@@ -1636,8 +1660,8 @@ class PrivateOverlaySyncTests(unittest.TestCase):
             candidate=candidate,
             squash=squash,
             future_merge=future_merge,
+            changed_merge_descendant=changed_merge_descendant,
             fork=fork,
-            changed_subtree=changed_subtree,
             base_move_squash=base_move_squash,
         )
 
@@ -2605,17 +2629,75 @@ class PrivateOverlaySyncTests(unittest.TestCase):
         ):
             self._bind_migration_fixture(history, pin)
 
-    def test_canonical_review_migration_rejects_changed_review_subtree(
+    def test_canonical_review_migration_accepts_changed_review_subtree_descendant(
         self,
     ) -> None:
         history = self._canonical_migration_history()
-        pin = self._verified_migration_fixture_pin(history, history.changed_subtree)
+        pin = self._verified_migration_fixture_pin(
+            history,
+            history.changed_merge_descendant,
+        )
+        live_review_subtree_tree = self._fixture_git(
+            history.checkout,
+            "rev-parse",
+            f"{pin.sha}:{history.rule.source.as_posix()}",
+        )
 
-        with self.assertRaisesRegex(
-            SYNC_MODULE.SyncError,
-            "live subtree is not approved",
+        source_pin, receipt = self._bind_migration_fixture(history, pin)
+
+        self.assertEqual(source_pin.revision, history.changed_merge_descendant)
+        self.assertNotEqual(
+            live_review_subtree_tree,
+            history.policy.approved_review_subtree_tree,
+        )
+        self.assertIsNotNone(receipt)
+        self.assertEqual(
+            receipt.activation_basis,
+            "bounded-approved-root-tree-ancestor",
+        )
+        self.assertEqual(receipt.live_review_subtree_tree, live_review_subtree_tree)
+
+        verification = self._complete_checkout_verification(
+            SimpleNamespace(
+                name=history.checkout.name,
+                repository=source_pin.repository,
+                sha=source_pin.revision,
+                tree=source_pin.root_tree,
+            ),
+            source_root=history.checkout.parent,
+        )
+        locked_source = SYNC_MODULE._LockedRuleSource(
+            checkout=history.checkout,
+            manifest=SimpleNamespace(root_object_id=live_review_subtree_tree),
+            read_blob=mock.Mock(),
+            source_pin=source_pin,
+            canonical_review_migration_receipt=receipt,
+            prewrite_checkout_verification=verification,
+        )
+        with mock.patch.object(
+            SYNC_MODULE,
+            "_CANONICAL_REVIEW_SYNC_RULE",
+            history.rule,
         ):
-            self._bind_migration_fixture(history, pin)
+            self.assertTrue(
+                SYNC_MODULE._canonical_review_personal_agents_migration_required(
+                    history.rule,
+                    locked_source,
+                )
+            )
+            with self.assertRaisesRegex(
+                SYNC_MODULE.SyncError,
+                "migration receipt does not match its source",
+            ):
+                SYNC_MODULE._canonical_review_personal_agents_migration_required(
+                    history.rule,
+                    dataclasses.replace(
+                        locked_source,
+                        manifest=SimpleNamespace(
+                            root_object_id=(history.policy.approved_review_subtree_tree)
+                        ),
+                    ),
+                )
 
     def test_canonical_review_migration_rejects_wrong_locked_sha_or_tree(
         self,
