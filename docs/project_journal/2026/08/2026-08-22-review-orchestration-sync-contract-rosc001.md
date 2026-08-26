@@ -4,8 +4,8 @@ title: Review Orchestration Private Sync Contract
 status: completed
 created: 2026-08-22
 updated: 2026-08-26
-branch: wip/review-orchestration-sync-contract
-pr: https://github.com/Joey-Tools/codex-private-workflows/pull/177
+branch: codex/review-orchestration-activation
+pr: https://github.com/Joey-Tools/codex-private-workflows/pull/181
 supersedes: []
 superseded_by:
 ---
@@ -211,14 +211,22 @@ superseded_by:
   pathname revalidation; they are not mutation evidence. Missing paths,
   unreadable paths, other revalidation failures, and observed property
   mismatches remain distinct outcomes.
-- Bare triple review authorizes one exact `@codex review` producer operation
-  and the skill's single-owner, single-flight ambiguous-delivery recovery by
-  repeating that exact POST for the same logical request. It does not authorize
-  GitHub Actions mutation. An Actions rerun,
-  dispatch, or reconciliation requires both repository-predeclared exact
-  frozen-scope idempotent/reentrant inputs and separate current-task delivery or
-  readiness authorization; branch, PR metadata, scope, and unrelated mutations
-  remain outside that authority.
+- Bare triple review authorizes at most one possibly delivered exact
+  `@codex review` issue-comment POST for each repository/PR/head epoch. Once
+  the call could have reached GitHub, its write budget is consumed even when
+  the client sees an ambiguous result. Recovery is then read-only: completely
+  reread the unchanged head and visible request set, observe while typed
+  evidence can still make progress, and report inconclusive when delivery
+  cannot be proved; never repeat the comment POST in that epoch. This avoids
+  treating non-idempotent comment creation as a retriable logical request.
+- GitHub Actions recovery remains a separate external mutation. It requires
+  current-task delivery or readiness authorization and one frozen exact tuple
+  of repository, PR, head, dynamically identified Action or workflow,
+  operation, and inputs. The tuple must remain type-preservingly unchanged at
+  each repeat. The same tuple is idempotent for this consumer without any
+  repository-predeclared idempotency or reentrancy contract; changing any tuple
+  field is a new mutation that requires ordinary confirmation. This preserves
+  automatic recovery without inventing an extra repository-policy gate.
 - The seven-repository default gate is intentionally absent from global
   personal guidance. Its scoped mother-repository `AGENTS.md` change is now on
   the default branch through `Joey-Tools/codex-workspace#12`; a child
@@ -324,6 +332,79 @@ bounded ancestry contains the approved root remains eligible without a refresh.
   non-descendants, base-move squashes without the anchor, incomplete history,
   wrong source-lock SHA/tree, and receipt/manifest drift fail closed.
 
+## Activation Delivery Recovery
+
+- Forced scheduled sync run `32932573984` selected canonical review source
+  `4f634a18ba711a1d35c4c1c8841e0c9821b39c8a` with root tree
+  `4a9995aad7c38ebce55ff599713adf200307cb25` and produced source-lock digest
+  `3df9c166be0917fc584c210b6463a1f10443ce4b26b85a080c991515dcd68eab`.
+  Source sync, both complete test suites, manifest validation, and canonical
+  workflow validation succeeded.
+- The run failed only when its configured Personal Access Token attempted to
+  push the generated `.github/workflows/ci.yml` update. GitHub rejected that
+  write because the token lacked workflow-file scope. No activation PR was
+  created and no auto-merge request was enabled.
+- Recovery deliberately leaves repository secrets and token scope unchanged.
+  A task-scoped clean worktree reproduces the candidate from the same five
+  detached source identities through the repository's source-lock and sync
+  scripts, requires the exact source-lock digest above, and carries the result
+  through an ordinary signed user-authorized PR. This is a delivery-transport
+  recovery, not a new source-sync or review-policy path.
+- The recovered activation retains the full pre-merge gate: exact-secret
+  admission, one fresh local Codex lane at `gpt-5.6-sol`/`ultra`, one exact
+  current-head GitHub `@codex review`, complete CI and conversation checks,
+  immutable release verification, and strict local overlay installation. A
+  base-refresh requirement is satisfied by a signed base-to-feature merge and
+  a complete gate rerun, never by rebasing or linearizing the feature DAG.
+- Activation review corrected the compact private authorization boundary to
+  match the synchronized canonical evidence authority: an ambiguous possibly
+  delivered `@codex review` POST exhausts the repository/PR/head epoch, while
+  an authorized GitHub Actions recovery may repeat only an unchanged frozen
+  exact tuple and needs no repository predeclaration. These are deliberately
+  different rules because issue-comment creation is non-idempotent and the
+  exact Actions tuple is the consumer's idempotency key.
+
+## Canonical PR #110 Activation Closure
+
+- `Joey-Tools/codex-review-workflows#110` merged at
+  `2026-08-26T15:36:25Z` as verified commit
+  `a439793df9483943991c258e16f4ddf705736643` with root tree
+  `76633f7ac00736ab83039a8f22413839dea04267`. This verified descendant is
+  the final canonical source identity for the activation that the earlier
+  `4f634a18ba711a1d35c4c1c8841e0c9821b39c8a` recovery prepared.
+- The refreshed private source lock binds that commit and tree with lock-file
+  SHA-256
+  `46a27b82064e3b171be387a1a1a7a1cc50f0b0bf205e1bc5556495bb9f7a2bd0`.
+  The synchronized overlay additionally carries the canonical UTF-8
+  source-authority binding and recovery-test correction from PR #110.
+- GitHub's `Require branches to be up to date before merging` freshness rule
+  is distinct from `Require linear history`. A strict freshness block does not
+  imply rebase or first-parent-only history: when no merge queue supplies the
+  update, merge the current base into the feature branch with a signed merge
+  commit, create a new head, and rerun tests, every required review lane, the
+  GitHub lane, CI, conversation resolution, scope/lifecycle/merge-policy checks,
+  and the final reread. The reviewed DAG may contain ordinary merge commits and
+  side-parent history.
+- The refreshed private validation passed Ruff lint and format checks,
+  source-lock/manifest validation, project-journal validation, and
+  `git diff --check`. The source-lock module ran 49 tests with one conditional
+  skip in 53.563 seconds; source sync ran 338 tests in 45.751 seconds; repository
+  discovery ran 2,057 tests with four conditional skips in 333.517 seconds; and
+  the independent deterministic supervisor ran 848 tests in 269.263 seconds.
+  The canonical skill mirror ran 3,217 tests in 1,611.375 seconds: 3,209 passed,
+  seven were conditionally skipped, and one nested macOS `sandbox-exec` case was
+  denied by the restricted outer sandbox. That exact test passed in the approved
+  unrestricted rerun in 2.044 seconds.
+- A premature forced scheduled-sync run, `32985648188`, completed with
+  `startup_failure` but created PR #182 at head
+  `d5a0436912b611468529473b277d33d4450a1bd1`. Its auto-merge request was
+  disabled and PR #182 was closed
+  unmerged; `mergedAt` is null and `autoMergeRequest` is null. The private
+  default branch remained at
+  `58e44edb8aa57bfe8e18adceac01489f85f2bf19`. PR #181 is the sole authorized
+  final activation delivery path; the earlier run `32932573984` remains useful
+  historical evidence for the original transport failure.
+
 ## Current State
 
 - The companion implementation now stages global personal routing safely: the
@@ -409,9 +490,9 @@ bounded ancestry contains the approved root remains eligible without a refresh.
 
 ## Next Steps
 
-- Rerun scheduled source sync against canonical `master`, review and merge the
-  generated activation PR, verify its final immutable release, and install plus
-  strictly validate that release on the current host.
+- No tracked implementation remains after the activation change is merged.
+  Final delivery verifies the exact immutable default-branch release and then
+  installs and strictly validates that release on the current host.
 
 ## Evidence
 
@@ -427,6 +508,11 @@ bounded ancestry contains the approved root remains eligible without a refresh.
   passed all 338 tests in 39.451 seconds. Warning-strict repository discovery
   passed all 2,057 tests in 321.643 seconds with four conditional skips. Ruff
   lint/format checks, project-journal validation, and `git diff --check` passed.
+- Scheduled activation run `32932573984` passed source sync, repository tests,
+  source-lock/manifest validation, and canonical workflow validation before the
+  push-only token-scope rejection. Its generated source-lock digest was
+  `3df9c166be0917fc584c210b6463a1f10443ce4b26b85a080c991515dcd68eab`;
+  the run created no PR and enabled no auto-merge request.
 - The post-merge change-delivery replacement regression passed against the
   actual `SYNC_RULES` entry and current canonical description. It proves the
   path- and frontmatter-field-scoped exact one-count private specialization,
@@ -469,9 +555,10 @@ bounded ancestry contains the approved root remains eligible without a refresh.
   materialization hint, bounded persistent timestamp churn, content mutation,
   inode replacement, uid/mode/link-count drift, and distinct missing,
   unreadable, and failed pathname revalidation outcomes (pass).
-- Cross-policy guidance assertions bind same-logical-request ambiguous-delivery
-  recovery, the absence of bare-review Actions authority, and the required
-  repository-policy plus current-task authorization gates (pass).
+- Cross-policy guidance assertions bind one-shot ambiguous comment delivery,
+  the absence of bare-review Actions authority, and the required unchanged
+  exact-tuple plus current-task authorization gates without a repository
+  predeclaration (pass).
 - The previously failing pinned canonical contract test
   `test_canonical_claude_auth_control_plane_is_not_helper_broker` passes with
   the exact legacy pre-sync guidance restored.
@@ -565,3 +652,7 @@ bounded ancestry contains the approved root remains eligible without a refresh.
   nested-`sandbox-exec` denial); the exact denied test passed in a single
   approved outside-host-sandbox rerun (`1` test, `0` failures, `2.044`
   seconds).
+- Activation policy-boundary correction validation passed the exact canonical
+  named-review guidance assertion (`1` test), all `33` `personal_agents`
+  filtered sync tests, source/test Python compilation, Ruff lint, project
+  journal validation, and `git diff --check`.

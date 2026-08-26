@@ -13238,15 +13238,17 @@ jobs:
             "including tracked repository secrets",
             "excludes runtime secrets and credentials",
             "A bare named-review request is report-only",
-            "scoped exact `@codex review` producer operation",
-            "single-owner, single-flight recovery after ambiguous delivery",
-            "repeating that exact POST for the same logical request",
-            "never authorizes a second logical request",
-            "GitHub Actions rerun, dispatch, or reconciliation requires both",
-            "repository-predeclared exact idempotent or reentrant contract",
-            "frozen scope and exact inputs",
-            "separate current-task delivery or readiness authorization",
-            "never authorizes a different workflow, input, scope, destination",
+            "at most one possibly delivered scoped exact `@codex review`",
+            "one repository/PR/head epoch",
+            "consumes the epoch's comment-mutation budget",
+            "ambiguous outcome permits only a complete reread",
+            "never another comment POST in that epoch",
+            "GitHub Actions rerun, dispatch, or reconciliation requires separate",
+            "current-task delivery or readiness authorization",
+            "one frozen exact tuple of repository, PR, head",
+            "only while that tuple remains type-preservingly unchanged",
+            "idempotent for this consumer without a repository predeclaration",
+            "changed tuple or different workflow, scope, destination",
         ):
             with self.subTest(anchor=anchor):
                 self.assertIn(anchor, agents)
@@ -13263,6 +13265,8 @@ jobs:
             "$external-review-playbook",
             "$copilot-review-playbook",
             "is the only mutation implied by bare triple",
+            "repeating that exact POST for the same logical request",
+            "repository-predeclared exact idempotent or reentrant contract",
         ):
             with self.subTest(retired=retired):
                 self.assertNotIn(retired, agents)
