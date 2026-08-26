@@ -324,6 +324,31 @@ bounded ancestry contains the approved root remains eligible without a refresh.
   non-descendants, base-move squashes without the anchor, incomplete history,
   wrong source-lock SHA/tree, and receipt/manifest drift fail closed.
 
+## Activation Delivery Recovery
+
+- Forced scheduled sync run `32932573984` selected canonical review source
+  `4f634a18ba711a1d35c4c1c8841e0c9821b39c8a` with root tree
+  `4a9995aad7c38ebce55ff599713adf200307cb25` and produced source-lock digest
+  `3df9c166be0917fc584c210b6463a1f10443ce4b26b85a080c991515dcd68eab`.
+  Source sync, both complete test suites, manifest validation, and canonical
+  workflow validation succeeded.
+- The run failed only when its configured Personal Access Token attempted to
+  push the generated `.github/workflows/ci.yml` update. GitHub rejected that
+  write because the token lacked workflow-file scope. No activation PR was
+  created and no auto-merge request was enabled.
+- Recovery deliberately leaves repository secrets and token scope unchanged.
+  A task-scoped clean worktree reproduces the candidate from the same five
+  detached source identities through the repository's source-lock and sync
+  scripts, requires the exact source-lock digest above, and carries the result
+  through an ordinary signed user-authorized PR. This is a delivery-transport
+  recovery, not a new source-sync or review-policy path.
+- The recovered activation retains the full pre-merge gate: exact-secret
+  admission, one fresh local Codex lane at `gpt-5.6-sol`/`ultra`, one exact
+  current-head GitHub `@codex review`, complete CI and conversation checks,
+  immutable release verification, and strict local overlay installation. A
+  base-refresh requirement is satisfied by a signed base-to-feature merge and
+  a complete gate rerun, never by rebasing or linearizing the feature DAG.
+
 ## Current State
 
 - The companion implementation now stages global personal routing safely: the
@@ -409,9 +434,9 @@ bounded ancestry contains the approved root remains eligible without a refresh.
 
 ## Next Steps
 
-- Rerun scheduled source sync against canonical `master`, review and merge the
-  generated activation PR, verify its final immutable release, and install plus
-  strictly validate that release on the current host.
+- No tracked implementation remains after the activation change is merged.
+  Final delivery verifies the exact immutable default-branch release and then
+  installs and strictly validates that release on the current host.
 
 ## Evidence
 
@@ -427,6 +452,11 @@ bounded ancestry contains the approved root remains eligible without a refresh.
   passed all 338 tests in 39.451 seconds. Warning-strict repository discovery
   passed all 2,057 tests in 321.643 seconds with four conditional skips. Ruff
   lint/format checks, project-journal validation, and `git diff --check` passed.
+- Scheduled activation run `32932573984` passed source sync, repository tests,
+  source-lock/manifest validation, and canonical workflow validation before the
+  push-only token-scope rejection. Its generated source-lock digest was
+  `3df9c166be0917fc584c210b6463a1f10443ce4b26b85a080c991515dcd68eab`;
+  the run created no PR and enabled no auto-merge request.
 - The post-merge change-delivery replacement regression passed against the
   actual `SYNC_RULES` entry and current canonical description. It proves the
   path- and frontmatter-field-scoped exact one-count private specialization,
