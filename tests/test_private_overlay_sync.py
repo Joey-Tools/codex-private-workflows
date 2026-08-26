@@ -6615,6 +6615,12 @@ class PrivateOverlaySyncTests(unittest.TestCase):
                 frontmatter_key="description",
             ),
             SYNC_MODULE.Replacement(
+                '1description: "public',
+                '1description: "private',
+                path=Path("SKILL.md"),
+                frontmatter_key="1description",
+            ),
+            SYNC_MODULE.Replacement(
                 'description: "public\ncontinued',
                 'description: "private',
                 path=Path("SKILL.md"),
@@ -6672,6 +6678,11 @@ class PrivateOverlaySyncTests(unittest.TestCase):
             '---\ndescription: "public"\n? description\n: "other"\n---\n',
             '---\nbase: &base\n  description: "other"\n<<: *base\n'
             'description: "public"\n---\n',
+            '---\nname: {nested: value}\ndescription: "public"\n---\n',
+            '---\nname:foo\ndescription: "public"\n---\n',
+            '---\nname: demo\nnote: |\n  nested\ndescription: "public"\n---\n',
+            '---\nname: demo\n  # indented comment\ndescription: "public"\n---\n',
+            '---\nname: "\\u2028"\ndescription: "public"\n---\n',
         )
         for content in cases:
             with self.subTest(content=content):

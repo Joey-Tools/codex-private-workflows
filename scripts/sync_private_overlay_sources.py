@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 import errno
 import hashlib
 import importlib.util
+import json
 import os
 from pathlib import Path
 import secrets
@@ -209,6 +210,12 @@ CHANGE_DELIVERY_PRIVATE_DESCRIPTION_PREFIXES = (
 )
 FRONTMATTER_SAFE_KEY_CHARACTERS = frozenset(
     "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-"
+)
+FRONTMATTER_SAFE_KEY_INITIAL_CHARACTERS = frozenset(
+    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
+)
+FRONTMATTER_SAFE_PLAIN_VALUE_CHARACTERS = frozenset(
+    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 ._/-"
 )
 
 
@@ -1574,15 +1581,16 @@ def _frontmatter_field_line_span(
     cursor = frontmatter_start
     for raw_line in frontmatter.splitlines(keepends=True):
         line = raw_line.removesuffix("\n")
-        stripped = line.lstrip()
-        if not stripped or stripped.startswith("#"):
+        if not line or line.startswith("#"):
             cursor += len(raw_line)
             continue
-        raw_key, separator, _value = line.partition(":")
+        stripped = line.lstrip()
+        raw_key, separator, _ = line.partition(":")
         if (
             line != stripped
             or not separator
             or not raw_key
+            or raw_key[0] not in FRONTMATTER_SAFE_KEY_INITIAL_CHARACTERS
             or any(
                 character not in FRONTMATTER_SAFE_KEY_CHARACTERS
                 for character in raw_key
@@ -1590,6 +1598,37 @@ def _frontmatter_field_line_span(
         ):
             raise SyncError(
                 f"frontmatter must use a flat simple-key mapping at {surface}"
+            )
+        value = line[len(raw_key) + 1 :]
+        if not value.startswith(" "):
+            raise SyncError(
+                f"frontmatter must use single-line scalar values at {surface}"
+            )
+        value = value[1:]
+        if not value or value != value.strip():
+            raise SyncError(f"frontmatter must use nonempty scalar values at {surface}")
+        if value.startswith('"'):
+            try:
+                decoded_value = json.loads(value)
+            except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+                raise SyncError(
+                    "frontmatter double-quoted values must use single-line JSON "
+                    f"string syntax at {surface}"
+                ) from exc
+            if not isinstance(decoded_value, str) or any(
+                separator in decoded_value for separator in "\r\n\x85\u2028\u2029"
+            ):
+                raise SyncError(
+                    "frontmatter double-quoted values must decode to one string "
+                    f"line at {surface}"
+                )
+        elif any(
+            character not in FRONTMATTER_SAFE_PLAIN_VALUE_CHARACTERS
+            for character in value
+        ):
+            raise SyncError(
+                "frontmatter plain values must use the closed scalar grammar "
+                f"at {surface}"
             )
         if raw_key in fields:
             raise SyncError(
@@ -1687,6 +1726,7 @@ def _validate_replacement_excluded_paths(rules: tuple[SyncRule, ...]) -> None:
             key = replacement.frontmatter_key
             if (
                 not key
+                or key[0] not in FRONTMATTER_SAFE_KEY_INITIAL_CHARACTERS
                 or any(
                     character not in FRONTMATTER_SAFE_KEY_CHARACTERS
                     for character in key
