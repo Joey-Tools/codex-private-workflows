@@ -69,6 +69,7 @@ class Replacement:
     required: bool = True
     path: Path | None = None
     required_count: int | None = None
+    frontmatter_key: str | None = None
 
 
 @dataclass(frozen=True)
@@ -197,6 +198,14 @@ COMMON_JOEY_TEXT_REPLACEMENTS = (
     Replacement("Joey request", "Joey's request", required=False),
     Replacement("user-specific", "Joey-specific", required=False),
     Replacement("User-Specific", "Joey-Specific", required=False),
+)
+
+CHANGE_DELIVERY_TARGET = _path("personal_codex/skills/change-delivery-workflow")
+CHANGE_DELIVERY_SKILL_PATH = Path("SKILL.md")
+CHANGE_DELIVERY_PUBLIC_DESCRIPTION_PREFIX = 'description: "Run a local '
+CHANGE_DELIVERY_PRIVATE_DESCRIPTION_PREFIXES = (
+    "description: \"Run Joey's local pre-commit delivery gate for ",
+    "description: \"Run Joey's local delivery gate for ",
 )
 
 
@@ -649,10 +658,11 @@ SYNC_RULES = (
         "personal_codex/skills/change-delivery-workflow",
         (
             Replacement(
-                'description: "Run a local delivery gate',
-                "description: \"Run Joey's local delivery gate",
-                path=Path("SKILL.md"),
+                CHANGE_DELIVERY_PUBLIC_DESCRIPTION_PREFIX,
+                "description: \"Run Joey's local ",
+                path=CHANGE_DELIVERY_SKILL_PATH,
                 required_count=1,
+                frontmatter_key="description",
             ),
         ),
         common_joey_text=True,
@@ -1544,6 +1554,68 @@ def _validate_no_retired_review_references(
                 )
 
 
+def _frontmatter_field_line_span(
+    text: str,
+    key: str,
+    *,
+    surface: str,
+) -> tuple[int, int, str]:
+    if not text.startswith("---\n"):
+        raise SyncError(f"frontmatter lacks opening delimiter at {surface}")
+    closing = text.find("\n---\n", len("---\n"))
+    if closing < 0:
+        raise SyncError(f"frontmatter lacks closing delimiter at {surface}")
+    frontmatter_start = len("---\n")
+    frontmatter = text[frontmatter_start:closing]
+    prefix = f"{key}:"
+    matches: list[tuple[int, int, str]] = []
+    cursor = frontmatter_start
+    for raw_line in frontmatter.splitlines(keepends=True):
+        line = raw_line.removesuffix("\n")
+        if line.lstrip().startswith(prefix):
+            matches.append((cursor, cursor + len(line), line))
+        cursor += len(raw_line)
+    if len(matches) != 1 or matches[0][2] != matches[0][2].lstrip():
+        raise SyncError(
+            f"frontmatter must contain exactly one top-level {key} at {surface}"
+        )
+    return matches[0]
+
+
+def _apply_text_replacements(
+    text: str,
+    relative: Path,
+    replacements: tuple[Replacement, ...],
+    *,
+    surface: str,
+) -> tuple[str, dict[int, int]]:
+    found: dict[int, int] = {}
+    for index, replacement in enumerate(replacements):
+        if replacement.path is not None and replacement.path != relative:
+            continue
+        if replacement.frontmatter_key is not None:
+            start, end, line = _frontmatter_field_line_span(
+                text,
+                replacement.frontmatter_key,
+                surface=surface,
+            )
+            if not line.startswith(replacement.old):
+                continue
+            found[index] = 1
+            text = (
+                text[:start]
+                + replacement.new
+                + line[len(replacement.old) :]
+                + text[end:]
+            )
+            continue
+        if replacement.old not in text:
+            continue
+        found[index] = text.count(replacement.old)
+        text = text.replace(replacement.old, replacement.new)
+    return text, found
+
+
 def _apply_replacements(
     path: Path,
     relative: Path,
@@ -1553,18 +1625,14 @@ def _apply_replacements(
         text = path.read_text(encoding="utf-8")
     except UnicodeDecodeError:
         return {}
-    changed = False
-    found: dict[int, int] = {}
-    for index, replacement in enumerate(replacements):
-        if replacement.path is not None and replacement.path != relative:
-            continue
-        if replacement.old not in text:
-            continue
-        found[index] = text.count(replacement.old)
-        text = text.replace(replacement.old, replacement.new)
-        changed = True
-    if changed:
-        path.write_text(text, encoding="utf-8")
+    transformed, found = _apply_text_replacements(
+        text,
+        relative,
+        replacements,
+        surface=str(path),
+    )
+    if transformed != text:
+        path.write_text(transformed, encoding="utf-8")
     return found
 
 
@@ -1590,6 +1658,29 @@ def _validate_replacement_excluded_paths(rules: tuple[SyncRule, ...]) -> None:
             for replacement in rule.replacements
             if replacement.path is not None
         }
+        for replacement in rule.replacements:
+            if replacement.frontmatter_key is None:
+                continue
+            key = replacement.frontmatter_key
+            if (
+                not key
+                or any(
+                    character
+                    not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-"
+                    for character in key
+                )
+                or replacement.path is None
+                or not replacement.old.startswith(f"{key}:")
+                or not replacement.new.startswith(f"{key}:")
+                or "\n" in replacement.old
+                or "\r" in replacement.old
+                or "\n" in replacement.new
+                or "\r" in replacement.new
+            ):
+                raise SyncError(
+                    "frontmatter-scoped replacement requires a safe key, exact "
+                    f"path, and matching field prefixes: {rule.target}"
+                )
         for relative in excluded_paths:
             if (
                 not isinstance(relative, Path)
@@ -4859,15 +4950,14 @@ def _apply_regular_file_overlay_rule_to_bytes(
     except UnicodeDecodeError:
         return data
     if relative not in rule.replacement_excluded_paths:
-        for index, replacement in enumerate(rule.replacements):
-            if replacement.path is not None and replacement.path != relative:
-                continue
-            if replacement.old not in text:
-                continue
-            found_replacements[index] = found_replacements.get(index, 0) + text.count(
-                replacement.old
-            )
-            text = text.replace(replacement.old, replacement.new)
+        text, local_found = _apply_text_replacements(
+            text,
+            relative,
+            rule.replacements,
+            surface=f"descriptor-bound public source {relative}",
+        )
+        for index, count in local_found.items():
+            found_replacements[index] = found_replacements.get(index, 0) + count
     for residual in rule.forbidden_residuals:
         if residual in text:
             raise SyncError(f"forbidden residual {residual!r} remains in {relative}")
@@ -4884,6 +4974,8 @@ def _validate_regular_file_overlay_policy_bytes(
     ),
     surface: str,
 ) -> None:
+    if target == CHANGE_DELIVERY_TARGET and relative == CHANGE_DELIVERY_SKILL_PATH:
+        _validate_change_delivery_private_skill_bytes(data, surface=surface)
     if relative.suffix != ".md" or (
         target == CANONICAL_REVIEW_TARGET
         and not inventory_profile.reject_retired_references
@@ -4902,6 +4994,55 @@ def _validate_regular_file_overlay_policy_bytes(
                 "regular-file overlay target retains retired reference "
                 f"{reference!r} at {surface} {target / relative}"
             )
+
+
+def _change_delivery_frontmatter_description(
+    data: bytes,
+    *,
+    surface: str,
+) -> str:
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise SyncError(
+            f"change-delivery SKILL.md is not valid UTF-8 at {surface}"
+        ) from exc
+    try:
+        _start, _end, description = _frontmatter_field_line_span(
+            text,
+            "description",
+            surface=surface,
+        )
+    except SyncError as exc:
+        raise SyncError(f"change-delivery SKILL.md {exc}") from exc
+    return description
+
+
+def _validate_change_delivery_private_skill_bytes(
+    data: bytes,
+    *,
+    surface: str,
+) -> None:
+    description = _change_delivery_frontmatter_description(data, surface=surface)
+    if not description.endswith('"') or not any(
+        description.startswith(prefix)
+        for prefix in CHANGE_DELIVERY_PRIVATE_DESCRIPTION_PREFIXES
+    ):
+        raise SyncError(
+            "change-delivery SKILL.md frontmatter description is not the "
+            f"recognized private legacy/current form at {surface}"
+        )
+
+
+def _validate_change_delivery_target_contents(target: Path) -> None:
+    skill = target / CHANGE_DELIVERY_SKILL_PATH
+    try:
+        data = skill.read_bytes()
+    except OSError as exc:
+        raise SyncError(
+            f"cannot read staged change-delivery SKILL.md at {target}: {exc}"
+        ) from exc
+    _validate_change_delivery_private_skill_bytes(data, surface=str(target))
 
 
 def _validate_regular_file_overlay_required_manifest_paths(
@@ -8093,6 +8234,8 @@ def _sync_sources_with_repo_binding(
             _copy_source_to_staging(source, staging, exclude_names=rule.exclude_names)
             _apply_rule_replacements(staging, rule)
             _reject_forbidden_residuals(staging, rule)
+            if rule.target == CHANGE_DELIVERY_TARGET:
+                _validate_change_delivery_target_contents(staging)
             if rule.target == PRIVATE_BUG_TRIAGE_TARGET:
                 _validate_private_bug_triage_target_contents(staging)
             if rule.target == CANONICAL_REVIEW_TARGET:

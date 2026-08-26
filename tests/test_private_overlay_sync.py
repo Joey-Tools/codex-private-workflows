@@ -4854,7 +4854,9 @@ class PrivateOverlaySyncTests(unittest.TestCase):
             "wrapping up local work, probing local gate readiness, or starting "
             'a full workflow before PR readiness."\n'
             "---\n\n"
-            "Ask the user before expanding scope.\n",
+            "Ask the user before expanding scope.\n"
+            "Historical public example:\n"
+            'description: "Run a local delivery gate for old work."\n',
             encoding="utf-8",
         )
         rule = next(
@@ -4866,10 +4868,11 @@ class PrivateOverlaySyncTests(unittest.TestCase):
         self.assertEqual(
             rule.replacements[0],
             SYNC_MODULE.Replacement(
-                'description: "Run a local delivery gate',
-                "description: \"Run Joey's local delivery gate",
-                path=Path("SKILL.md"),
+                SYNC_MODULE.CHANGE_DELIVERY_PUBLIC_DESCRIPTION_PREFIX,
+                "description: \"Run Joey's local ",
+                path=SYNC_MODULE.CHANGE_DELIVERY_SKILL_PATH,
                 required_count=1,
+                frontmatter_key="description",
             ),
         )
 
@@ -4886,7 +4889,74 @@ class PrivateOverlaySyncTests(unittest.TestCase):
             "wrapping up local work, probing local gate readiness, or starting "
             'a full workflow before PR readiness."\n'
             "---\n\n"
-            "Ask Joey before expanding scope.\n",
+            "Ask Joey before expanding scope.\n"
+            "Historical public example:\n"
+            'description: "Run a local delivery gate for old work."\n',
+        )
+
+    def test_change_delivery_sync_rule_replays_locked_legacy_private_variant(
+        self,
+    ) -> None:
+        skill = (
+            self.source_root
+            / "codex-review-workflows"
+            / "skills"
+            / "change-delivery-workflow"
+            / "SKILL.md"
+        )
+        skill.parent.mkdir(parents=True)
+        skill.write_text(
+            "---\n"
+            "name: change-delivery-workflow\n"
+            'description: "Run a local pre-commit delivery gate for non-trivial '
+            "repo changes: implement, build, test, update docs, run "
+            "local/internal review, then commit. Use when wrapping up local "
+            "work before commit, probing local gate readiness, or as the first "
+            "phase before PR readiness when the user asks for a full workflow "
+            'before merge."\n'
+            "---\n\n"
+            "Historical public example:\n"
+            'description: "Run a local pre-commit delivery gate for old work."\n',
+            encoding="utf-8",
+        )
+        rule = next(
+            rule
+            for rule in SYNC_MODULE.SYNC_RULES
+            if rule.target == SYNC_MODULE.CHANGE_DELIVERY_TARGET
+        )
+        policy = SYNC_MODULE.CANONICAL_REVIEW_MIGRATION_POLICY
+        source_pin = SYNC_MODULE._VerifiedLockedSourcePin(
+            repository=policy.repository,
+            revision=policy.legacy_revision,
+            root_tree=policy.legacy_root_tree,
+        )
+        locked_sources = self._locked_bug_triage_source(
+            rule,
+            skill.parent,
+            source_pin=source_pin,
+        )
+
+        SYNC_MODULE.sync_sources(
+            self.repo_root,
+            self.source_root,
+            (rule,),
+            locked_sources=locked_sources,
+        )
+
+        target = self.repo_root / rule.target / "SKILL.md"
+        self.assertEqual(
+            target.read_text(encoding="utf-8"),
+            "---\n"
+            "name: change-delivery-workflow\n"
+            "description: \"Run Joey's local pre-commit delivery gate for "
+            "non-trivial repo changes: implement, build, test, update docs, run "
+            "local/internal review, then commit. Use when wrapping up local "
+            "work before commit, probing local gate readiness, or as the first "
+            "phase before PR readiness when Joey asks for a full workflow "
+            'before merge."\n'
+            "---\n\n"
+            "Historical public example:\n"
+            'description: "Run a local pre-commit delivery gate for old work."\n',
         )
 
     def test_change_delivery_sync_rule_rejects_cross_file_frontmatter_bait(
@@ -4923,6 +4993,84 @@ class PrivateOverlaySyncTests(unittest.TestCase):
             "required replacement count mismatch",
         ):
             SYNC_MODULE.sync_sources(self.repo_root, self.source_root, (rule,))
+
+        self.assertFalse((self.repo_root / rule.target).exists())
+
+    def test_change_delivery_sync_rule_rejects_same_file_body_bait(self) -> None:
+        source = (
+            self.source_root
+            / "codex-review-workflows"
+            / "skills"
+            / "change-delivery-workflow"
+            / "SKILL.md"
+        )
+        source.parent.mkdir(parents=True)
+        source.write_text(
+            "---\n"
+            "name: change-delivery-workflow\n"
+            'description: "Run a repository delivery gate."\n'
+            "---\n\n"
+            "Historical example:\n"
+            'description: "Run a local delivery gate for old work."\n',
+            encoding="utf-8",
+        )
+        rule = next(
+            rule
+            for rule in SYNC_MODULE.SYNC_RULES
+            if rule.target == SYNC_MODULE.CHANGE_DELIVERY_TARGET
+        )
+        locked_sources = self._locked_bug_triage_source(rule, source.parent)
+
+        with self.assertRaisesRegex(
+            SYNC_MODULE.SyncError,
+            "frontmatter description is not the recognized private",
+        ):
+            SYNC_MODULE.sync_sources(
+                self.repo_root,
+                self.source_root,
+                (rule,),
+                locked_sources=locked_sources,
+            )
+
+        self.assertFalse((self.repo_root / rule.target).exists())
+
+    def test_change_delivery_sync_rule_rejects_private_frontmatter_with_public_body_bait(
+        self,
+    ) -> None:
+        source = (
+            self.source_root
+            / "codex-review-workflows"
+            / "skills"
+            / "change-delivery-workflow"
+            / "SKILL.md"
+        )
+        source.parent.mkdir(parents=True)
+        source.write_text(
+            "---\n"
+            "name: change-delivery-workflow\n"
+            'description: "Run Joey\'s local delivery gate for current work."\n'
+            "---\n\n"
+            "Historical public example:\n"
+            'description: "Run a local delivery gate for old work."\n',
+            encoding="utf-8",
+        )
+        rule = next(
+            rule
+            for rule in SYNC_MODULE.SYNC_RULES
+            if rule.target == SYNC_MODULE.CHANGE_DELIVERY_TARGET
+        )
+        locked_sources = self._locked_bug_triage_source(rule, source.parent)
+
+        with self.assertRaisesRegex(
+            SYNC_MODULE.SyncError,
+            "required replacement count mismatch",
+        ):
+            SYNC_MODULE.sync_sources(
+                self.repo_root,
+                self.source_root,
+                (rule,),
+                locked_sources=locked_sources,
+            )
 
         self.assertFalse((self.repo_root / rule.target).exists())
 
@@ -6363,6 +6511,93 @@ class PrivateOverlaySyncTests(unittest.TestCase):
                         self.source_root,
                         (rule,),
                     )
+
+    def test_frontmatter_scoped_replacement_rejects_unsafe_configuration(
+        self,
+    ) -> None:
+        cases = (
+            SYNC_MODULE.Replacement(
+                'description: "public',
+                'description: "private',
+                frontmatter_key="description",
+            ),
+            SYNC_MODULE.Replacement(
+                'description: "public',
+                'description: "private',
+                path=Path("SKILL.md"),
+                frontmatter_key="description\nname",
+            ),
+            SYNC_MODULE.Replacement(
+                'summary: "public',
+                'description: "private',
+                path=Path("SKILL.md"),
+                frontmatter_key="description",
+            ),
+            SYNC_MODULE.Replacement(
+                'description: "public\ncontinued',
+                'description: "private',
+                path=Path("SKILL.md"),
+                frontmatter_key="description",
+            ),
+            SYNC_MODULE.Replacement(
+                'description: "public',
+                'description: "private\rcontinued',
+                path=Path("SKILL.md"),
+                frontmatter_key="description",
+            ),
+        )
+        for replacement in cases:
+            with self.subTest(replacement=replacement):
+                rule = SYNC_MODULE.SyncRule(
+                    repo="example-repo",
+                    source=Path("skill"),
+                    target=Path("personal_codex/skills/example"),
+                    replacements=(replacement,),
+                )
+                with self.assertRaisesRegex(
+                    SYNC_MODULE.SyncError,
+                    "frontmatter-scoped replacement requires",
+                ):
+                    SYNC_MODULE.sync_sources(
+                        self.repo_root,
+                        self.source_root,
+                        (rule,),
+                    )
+
+    def test_frontmatter_scoped_replacement_rejects_ambiguous_frontmatter(
+        self,
+    ) -> None:
+        source = self.source_root / "example-repo" / "skill" / "SKILL.md"
+        source.parent.mkdir(parents=True)
+        rule = SYNC_MODULE.SyncRule(
+            repo="example-repo",
+            source=Path("skill"),
+            target=Path("personal_codex/skills/example"),
+            replacements=(
+                SYNC_MODULE.Replacement(
+                    'description: "public',
+                    'description: "private',
+                    path=Path("SKILL.md"),
+                    frontmatter_key="description",
+                ),
+            ),
+        )
+        cases = (
+            'description: "public"\n',
+            '---\ndescription: "public"\n',
+            '---\ndescription: "public"\ndescription: "other"\n---\n',
+            '---\n  description: "public"\n---\n',
+        )
+        for content in cases:
+            with self.subTest(content=content):
+                source.write_text(content, encoding="utf-8")
+                with self.assertRaisesRegex(SYNC_MODULE.SyncError, "frontmatter"):
+                    SYNC_MODULE.sync_sources(
+                        self.repo_root,
+                        self.source_root,
+                        (rule,),
+                    )
+                self.assertFalse((self.repo_root / rule.target).exists())
 
     def test_replacement_excluded_path_must_name_a_text_candidate(self) -> None:
         source = self.source_root / "example-repo" / "skill"
