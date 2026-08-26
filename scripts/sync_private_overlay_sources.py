@@ -649,8 +649,9 @@ SYNC_RULES = (
         "personal_codex/skills/change-delivery-workflow",
         (
             Replacement(
-                "Run a local delivery gate",
-                "Run Joey's local delivery gate",
+                'description: "Run a local delivery gate',
+                "description: \"Run Joey's local delivery gate",
+                path=Path("SKILL.md"),
                 required_count=1,
             ),
         ),

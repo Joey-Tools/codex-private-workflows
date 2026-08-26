@@ -356,8 +356,11 @@ bounded ancestry contains the approved root remains eligible without a refresh.
 
 ## Next Steps
 
-- Merge and release this transition-aware companion, then complete the
-  canonical squash and execute the generated-sync activation sequence above.
+- After this narrow fail-closed sync-rule repair reaches `master` and its
+  immutable release is verified, rerun scheduled source sync against canonical
+  `master`, review and merge the generated activation PR, verify its final
+  immutable release, and install plus strictly validate that release on the
+  current host.
 
 ## Evidence
 
@@ -369,11 +372,12 @@ bounded ancestry contains the approved root remains eligible without a refresh.
 - `personal_codex/AGENTS.md`
 - The post-merge change-delivery replacement regression passed against the
   actual `SYNC_RULES` entry and current canonical description. It proves the
-  exact one-count private frontmatter specialization, the preserved
-  landing-commit/frozen-review sequence, and the common `the user` to `Joey`
-  transform. The complete `tests.test_private_overlay_sync` module passed all
-  331 tests in 39.322 seconds; Ruff lint/format checks, project-journal
-  validation, and `git diff --check` also passed.
+  path-scoped exact one-count private frontmatter specialization, rejects a
+  cross-file historical-wording bait, preserves the landing-commit/frozen-
+  review sequence, and keeps the common `the user` to `Joey` transform. The
+  complete `tests.test_private_overlay_sync` module passed all 332 tests in
+  31.757 seconds; Ruff lint/format checks, project-journal validation, and
+  `git diff --check` also passed.
 - Targeted `tests.test_private_overlay_sync.PrivateOverlaySyncTests` checks for
   self-contained canonical sync, required policy inventory, exact internal
   compatibility inventory, stale public-surface removal, and canonical global

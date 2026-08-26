@@ -4866,8 +4866,9 @@ class PrivateOverlaySyncTests(unittest.TestCase):
         self.assertEqual(
             rule.replacements[0],
             SYNC_MODULE.Replacement(
-                "Run a local delivery gate",
-                "Run Joey's local delivery gate",
+                'description: "Run a local delivery gate',
+                "description: \"Run Joey's local delivery gate",
+                path=Path("SKILL.md"),
                 required_count=1,
             ),
         )
@@ -4887,6 +4888,43 @@ class PrivateOverlaySyncTests(unittest.TestCase):
             "---\n\n"
             "Ask Joey before expanding scope.\n",
         )
+
+    def test_change_delivery_sync_rule_rejects_cross_file_frontmatter_bait(
+        self,
+    ) -> None:
+        source = (
+            self.source_root
+            / "codex-review-workflows"
+            / "skills"
+            / "change-delivery-workflow"
+        )
+        source.mkdir(parents=True)
+        (source / "SKILL.md").write_text(
+            "---\n"
+            "name: change-delivery-workflow\n"
+            'description: "Run a repository delivery gate."\n'
+            "---\n",
+            encoding="utf-8",
+        )
+        references = source / "references"
+        references.mkdir()
+        (references / "wording-history.md").write_text(
+            'Previous frontmatter: description: "Run a local delivery gate."\n',
+            encoding="utf-8",
+        )
+        rule = next(
+            rule
+            for rule in SYNC_MODULE.SYNC_RULES
+            if rule.target == Path("personal_codex/skills/change-delivery-workflow")
+        )
+
+        with self.assertRaisesRegex(
+            SYNC_MODULE.SyncError,
+            "required replacement count mismatch",
+        ):
+            SYNC_MODULE.sync_sources(self.repo_root, self.source_root, (rule,))
+
+        self.assertFalse((self.repo_root / rule.target).exists())
 
     def test_bug_triage_sync_rule_builds_current_private_transport_variant(
         self,
