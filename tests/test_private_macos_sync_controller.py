@@ -1469,7 +1469,7 @@ class PrivateMacosSyncControllerTests(unittest.TestCase):
             manifest["base_release"],
             {
                 "repo": "Joey-Tools/codex-toolbox",
-                "sha": "b5694a8057b03b8e7e5dba56083a738383ad463a",
+                "sha": "255372d2b0dd96f39faf1e52a9168ca2aa7ece69",
             },
         )
         for path in (
