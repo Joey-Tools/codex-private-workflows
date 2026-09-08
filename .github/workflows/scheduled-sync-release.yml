@@ -92,6 +92,15 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
+      - name: Check out archify
+        if: steps.cooldown.outputs.run == 'true'
+        uses: actions/checkout@v4
+        with:
+          repository: Joey-Tools/archify
+          path: .source/archify
+          fetch-depth: 0
+          persist-credentials: false
+
       - name: Check out codex-debug-triage
         if: steps.cooldown.outputs.run == 'true'
         uses: actions/checkout@v4
@@ -138,6 +147,7 @@ jobs:
           GIT_TERMINAL_PROMPT: "0"
         run: |
           for source in \
+            archify \
             codex-debug-triage \
             codex-review-workflows \
             codex-workflow-hygiene \
@@ -300,18 +310,19 @@ jobs:
           ## Summary
           - Syncs private overlay sources from the public Joey-Tools repositories.
           - Keeps the immutable public toolbox base pinned to `${{ steps.refreshed-lock.outputs.codex_toolbox_sha }}`.
-          - Persists source lock `${{ steps.refreshed-lock.outputs.source_lock_sha256 }}` for the exact five-source candidate.
+          - Persists source lock `${{ steps.refreshed-lock.outputs.source_lock_sha256 }}` for the exact six-source candidate.
           - Replaces the previous scheduled direct-push path, which is blocked by branch rules.
 
           ## Frozen sources
           - codex-toolbox: `${{ steps.refreshed-lock.outputs.codex_toolbox_sha }}` / `${{ steps.refreshed-lock.outputs.codex_toolbox_tree }}`
+          - archify: `${{ steps.refreshed-lock.outputs.archify_sha }}` / `${{ steps.refreshed-lock.outputs.archify_tree }}`
           - codex-debug-triage: `${{ steps.refreshed-lock.outputs.codex_debug_triage_sha }}` / `${{ steps.refreshed-lock.outputs.codex_debug_triage_tree }}`
           - codex-review-workflows: `${{ steps.refreshed-lock.outputs.codex_review_workflows_sha }}` / `${{ steps.refreshed-lock.outputs.codex_review_workflows_tree }}`
           - codex-workflow-hygiene: `${{ steps.refreshed-lock.outputs.codex_workflow_hygiene_sha }}` / `${{ steps.refreshed-lock.outputs.codex_workflow_hygiene_tree }}`
           - codex-project-journal: `${{ steps.refreshed-lock.outputs.codex_project_journal_sha }}` / `${{ steps.refreshed-lock.outputs.codex_project_journal_tree }}`
 
           ## Validation
-          - Exact source-lock refresh plus five-source pre/post checkout verification.
+          - Exact source-lock refresh plus six-source pre/post checkout verification.
           - Source-only Python syntax check for release, sync, package, and test helpers.
           - python3 -m unittest discover -s tests
           - python3 -m unittest discover -s personal_codex/skills/review-orchestration-playbook/tests -p 'test_*.py'

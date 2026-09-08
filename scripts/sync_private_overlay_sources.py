@@ -778,6 +778,11 @@ SYNC_RULES = (
         common_joey_text=True,
     ),
     _rule(
+        "archify",
+        "archify",
+        "personal_codex/skills/archify",
+    ),
+    _rule(
         "codex-review-workflows",
         "skills/review-orchestration-playbook/tests/fixtures/ci/private.yml",
         ".github/workflows/ci.yml",

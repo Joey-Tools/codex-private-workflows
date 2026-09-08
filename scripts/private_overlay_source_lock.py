@@ -32,6 +32,7 @@ MACOS_GIT_PATH = Path("/Library/Developer/CommandLineTools/usr/bin/git")
 SHA_RE = re.compile(r"[0-9a-f]{40}\Z")
 EXPECTED_SOURCES = (
     ("codex-toolbox", "Joey-Tools/codex-toolbox"),
+    ("archify", "Joey-Tools/archify"),
     ("codex-debug-triage", "Joey-Tools/codex-debug-triage"),
     ("codex-review-workflows", "Joey-Tools/codex-review-workflows"),
     ("codex-workflow-hygiene", "Joey-Tools/codex-workflow-hygiene"),
@@ -203,7 +204,7 @@ def load_source_lock(repo_root: Path) -> SourceLock:
     raw_sources = payload.get("sources")
     if not isinstance(raw_sources, list) or len(raw_sources) != len(EXPECTED_SOURCES):
         raise SourceLockError(
-            "source lock must contain the exact five-source inventory"
+            "source lock must contain the exact six-source inventory"
         )
     pins: list[SourcePin] = []
     for index, ((expected_name, expected_repo), raw_pin) in enumerate(

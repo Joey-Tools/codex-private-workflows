@@ -13394,7 +13394,7 @@ jobs:
             "ref: ${{ steps.source-lock.outputs.codex_toolbox_sha }}",
             workflow,
         )
-        self.assertEqual(workflow.count("fetch-depth: 0"), 6)
+        self.assertEqual(workflow.count("fetch-depth: 0"), 7)
         self.assertIn("Detach dynamic source checkouts", workflow)
         self.assertEqual(
             workflow.count("checkout --detach --no-recurse-submodules HEAD"), 1
@@ -13413,6 +13413,7 @@ jobs:
         self.assertIn("steps.refreshed-lock.outputs.source_lock_sha256", workflow)
         for name, _repository in (
             ("codex_toolbox", "Joey-Tools/codex-toolbox"),
+            ("archify", "Joey-Tools/archify"),
             ("codex_debug_triage", "Joey-Tools/codex-debug-triage"),
             ("codex_review_workflows", "Joey-Tools/codex-review-workflows"),
             ("codex_workflow_hygiene", "Joey-Tools/codex-workflow-hygiene"),
