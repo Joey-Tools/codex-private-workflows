@@ -12888,8 +12888,18 @@ jobs:
             3,
         )
 
-        self.assertIn("\n  platform_tests:\n", workflow)
-        self.assertIn("name: platform-tests (${{ matrix.os }})", workflow)
+        for job_name in (
+            "review_syntax_tests",
+            "review_tests",
+            "project_journal_tests",
+            "private_overlay_sync_tests",
+            "linux_isolation_tests",
+            "private_overlay_tests",
+            "private_overlay_contract_tests",
+        ):
+            self.assertIn(f"\n  {job_name}:\n", workflow)
+        self.assertIn("name: review-tests (${{ matrix.os }}, ${{ matrix.module }})", workflow)
+        self.assertIn("name: private-overlay-tests (${{ matrix.module }})", workflow)
         self.assertIn("ubuntu-latest", workflow)
         self.assertIn("macos-latest", workflow)
         self.assertIn('python-version: "3.10"', workflow)
@@ -12903,6 +12913,15 @@ jobs:
         self.assertIn(
             "python3 -m unittest -v personal_codex/skills/"
             "review-orchestration-playbook/tests/test_claude_linux.py",
+            workflow,
+        )
+        self.assertIn(
+            "python3 -m unittest \"personal_codex/skills/"
+            "review-orchestration-playbook/tests/${{ matrix.module }}\"",
+            workflow,
+        )
+        self.assertIn(
+            "python3 -m unittest \"tests/${{ matrix.module }}\"",
             workflow,
         )
         self.assertNotIn("when present", workflow)
@@ -12924,7 +12943,7 @@ jobs:
             1,
         )
         self.assertEqual(workflow.count("    runs-on: ubuntu-slim\n"), 2)
-        self.assertIn(
+        self.assertNotIn(
             "needs:\n      - python-39-compatibility\n    strategy:",
             workflow,
         )
@@ -12933,14 +12952,20 @@ jobs:
         self.assertIn("if: ${{ always() }}", workflow)
         self.assertIn(
             "needs:\n"
-            "      - platform_tests\n"
             "      - python-39-compatibility\n"
             "      - independent_supervisor_tests\n"
-            "      - readonly_install_supervisor_tests",
+            "      - readonly_install_supervisor_tests\n"
+            "      - review_syntax_tests\n"
+            "      - review_tests\n"
+            "      - project_journal_tests\n"
+            "      - private_overlay_sync_tests\n"
+            "      - linux_isolation_tests\n"
+            "      - private_overlay_tests\n"
+            "      - private_overlay_contract_tests",
             workflow,
         )
         self.assertIn(
-            "PLATFORM_TESTS_RESULT: ${{ needs.platform_tests.result }}",
+            "REVIEW_SYNTAX_RESULT: ${{ needs.review_syntax_tests.result }}",
             workflow,
         )
         self.assertIn(
@@ -12957,7 +12982,16 @@ jobs:
             "${{ needs.readonly_install_supervisor_tests.result }}",
             workflow,
         )
-        self.assertIn('test "$PLATFORM_TESTS_RESULT" = "success"', workflow)
+        for result_name in (
+            "REVIEW_SYNTAX_RESULT",
+            "REVIEW_RESULT",
+            "PROJECT_JOURNAL_RESULT",
+            "PRIVATE_OVERLAY_SYNC_RESULT",
+            "LINUX_ISOLATION_RESULT",
+            "PRIVATE_OVERLAY_RESULT",
+            "PRIVATE_OVERLAY_CONTRACT_RESULT",
+        ):
+            self.assertIn(f'test "${result_name}" = "success"', workflow)
         self.assertIn('test "$PYTHON_39_RESULT" = "success"', workflow)
         self.assertIn('test "$INDEPENDENT_SUPERVISOR_RESULT" = "success"', workflow)
         self.assertIn(
