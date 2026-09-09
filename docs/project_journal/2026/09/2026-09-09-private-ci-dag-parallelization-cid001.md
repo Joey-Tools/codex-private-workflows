@@ -24,6 +24,7 @@ superseded_by:
 - Review syntax, project-journal tests, private-overlay synchronization, Linux isolation, private-overlay modules, and contract validation are separate parallel leaves.
 - The aggregate `test` job waits for every leaf with `if: always()` and fails unless every leaf reports success.
 - Visible internal checks may increase; no new required checks are introduced.
+- During validation, GitHub's macOS runner advanced to `26.6.2/25G83`; the exact fingerprint was added to the existing reviewed profile while retaining older pins and fail-closed matching.
 
 ## Next Steps
 
@@ -33,4 +34,5 @@ superseded_by:
 ## Evidence
 
 - PR #186 CI run: https://github.com/Joey-Tools/codex-private-workflows/actions/runs/34333210121
+- PR #187 CI run after the matrix-inventory fix: https://github.com/Joey-Tools/codex-private-workflows/actions/runs/34345610384
 - Source workflow: `.github/workflows/ci.yml`
