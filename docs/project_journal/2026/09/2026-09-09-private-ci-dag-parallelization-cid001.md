@@ -26,6 +26,7 @@ superseded_by:
 - Visible internal checks may increase; no new required checks are introduced.
 - During validation, GitHub's macOS runner advanced to `26.6.2/25G83`; its exact `codesign` digest was added to the reviewed profile while retaining the previous `26.5.2/25F84` OS and digest branch plus fail-closed matching.
 - Keep `26.5.2/25F84` as an additional hosted branch because the `macos-26` label may still assign the previously reviewed image during runner transition.
+- Keep Linux isolation package installation only in `linux_isolation_tests`; other Linux matrix leaves do not need the integration tools and should not repeat apt operations.
 
 ## Next Steps
 
