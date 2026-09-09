@@ -3,7 +3,7 @@ id: 20260908-asi001
 title: Archify External Source Integration
 status: active
 created: 2026-09-08
-updated: 2026-09-08
+updated: 2026-09-09
 branch: wip/archify-source-sync
 pr:
 supersedes: []
@@ -21,6 +21,7 @@ superseded_by:
 
 - Archify 使用 fork 的 `joey-custom` 默认分支；private overlay 不同步 repo-local `.agents/skills/archify-maintenance`。
 - source lock 会绑定 Archify 的完整 commit/tree，安装内容只由显式 sync rule 选择。
+- `codex-review-workflows` 已在 PR #112 合并 runtime pin 修复；source lock 更新到 merge commit `06d8a1573ab04e6ccc58c79d944d3797fdc2a9bd` / tree `6a2ddb7b8cc6cf533f25703726a5741c8bb06161`。
 
 ## Decisions
 
@@ -29,7 +30,8 @@ superseded_by:
 
 ## Next Steps
 
-- 更新六源 source lock、checkout workflow、manifest 和同步测试。
+- 运行 private overlay source-lock、generated-lock 和完整同步测试，确认六源 source lock 与 package 校验仍通过。
+- 等待本 PR CI 通过后完成 private overlay 合并。
 - 验证 private package 中的 `skills/archify` 完整且不包含维护 skill。
 
 ## Evidence
