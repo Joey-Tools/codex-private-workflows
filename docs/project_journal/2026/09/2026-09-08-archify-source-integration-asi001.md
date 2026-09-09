@@ -36,8 +36,8 @@ superseded_by:
 ## Validation
 
 - private overlay sync tests and source-lock tests pass.
-- `archify` package test command is private-synced to package-local checks and no longer resolves `../scripts/`.
-- The private test metadata assertion accepts the explicit-invocation wording used by the installed skill.
+- installed Archify removes repository-only `scripts`, `devDependencies`, `package-lock.json`, the `test/` tree, and generator scripts while retaining runtime update-contract files.
+- Archify runtime instructions resolve the loaded skill directory explicitly while preserving the target repository as the working directory.
 - private package contains the `archify` skill without the repo-local `archify-maintenance` skill.
 
 ## Evidence

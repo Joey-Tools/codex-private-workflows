@@ -445,7 +445,6 @@ def _rule(
     target: str,
     replacements: tuple[Replacement, ...] = (),
     *,
-    text_extensions: tuple[str, ...] = (".md", ".yaml", ".yml", ".py", ".toml", ".json"),
     common_joey_text: bool = False,
     replacement_excluded_paths: tuple[str, ...] = (),
     exclude_names: tuple[str, ...] = (),
@@ -460,7 +459,6 @@ def _rule(
         source=_path(source),
         target=_path(target),
         replacements=replacements,
-        text_extensions=text_extensions,
         replacement_excluded_paths=tuple(
             _path(path) for path in replacement_excluded_paths
         ),
@@ -469,6 +467,30 @@ def _rule(
         regular_file_overlays=regular_file_overlays,
         canonical_review_migration_policy=canonical_review_migration_policy,
     )
+
+
+ARCHIFY_PACKAGE_SCRIPTS = """  \"scripts\": {
+    \"generate:brand-marks\": \"node scripts/generate-brand-marks.mjs\",
+    \"check:brand-marks\": \"node scripts/generate-brand-marks.mjs --check\",
+    \"generate:validators\": \"node scripts/generate-validators.mjs\",
+    \"check:validators\": \"node scripts/generate-validators.mjs --check\",
+    \"check:release-identity\": \"node ../scripts/check-release-identity.mjs\",
+    \"build:gallery\": \"node ../scripts/build-gallery.mjs ../docs\",
+    \"build:guide\": \"node ../scripts/build-guide.mjs ../docs/guide.html\",
+    \"build:start\": \"node ../scripts/build-start.mjs ../docs/start.html\",
+    \"build:readme-showcase\": \"node ../scripts/build-readme-showcase.mjs\",
+    \"test:webm\": \"node test/webm-artifact.smoke.mjs && node --test test/site-language-integration.mjs\",
+    \"test\": \"npm run check:brand-marks && npm run check:validators && npm run check:release-identity && node test/golden.mjs && node ../scripts/run-tests.mjs\",
+    \"render:examples\": \"node scripts/render-examples.mjs ../examples\"
+  },
+"""
+ARCHIFY_PACKAGE_DEV_DEPENDENCIES = """  \"devDependencies\": {
+    \"ajv\": \"^8.17.1\",
+    \"parse5\": \"7.3.0\",
+    \"saxes\": \"6.0.0\",
+    \"simple-icons\": \"16.28.0\"
+  },
+"""
 
 
 SYNC_RULES = (
@@ -785,19 +807,34 @@ SYNC_RULES = (
         "personal_codex/skills/archify",
         (
             Replacement(
-                '"test": "npm run check:brand-marks && npm run check:validators && npm run check:release-identity && node test/golden.mjs && node ../scripts/run-tests.mjs",',
-                '"test": "npm run check:brand-marks && npm run check:validators && node --test test/skill-metadata.test.mjs test/generate-validators.test.mjs",',
+                ARCHIFY_PACKAGE_SCRIPTS,
+                "",
                 path=Path("package.json"),
                 required_count=1,
             ),
             Replacement(
-                "  assert.match(description, /Use when/i);",
-                "  assert.match(description, /(?:Use when|Only when)/i);",
-                path=Path("test/skill-metadata.test.mjs"),
+                ARCHIFY_PACKAGE_DEV_DEPENDENCIES,
+                "",
+                path=Path("package.json"),
+                required_count=1,
+            ),
+            Replacement(
+                "node bin/archify.mjs",
+                "node <loaded-skill-dir>/bin/archify.mjs",
+                required_count=1,
+            ),
+            Replacement(
+                "scripts/check-update.mjs",
+                "<loaded-skill-dir>/scripts/check-update.mjs",
                 required_count=1,
             ),
         ),
-        text_extensions=(".md", ".yaml", ".yml", ".py", ".toml", ".json", ".mjs"),
+        exclude_names=(
+            "test",
+            "package-lock.json",
+            "generate-brand-marks.mjs",
+            "generate-validators.mjs",
+        ),
     ),
     _rule(
         "codex-review-workflows",

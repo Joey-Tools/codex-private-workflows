@@ -13,7 +13,7 @@ or prevent replacement of an existing artifact of the expected type.
 Use final atomic delivery only after the candidate is frozen:
 
 ```bash
-node bin/archify.mjs deliver <type> <candidate.json> <output.html> --quality showcase --json
+node <loaded-skill-dir>/bin/archify.mjs deliver <type> <candidate.json> <output.html> --quality showcase --json
 ```
 
 Deliver reads the specification once, writes those exact bytes to a private same-directory candidate snapshot, renders that snapshot, runs the complete artifact checker, and only replaces the target after all artifact checks pass. The JSON receipt includes SHA-256 and byte counts for both `specification` and `artifact`. Renderer, checker, receipt, or commit failure exits non-zero, removes private state, preserves the previous trusted artifact, and never invokes an opener.
@@ -38,7 +38,7 @@ After delivery, inspect the exact trusted HTML without rerendering or modifying
 it:
 
 ```bash
-node bin/archify.mjs visual-check <output.html> --json
+node <loaded-skill-dir>/bin/archify.mjs visual-check <output.html> --json
 ```
 
 The zero-dependency command uses Chrome/Chromium through the DevTools pipe. It
@@ -70,10 +70,10 @@ Add `--open` only when the user wants an immediate local preview. It runs after 
 
 ## Last-Good Live Preview
 
-For an active desktop authoring loop only:
+For an active desktop authoring loop only; resolve the loaded skill directory before running the command:
 
 ```bash
-node bin/archify.mjs preview <type> <input>.json <output>.html --quality showcase
+node <loaded-skill-dir>/bin/archify.mjs preview <type> <input>.json <output>.html --quality showcase
 ```
 
 Preview watches one explicit input on loopback, binds each stable digest to a private snapshot, and advances only after the existing verified delivery pipeline passes. Invalid, half-written, deleted, or superseded input leaves the previous verified revision on screen and on disk. Identical bytes do not rebuild or reload.

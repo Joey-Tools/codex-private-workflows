@@ -1728,27 +1728,54 @@ class PrivateOverlaySyncTests(unittest.TestCase):
             target.read_text(encoding="utf-8"), "Use this when Joey asks.\n"
         )
 
-    def test_archify_sync_rule_keeps_package_test_within_skill_tree(self) -> None:
+    def test_archify_sync_rule_builds_clean_package_with_loaded_skill_paths(self) -> None:
         rule = next(
             candidate
             for candidate in SYNC_MODULE.SYNC_RULES
             if candidate.repo == "archify"
         )
-        source = self.source_root / rule.repo / rule.source / "package.json"
-        source.parent.mkdir(parents=True)
-        source.write_text(
+        source = self.source_root / rule.repo / rule.source
+        source.mkdir(parents=True)
+        (source / "package.json").write_text(
             '{\n'
+            '  "name": "archify",\n'
+            '  "version": "2.17.0-dev.1",\n'
             '  "scripts": {\n'
+            '    "generate:brand-marks": "node scripts/generate-brand-marks.mjs",\n'
+            '    "check:brand-marks": "node scripts/generate-brand-marks.mjs --check",\n'
+            '    "generate:validators": "node scripts/generate-validators.mjs",\n'
+            '    "check:validators": "node scripts/generate-validators.mjs --check",\n'
+            '    "check:release-identity": "node ../scripts/check-release-identity.mjs",\n'
+            '    "build:gallery": "node ../scripts/build-gallery.mjs ../docs",\n'
+            '    "build:guide": "node ../scripts/build-guide.mjs ../docs/guide.html",\n'
+            '    "build:start": "node ../scripts/build-start.mjs ../docs/start.html",\n'
+            '    "build:readme-showcase": "node ../scripts/build-readme-showcase.mjs",\n'
+            '    "test:webm": "node test/webm-artifact.smoke.mjs && node --test test/site-language-integration.mjs",\n'
             '    "test": "npm run check:brand-marks && npm run check:validators && npm run check:release-identity && node test/golden.mjs && node ../scripts/run-tests.mjs",\n'
             '    "render:examples": "node scripts/render-examples.mjs ../examples"\n'
+            '  },\n'
+            '  "devDependencies": {\n'
+            '    "ajv": "^8.17.1",\n'
+            '    "parse5": "7.3.0",\n'
+            '    "saxes": "6.0.0",\n'
+            '    "simple-icons": "16.28.0"\n'
+            '  },\n'
+            '  "overrides": {\n'
+            '    "fast-uri": "3.1.5"\n'
             '  }\n'
             '}\n',
             encoding="utf-8",
         )
-        metadata_test = source.parent / "test" / "skill-metadata.test.mjs"
-        metadata_test.parent.mkdir(parents=True)
-        metadata_test.write_text(
-            "  assert.match(description, /Use when/i);\n",
+        (source / "package-lock.json").write_text("lock\n", encoding="utf-8")
+        (source / "test").mkdir()
+        (source / "test" / "fixture.mjs").write_text("test\n", encoding="utf-8")
+        (source / "scripts").mkdir()
+        for name in ("generate-brand-marks.mjs", "generate-validators.mjs"):
+            (source / "scripts" / name).write_text("generator\n", encoding="utf-8")
+        (source / "scripts" / "check-update.mjs").write_text("checker\n", encoding="utf-8")
+        (source / "SKILL.md").write_text(
+            "node bin/archify.mjs validate\n"
+            "scripts/check-update.mjs\n",
             encoding="utf-8",
         )
 
@@ -1763,23 +1790,18 @@ class PrivateOverlaySyncTests(unittest.TestCase):
                 / "package.json"
             ).read_text(encoding="utf-8")
         )
-        self.assertEqual(
-            package["scripts"]["test"],
-            "npm run check:brand-marks && npm run check:validators "
-            "&& node --test test/skill-metadata.test.mjs "
-            "test/generate-validators.test.mjs",
-        )
-        self.assertNotIn("../scripts/", package["scripts"]["test"])
-        self.assertEqual(
-            (
-                self.repo_root
-                / "personal_codex"
-                / "skills"
-                / "archify"
-                / "test"
-                / "skill-metadata.test.mjs"
-            ).read_text(encoding="utf-8"),
-            "  assert.match(description, /(?:Use when|Only when)/i);\n",
+        self.assertNotIn("scripts", package)
+        self.assertNotIn("devDependencies", package)
+        target = self.repo_root / "personal_codex" / "skills" / "archify"
+        self.assertFalse((target / "package-lock.json").exists())
+        self.assertFalse((target / "test").exists())
+        self.assertFalse((target / "scripts" / "generate-brand-marks.mjs").exists())
+        self.assertFalse((target / "scripts" / "generate-validators.mjs").exists())
+        skill = (target / "SKILL.md").read_text(encoding="utf-8")
+        self.assertIn("node <loaded-skill-dir>/bin/archify.mjs validate", skill)
+        self.assertIn(
+            "<loaded-skill-dir>/scripts/check-update.mjs",
+            skill,
         )
 
     def test_private_ci_workflow_sync_rule_is_unique_and_byte_exact(self) -> None:

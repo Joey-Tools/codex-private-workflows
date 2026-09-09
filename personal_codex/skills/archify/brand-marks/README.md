@@ -6,7 +6,7 @@ identity: it never replaces the node's semantic `type`, color, label, or
 relationships.
 
 Unknown sites are handled by an explicit two-stage workflow. Run
-`node bin/archify.mjs brands capture <url> --json`, then author the returned
+`node <loaded-skill-dir>/bin/archify.mjs brands capture <url> --json`, then author the returned
 digest-pinned `brand` value. Normal render and validate commands do not perform
 an unpinned capture, and changed or unavailable content fails closed.
 
