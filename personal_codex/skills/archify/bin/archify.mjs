@@ -1541,7 +1541,7 @@ async function commandBrands(args) {
     return;
   }
   if (!marks.length) {
-    console.log(`No built-in brand matched "${query}". Run "${cliCommand('brands', 'capture', query, '--json')}", then use the returned digest-pinned brand value.`);
+    console.log(`No built-in brand matched "${query}". Run "${cliHelp('brands capture <url> --json')}", then use the returned digest-pinned brand value.`);
     return;
   }
   const grouped = Map.groupBy

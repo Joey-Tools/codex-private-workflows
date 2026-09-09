@@ -1851,7 +1851,32 @@ class PrivateOverlaySyncTests(unittest.TestCase):
             encoding="utf-8",
         )
 
-        SYNC_MODULE.sync_sources(self.repo_root, self.source_root, (rule,))
+        locked_sources = self._locked_bug_triage_source(rule, source)
+        locked_source = locked_sources[(rule.repo, rule.source)]
+        ignored_names = SYNC_MODULE.EXCLUDED_NAMES | frozenset(rule.exclude_names)
+        locked_sources[(rule.repo, rule.source)] = dataclasses.replace(
+            locked_source,
+            manifest=SimpleNamespace(
+                root_kind=locked_source.manifest.root_kind,
+                root_object_id=locked_source.manifest.root_object_id,
+                entries=tuple(
+                    entry
+                    for entry in locked_source.manifest.entries
+                    if not SYNC_MODULE._is_ignored_relative(
+                        entry.relative,
+                        Path("."),
+                        ignored_names,
+                        rule.exclude_paths,
+                    )
+                ),
+            ),
+        )
+        SYNC_MODULE.sync_sources(
+            self.repo_root,
+            self.source_root,
+            (rule,),
+            locked_sources=locked_sources,
+        )
 
         package = json.loads(
             (
@@ -1904,6 +1929,16 @@ class PrivateOverlaySyncTests(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn(str(target / "bin" / "archify.mjs"), result.stdout)
+        fallback = subprocess.run(
+            [node, str(cli), "brands", "unknown-brand"],
+            cwd=self.repo_root,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(fallback.returncode, 0, fallback.stderr)
+        self.assertIn("brands capture <url> --json", fallback.stdout)
+        self.assertNotIn("brands capture unknown-brand --json", fallback.stdout)
 
     def test_private_ci_workflow_sync_rule_is_unique_and_byte_exact(self) -> None:
         canonical_source = Path(

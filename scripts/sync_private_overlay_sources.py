@@ -1003,7 +1003,7 @@ SYNC_RULES = (
             ),
             Replacement(
                 "console.log(`No built-in brand matched \"${query}\". Run \"archify brands capture <url> --json\", then use the returned digest-pinned brand value.`);",
-                "console.log(`No built-in brand matched \"${query}\". Run \"${cliCommand('brands', 'capture', query, '--json')}\", then use the returned digest-pinned brand value.`);",
+                "console.log(`No built-in brand matched \"${query}\". Run \"${cliHelp('brands capture <url> --json')}\", then use the returned digest-pinned brand value.`);",
                 path=Path("bin/archify.mjs"),
                 required_count=1,
             ),
@@ -1542,8 +1542,15 @@ def _is_excluded_relative(
     path: Path, root: Path, excluded_paths: tuple[Path, ...]
 ) -> bool:
     relative = path.relative_to(root)
+    return _is_excluded_parts(relative.parts, excluded_paths)
+
+
+def _is_excluded_parts(
+    relative_parts: tuple[str, ...], excluded_paths: tuple[Path, ...]
+) -> bool:
     return any(
-        relative == excluded or excluded in relative.parents
+        relative_parts == excluded.parts
+        or relative_parts[: len(excluded.parts)] == excluded.parts
         for excluded in excluded_paths
     )
 
@@ -3413,6 +3420,7 @@ def _capture_regular_file_overlay_tree_manifest(
     *,
     label: str,
     ignored_names: frozenset[str] = frozenset(),
+    excluded_paths: tuple[Path, ...] = (),
     raw_entry_validator: Callable[[tuple[str, ...]], None] | None = None,
 ) -> _RegularFileOverlayTreeManifest:
     if os.scandir not in os.supports_fd:
@@ -3460,6 +3468,8 @@ def _capture_regular_file_overlay_tree_manifest(
         scanned_entries += len(initial_names)
         for name in initial_names:
             child_parts = (*relative_parts, name)
+            if _is_excluded_parts(child_parts, excluded_paths):
+                continue
             if raw_entry_validator is not None:
                 raw_entry_validator(child_parts)
             if _is_ignored_name(name, ignored_names):
@@ -5610,6 +5620,7 @@ def _copy_regular_file_overlay_public_source_to_prepared(
             source_root.descriptor,
             label="initial public source",
             ignored_names=ignored_names,
+            excluded_paths=rule.exclude_paths,
             raw_entry_validator=raw_entry_validator,
         )
         locked_entries: dict[tuple[str, ...], object] = {}
@@ -5690,6 +5701,8 @@ def _copy_regular_file_overlay_public_source_to_prepared(
             budget.scanned_entries += len(names)
             for name in names:
                 child_relative = relative / name
+                if _is_excluded_parts(child_relative.parts, rule.exclude_paths):
+                    continue
                 if raw_entry_validator is not None:
                     raw_entry_validator(child_relative.parts)
                 if _is_ignored_name(name, ignored_names):
@@ -5993,6 +6006,7 @@ def _copy_regular_file_overlay_public_source_to_prepared(
             source_root.descriptor,
             label="final public source",
             ignored_names=ignored_names,
+            excluded_paths=rule.exclude_paths,
             raw_entry_validator=raw_entry_validator,
         )
         if final_source_manifest != source_manifest:
