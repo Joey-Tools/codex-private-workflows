@@ -25,6 +25,7 @@ superseded_by:
 - The aggregate `test` job waits for every leaf with `if: always()` and fails unless every leaf reports success.
 - Visible internal checks may increase; no new required checks are introduced.
 - During validation, GitHub's macOS runner advanced to `26.6.2/25G83`; the exact fingerprint was added to the existing reviewed profile while retaining older pins and fail-closed matching.
+- Keep `26.5.2/25F84` as an additional hosted branch because the `macos-26` label may still assign the previously reviewed image during runner transition.
 
 ## Next Steps
 
