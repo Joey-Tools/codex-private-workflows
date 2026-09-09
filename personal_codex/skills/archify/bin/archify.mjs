@@ -9,26 +9,43 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const skillRoot = path.resolve(__dirname, '..');
+const cliEntryPath = path.join(skillRoot, 'bin', 'archify.mjs');
+
+function shellQuote(value) {
+  return `'${String(value).replaceAll("'", "'\\''")}'`;
+}
+
+function cliPrefix() {
+  return `${shellQuote(process.execPath)} ${shellQuote(cliEntryPath)}`;
+}
+
+function cliHelp(suffix) {
+  return `${cliPrefix()} ${suffix}`;
+}
+
+function cliCommand(...args) {
+  return `${cliPrefix()} ${args.map(shellQuote).join(' ')}`;
+}
 
 const TYPES = new Set(['architecture', 'workflow', 'sequence', 'dataflow', 'lifecycle']);
 
 function usage() {
   return `Usage:
-  archify render <type> <input.json> [output.html] [--quality standard|showcase] [--repo-root path (architecture only)]
-  archify compare architecture <base.json> <head.json> [output.html] [--receipt path] [--json] [--quality standard|showcase] [--repo-root path]
-  archify deliver <type> <input.json> [output.html] [--json] [--open] [--quality standard|showcase] [--repo-root path (architecture only)]
-  archify preview <type> <input.json> [output.html] [--no-open] [--quality standard|showcase] [--repo-root path (architecture only)]
-  archify validate <type> <input.json> [--json] [--layout-json] [--quality standard|showcase] [--repo-root path (architecture only)]
-  archify migrate workflow <old.json> <new.json> --to-schema 2 [--json]
-  archify inspect <type> <input.json>
-  archify check <output.html>
-  archify visual-check <output.html> [--json]
-  archify guide [scenario or question] [--json] [--lang en|zh]
-  archify brands [name, alias, domain, or category] [--json]
-  archify brands capture <url> [--json]
-  archify examples
-  archify doctor
-  archify demo [output-directory]
+  ${cliHelp('render <type> <input.json> [output.html] [--quality standard|showcase] [--repo-root path (architecture only)]')}
+  ${cliHelp('compare architecture <base.json> <head.json> [output.html] [--receipt path] [--json] [--quality standard|showcase] [--repo-root path]')}
+  ${cliHelp('deliver <type> <input.json> [output.html] [--json] [--open] [--quality standard|showcase] [--repo-root path (architecture only)]')}
+  ${cliHelp('preview <type> <input.json> [output.html] [--no-open] [--quality standard|showcase] [--repo-root path (architecture only)]')}
+  ${cliHelp('validate <type> <input.json> [--json] [--layout-json] [--quality standard|showcase] [--repo-root path (architecture only)]')}
+  ${cliHelp('migrate workflow <old.json> <new.json> --to-schema 2 [--json]')}
+  ${cliHelp('inspect <type> <input.json>')}
+  ${cliHelp('check <output.html>')}
+  ${cliHelp('visual-check <output.html> [--json]')}
+  ${cliHelp('guide [scenario or question] [--json] [--lang en|zh]')}
+  ${cliHelp('brands [name, alias, domain, or category] [--json]')}
+  ${cliHelp('brands capture <url> [--json]')}
+  ${cliHelp('examples')}
+  ${cliHelp('doctor')}
+  ${cliHelp('demo [output-directory]')}
 
 Types:
   architecture, workflow, sequence, dataflow, lifecycle
@@ -834,7 +851,7 @@ async function commandDeliver(args) {
   const [type, input, requestedOutput] = positional;
   if (!type || !input || positional.length > 3) rejectCliArgument(usage(), {
     code: 'cli/usage',
-    supportedFixes: ['use: archify deliver <type> <input.json> [output.html] [options]'],
+    supportedFixes: [`use: ${cliHelp('deliver <type> <input.json> [output.html] [options]')}`],
   });
   assertEvidenceType(type, repoArgs.repoRoot);
   const renderer = rendererPath(type);
@@ -1485,7 +1502,7 @@ async function commandBrands(args) {
   if (unknown.length) fail(`Unknown brands option "${unknown[0]}".`);
   const positional = args.filter((arg) => arg !== '--json');
   if (positional[0] === 'capture') {
-    if (positional.length !== 2) fail('Usage: archify brands capture <url> [--json]');
+    if (positional.length !== 2) fail(`Usage: ${cliHelp('brands capture <url> [--json]')}`);
     const { captureBrandReference } = await import('../renderers/shared/brand-marks.mjs');
     let capture;
     try {
@@ -1519,12 +1536,12 @@ async function commandBrands(args) {
       query,
       count: marks.length,
       marks,
-      fallback: 'Run "archify brands capture <url> --json", then use the returned digest-pinned brand value.',
+      fallback: `Run "${cliHelp('brands capture <url> --json')}", then use the returned digest-pinned brand value.`,
     }, null, 2));
     return;
   }
   if (!marks.length) {
-    console.log(`No built-in brand matched "${query}". Run "archify brands capture <url> --json", then use the returned digest-pinned brand value.`);
+    console.log(`No built-in brand matched "${query}". Run "${cliCommand('brands', 'capture', query, '--json')}", then use the returned digest-pinned brand value.`);
     return;
   }
   const grouped = Map.groupBy
@@ -1553,7 +1570,7 @@ function commandDemo(args) {
 
   console.log(`\nDemo ready: ${output}`);
   console.log('Next: open the HTML in your browser, then render your own diagram:');
-  console.log('  archify render architecture <input.json> <output.html>');
+  console.log(`  ${cliHelp('render architecture <input.json> <output.html>')}`);
 }
 
 function migrationPathDiagnostics(error, sourcePath, destinationPath) {
@@ -1672,7 +1689,7 @@ async function commandMigrate(args) {
     || options.positional.length !== 3
     || options.toSchema !== '2'
   ) {
-    fail('Usage: archify migrate workflow <old.json> <new.json> --to-schema 2 [--json]');
+    fail(`Usage: ${cliHelp('migrate workflow <old.json> <new.json> --to-schema 2 [--json]')}`);
   }
 
   const sourcePath = path.resolve(sourceArgument);
@@ -1904,7 +1921,7 @@ function commandValidate(args) {
   const [type, input] = rest;
   if (!type || !input || rest.length !== 2) rejectCliArgument(usage(), {
     code: 'cli/usage',
-    supportedFixes: ['use: archify validate <type> <input.json> [options]'],
+    supportedFixes: [`use: ${cliHelp('validate <type> <input.json> [options]')}`],
   });
   assertEvidenceType(type, repoRoot);
   const renderer = rendererPath(type);

@@ -1769,10 +1769,61 @@ class PrivateOverlaySyncTests(unittest.TestCase):
         (source / "package-lock.json").write_text("lock\n", encoding="utf-8")
         (source / "test").mkdir()
         (source / "test" / "fixture.mjs").write_text("test\n", encoding="utf-8")
+        (source / "runtime" / "test").mkdir(parents=True)
+        (source / "runtime" / "test" / "required.dat").write_text(
+            "runtime test fixture\n",
+            encoding="utf-8",
+        )
         (source / "scripts").mkdir()
         for name in ("generate-brand-marks.mjs", "generate-validators.mjs"):
             (source / "scripts" / name).write_text("generator\n", encoding="utf-8")
         (source / "scripts" / "check-update.mjs").write_text("checker\n", encoding="utf-8")
+        (source / "bin").mkdir()
+        (source / "bin" / "archify.mjs").write_text(
+            "const skillRoot = path.resolve(__dirname, '..');\n"
+            "function usage() {\n"
+            "  return `Usage:\n"
+            "  archify render <type> <input.json> [output.html] [--quality standard|showcase] [--repo-root path (architecture only)]\n"
+            "  archify compare architecture <base.json> <head.json> [output.html] [--receipt path] [--json] [--quality standard|showcase] [--repo-root path]\n"
+            "  archify deliver <type> <input.json> [output.html] [--json] [--open] [--quality standard|showcase] [--repo-root path (architecture only)]\n"
+            "  archify preview <type> <input.json> [output.html] [--no-open] [--quality standard|showcase] [--repo-root path (architecture only)]\n"
+            "  archify validate <type> <input.json> [--json] [--layout-json] [--quality standard|showcase] [--repo-root path (architecture only)]\n"
+            "  archify migrate workflow <old.json> <new.json> --to-schema 2 [--json]\n"
+            "  archify inspect <type> <input.json>\n"
+            "  archify check <output.html>\n"
+            "  archify visual-check <output.html> [--json]\n"
+            "  archify guide [scenario or question] [--json] [--lang en|zh]\n"
+            "  archify brands [name, alias, domain, or category] [--json]\n"
+            "  archify brands capture <url> [--json]\n"
+            "  archify examples\n"
+            "  archify doctor\n"
+            "  archify demo [output-directory]\n`;\n"
+            "}\n"
+            "supportedFixes: ['use: archify deliver <type> <input.json> [output.html] [options]'],\n"
+            "if (positional.length !== 2) fail('Usage: archify brands capture <url> [--json]');\n"
+            "fallback: 'Run \"archify brands capture <url> --json\", then use the returned digest-pinned brand value.',\n"
+            "console.log(`No built-in brand matched \"${query}\". Run \"archify brands capture <url> --json\", then use the returned digest-pinned brand value.`);\n"
+            "console.log('  archify render architecture <input.json> <output.html>');\n"
+            "fail('Usage: archify migrate workflow <old.json> <new.json> --to-schema 2 [--json]');\n"
+            "supportedFixes: ['use: archify validate <type> <input.json> [options]'],\n",
+            encoding="utf-8",
+        )
+        (source / "renderers" / "shared").mkdir(parents=True)
+        (source / "renderers" / "shared" / "brand-marks.mjs").write_text(
+            "import { esc, textUnits } from './utils.mjs';\n"
+            "unknown.push(`/${collection}/${index}/brand ${JSON.stringify(node.brand)} is an unpinned URL; capture it first with \\`archify brands capture ${url.href} --json\\``);\n"
+            "? ['run `archify brands capture <url> --json` and author the returned digest-pinned brand object']\n"
+            ": ['choose an ID from `archify brands`', 'run `archify brands capture <url> --json` for an unknown official site'],\n",
+            encoding="utf-8",
+        )
+        (source / "recipes").mkdir()
+        (source / "recipes" / "scenarios.mjs").write_text(
+            "const RAW_RECIPES = [\n"
+            "const intro = isZh\n"
+            "  ? '先选择你要回答的问题，再选择图表类型。可运行：archify guide \"你的场景\"'\n"
+            ": 'Choose the question before the diagram type. Run: archify guide \"your scenario\"';\n",
+            encoding="utf-8",
+        )
         (source / "brand-marks").mkdir()
         (source / "brand-marks" / "README.md").write_text(
             "node bin/archify.mjs brands capture\n",
@@ -1816,6 +1867,12 @@ class PrivateOverlaySyncTests(unittest.TestCase):
         target = self.repo_root / "personal_codex" / "skills" / "archify"
         self.assertFalse((target / "package-lock.json").exists())
         self.assertFalse((target / "test").exists())
+        self.assertEqual(
+            (target / "runtime" / "test" / "required.dat").read_text(
+                encoding="utf-8"
+            ),
+            "runtime test fixture\n",
+        )
         self.assertFalse((target / "scripts" / "generate-brand-marks.mjs").exists())
         self.assertFalse((target / "scripts" / "generate-validators.mjs").exists())
         skill = (target / "SKILL.md").read_text(encoding="utf-8")
@@ -1830,6 +1887,23 @@ class PrivateOverlaySyncTests(unittest.TestCase):
                 target / "renderers" / "workflow" / "README.md"
             ).read_text(encoding="utf-8"),
         )
+
+
+    def test_archify_runtime_commands_use_loaded_skill_path(self) -> None:
+        node = shutil.which("node")
+        if node is None:
+            self.skipTest("node is unavailable for Archify CLI path validation")
+        target = REPO_ROOT / "personal_codex" / "skills" / "archify"
+        cli = target / "bin" / "archify.mjs"
+        result = subprocess.run(
+            [node, str(cli), "brands", "unknown-brand", "--json"],
+            cwd=self.repo_root,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(str(target / "bin" / "archify.mjs"), result.stdout)
 
     def test_private_ci_workflow_sync_rule_is_unique_and_byte_exact(self) -> None:
         canonical_source = Path(
@@ -7204,12 +7278,14 @@ class PrivateOverlaySyncTests(unittest.TestCase):
             locked_path,
             *,
             exclude_names,
+            exclude_paths,
             exclude_suffixes,
         ):
             self.assertEqual(checkout, source_repository)
             self.assertEqual(commit, "c" * 40)
             self.assertEqual(locked_path, rule.source)
             self.assertIsInstance(exclude_names, tuple)
+            self.assertIsInstance(exclude_paths, tuple)
             self.assertIsInstance(exclude_suffixes, tuple)
             return locked_manifest
 

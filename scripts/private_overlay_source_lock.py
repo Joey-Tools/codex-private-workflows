@@ -1082,6 +1082,7 @@ def load_locked_source_manifest(
     source: Path,
     *,
     exclude_names: tuple[str, ...] = (),
+    exclude_paths: tuple[Path, ...] = (),
     exclude_suffixes: tuple[str, ...] = (),
 ) -> LockedSourceManifest:
     """Load an exact, bounded source inventory from the frozen Git commit."""
@@ -1171,6 +1172,15 @@ def load_locked_source_manifest(
             )
 
     ignored = frozenset(exclude_names)
+    for excluded in exclude_paths:
+        if (
+            excluded.is_absolute()
+            or not excluded.parts
+            or any(part in {"", ".", ".."} for part in excluded.parts)
+        ):
+            raise SourceLockError(
+                f"locked source exclusion path is unsafe: {excluded}"
+            )
     entries: list[LockedSourceEntry] = []
     seen: set[Path] = set()
     for index, record in enumerate(
@@ -1202,6 +1212,9 @@ def load_locked_source_manifest(
         if relative == Path(".") or relative.is_absolute() or ".." in relative.parts:
             raise SourceLockError(f"locked source inventory path is unsafe: {source}")
         if any(
+            relative == excluded or excluded in relative.parents
+            for excluded in exclude_paths
+        ) or any(
             part in ignored or any(part.endswith(suffix) for suffix in exclude_suffixes)
             for part in relative.parts
         ):
