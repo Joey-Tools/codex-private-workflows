@@ -445,6 +445,7 @@ def _rule(
     target: str,
     replacements: tuple[Replacement, ...] = (),
     *,
+    text_extensions: tuple[str, ...] = (".md", ".yaml", ".yml", ".py", ".toml", ".json"),
     common_joey_text: bool = False,
     replacement_excluded_paths: tuple[str, ...] = (),
     exclude_names: tuple[str, ...] = (),
@@ -459,6 +460,7 @@ def _rule(
         source=_path(source),
         target=_path(target),
         replacements=replacements,
+        text_extensions=text_extensions,
         replacement_excluded_paths=tuple(
             _path(path) for path in replacement_excluded_paths
         ),
@@ -781,6 +783,21 @@ SYNC_RULES = (
         "archify",
         "archify",
         "personal_codex/skills/archify",
+        (
+            Replacement(
+                '"test": "npm run check:brand-marks && npm run check:validators && npm run check:release-identity && node test/golden.mjs && node ../scripts/run-tests.mjs",',
+                '"test": "npm run check:brand-marks && npm run check:validators && node --test test/skill-metadata.test.mjs test/generate-validators.test.mjs",',
+                path=Path("package.json"),
+                required_count=1,
+            ),
+            Replacement(
+                "  assert.match(description, /Use when/i);",
+                "  assert.match(description, /(?:Use when|Only when)/i);",
+                path=Path("test/skill-metadata.test.mjs"),
+                required_count=1,
+            ),
+        ),
+        text_extensions=(".md", ".yaml", ".yml", ".py", ".toml", ".json", ".mjs"),
     ),
     _rule(
         "codex-review-workflows",

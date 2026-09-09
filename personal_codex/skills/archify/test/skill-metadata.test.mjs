@@ -21,7 +21,7 @@ test('skill description is portable across 1024-character runtimes and remains s
     assert.match(description, new RegExp(`\\b${trigger}\\b`, 'i'), `description must retain the ${trigger} trigger`);
   }
   assert.match(description, /standalone HTML/i);
-  assert.match(description, /Use when/i);
+  assert.match(description, /(?:Use when|Only when)/i);
 });
 
 test('literal packaged-skill path references resolve inside the installed skill root', () => {

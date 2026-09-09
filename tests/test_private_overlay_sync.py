@@ -1728,6 +1728,60 @@ class PrivateOverlaySyncTests(unittest.TestCase):
             target.read_text(encoding="utf-8"), "Use this when Joey asks.\n"
         )
 
+    def test_archify_sync_rule_keeps_package_test_within_skill_tree(self) -> None:
+        rule = next(
+            candidate
+            for candidate in SYNC_MODULE.SYNC_RULES
+            if candidate.repo == "archify"
+        )
+        source = self.source_root / rule.repo / rule.source / "package.json"
+        source.parent.mkdir(parents=True)
+        source.write_text(
+            '{\n'
+            '  "scripts": {\n'
+            '    "test": "npm run check:brand-marks && npm run check:validators && npm run check:release-identity && node test/golden.mjs && node ../scripts/run-tests.mjs",\n'
+            '    "render:examples": "node scripts/render-examples.mjs ../examples"\n'
+            '  }\n'
+            '}\n',
+            encoding="utf-8",
+        )
+        metadata_test = source.parent / "test" / "skill-metadata.test.mjs"
+        metadata_test.parent.mkdir(parents=True)
+        metadata_test.write_text(
+            "  assert.match(description, /Use when/i);\n",
+            encoding="utf-8",
+        )
+
+        SYNC_MODULE.sync_sources(self.repo_root, self.source_root, (rule,))
+
+        package = json.loads(
+            (
+                self.repo_root
+                / "personal_codex"
+                / "skills"
+                / "archify"
+                / "package.json"
+            ).read_text(encoding="utf-8")
+        )
+        self.assertEqual(
+            package["scripts"]["test"],
+            "npm run check:brand-marks && npm run check:validators "
+            "&& node --test test/skill-metadata.test.mjs "
+            "test/generate-validators.test.mjs",
+        )
+        self.assertNotIn("../scripts/", package["scripts"]["test"])
+        self.assertEqual(
+            (
+                self.repo_root
+                / "personal_codex"
+                / "skills"
+                / "archify"
+                / "test"
+                / "skill-metadata.test.mjs"
+            ).read_text(encoding="utf-8"),
+            "  assert.match(description, /(?:Use when|Only when)/i);\n",
+        )
+
     def test_private_ci_workflow_sync_rule_is_unique_and_byte_exact(self) -> None:
         canonical_source = Path(
             "skills/review-orchestration-playbook/tests/fixtures/ci/private.yml"

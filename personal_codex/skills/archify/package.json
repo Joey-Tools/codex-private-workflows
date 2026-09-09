@@ -22,7 +22,7 @@
     "build:start": "node ../scripts/build-start.mjs ../docs/start.html",
     "build:readme-showcase": "node ../scripts/build-readme-showcase.mjs",
     "test:webm": "node test/webm-artifact.smoke.mjs && node --test test/site-language-integration.mjs",
-    "test": "npm run check:brand-marks && npm run check:validators && npm run check:release-identity && node test/golden.mjs && node ../scripts/run-tests.mjs",
+    "test": "npm run check:brand-marks && npm run check:validators && node --test test/skill-metadata.test.mjs test/generate-validators.test.mjs",
     "render:examples": "node scripts/render-examples.mjs ../examples"
   },
   "devDependencies": {

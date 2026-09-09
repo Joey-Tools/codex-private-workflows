@@ -1,11 +1,11 @@
 ---
 id: 20260908-asi001
 title: Archify External Source Integration
-status: active
+status: completed
 created: 2026-09-08
 updated: 2026-09-09
 branch: wip/archify-source-sync
-pr:
+pr: https://github.com/Joey-Tools/codex-private-workflows/pull/186
 supersedes: []
 superseded_by:
 ---
@@ -31,9 +31,14 @@ superseded_by:
 
 ## Next Steps
 
-- 运行 private overlay source-lock、generated-lock 和完整同步测试，确认六源 source lock 与 package 校验仍通过。
-- 等待本 PR CI 通过后完成 private overlay 合并。
-- 验证 private package 中的 `skills/archify` 完整且不包含维护 skill。
+- 集成已完成；后续 source refresh 由人工触发，并继续沿用当前 source-lock 与 sync rule 验证。
+
+## Validation
+
+- private overlay sync tests and source-lock tests pass.
+- `archify` package test command is private-synced to package-local checks and no longer resolves `../scripts/`.
+- The private test metadata assertion accepts the explicit-invocation wording used by the installed skill.
+- private package contains the `archify` skill without the repo-local `archify-maintenance` skill.
 
 ## Evidence
 
