@@ -1773,9 +1773,29 @@ class PrivateOverlaySyncTests(unittest.TestCase):
         for name in ("generate-brand-marks.mjs", "generate-validators.mjs"):
             (source / "scripts" / name).write_text("generator\n", encoding="utf-8")
         (source / "scripts" / "check-update.mjs").write_text("checker\n", encoding="utf-8")
+        (source / "brand-marks").mkdir()
+        (source / "brand-marks" / "README.md").write_text(
+            "node bin/archify.mjs brands capture\n",
+            encoding="utf-8",
+        )
+        (source / "references").mkdir()
+        (source / "references" / "brand-marks.md").write_text(
+            "node bin/archify.mjs brands\n",
+            encoding="utf-8",
+        )
+        (source / "references" / "delivery-contract.md").write_text(
+            "node bin/archify.mjs deliver\n",
+            encoding="utf-8",
+        )
+        for renderer in ("dataflow", "lifecycle", "sequence", "workflow"):
+            renderer_root = source / "renderers" / renderer
+            renderer_root.mkdir(parents=True)
+            (renderer_root / "README.md").write_text(
+                f"node archify/renderers/{renderer}/render.mjs\n",
+                encoding="utf-8",
+            )
         (source / "SKILL.md").write_text(
             "node bin/archify.mjs validate\n"
-            "node archify/renderers/workflow/render-workflow.mjs input.json output.html\n"
             "scripts/check-update.mjs\n",
             encoding="utf-8",
         )
@@ -1801,12 +1821,14 @@ class PrivateOverlaySyncTests(unittest.TestCase):
         skill = (target / "SKILL.md").read_text(encoding="utf-8")
         self.assertIn("node <loaded-skill-dir>/bin/archify.mjs validate", skill)
         self.assertIn(
-            "node <loaded-skill-dir>/renderers/workflow/render-workflow.mjs",
+            "<loaded-skill-dir>/scripts/check-update.mjs",
             skill,
         )
         self.assertIn(
-            "<loaded-skill-dir>/scripts/check-update.mjs",
-            skill,
+            "node <loaded-skill-dir>/renderers/workflow/render.mjs",
+            (
+                target / "renderers" / "workflow" / "README.md"
+            ).read_text(encoding="utf-8"),
         )
 
     def test_private_ci_workflow_sync_rule_is_unique_and_byte_exact(self) -> None:

@@ -819,14 +819,44 @@ SYNC_RULES = (
                 required_count=1,
             ),
             Replacement(
-                "archify/",
-                "<loaded-skill-dir>/",
-                required=False,
+                "node bin/archify.mjs",
+                "node <loaded-skill-dir>/bin/archify.mjs",
+                path=Path("SKILL.md"),
             ),
             Replacement(
                 "node bin/archify.mjs",
                 "node <loaded-skill-dir>/bin/archify.mjs",
-                required_count=1,
+                path=Path("brand-marks/README.md"),
+            ),
+            Replacement(
+                "node bin/archify.mjs",
+                "node <loaded-skill-dir>/bin/archify.mjs",
+                path=Path("references/brand-marks.md"),
+            ),
+            Replacement(
+                "node bin/archify.mjs",
+                "node <loaded-skill-dir>/bin/archify.mjs",
+                path=Path("references/delivery-contract.md"),
+            ),
+            Replacement(
+                "archify/",
+                "<loaded-skill-dir>/",
+                path=Path("renderers/dataflow/README.md"),
+            ),
+            Replacement(
+                "archify/",
+                "<loaded-skill-dir>/",
+                path=Path("renderers/lifecycle/README.md"),
+            ),
+            Replacement(
+                "archify/",
+                "<loaded-skill-dir>/",
+                path=Path("renderers/sequence/README.md"),
+            ),
+            Replacement(
+                "archify/",
+                "<loaded-skill-dir>/",
+                path=Path("renderers/workflow/README.md"),
             ),
             Replacement(
                 "scripts/check-update.mjs",
