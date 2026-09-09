@@ -24,7 +24,7 @@ superseded_by:
 - Review syntax, project-journal tests, private-overlay synchronization, Linux isolation, private-overlay modules, and contract validation are separate parallel leaves.
 - The aggregate `test` job waits for every leaf with `if: always()` and fails unless every leaf reports success.
 - Visible internal checks may increase; no new required checks are introduced.
-- During validation, GitHub's macOS runner advanced to `26.6.2/25G83`; the exact fingerprint was added to the existing reviewed profile while retaining older pins and fail-closed matching.
+- During validation, GitHub's macOS runner advanced to `26.6.2/25G83`; its exact `codesign` digest was added to the reviewed profile while retaining the previous `26.5.2/25F84` OS and digest branch plus fail-closed matching.
 - Keep `26.5.2/25F84` as an additional hosted branch because the `macos-26` label may still assign the previously reviewed image during runner transition.
 
 ## Next Steps
