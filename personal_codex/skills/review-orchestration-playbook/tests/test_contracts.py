@@ -110,7 +110,7 @@ class RepositoryContractTest(unittest.TestCase):
         self.assertIn("Require source-only Python tree", workflow)
         self.assertIn("python3 -B -c 'import pathlib, sys;", workflow)
         self.assertIn("if: ${{ always() }}", workflow)
-        self.assertIn("Require every platform test to pass", workflow)
+        self.assertIn("Require every CI leaf to pass", workflow)
 
     def test_only_canonical_review_skill_entrypoint_remains(self) -> None:
         self.assertTrue((SKILL_ROOT / "SKILL.md").is_file())
