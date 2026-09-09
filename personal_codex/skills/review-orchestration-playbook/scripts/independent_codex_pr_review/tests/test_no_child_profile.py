@@ -918,6 +918,16 @@ class NoChildProfileUnitTests(unittest.TestCase):
             "8290e4be7387a0df83cd1559e86afd880464f269450573d012795761fe298f16",
         )
         self.assertEqual(current, profile.PINNED_RUNTIME)
+        latest = GITHUB_HOSTED_RUNTIME_PINS[
+            "github-macos-26-arm64-26.6.2-25G83"
+        ]
+        self.assertEqual(latest.macos_product_version, "26.6.2")
+        self.assertEqual(latest.macos_build_version, "25G83")
+        self.assertEqual(latest.darwin_release, "25.6.0")
+        self.assertEqual(
+            latest.sandbox_exec_sha256,
+            "abc5bb136d6b5cce8fa85d789f78e3326c51ca60cae637b2064adfb67a1dcd9a",
+        )
 
     def test_hosted_runtime_selector_requires_an_exact_reviewed_match(self) -> None:
         from tests.run_hosted_no_child_fail_closed import (
