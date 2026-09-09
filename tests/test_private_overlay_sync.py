@@ -13035,6 +13035,10 @@ jobs:
                 / "review-orchestration-playbook"
                 / "tests",
             ),
+            (
+                "project_journal_tests",
+                REPO_ROOT / "personal_codex" / "skills" / "project-journal" / "tests",
+            ),
             ("private_overlay_tests", REPO_ROOT / "tests"),
         )
         for job_name, test_root in inventories:

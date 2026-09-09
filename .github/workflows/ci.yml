@@ -107,13 +107,15 @@ jobs:
           python3 -B -c 'import pathlib, sys; artifacts = [str(path) for path in pathlib.Path(".").rglob("*") if path.name == "__pycache__" or path.suffix in {".pyc", ".pyo"}][:20]; sys.exit("bytecode artifacts: " + ", ".join(artifacts)) if artifacts else None'
 
   project_journal_tests:
-    name: project-journal-tests (${{ matrix.os }})
+    name: project-journal-tests (${{ matrix.os }}, ${{ matrix.module }})
     strategy:
       fail-fast: false
       matrix:
         os:
           - ubuntu-latest
           - macos-latest
+        module:
+          - test_project_journal.py
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -126,7 +128,7 @@ jobs:
         run: |
           python3 -m pip install --disable-pip-version-check --no-input 'tomli==2.2.1; python_version < "3.11"'
       - name: Verify canonical project journal workflow
-        run: python3 -m unittest "personal_codex/skills/project-journal/tests/test_project_journal.py"
+        run: python3 -m unittest "personal_codex/skills/project-journal/tests/${{ matrix.module }}"
       - name: Require source-only Python tree
         if: always()
         run: |
