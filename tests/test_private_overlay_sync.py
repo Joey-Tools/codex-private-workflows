@@ -13048,6 +13048,40 @@ jobs:
                 )
                 self.assertEqual(tuple(sorted(matrix_modules(job_name))), expected)
 
+    def test_ci_installs_linux_tools_only_for_integration_job(self) -> None:
+        workflow = (REPO_ROOT / ".github" / "workflows" / "ci.yml").read_text(
+            encoding="utf-8"
+        )
+
+        def job_body(job_name: str) -> str:
+            job_match = re.search(
+                rf"(?ms)^  {re.escape(job_name)}:\n"
+                rf"(?P<body>.*?)(?=^  [-a-zA-Z0-9_]+:\n|\Z)",
+                workflow,
+            )
+            self.assertIsNotNone(job_match)
+            return job_match.group("body")
+
+        for job_name in (
+            "review_tests",
+            "private_overlay_tests",
+            "private_overlay_contract_tests",
+        ):
+            with self.subTest(job=job_name):
+                self.assertNotIn("sudo apt-get update", job_body(job_name))
+                self.assertNotIn(
+                    "kernel.apparmor_restrict_unprivileged_userns",
+                    job_body(job_name),
+                )
+
+        integration_body = job_body("linux_isolation_tests")
+        self.assertIn("sudo apt-get update", integration_body)
+        self.assertIn(
+            "kernel.apparmor_restrict_unprivileged_userns",
+            integration_body,
+        )
+        self.assertEqual(workflow.count("sudo apt-get update"), 1)
+
     def test_python_workflows_disable_implicit_bytecode(self) -> None:
         workflow_paths = (
             REPO_ROOT / ".github" / "workflows" / "ci.yml",
