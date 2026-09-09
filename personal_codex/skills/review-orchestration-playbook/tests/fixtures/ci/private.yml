@@ -77,6 +77,13 @@ jobs:
           - test_trusted_mac_gate_manifest.py
           - test_validate_claude_stream.py
           - test_workspace.py
+        exclude:
+          - os: macos-latest
+            module: test_named_lane.py
+          - os: macos-latest
+            module: test_providers.py
+          - os: macos-latest
+            module: test_review_workspace.py
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -90,6 +97,59 @@ jobs:
           python3 -m pip install --disable-pip-version-check --no-input 'tomli==2.2.1; python_version < "3.11"'
       - name: Run review test module
         run: python3 -m unittest "personal_codex/skills/review-orchestration-playbook/tests/${{ matrix.module }}"
+      - name: Require source-only Python tree
+        if: always()
+        run: |
+          python3 -B -c 'import pathlib, sys; artifacts = [str(path) for path in pathlib.Path(".").rglob("*") if path.name == "__pycache__" or path.suffix in {".pyc", ".pyo"}][:20]; sys.exit("bytecode artifacts: " + ", ".join(artifacts)) if artifacts else None'
+
+  review_macos_shard_tests:
+    name: review-macos-shards (${{ matrix.module }}, shard ${{ matrix.shard }}/${{ matrix.shard_count }})
+    strategy:
+      fail-fast: false
+      max-parallel: 5
+      matrix:
+        include:
+          - module: test_named_lane.py
+            shard: 0
+            shard_count: 4
+          - module: test_named_lane.py
+            shard: 1
+            shard_count: 4
+          - module: test_named_lane.py
+            shard: 2
+            shard_count: 4
+          - module: test_named_lane.py
+            shard: 3
+            shard_count: 4
+          - module: test_providers.py
+            shard: 0
+            shard_count: 2
+          - module: test_providers.py
+            shard: 1
+            shard_count: 2
+          - module: test_review_workspace.py
+            shard: 0
+            shard_count: 2
+          - module: test_review_workspace.py
+            shard: 1
+            shard_count: 2
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+      - name: Install Python test dependencies
+        run: |
+          python3 -m pip install --disable-pip-version-check --no-input 'tomli==2.2.1; python_version < "3.11"'
+      - name: Run review test shard
+        run: |
+          python3 -B scripts/run_unittest_shard.py \
+            "personal_codex/skills/review-orchestration-playbook/tests/${{ matrix.module }}" \
+            --shard-index "${{ matrix.shard }}" \
+            --shard-count "${{ matrix.shard_count }}"
       - name: Require source-only Python tree
         if: always()
         run: |
@@ -197,6 +257,7 @@ jobs:
           - test_scheduler_doctor.py
           - test_skill_validator_wrapper.py
           - test_sync_manifest_changes.py
+          - test_unittest_shard.py
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -1963,6 +2024,7 @@ jobs:
       - readonly_install_supervisor_tests
       - review_syntax_tests
       - review_tests
+      - review_macos_shard_tests
       - project_journal_tests
       - private_overlay_sync_tests
       - linux_isolation_tests
@@ -1979,6 +2041,7 @@ jobs:
           READONLY_INSTALL_SUPERVISOR_RESULT: ${{ needs.readonly_install_supervisor_tests.result }}
           REVIEW_SYNTAX_RESULT: ${{ needs.review_syntax_tests.result }}
           REVIEW_RESULT: ${{ needs.review_tests.result }}
+          REVIEW_MACOS_SHARD_RESULT: ${{ needs.review_macos_shard_tests.result }}
           PROJECT_JOURNAL_RESULT: ${{ needs.project_journal_tests.result }}
           PRIVATE_OVERLAY_SYNC_RESULT: ${{ needs.private_overlay_sync_tests.result }}
           LINUX_ISOLATION_RESULT: ${{ needs.linux_isolation_tests.result }}
@@ -1990,6 +2053,7 @@ jobs:
           test "$READONLY_INSTALL_SUPERVISOR_RESULT" = "success"
           test "$REVIEW_SYNTAX_RESULT" = "success"
           test "$REVIEW_RESULT" = "success"
+          test "$REVIEW_MACOS_SHARD_RESULT" = "success"
           test "$PROJECT_JOURNAL_RESULT" = "success"
           test "$PRIVATE_OVERLAY_SYNC_RESULT" = "success"
           test "$LINUX_ISOLATION_RESULT" = "success"
