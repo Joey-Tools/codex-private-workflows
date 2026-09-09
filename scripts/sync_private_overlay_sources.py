@@ -819,6 +819,11 @@ SYNC_RULES = (
                 required_count=1,
             ),
             Replacement(
+                "archify/",
+                "<loaded-skill-dir>/",
+                required=False,
+            ),
+            Replacement(
                 "node bin/archify.mjs",
                 "node <loaded-skill-dir>/bin/archify.mjs",
                 required_count=1,

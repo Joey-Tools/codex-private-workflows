@@ -1775,6 +1775,7 @@ class PrivateOverlaySyncTests(unittest.TestCase):
         (source / "scripts" / "check-update.mjs").write_text("checker\n", encoding="utf-8")
         (source / "SKILL.md").write_text(
             "node bin/archify.mjs validate\n"
+            "node archify/renderers/workflow/render-workflow.mjs input.json output.html\n"
             "scripts/check-update.mjs\n",
             encoding="utf-8",
         )
@@ -1799,6 +1800,10 @@ class PrivateOverlaySyncTests(unittest.TestCase):
         self.assertFalse((target / "scripts" / "generate-validators.mjs").exists())
         skill = (target / "SKILL.md").read_text(encoding="utf-8")
         self.assertIn("node <loaded-skill-dir>/bin/archify.mjs validate", skill)
+        self.assertIn(
+            "node <loaded-skill-dir>/renderers/workflow/render-workflow.mjs",
+            skill,
+        )
         self.assertIn(
             "<loaded-skill-dir>/scripts/check-update.mjs",
             skill,

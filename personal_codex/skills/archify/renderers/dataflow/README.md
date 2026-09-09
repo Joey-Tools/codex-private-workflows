@@ -4,10 +4,10 @@ Render `diagram_type: "dataflow"` JSON files into the standard Archify HTML
 template.
 
 ```bash
-node archify/renderers/dataflow/render-dataflow.mjs input.dataflow.json output.html
+node <loaded-skill-dir>/renderers/dataflow/render-dataflow.mjs input.dataflow.json output.html
 ```
 
-The renderer validates input against `archify/schemas/dataflow.schema.json`
+The renderer validates input against `<loaded-skill-dir>/schemas/dataflow.schema.json`
 with the bundled standalone validator. No dependency installation is required.
 
 If `output.html` is omitted, the renderer uses `meta.output` from the JSON file
@@ -33,12 +33,12 @@ Data-flow JSON files must set:
 ```
 
 A complete worked example lives at
-`archify/examples/product-analytics.dataflow.json`.
+`<loaded-skill-dir>/examples/product-analytics.dataflow.json`.
 
 The schema lives at:
 
 ```text
-archify/schemas/dataflow.schema.json
+<loaded-skill-dir>/schemas/dataflow.schema.json
 ```
 
 ## Legend
