@@ -12998,6 +12998,52 @@ jobs:
             'test "$READONLY_INSTALL_SUPERVISOR_RESULT" = "success"', workflow
         )
 
+    def test_ci_matrix_inventories_match_test_directories(self) -> None:
+        workflow = (REPO_ROOT / ".github" / "workflows" / "ci.yml").read_text(
+            encoding="utf-8"
+        )
+
+        def matrix_modules(job_name: str) -> tuple[str, ...]:
+            job_match = re.search(
+                rf"(?ms)^  {re.escape(job_name)}:\n"
+                rf"(?P<body>.*?)(?=^  [-a-zA-Z0-9_]+:\n|\Z)",
+                workflow,
+            )
+            self.assertIsNotNone(job_match)
+            job_body = job_match.group("body")
+            module_match = re.search(
+                r"(?ms)^        module:\n(?P<modules>.*?)(?=^    runs-on:)",
+                job_body,
+            )
+            self.assertIsNotNone(module_match)
+            modules = tuple(
+                re.findall(
+                    r"^          - (test_[^\s]+\.py)$",
+                    module_match.group("modules"),
+                    re.MULTILINE,
+                )
+            )
+            self.assertEqual(len(modules), len(set(modules)))
+            return modules
+
+        inventories = (
+            (
+                "review_tests",
+                REPO_ROOT
+                / "personal_codex"
+                / "skills"
+                / "review-orchestration-playbook"
+                / "tests",
+            ),
+            ("private_overlay_tests", REPO_ROOT / "tests"),
+        )
+        for job_name, test_root in inventories:
+            with self.subTest(job=job_name):
+                expected = tuple(
+                    sorted(path.name for path in test_root.glob("test_*.py"))
+                )
+                self.assertEqual(tuple(sorted(matrix_modules(job_name))), expected)
+
     def test_python_workflows_disable_implicit_bytecode(self) -> None:
         workflow_paths = (
             REPO_ROOT / ".github" / "workflows" / "ci.yml",
