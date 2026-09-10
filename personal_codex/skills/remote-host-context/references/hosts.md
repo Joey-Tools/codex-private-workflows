@@ -152,7 +152,7 @@ The producer converts its internal exception to a typed local category before fr
 Current dedicated helper path for those repeated remote Codex reads:
 
 ```bash
-python3 "$HOME/.codex/skills/remote-host-context/scripts/remote_codex_probe.py" preflight --host local --host BL-mac-mini-m4-hoteng --host hoteng-srv-01 --host hoteng-srv-01 --host codex-hoteng-srv-01
+python3 "$HOME/.codex/skills/remote-host-context/scripts/remote_codex_probe.py" preflight --host local --host BL-mac-mini-m4-hoteng --host hoteng-srv-01 --host codex-hoteng-srv-01
 ```
 
 Use `session-meta` only to enumerate canonical rollout candidates, then hand the copied rollout back to `codex-session-mining` locally for the actual transcript search and filtering.

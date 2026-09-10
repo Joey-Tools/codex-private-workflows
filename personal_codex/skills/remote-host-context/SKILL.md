@@ -17,7 +17,7 @@ It standardizes a small read-only SSH preflight across Joey's default remote hos
   - `BL-mac-mini-m4-hoteng`
   - `hoteng-srv-01`
   - `codex-hoteng-srv-01`
-- Do not require Joey to mention any default remote separately in future conversations. Include all four SSH aliases in the default preflight.
+- Do not require Joey to mention any default remote separately in future conversations. Include all three SSH aliases in the default preflight.
 - Treat `hoteng-srv-01` and `codex-hoteng-srv-01` as distinct evidence roots even though they reach the same remote hostname; they use different login users and Codex homes.
 - For tasks rooted in local mutable state such as Apple Notes, local GUI apps, or local databases, keep all writes local. Remote hosts contribute evidence only unless Joey explicitly asks to modify them.
 
