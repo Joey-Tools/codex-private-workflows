@@ -99,10 +99,11 @@ local to the current page.
 
 Every semantic node collection (`components`, `nodes`, `participants`, and
 `states`) also accepts one optional `brand`: either a canonical string returned
-by `archify brands --json`, or a digest-pinned `{ "url", "sha256" }` object
-returned by `archify brands capture <url> --json`. Known IDs and known-brand
-domains use the bundled vector catalogue. Unknown URLs must be captured in that
-explicit command before authoring; render and validate never perform an
+by `node <loaded-skill-dir>/bin/archify.mjs brands --json`, or a digest-pinned
+`{ "url", "sha256" }` object returned by
+`node <loaded-skill-dir>/bin/archify.mjs brands capture <url> --json`. Known IDs
+and known-brand domains use the bundled vector catalogue. Unknown URLs must be
+captured in that explicit command before authoring; render and validate never perform an
 unpinned network capture. Unsafe, unavailable, changed, or unsupported content
 fails closed with a brand diagnostic. Omitted `brand` preserves the prior
 output.
@@ -111,7 +112,7 @@ output.
 
 Workflow supports schema versions 1 and 2. Version 1 remains the fixed-layout
 compatibility contract; version 2 opts into the readable workflow compiler and
-can be produced explicitly with `archify migrate workflow ... --to-schema 2`.
+can be produced explicitly with `node <loaded-skill-dir>/bin/archify.mjs migrate workflow ... --to-schema 2`.
 The other four diagram schemas keep `schema_version` pinned to `1`.
 
 Workflow also accepts optional `semanticChecks`. `allowedRoots` and

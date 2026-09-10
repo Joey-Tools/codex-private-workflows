@@ -1838,6 +1838,13 @@ class PrivateOverlaySyncTests(unittest.TestCase):
             "node bin/archify.mjs deliver\n",
             encoding="utf-8",
         )
+        (source / "schemas").mkdir()
+        (source / "schemas" / "README.md").write_text(
+            "brand returned by `archify brands --json`\n"
+            "capture with `archify brands capture <url> --json`\n"
+            "migrate with `archify migrate workflow ... --to-schema 2`\n",
+            encoding="utf-8",
+        )
         for renderer in ("dataflow", "lifecycle", "sequence", "workflow"):
             renderer_root = source / "renderers" / renderer
             renderer_root.mkdir(parents=True)
@@ -1911,6 +1918,21 @@ class PrivateOverlaySyncTests(unittest.TestCase):
             (
                 target / "renderers" / "workflow" / "README.md"
             ).read_text(encoding="utf-8"),
+        )
+        schema_readme = (target / "schemas" / "README.md").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn(
+            "node <loaded-skill-dir>/bin/archify.mjs brands --json",
+            schema_readme,
+        )
+        self.assertIn(
+            "node <loaded-skill-dir>/bin/archify.mjs brands capture <url> --json",
+            schema_readme,
+        )
+        self.assertIn(
+            "node <loaded-skill-dir>/bin/archify.mjs migrate workflow ... --to-schema 2",
+            schema_readme,
         )
 
 

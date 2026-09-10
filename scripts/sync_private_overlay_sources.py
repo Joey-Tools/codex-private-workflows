@@ -1088,6 +1088,24 @@ SYNC_RULES = (
                 path=Path("references/delivery-contract.md"),
             ),
             Replacement(
+                "archify brands --json",
+                "node <loaded-skill-dir>/bin/archify.mjs brands --json",
+                path=Path("schemas/README.md"),
+                required_count=1,
+            ),
+            Replacement(
+                "archify brands capture <url> --json",
+                "node <loaded-skill-dir>/bin/archify.mjs brands capture <url> --json",
+                path=Path("schemas/README.md"),
+                required_count=1,
+            ),
+            Replacement(
+                "archify migrate workflow ... --to-schema 2",
+                "node <loaded-skill-dir>/bin/archify.mjs migrate workflow ... --to-schema 2",
+                path=Path("schemas/README.md"),
+                required_count=1,
+            ),
+            Replacement(
                 "archify/",
                 "<loaded-skill-dir>/",
                 path=Path("renderers/dataflow/README.md"),
