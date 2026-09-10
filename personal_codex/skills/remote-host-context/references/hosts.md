@@ -152,7 +152,7 @@ The producer converts its internal exception to a typed local category before fr
 Current dedicated helper path for those repeated remote Codex reads:
 
 ```bash
-python3 "$HOME/.codex/skills/remote-host-context/scripts/remote_codex_probe.py" preflight --host local --host BL-mac-mini-m4-hoteng --host miku-bot-dev --host hoteng-srv-01 --host codex-hoteng-srv-01
+python3 "$HOME/.codex/skills/remote-host-context/scripts/remote_codex_probe.py" preflight --host local --host BL-mac-mini-m4-hoteng --host hoteng-srv-01 --host hoteng-srv-01 --host codex-hoteng-srv-01
 ```
 
 Use `session-meta` only to enumerate canonical rollout candidates, then hand the copied rollout back to `codex-session-mining` locally for the actual transcript search and filtering.
@@ -160,13 +160,13 @@ Concrete helper shapes for the two most common follow-up reads:
 
 ```bash
 python3 "$HOME/.codex/skills/remote-host-context/scripts/remote_codex_probe.py" session-meta \
-  --host miku-bot-dev \
+  --host hoteng-srv-01 \
   --date 2026/03/29
 
 python3 "$HOME/.codex/skills/remote-host-context/scripts/remote_codex_probe.py" fetch-rollout \
-  --host miku-bot-dev \
+  --host hoteng-srv-01 \
   --rollout sessions/2026/03/29/rollout-2026-03-29T08-27-20-019d38b4-6875-7ba1-acf1-491c64a875b3.jsonl \
-  --output .codex-tmp/remote-host-context/miku-bot-dev-019d38b4-6875-7ba1-acf1-491c64a875b3.jsonl
+  --output .codex-tmp/remote-host-context/hoteng-srv-01-019d38b4-6875-7ba1-acf1-491c64a875b3.jsonl
 ```
 
 `session-meta` takes `--date YYYY/MM/DD`, not `YYYY-MM-DD`.
@@ -176,7 +176,7 @@ Concrete bounded-read shape:
 
 ```bash
 python3 "$HOME/.codex/skills/remote-host-context/scripts/remote_codex_probe.py" rollout-summary \
-  --host miku-bot-dev \
+  --host hoteng-srv-01 \
   --rollout sessions/2026/03/25/rollout-2026-03-25T21-45-29-019d16fd-9cc9-7ef4-8f8e-69d3bca6a3f6.jsonl \
   --keyword "git commit" \
   --keyword "No findings" \
@@ -191,17 +191,17 @@ Identity-bound command sequence (substitute the values emitted by the first comm
 
 ```bash
 python3 "$HOME/.codex/skills/remote-host-context/scripts/remote_codex_probe.py" rollout-stat \
-  --host miku-bot-dev \
+  --host hoteng-srv-01 \
   --rollout sessions/2026/03/25/rollout-example.jsonl
 
 python3 "$HOME/.codex/skills/remote-host-context/scripts/remote_codex_probe.py" chunked-rollout-summary \
-  --host miku-bot-dev \
+  --host hoteng-srv-01 \
   --rollout sessions/2026/03/25/rollout-example.jsonl \
   --expected-source-bytes <SOURCE_BYTES> \
   --expected-source-identity <SOURCE_IDENTITY>
 
 python3 "$HOME/.codex/skills/remote-host-context/scripts/remote_codex_probe.py" fetch-rollout-chunk \
-  --host miku-bot-dev \
+  --host hoteng-srv-01 \
   --rollout sessions/2026/03/25/rollout-example.jsonl \
   --byte-start <BYTE_START> \
   --byte-end <BYTE_END> \
@@ -210,7 +210,7 @@ python3 "$HOME/.codex/skills/remote-host-context/scripts/remote_codex_probe.py" 
   --output .codex-tmp/remote-host-context/part.jsonl
 
 python3 "$HOME/.codex/skills/remote-host-context/scripts/remote_codex_probe.py" rollout-stat \
-  --host miku-bot-dev \
+  --host hoteng-srv-01 \
   --rollout sessions/2026/03/25/rollout-example.jsonl \
   --expected-source-bytes <SOURCE_BYTES> \
   --expected-source-identity <SOURCE_IDENTITY>

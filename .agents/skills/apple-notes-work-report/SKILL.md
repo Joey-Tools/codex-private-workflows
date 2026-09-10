@@ -23,8 +23,8 @@ It covers read-only auditing, evidence collection from `~/.codex`, two-tier back
 
 - Primary source for note content: `Notes.app` AppleScript automation.
 - Primary source for local work evidence: `~/.codex/history.jsonl`, `~/.codex/session_index.jsonl`, and relevant files under `~/.codex/sessions/`.
-- For daily work-report audits and draft generation, start with `$remote-host-context` preflight across `miku-bot-dev` and `hoteng-srv-01` before deciding the evidence set is complete, even when the local `~/.codex` history already looks dense.
-- Treat long-lived remote sessions as a default risk for false local completeness; merge remote `~/.codex` evidence from `miku-bot-dev` and `hoteng-srv-01` before deciding an item is missing or concluding the day was fully covered by local-only traces.
+- For daily work-report audits and draft generation, start with `$remote-host-context` preflight across `hoteng-srv-01` before deciding the evidence set is complete, even when the local `~/.codex` history already looks dense.
+- Treat long-lived remote sessions as a default risk for false local completeness; merge remote `~/.codex` evidence from `hoteng-srv-01` before deciding an item is missing or concluding the day was fully covered by local-only traces.
 - For local manual terminal work that may not have clean Codex traces, use supplemental read-only evidence from `~/.codex/shell_snapshots/`, local shell history such as `~/.zsh_history` / `~/.bash_history`, and iTerm text logs under `~/.dotfiles/.iterm_input_logs/`.
 - Treat those shell and iTerm sources as secondary evidence that can confirm manual commands, cwd, and host context, but do not let them override stronger note text or Codex rollout evidence on their own.
 - Use [references/supplemental-shell-evidence.md](references/supplemental-shell-evidence.md) for the bounded search order, the known parsing traps, and the preferred extraction recipes.
@@ -92,7 +92,7 @@ It covers read-only auditing, evidence collection from `~/.codex`, two-tier back
 - Work-adjacent meta/tooling can still count when Joey has kept it in reports, for example Apple Notes / Codex workflow maintenance or HDR prototyping work.
 - Active engineering/tooling repos remain reportable even when a given same-day slice is docs-heavy, review-heavy, or mostly project-record maintenance, as long as the evidence shows they were being advanced rather than merely browsed.
 - `webex-message-archiver` is reportable work by default. Do not demote it to "needs scope confirmation" just because a given slice is short or review-only.
-- `copilot-code-review-tool` is reportable work by default. Do not demote it to "needs scope confirmation" just because a given slice is remote-only on `miku-bot-dev`, docs-heavy, review-heavy, or centered on project-record cleanup.
+- `copilot-code-review-tool` is reportable work by default. Do not demote it to "needs scope confirmation" just because a given slice is remote-only on `hoteng-srv-01`, docs-heavy, review-heavy, or centered on project-record cleanup.
 - When the boundary is unclear, classify the item as "needs scope confirmation" instead of counting it as either a missing work-report item or an excluded item.
 
 ## Edit Workflow
@@ -160,7 +160,7 @@ Do not collapse logical export backup and full-fidelity restore backup into one 
 ## Reporting Back To Joey
 
 - State which notes were inspected.
-- State which evidence hosts were checked (`local`, `miku-bot-dev`, `hoteng-srv-01`) and which ones contributed matching evidence, were stale, or had no relevant sessions.
+- State which evidence hosts were checked (`local`, `hoteng-srv-01`) and which ones contributed matching evidence, were stale, or had no relevant sessions.
 - State whether supplemental local shell evidence (`shell_snapshots`, shell history, iTerm text logs) changed the result, and if so whether it only corroborated existing items or surfaced likely missing manual work.
 - Separate "confirmed OK", "likely omitted", and "uncertain" items.
 - Reserve "uncertain" for item-level evidence gaps that could still materially change what belongs in the paste-ready draft.

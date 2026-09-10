@@ -1,6 +1,6 @@
 ---
 name: remote-host-context
-description: Collect read-only task evidence across Joey's local machine, BL-mac-mini-m4-hoteng, miku-bot-dev, hoteng-srv-01, and codex-hoteng-srv-01. Use when Apple Notes work reports, session/history scans, repo-state recovery, cross-host Codex task/thread URL recovery, or similar workflow summaries might miss work done on remote hosts.
+description: Collect read-only task evidence across Joey's local machine, BL-mac-mini-m4-hoteng, hoteng-srv-01, and codex-hoteng-srv-01. Use when Apple Notes work reports, session/history scans, repo-state recovery, cross-host Codex task/thread URL recovery, or similar workflow summaries might miss work done on remote hosts.
 ---
 
 # Remote Host Context
