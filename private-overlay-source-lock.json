@@ -4,8 +4,8 @@
     {
       "name": "codex-toolbox",
       "repository": "Joey-Tools/codex-toolbox",
-      "sha": "255372d2b0dd96f39faf1e52a9168ca2aa7ece69",
-      "tree": "117699605432b44b6af190fdc944fe1f1b08b6a5"
+      "sha": "5de600c38271e422a74c23ed6260bbff64674b55",
+      "tree": "c30037e682f3d51d09adac6b5dd511e629b470cc"
     },
     {
       "name": "codex-debug-triage",
@@ -16,8 +16,8 @@
     {
       "name": "codex-review-workflows",
       "repository": "Joey-Tools/codex-review-workflows",
-      "sha": "8b70bc68a483eb1e0f7e9377bd6d8fe2fa03e0d9",
-      "tree": "92faa196880fbf28a879baa0cc8a0c4e7a493ee8"
+      "sha": "32028658d8d7497dba30a29715f3868f3cf76d8d",
+      "tree": "9c3f28bc4011f17b65ea120d7da9f480c58a3abf"
     },
     {
       "name": "codex-workflow-hygiene",
@@ -34,7 +34,7 @@
   ],
   "toolbox_generated_provenance": {
     "repository": "Joey-Tools/codex-personal-sync",
-    "sha": "7803eebe63782f5539c22e1b7f0d7a7ec587ac3f",
-    "receipt_sha256": "9ea6cd232867fafaa7a72aa46586f8905dbb91ef97de2e5d2baeb75a918efa0a"
+    "sha": "0f05c6c102811cf104de67cf931b7c83f172781c",
+    "receipt_sha256": "bb3cd618bcb8ee792ad1c556bbc1efba7e4747e441af40b935a9640cd44bc278"
   }
 }

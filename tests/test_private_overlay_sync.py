@@ -1777,6 +1777,13 @@ class PrivateOverlaySyncTests(unittest.TestCase):
             Path("scripts/verify_generated_sync_source_lock.py"),
             Path("tests/test_generated_sync_source_lock.py"),
         }
+        atomic_promotion_test_paths = {
+            Path("tests/test_pending_agent_claim_compatibility.py"),
+            Path("tests/test_pending_staging_cleanup.py"),
+            Path("tests/test_quarantine_empty_batch_reclaim.py"),
+            Path("tests/test_regular_agent_materialization.py"),
+            Path("tests/test_regular_overlay_uninstall_status_regressions.py"),
+        }
         toolbox_rules = {
             (rule.source, rule.target)
             for rule in SYNC_MODULE.SYNC_RULES
@@ -1787,6 +1794,15 @@ class PrivateOverlaySyncTests(unittest.TestCase):
             {
                 (path, path) for path in generated_paths | receipt_contract_paths
             }.issubset(toolbox_rules)
+        )
+        self.assertEqual(
+            {
+                (source, target)
+                for source, target in toolbox_rules
+                if source in atomic_promotion_test_paths
+                or target in atomic_promotion_test_paths
+            },
+            {(path, path) for path in atomic_promotion_test_paths},
         )
 
     def test_review_sync_preserves_private_ci_fixture_and_personalization(
@@ -12426,7 +12442,7 @@ class PrivateOverlaySyncTests(unittest.TestCase):
         )
         self.assertEqual(
             receipt["canonical_commit"],
-            "7803eebe63782f5539c22e1b7f0d7a7ec587ac3f",
+            "0f05c6c102811cf104de67cf931b7c83f172781c",
         )
         self.assertEqual(receipt["mirror"], "toolbox")
         self.assertEqual(
@@ -12440,6 +12456,11 @@ class PrivateOverlaySyncTests(unittest.TestCase):
             "tests/test_personal_sync_reconciliation_safety.py",
             "tests/test_release_retention.py",
             "tests/test_scheduler_doctor.py",
+            "tests/test_pending_agent_claim_compatibility.py",
+            "tests/test_pending_staging_cleanup.py",
+            "tests/test_quarantine_empty_batch_reclaim.py",
+            "tests/test_regular_agent_materialization.py",
+            "tests/test_regular_overlay_uninstall_status_regressions.py",
         }
         self.assertEqual(
             {entry["target_path"] for entry in receipt["files"]},
