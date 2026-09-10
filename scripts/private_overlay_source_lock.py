@@ -44,7 +44,12 @@ EXPECTED_TOOLBOX_MANAGED_PATHS = (
     "scripts/codex_personal_sync.py",
     "tests/test_codex_personal_sync.py",
     "schema/sync-manifest.schema.json",
+    "tests/test_pending_agent_claim_compatibility.py",
+    "tests/test_pending_staging_cleanup.py",
+    "tests/test_quarantine_empty_batch_reclaim.py",
     "tests/test_personal_sync_reconciliation_safety.py",
+    "tests/test_regular_agent_materialization.py",
+    "tests/test_regular_overlay_uninstall_status_regressions.py",
     "tests/test_release_retention.py",
     "tests/test_scheduler_doctor.py",
 )
