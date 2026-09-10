@@ -197,7 +197,7 @@ class RemoteHostContextDocumentationTests(unittest.TestCase):
 
         self.assertIn(
             "preflight --host local --host BL-mac-mini-m4-hoteng "
-            "--host miku-bot-dev --host hoteng-srv-01 "
+            "--host hoteng-srv-01 "
             "--host codex-hoteng-srv-01",
             skill,
         )
@@ -388,7 +388,6 @@ class RemoteHostContextDocumentationTests(unittest.TestCase):
             [
                 "local",
                 "BL-mac-mini-m4-hoteng",
-                "miku-bot-dev",
                 "hoteng-srv-01",
                 "codex-hoteng-srv-01",
             ]
@@ -399,7 +398,6 @@ class RemoteHostContextDocumentationTests(unittest.TestCase):
             [
                 "local",
                 "BL-mac-mini-m4-hoteng",
-                "miku-bot-dev",
                 "hoteng-srv-01",
                 "codex-hoteng-srv-01",
             ],

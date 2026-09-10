@@ -15,7 +15,6 @@ It standardizes a small read-only SSH preflight across Joey's default remote hos
 - Treat these hosts as Joey's default evidence scope unless the user explicitly narrows it:
   - local machine
   - `BL-mac-mini-m4-hoteng`
-  - `miku-bot-dev` (Joey may also refer to it as `miku-server-dev`)
   - `hoteng-srv-01`
   - `codex-hoteng-srv-01`
 - Do not require Joey to mention any default remote separately in future conversations. Include all four SSH aliases in the default preflight.
@@ -46,7 +45,7 @@ It standardizes a small read-only SSH preflight across Joey's default remote hos
 - After fetching the complete ordered range plan, verify that the reconstructed byte count equals `source_bytes` and its SHA-256 equals `rollout_meta.source_sha256`, then run `rollout-stat` again with the original expected byte count and identity. Any append, truncation, replacement, short read, identity mismatch, digest mismatch, or final-stat mismatch invalidates the snapshot: discard the partial reconstruction and restart from byte 0 with a new `rollout-stat`; never extend the old plan or authorization.
 - The helper takes a repeatable `--host` option for `preflight` and `session-meta`; do not pass positional host names or a plural `--hosts` flag.
 - Treat active `sessions/YYYY/MM/DD/rollout-*.jsonl`, flat `archived_sessions/rollout-*.jsonl`, and date-nested `archived_sessions/YYYY/MM/DD/rollout-*.jsonl` paths as distinct locators even when their basenames and parsed session ids match. Deduplicate only an exact relative rollout path; lifecycle copies can contain different suffixes or later human follow-ups, so a repeated session id must not hide another path.
-- For the default evidence scope, use `python3 /Users/hoteng/.codex/skills/remote-host-context/scripts/remote_codex_probe.py preflight --host local --host BL-mac-mini-m4-hoteng --host miku-bot-dev --host hoteng-srv-01 --host codex-hoteng-srv-01`.
+- For the default evidence scope, use `python3 /Users/hoteng/.codex/skills/remote-host-context/scripts/remote_codex_probe.py preflight --host local --host BL-mac-mini-m4-hoteng --host hoteng-srv-01 --host codex-hoteng-srv-01`.
 - For required remote evidence workflows, if `remote_codex_probe.py preflight`, `session-meta`, `rollout-stat`, `rollout-summary`, `chunked-rollout-summary`, `terminal-tail`, `fetch-rollout`, or `fetch-rollout-chunk` fails with a local sandbox/network error such as `Operation not permitted`, a DNS/network gate, or a connection blocked before SSH authentication, immediately rerun the same helper command with `sandbox_permissions=require_escalated`.
 - Only report a host as unreachable after that escalated retry also fails, and include the exact gate from the failed retry.
 - Use `... remote_codex_probe.py session-meta ...` only to list candidate session ids, cwd values, and canonical rollout paths from bounded `sessions/YYYY/MM/DD/` date trees.
@@ -89,7 +88,6 @@ It standardizes a small read-only SSH preflight across Joey's default remote hos
 
 5. Interpret host-specific structure correctly.
 - `BL-mac-mini-m4-hoteng` currently stores Codex history directly in `/Users/hoteng/.codex`.
-- `miku-bot-dev` currently stores Codex history directly in `/home/hoteng/.codex`.
 - `hoteng-srv-01` currently stores Codex history directly in `/home/hoteng/.codex`.
 - `codex-hoteng-srv-01` logs in as user `codex` on host `hoteng-srv-01` and stores Codex history directly in `/home/codex/.codex`; keep it in the default evidence scope because it is distinct from the `hoteng` account's history.
 - On `hoteng-srv-01`, dev-shell-kit containers may mount the host `~/.codex` into the container. Treat the host path as canonical by default instead of entering containers first.

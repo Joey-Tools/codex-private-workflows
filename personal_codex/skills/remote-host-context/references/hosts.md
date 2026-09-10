@@ -21,19 +21,6 @@ Re-check these assumptions if a host starts returning stale or missing evidence.
   - `rg`
   - `python3`
 
-## miku-bot-dev
-
-- User-facing names seen so far:
-  - `miku-bot-dev` (SSH alias)
-  - `miku-server-dev` (Joey shorthand)
-- Verified login home: `/home/hoteng`
-- Verified Codex root: `/home/hoteng/.codex`
-- Verified subdirectories:
-  - `/home/hoteng/.codex/sessions`
-  - `/home/hoteng/.codex/skills`
-- Verified recent rollout window on 2026-03-10:
-  - recent files reached `2026-03-10`
-
 ## hoteng-srv-01
 
 - SSH alias: `hoteng-srv-01`
