@@ -13105,6 +13105,7 @@ jobs:
         for job_name in (
             "review_syntax_tests",
             "review_tests",
+            "review_macos_shard_tests",
             "project_journal_tests",
             "private_overlay_sync_tests",
             "linux_isolation_tests",
@@ -13113,6 +13114,13 @@ jobs:
         ):
             self.assertIn(f"\n  {job_name}:\n", workflow)
         self.assertIn("name: review-tests (${{ matrix.os }}, ${{ matrix.module }})", workflow)
+        self.assertIn(
+            "name: review-macos-shards (${{ matrix.module }}, shard "
+            "${{ matrix.shard }}/${{ matrix.shard_count }})",
+            workflow,
+        )
+        self.assertIn("max-parallel: 5", workflow)
+        self.assertIn("scripts/run_unittest_shard.py", workflow)
         self.assertIn("name: private-overlay-tests (${{ matrix.module }})", workflow)
         self.assertIn("ubuntu-latest", workflow)
         self.assertIn("macos-latest", workflow)
@@ -13171,6 +13179,7 @@ jobs:
             "      - readonly_install_supervisor_tests\n"
             "      - review_syntax_tests\n"
             "      - review_tests\n"
+            "      - review_macos_shard_tests\n"
             "      - project_journal_tests\n"
             "      - private_overlay_sync_tests\n"
             "      - linux_isolation_tests\n"
@@ -13180,6 +13189,11 @@ jobs:
         )
         self.assertIn(
             "REVIEW_SYNTAX_RESULT: ${{ needs.review_syntax_tests.result }}",
+            workflow,
+        )
+        self.assertIn(
+            "REVIEW_MACOS_SHARD_RESULT: "
+            "${{ needs.review_macos_shard_tests.result }}",
             workflow,
         )
         self.assertIn(
@@ -13199,6 +13213,7 @@ jobs:
         for result_name in (
             "REVIEW_SYNTAX_RESULT",
             "REVIEW_RESULT",
+            "REVIEW_MACOS_SHARD_RESULT",
             "PROJECT_JOURNAL_RESULT",
             "PRIVATE_OVERLAY_SYNC_RESULT",
             "LINUX_ISOLATION_RESULT",
@@ -13261,6 +13276,38 @@ jobs:
                     sorted(path.name for path in test_root.glob("test_*.py"))
                 )
                 self.assertEqual(tuple(sorted(matrix_modules(job_name))), expected)
+
+    def test_ci_macos_shard_inventory_is_explicit(self) -> None:
+        workflow = (REPO_ROOT / ".github" / "workflows" / "ci.yml").read_text(
+            encoding="utf-8"
+        )
+        job_match = re.search(
+            r"(?ms)^  review_macos_shard_tests:\n"
+            r"(?P<body>.*?)(?=^  [-a-zA-Z0-9_]+:\n|\Z)",
+            workflow,
+        )
+        self.assertIsNotNone(job_match)
+        shard_job = job_match.group("body")
+
+        for module, shard_count in (
+            ("test_named_lane.py", 4),
+            ("test_providers.py", 2),
+            ("test_review_workspace.py", 2),
+        ):
+            with self.subTest(module=module):
+                entries = re.findall(
+                    rf"^          - module: {re.escape(module)}\n"
+                    rf"            shard: [0-9]+\n"
+                    rf"            shard_count: ([0-9]+)$",
+                    shard_job,
+                    re.MULTILINE,
+                )
+                self.assertEqual(entries, [str(shard_count)] * shard_count)
+                self.assertIn(
+                    "          - os: macos-latest\n"
+                    f"            module: {module}",
+                    workflow,
+                )
 
     def test_ci_installs_linux_tools_only_for_integration_job(self) -> None:
         workflow = (REPO_ROOT / ".github" / "workflows" / "ci.yml").read_text(
