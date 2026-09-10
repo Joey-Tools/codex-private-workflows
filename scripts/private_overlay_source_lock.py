@@ -32,6 +32,7 @@ MACOS_GIT_PATH = Path("/Library/Developer/CommandLineTools/usr/bin/git")
 SHA_RE = re.compile(r"[0-9a-f]{40}\Z")
 EXPECTED_SOURCES = (
     ("codex-toolbox", "Joey-Tools/codex-toolbox"),
+    ("archify", "Joey-Tools/archify"),
     ("codex-debug-triage", "Joey-Tools/codex-debug-triage"),
     ("codex-review-workflows", "Joey-Tools/codex-review-workflows"),
     ("codex-workflow-hygiene", "Joey-Tools/codex-workflow-hygiene"),
@@ -203,7 +204,7 @@ def load_source_lock(repo_root: Path) -> SourceLock:
     raw_sources = payload.get("sources")
     if not isinstance(raw_sources, list) or len(raw_sources) != len(EXPECTED_SOURCES):
         raise SourceLockError(
-            "source lock must contain the exact five-source inventory"
+            "source lock must contain the exact six-source inventory"
         )
     pins: list[SourcePin] = []
     for index, ((expected_name, expected_repo), raw_pin) in enumerate(
@@ -1081,6 +1082,7 @@ def load_locked_source_manifest(
     source: Path,
     *,
     exclude_names: tuple[str, ...] = (),
+    exclude_paths: tuple[Path, ...] = (),
     exclude_suffixes: tuple[str, ...] = (),
 ) -> LockedSourceManifest:
     """Load an exact, bounded source inventory from the frozen Git commit."""
@@ -1170,6 +1172,15 @@ def load_locked_source_manifest(
             )
 
     ignored = frozenset(exclude_names)
+    for excluded in exclude_paths:
+        if (
+            excluded.is_absolute()
+            or not excluded.parts
+            or any(part in {"", ".", ".."} for part in excluded.parts)
+        ):
+            raise SourceLockError(
+                f"locked source exclusion path is unsafe: {excluded}"
+            )
     entries: list[LockedSourceEntry] = []
     seen: set[Path] = set()
     for index, record in enumerate(
@@ -1201,6 +1212,9 @@ def load_locked_source_manifest(
         if relative == Path(".") or relative.is_absolute() or ".." in relative.parts:
             raise SourceLockError(f"locked source inventory path is unsafe: {source}")
         if any(
+            relative == excluded or excluded in relative.parents
+            for excluded in exclude_paths
+        ) or any(
             part in ignored or any(part.endswith(suffix) for suffix in exclude_suffixes)
             for part in relative.parts
         ):

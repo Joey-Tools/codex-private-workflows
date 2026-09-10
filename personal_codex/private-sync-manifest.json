@@ -42,6 +42,11 @@
       "kind": "skill"
     },
     {
+      "source": "personal_codex/skills/archify",
+      "target": "skills/archify",
+      "kind": "skill"
+    },
+    {
       "source": "personal_codex/skills/cisco-trackers-lookup",
       "target": "skills/cisco-trackers-lookup",
       "kind": "skill"

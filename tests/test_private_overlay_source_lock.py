@@ -818,7 +818,9 @@ class CheckoutVerifierTests(unittest.TestCase):
         checkout = self._checkout(1)
         files = {
             Path("skill/keep.txt"): b"keep root\n",
+            Path("skill/test/drop.txt"): b"root test tree\n",
             Path("skill/nested/keep.py"): b"keep nested\n",
+            Path("skill/nested/test/keep.dat"): b"nested runtime test\n",
             Path("skill/nested/drop.tmp"): b"excluded suffix\n",
             Path("skill/excluded-name/secret.txt"): b"excluded name\n",
         }
@@ -837,6 +839,7 @@ class CheckoutVerifierTests(unittest.TestCase):
             commit,
             Path("skill"),
             exclude_names=("excluded-name",),
+            exclude_paths=(Path("test"),),
             exclude_suffixes=(".tmp",),
         )
 
@@ -850,6 +853,8 @@ class CheckoutVerifierTests(unittest.TestCase):
                 Path("keep.txt"),
                 Path("nested"),
                 Path("nested/keep.py"),
+                Path("nested/test"),
+                Path("nested/test/keep.dat"),
             },
         )
         self.assertEqual(
@@ -862,6 +867,7 @@ class CheckoutVerifierTests(unittest.TestCase):
         for relative, payload in (
             (Path("keep.txt"), b"keep root\n"),
             (Path("nested/keep.py"), b"keep nested\n"),
+            (Path("nested/test/keep.dat"), b"nested runtime test\n"),
         ):
             entry = entries[relative]
             self.assertEqual((entry.kind, entry.mode), ("file", 0o644))

@@ -1,0 +1,7 @@
+interface:
+  display_name: "Archify"
+  short_description: "Create validated interactive architecture and workflow diagrams"
+  default_prompt: "Use $archify to create a validated interactive diagram."
+
+policy:
+  allow_implicit_invocation: false

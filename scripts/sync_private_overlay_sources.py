@@ -124,6 +124,7 @@ class SyncRule:
     replacements: tuple[Replacement, ...] = ()
     text_extensions: tuple[str, ...] = (".md", ".yaml", ".yml", ".py", ".toml", ".json")
     exclude_names: tuple[str, ...] = ()
+    exclude_paths: tuple[Path, ...] = ()
     forbidden_residuals: tuple[str, ...] = ()
     regular_file_overlays: tuple[RegularFileOverlay, ...] = ()
     replacement_excluded_paths: tuple[Path, ...] = ()
@@ -446,8 +447,17 @@ def _rule(
     replacements: tuple[Replacement, ...] = (),
     *,
     common_joey_text: bool = False,
+    text_extensions: tuple[str, ...] = (
+        ".md",
+        ".yaml",
+        ".yml",
+        ".py",
+        ".toml",
+        ".json",
+    ),
     replacement_excluded_paths: tuple[str, ...] = (),
     exclude_names: tuple[str, ...] = (),
+    exclude_paths: tuple[str, ...] = (),
     forbidden_residuals: tuple[str, ...] = (),
     regular_file_overlays: tuple[RegularFileOverlay, ...] = (),
     canonical_review_migration_policy: CanonicalReviewMigrationPolicy | None = None,
@@ -459,14 +469,97 @@ def _rule(
         source=_path(source),
         target=_path(target),
         replacements=replacements,
+        text_extensions=text_extensions,
         replacement_excluded_paths=tuple(
             _path(path) for path in replacement_excluded_paths
         ),
         exclude_names=exclude_names,
+        exclude_paths=tuple(_path(path) for path in exclude_paths),
         forbidden_residuals=forbidden_residuals,
         regular_file_overlays=regular_file_overlays,
         canonical_review_migration_policy=canonical_review_migration_policy,
     )
+
+
+ARCHIFY_PACKAGE_SCRIPTS = """  \"scripts\": {
+    \"generate:brand-marks\": \"node scripts/generate-brand-marks.mjs\",
+    \"check:brand-marks\": \"node scripts/generate-brand-marks.mjs --check\",
+    \"generate:validators\": \"node scripts/generate-validators.mjs\",
+    \"check:validators\": \"node scripts/generate-validators.mjs --check\",
+    \"check:release-identity\": \"node ../scripts/check-release-identity.mjs\",
+    \"build:gallery\": \"node ../scripts/build-gallery.mjs ../docs\",
+    \"build:guide\": \"node ../scripts/build-guide.mjs ../docs/guide.html\",
+    \"build:start\": \"node ../scripts/build-start.mjs ../docs/start.html\",
+    \"build:readme-showcase\": \"node ../scripts/build-readme-showcase.mjs\",
+    \"test:webm\": \"node test/webm-artifact.smoke.mjs && node --test test/site-language-integration.mjs\",
+    \"test\": \"npm run check:brand-marks && npm run check:validators && npm run check:release-identity && node test/golden.mjs && node ../scripts/run-tests.mjs\",
+    \"render:examples\": \"node scripts/render-examples.mjs ../examples\"
+  },
+"""
+ARCHIFY_PACKAGE_DEV_DEPENDENCIES = """  \"devDependencies\": {
+    \"ajv\": \"^8.17.1\",
+    \"parse5\": \"7.3.0\",
+    \"saxes\": \"6.0.0\",
+    \"simple-icons\": \"16.28.0\"
+  },
+"""
+
+ARCHIFY_BIN_CLI_HELPER = """const skillRoot = path.resolve(__dirname, '..');
+const cliEntryPath = path.join(skillRoot, 'bin', 'archify.mjs');
+
+function shellQuote(value) {
+  return `'${String(value).replaceAll(\"'\", \"'\\\\''\")}'`;
+}
+
+function cliPrefix() {
+  return `${shellQuote(process.execPath)} ${shellQuote(cliEntryPath)}`;
+}
+
+function cliHelp(suffix) {
+  return `${cliPrefix()} ${suffix}`;
+}
+
+function cliCommand(...args) {
+  return `${cliPrefix()} ${args.map(shellQuote).join(' ')}`;
+}"""
+
+ARCHIFY_BRAND_CLI_HELPER = """import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { BRAND_MARKS } from './generated-brand-marks.mjs';
+import { throwDiagnosticError } from './diagnostics.mjs';
+import { esc, textUnits } from './utils.mjs';
+
+const cliEntryPath = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../bin/archify.mjs');
+
+function shellQuote(value) {
+  return `'${String(value).replaceAll(\"'\", \"'\\\\''\")}'`;
+}
+
+function cliPrefix() {
+  return `${shellQuote(process.execPath)} ${shellQuote(cliEntryPath)}`;
+}
+
+function cliHelp(suffix) {
+  return `${cliPrefix()} ${suffix}`;
+}
+
+function cliCommand(...args) {
+  return `${cliPrefix()} ${args.map(shellQuote).join(' ')}`;
+}"""
+
+ARCHIFY_SCENARIO_CLI_HELPER = """import { fileURLToPath } from 'node:url';
+
+const cliEntryPath = fileURLToPath(new URL('../bin/archify.mjs', import.meta.url));
+
+function shellQuote(value) {
+  return `'${String(value).replaceAll(\"'\", \"'\\\\''\")}'`;
+}
+
+function cliHelp(suffix) {
+  return `${shellQuote(process.execPath)} ${shellQuote(cliEntryPath)} ${suffix}`;
+}
+
+"""
 
 
 SYNC_RULES = (
@@ -776,6 +869,283 @@ SYNC_RULES = (
             ),
         ),
         common_joey_text=True,
+    ),
+    _rule(
+        "archify",
+        "archify",
+        "personal_codex/skills/archify",
+        (
+            Replacement(
+                ARCHIFY_PACKAGE_SCRIPTS,
+                "",
+                path=Path("package.json"),
+                required_count=1,
+            ),
+            Replacement(
+                ARCHIFY_PACKAGE_DEV_DEPENDENCIES,
+                "",
+                path=Path("package.json"),
+                required_count=1,
+            ),
+            Replacement(
+                "const skillRoot = path.resolve(__dirname, '..');",
+                ARCHIFY_BIN_CLI_HELPER,
+                path=Path("bin/archify.mjs"),
+                required_count=1,
+            ),
+            Replacement(
+                "  archify render <type> <input.json> [output.html] [--quality standard|showcase] [--repo-root path (architecture only)]",
+                "  ${cliHelp('render <type> <input.json> [output.html] [--quality standard|showcase] [--repo-root path (architecture only)]')}",
+                path=Path("bin/archify.mjs"),
+                required_count=1,
+            ),
+            Replacement(
+                "  archify compare architecture <base.json> <head.json> [output.html] [--receipt path] [--json] [--quality standard|showcase] [--repo-root path]",
+                "  ${cliHelp('compare architecture <base.json> <head.json> [output.html] [--receipt path] [--json] [--quality standard|showcase] [--repo-root path]')}",
+                path=Path("bin/archify.mjs"),
+                required_count=1,
+            ),
+            Replacement(
+                "  archify deliver <type> <input.json> [output.html] [--json] [--open] [--quality standard|showcase] [--repo-root path (architecture only)]",
+                "  ${cliHelp('deliver <type> <input.json> [output.html] [--json] [--open] [--quality standard|showcase] [--repo-root path (architecture only)]')}",
+                path=Path("bin/archify.mjs"),
+                required_count=1,
+            ),
+            Replacement(
+                "  archify preview <type> <input.json> [output.html] [--no-open] [--quality standard|showcase] [--repo-root path (architecture only)]",
+                "  ${cliHelp('preview <type> <input.json> [output.html] [--no-open] [--quality standard|showcase] [--repo-root path (architecture only)]')}",
+                path=Path("bin/archify.mjs"),
+                required_count=1,
+            ),
+            Replacement(
+                "  archify validate <type> <input.json> [--json] [--layout-json] [--quality standard|showcase] [--repo-root path (architecture only)]",
+                "  ${cliHelp('validate <type> <input.json> [--json] [--layout-json] [--quality standard|showcase] [--repo-root path (architecture only)]')}",
+                path=Path("bin/archify.mjs"),
+                required_count=1,
+            ),
+            Replacement(
+                "  archify migrate workflow <old.json> <new.json> --to-schema 2 [--json]",
+                "  ${cliHelp('migrate workflow <old.json> <new.json> --to-schema 2 [--json]')}",
+                path=Path("bin/archify.mjs"),
+                required_count=1,
+            ),
+            Replacement(
+                "  archify inspect <type> <input.json>",
+                "  ${cliHelp('inspect <type> <input.json>')}",
+                path=Path("bin/archify.mjs"),
+                required_count=1,
+            ),
+            Replacement(
+                "  archify check <output.html>",
+                "  ${cliHelp('check <output.html>')}",
+                path=Path("bin/archify.mjs"),
+                required_count=1,
+            ),
+            Replacement(
+                "  archify visual-check <output.html> [--json]",
+                "  ${cliHelp('visual-check <output.html> [--json]')}",
+                path=Path("bin/archify.mjs"),
+                required_count=1,
+            ),
+            Replacement(
+                "  archify guide [scenario or question] [--json] [--lang en|zh]",
+                "  ${cliHelp('guide [scenario or question] [--json] [--lang en|zh]')}",
+                path=Path("bin/archify.mjs"),
+                required_count=1,
+            ),
+            Replacement(
+                "  archify brands [name, alias, domain, or category] [--json]",
+                "  ${cliHelp('brands [name, alias, domain, or category] [--json]')}",
+                path=Path("bin/archify.mjs"),
+                required_count=1,
+            ),
+            Replacement(
+                "  archify brands capture <url> [--json]",
+                "  ${cliHelp('brands capture <url> [--json]')}",
+                path=Path("bin/archify.mjs"),
+                required_count=1,
+            ),
+            Replacement(
+                "  archify examples",
+                "  ${cliHelp('examples')}",
+                path=Path("bin/archify.mjs"),
+                required_count=1,
+            ),
+            Replacement(
+                "  archify doctor",
+                "  ${cliHelp('doctor')}",
+                path=Path("bin/archify.mjs"),
+                required_count=1,
+            ),
+            Replacement(
+                "  archify demo [output-directory]",
+                "  ${cliHelp('demo [output-directory]')}",
+                path=Path("bin/archify.mjs"),
+                required_count=1,
+            ),
+            Replacement(
+                "supportedFixes: ['use: archify deliver <type> <input.json> [output.html] [options]'],",
+                "supportedFixes: [`use: ${cliHelp('deliver <type> <input.json> [output.html] [options]')}`],",
+                path=Path("bin/archify.mjs"),
+                required_count=1,
+            ),
+            Replacement(
+                "if (positional.length !== 2) fail('Usage: archify brands capture <url> [--json]');",
+                "if (positional.length !== 2) fail(`Usage: ${cliHelp('brands capture <url> [--json]')}`);",
+                path=Path("bin/archify.mjs"),
+                required_count=1,
+            ),
+            Replacement(
+                "fallback: 'Run \"archify brands capture <url> --json\", then use the returned digest-pinned brand value.',",
+                "fallback: `Run \"${cliHelp('brands capture <url> --json')}\", then use the returned digest-pinned brand value.`,",
+                path=Path("bin/archify.mjs"),
+                required_count=1,
+            ),
+            Replacement(
+                "console.log(`No built-in brand matched \"${query}\". Run \"archify brands capture <url> --json\", then use the returned digest-pinned brand value.`);",
+                "console.log(`No built-in brand matched \"${query}\". Run \"${cliHelp('brands capture <url> --json')}\", then use the returned digest-pinned brand value.`);",
+                path=Path("bin/archify.mjs"),
+                required_count=1,
+            ),
+            Replacement(
+                "console.log('  archify render architecture <input.json> <output.html>');",
+                "console.log(`  ${cliHelp('render architecture <input.json> <output.html>')}`);",
+                path=Path("bin/archify.mjs"),
+                required_count=1,
+            ),
+            Replacement(
+                "fail('Usage: archify migrate workflow <old.json> <new.json> --to-schema 2 [--json]');",
+                "fail(`Usage: ${cliHelp('migrate workflow <old.json> <new.json> --to-schema 2 [--json]')}`);",
+                path=Path("bin/archify.mjs"),
+                required_count=1,
+            ),
+            Replacement(
+                "supportedFixes: ['use: archify validate <type> <input.json> [options]'],",
+                "supportedFixes: [`use: ${cliHelp('validate <type> <input.json> [options]')}`],",
+                path=Path("bin/archify.mjs"),
+                required_count=1,
+            ),
+            Replacement(
+                "import { esc, textUnits } from './utils.mjs';",
+                ARCHIFY_BRAND_CLI_HELPER,
+                path=Path("renderers/shared/brand-marks.mjs"),
+                required_count=1,
+            ),
+            Replacement(
+                "unknown.push(`/${collection}/${index}/brand ${JSON.stringify(node.brand)} is an unpinned URL; capture it first with \\`archify brands capture ${url.href} --json\\``);",
+                "unknown.push(`/${collection}/${index}/brand ${JSON.stringify(node.brand)} is an unpinned URL; capture it first with \\`${cliCommand('brands', 'capture', url.href, '--json')}\\``);",
+                path=Path("renderers/shared/brand-marks.mjs"),
+                required_count=1,
+            ),
+            Replacement(
+                "? ['run `archify brands capture <url> --json` and author the returned digest-pinned brand object']",
+                "? [`run \\`${cliHelp('brands capture <url> --json')}\\` and author the returned digest-pinned brand object`]",
+                path=Path("renderers/shared/brand-marks.mjs"),
+                required_count=1,
+            ),
+            Replacement(
+                ": ['choose an ID from `archify brands`', 'run `archify brands capture <url> --json` for an unknown official site'],",
+                ": [`choose an ID from \\`${cliHelp('brands')}\\``, `run \\`${cliHelp('brands capture <url> --json')}\\` for an unknown official site`],",
+                path=Path("renderers/shared/brand-marks.mjs"),
+                required_count=1,
+            ),
+            Replacement(
+                "const RAW_RECIPES = [",
+                ARCHIFY_SCENARIO_CLI_HELPER + "const RAW_RECIPES = [",
+                path=Path("recipes/scenarios.mjs"),
+                required_count=1,
+            ),
+            Replacement(
+                "? '先选择你要回答的问题，再选择图表类型。可运行：archify guide \"你的场景\"'",
+                "? `先选择你要回答的问题，再选择图表类型。可运行：${cliHelp('guide \\\"你的场景\\\"')}`",
+                path=Path("recipes/scenarios.mjs"),
+                required_count=1,
+            ),
+            Replacement(
+                ": 'Choose the question before the diagram type. Run: archify guide \"your scenario\"';",
+                ": `Choose the question before the diagram type. Run: ${cliHelp('guide \\\"your scenario\\\"')}`;",
+                path=Path("recipes/scenarios.mjs"),
+                required_count=1,
+            ),
+            Replacement(
+                "node bin/archify.mjs",
+                "node <loaded-skill-dir>/bin/archify.mjs",
+                path=Path("SKILL.md"),
+            ),
+            Replacement(
+                "node bin/archify.mjs",
+                "node <loaded-skill-dir>/bin/archify.mjs",
+                path=Path("brand-marks/README.md"),
+            ),
+            Replacement(
+                "node bin/archify.mjs",
+                "node <loaded-skill-dir>/bin/archify.mjs",
+                path=Path("references/brand-marks.md"),
+            ),
+            Replacement(
+                "node bin/archify.mjs",
+                "node <loaded-skill-dir>/bin/archify.mjs",
+                path=Path("references/delivery-contract.md"),
+            ),
+            Replacement(
+                "archify brands --json",
+                "node <loaded-skill-dir>/bin/archify.mjs brands --json",
+                path=Path("schemas/README.md"),
+                required_count=1,
+            ),
+            Replacement(
+                "archify brands capture <url> --json",
+                "node <loaded-skill-dir>/bin/archify.mjs brands capture <url> --json",
+                path=Path("schemas/README.md"),
+                required_count=1,
+            ),
+            Replacement(
+                "archify migrate workflow ... --to-schema 2",
+                "node <loaded-skill-dir>/bin/archify.mjs migrate workflow ... --to-schema 2",
+                path=Path("schemas/README.md"),
+                required_count=1,
+            ),
+            Replacement(
+                "archify/",
+                "<loaded-skill-dir>/",
+                path=Path("renderers/dataflow/README.md"),
+            ),
+            Replacement(
+                "archify/",
+                "<loaded-skill-dir>/",
+                path=Path("renderers/lifecycle/README.md"),
+            ),
+            Replacement(
+                "archify/",
+                "<loaded-skill-dir>/",
+                path=Path("renderers/sequence/README.md"),
+            ),
+            Replacement(
+                "archify/",
+                "<loaded-skill-dir>/",
+                path=Path("renderers/workflow/README.md"),
+            ),
+            Replacement(
+                "scripts/check-update.mjs",
+                "<loaded-skill-dir>/scripts/check-update.mjs",
+                required_count=1,
+            ),
+        ),
+        text_extensions=(
+            ".md",
+            ".yaml",
+            ".yml",
+            ".py",
+            ".toml",
+            ".json",
+            ".mjs",
+        ),
+        exclude_names=(
+            "package-lock.json",
+            "generate-brand-marks.mjs",
+            "generate-validators.mjs",
+        ),
+        exclude_paths=("test",),
     ),
     _rule(
         "codex-review-workflows",
@@ -1186,18 +1556,44 @@ def _is_ignored_name(name: str, ignored_names: frozenset[str]) -> bool:
     )
 
 
-def _is_ignored_relative(path: Path, root: Path, ignored_names: frozenset[str]) -> bool:
+def _is_excluded_relative(
+    path: Path, root: Path, excluded_paths: tuple[Path, ...]
+) -> bool:
+    relative = path.relative_to(root)
+    return _is_excluded_parts(relative.parts, excluded_paths)
+
+
+def _is_excluded_parts(
+    relative_parts: tuple[str, ...], excluded_paths: tuple[Path, ...]
+) -> bool:
     return any(
+        relative_parts == excluded.parts
+        or relative_parts[: len(excluded.parts)] == excluded.parts
+        for excluded in excluded_paths
+    )
+
+
+def _is_ignored_relative(
+    path: Path,
+    root: Path,
+    ignored_names: frozenset[str],
+    excluded_paths: tuple[Path, ...] = (),
+) -> bool:
+    return _is_excluded_relative(path, root, excluded_paths) or any(
         _is_ignored_name(part, ignored_names) for part in path.relative_to(root).parts
     )
 
 
-def _reject_unignored_symlinks(path: Path, ignored_names: frozenset[str]) -> None:
+def _reject_unignored_symlinks(
+    path: Path,
+    ignored_names: frozenset[str],
+    excluded_paths: tuple[Path, ...] = (),
+) -> None:
     if path.is_symlink():
         raise SyncError(f"refusing to sync symlink: {path}")
     if path.is_dir():
         for child in path.rglob("*"):
-            if _is_ignored_relative(child, path, ignored_names):
+            if _is_ignored_relative(child, path, ignored_names, excluded_paths):
                 continue
             if child.is_symlink():
                 raise SyncError(f"refusing to sync nested symlink: {child}")
@@ -1278,17 +1674,32 @@ def _ensure_safe_source(source_repo_root: Path, source: Path) -> None:
 
 
 def _copy_source_to_staging(
-    source: Path, staging: Path, *, exclude_names: tuple[str, ...] = ()
+    source: Path,
+    staging: Path,
+    *,
+    exclude_names: tuple[str, ...] = (),
+    exclude_paths: tuple[Path, ...] = (),
 ) -> None:
     ignored_names = EXCLUDED_NAMES | frozenset(exclude_names)
-    _reject_unignored_symlinks(source, ignored_names)
+    _reject_unignored_symlinks(source, ignored_names, exclude_paths)
     if source.is_dir():
+        def ignore(directory: str, names: list[str]) -> list[str]:
+            directory_path = Path(directory)
+            return [
+                name
+                for name in names
+                if _is_ignored_name(name, ignored_names)
+                or _is_excluded_relative(
+                    directory_path / name,
+                    source,
+                    exclude_paths,
+                )
+            ]
+
         shutil.copytree(
             source,
             staging,
-            ignore=lambda _dir, names: [
-                name for name in names if _is_ignored_name(name, ignored_names)
-            ],
+            ignore=ignore,
         )
         _normalize_public_staging_modes(staging)
         return
@@ -3027,6 +3438,7 @@ def _capture_regular_file_overlay_tree_manifest(
     *,
     label: str,
     ignored_names: frozenset[str] = frozenset(),
+    excluded_paths: tuple[Path, ...] = (),
     raw_entry_validator: Callable[[tuple[str, ...]], None] | None = None,
 ) -> _RegularFileOverlayTreeManifest:
     if os.scandir not in os.supports_fd:
@@ -3074,6 +3486,8 @@ def _capture_regular_file_overlay_tree_manifest(
         scanned_entries += len(initial_names)
         for name in initial_names:
             child_parts = (*relative_parts, name)
+            if _is_excluded_parts(child_parts, excluded_paths):
+                continue
             if raw_entry_validator is not None:
                 raw_entry_validator(child_parts)
             if _is_ignored_name(name, ignored_names):
@@ -5224,6 +5638,7 @@ def _copy_regular_file_overlay_public_source_to_prepared(
             source_root.descriptor,
             label="initial public source",
             ignored_names=ignored_names,
+            excluded_paths=rule.exclude_paths,
             raw_entry_validator=raw_entry_validator,
         )
         locked_entries: dict[tuple[str, ...], object] = {}
@@ -5304,6 +5719,8 @@ def _copy_regular_file_overlay_public_source_to_prepared(
             budget.scanned_entries += len(names)
             for name in names:
                 child_relative = relative / name
+                if _is_excluded_parts(child_relative.parts, rule.exclude_paths):
+                    continue
                 if raw_entry_validator is not None:
                     raw_entry_validator(child_relative.parts)
                 if _is_ignored_name(name, ignored_names):
@@ -5607,6 +6024,7 @@ def _copy_regular_file_overlay_public_source_to_prepared(
             source_root.descriptor,
             label="final public source",
             ignored_names=ignored_names,
+            excluded_paths=rule.exclude_paths,
             raw_entry_validator=raw_entry_validator,
         )
         if final_source_manifest != source_manifest:
@@ -8295,7 +8713,12 @@ def _sync_sources_with_repo_binding(
             prefix=f".{target.name}.staging.", dir=target.parent
         ) as temp_directory:
             staging = Path(temp_directory) / target.name
-            _copy_source_to_staging(source, staging, exclude_names=rule.exclude_names)
+            _copy_source_to_staging(
+                source,
+                staging,
+                exclude_names=rule.exclude_names,
+                exclude_paths=rule.exclude_paths,
+            )
             _apply_rule_replacements(staging, rule)
             _reject_forbidden_residuals(staging, rule)
             if rule.target == CHANGE_DELIVERY_TARGET:
@@ -8527,6 +8950,7 @@ def main(argv: list[str] | None = None) -> int:
                 exclude_names=tuple(
                     sorted(EXCLUDED_NAMES | frozenset(rule.exclude_names))
                 ),
+                exclude_paths=rule.exclude_paths,
                 exclude_suffixes=EXCLUDED_SUFFIXES,
             )
             source_pin = None

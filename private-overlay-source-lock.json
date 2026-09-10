@@ -8,6 +8,12 @@
       "tree": "117699605432b44b6af190fdc944fe1f1b08b6a5"
     },
     {
+      "name": "archify",
+      "repository": "Joey-Tools/archify",
+      "sha": "52d64928314032ed840485ced531fce54bdfbb1e",
+      "tree": "9b7f7bf81b5ce7b660656cc1f9b489ab4eb13a61"
+    },
+    {
       "name": "codex-debug-triage",
       "repository": "Joey-Tools/codex-debug-triage",
       "sha": "d3b6fd26b021ef1a6aad8561a92a354c27510fbd",
@@ -16,8 +22,8 @@
     {
       "name": "codex-review-workflows",
       "repository": "Joey-Tools/codex-review-workflows",
-      "sha": "8b70bc68a483eb1e0f7e9377bd6d8fe2fa03e0d9",
-      "tree": "92faa196880fbf28a879baa0cc8a0c4e7a493ee8"
+      "sha": "06d8a1573ab04e6ccc58c79d944d3797fdc2a9bd",
+      "tree": "6a2ddb7b8cc6cf533f25703726a5741c8bb06161"
     },
     {
       "name": "codex-workflow-hygiene",
