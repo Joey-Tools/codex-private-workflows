@@ -89,7 +89,7 @@ PY
 Search iTerm text logs for the target day with stable keywords:
 
 ```bash
-rg -n -S "HDR-streaming|GitHub-agent|Codex-maintenance|swift run HDRColorSourceApp" \
+rg -n -S "HDR-streaming|GitHub-agent|Codex-maintenance|miku-bot-dev|swift run HDRColorSourceApp" \
   ~/.dotfiles/.iterm_input_logs/20260325*.log
 ```
 

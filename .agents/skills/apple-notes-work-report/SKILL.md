@@ -23,8 +23,8 @@ It covers read-only auditing, evidence collection from `~/.codex`, two-tier back
 
 - Primary source for note content: `Notes.app` AppleScript automation.
 - Primary source for local work evidence: `~/.codex/history.jsonl`, `~/.codex/session_index.jsonl`, and relevant files under `~/.codex/sessions/`.
-- For daily work-report audits and draft generation, start with `$remote-host-context` preflight across `hoteng-srv-01` before deciding the evidence set is complete, even when the local `~/.codex` history already looks dense.
-- Treat long-lived remote sessions as a default risk for false local completeness; merge remote `~/.codex` evidence from `hoteng-srv-01` before deciding an item is missing or concluding the day was fully covered by local-only traces.
+- For daily work-report audits and draft generation, use `$remote-host-context`'s default evidence scope (`local`, `BL-mac-mini-m4-hoteng`, `hoteng-srv-01`, and `codex-hoteng-srv-01`) before deciding the evidence set is complete, even when the local `~/.codex` history already looks dense.
+- Treat long-lived remote sessions as a default risk for false local completeness; merge remote `~/.codex` evidence from `BL-mac-mini-m4-hoteng`, `hoteng-srv-01`, and `codex-hoteng-srv-01` before deciding an item is missing or concluding the day was fully covered by local-only traces.
 - For local manual terminal work that may not have clean Codex traces, use supplemental read-only evidence from `~/.codex/shell_snapshots/`, local shell history such as `~/.zsh_history` / `~/.bash_history`, and iTerm text logs under `~/.dotfiles/.iterm_input_logs/`.
 - Treat those shell and iTerm sources as secondary evidence that can confirm manual commands, cwd, and host context, but do not let them override stronger note text or Codex rollout evidence on their own.
 - Use [references/supplemental-shell-evidence.md](references/supplemental-shell-evidence.md) for the bounded search order, the known parsing traps, and the preferred extraction recipes.
@@ -160,7 +160,7 @@ Do not collapse logical export backup and full-fidelity restore backup into one 
 ## Reporting Back To Joey
 
 - State which notes were inspected.
-- State which evidence hosts were checked (`local`, `hoteng-srv-01`) and which ones contributed matching evidence, were stale, or had no relevant sessions.
+- State which evidence hosts were checked (`local`, `BL-mac-mini-m4-hoteng`, `hoteng-srv-01`, `codex-hoteng-srv-01`) and which ones contributed matching evidence, were stale, or had no relevant sessions.
 - State whether supplemental local shell evidence (`shell_snapshots`, shell history, iTerm text logs) changed the result, and if so whether it only corroborated existing items or surfaced likely missing manual work.
 - Separate "confirmed OK", "likely omitted", and "uncertain" items.
 - Reserve "uncertain" for item-level evidence gaps that could still materially change what belongs in the paste-ready draft.
