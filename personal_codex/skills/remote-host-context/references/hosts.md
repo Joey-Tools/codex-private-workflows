@@ -156,6 +156,7 @@ python3 "$HOME/.codex/skills/remote-host-context/scripts/remote_codex_probe.py" 
 ```
 
 Use `session-meta` only to enumerate canonical rollout candidates, then hand the copied rollout back to `codex-session-mining` locally for the actual transcript search and filtering.
+The rollout paths below are placeholders; replace them with an exact path returned by `session-meta` for the selected host before running a read command.
 Concrete helper shapes for the two most common follow-up reads:
 
 ```bash
@@ -165,8 +166,8 @@ python3 "$HOME/.codex/skills/remote-host-context/scripts/remote_codex_probe.py" 
 
 python3 "$HOME/.codex/skills/remote-host-context/scripts/remote_codex_probe.py" fetch-rollout \
   --host hoteng-srv-01 \
-  --rollout sessions/2026/03/29/rollout-2026-03-29T08-27-20-019d38b4-6875-7ba1-acf1-491c64a875b3.jsonl \
-  --output .codex-tmp/remote-host-context/hoteng-srv-01-019d38b4-6875-7ba1-acf1-491c64a875b3.jsonl
+  --rollout sessions/2026/03/29/rollout-example.jsonl \
+  --output .codex-tmp/remote-host-context/hoteng-srv-01-example.jsonl
 ```
 
 `session-meta` takes `--date YYYY/MM/DD`, not `YYYY-MM-DD`.
@@ -177,7 +178,7 @@ Concrete bounded-read shape:
 ```bash
 python3 "$HOME/.codex/skills/remote-host-context/scripts/remote_codex_probe.py" rollout-summary \
   --host hoteng-srv-01 \
-  --rollout sessions/2026/03/25/rollout-2026-03-25T21-45-29-019d16fd-9cc9-7ef4-8f8e-69d3bca6a3f6.jsonl \
+  --rollout sessions/2026/03/25/rollout-example.jsonl \
   --keyword "git commit" \
   --keyword "No findings" \
   --limit 20 \
