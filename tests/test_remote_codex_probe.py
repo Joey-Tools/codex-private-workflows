@@ -197,7 +197,7 @@ class RemoteHostContextDocumentationTests(unittest.TestCase):
 
         self.assertIn(
             "preflight --host local --host BL-mac-mini-m4-hoteng "
-            "--host miku-bot-dev --host hoteng-srv-01 "
+            "--host hoteng-srv-01 "
             "--host codex-hoteng-srv-01",
             skill,
         )
@@ -388,7 +388,6 @@ class RemoteHostContextDocumentationTests(unittest.TestCase):
             [
                 "local",
                 "BL-mac-mini-m4-hoteng",
-                "miku-bot-dev",
                 "hoteng-srv-01",
                 "codex-hoteng-srv-01",
             ]
@@ -399,7 +398,6 @@ class RemoteHostContextDocumentationTests(unittest.TestCase):
             [
                 "local",
                 "BL-mac-mini-m4-hoteng",
-                "miku-bot-dev",
                 "hoteng-srv-01",
                 "codex-hoteng-srv-01",
             ],
@@ -6038,7 +6036,7 @@ class RemoteCodexProbeChunkTests(unittest.TestCase):
                 "expected_source_bytes": identity.size,
                 "expected_source_identity": token,
                 "authorized_source_bytes": None,
-                "output_host": "miku-bot-dev",
+                "output_host": "hoteng-srv-01",
             }
         )
         fetch_script = MODULE._remote_python_script(
@@ -6169,7 +6167,7 @@ class RemoteCodexProbeChunkTests(unittest.TestCase):
             with redirect_stdout(io.StringIO()):
                 rc = MODULE.cmd_chunked_rollout_summary(
                     argparse.Namespace(
-                        host="miku-bot-dev",
+                        host="hoteng-srv-01",
                         rollout="sessions/2026/05/26/rollout-a.jsonl",
                         keyword=["permission"],
                         chunk_bytes=MODULE.MIN_ROLLOUT_CHUNK_BYTES,
@@ -6182,7 +6180,7 @@ class RemoteCodexProbeChunkTests(unittest.TestCase):
 
         self.assertEqual(rc, 0)
         alias, payload = run_remote.call_args.args
-        self.assertEqual(alias, "miku-bot-dev")
+        self.assertEqual(alias, "hoteng-srv-01")
         self.assertEqual(
             payload["max_automatic_full_reconstruction_bytes"],
             MODULE.MAX_AUTOMATIC_FULL_RECONSTRUCTION_BYTES,
@@ -6293,7 +6291,7 @@ class RemoteCodexProbeChunkTests(unittest.TestCase):
                         identity
                     ),
                     "authorized_source_bytes": None,
-                    "output_host": "miku-bot-dev",
+                    "output_host": "hoteng-srv-01",
                 }
             )
 
@@ -7788,7 +7786,7 @@ class RemoteCodexProbeChunkTests(unittest.TestCase):
             ):
                 rc = MODULE.cmd_fetch_rollout(
                     argparse.Namespace(
-                        host="miku-bot-dev",
+                        host="hoteng-srv-01",
                         rollout="sessions/2026/05/26/rollout-a.jsonl",
                         output=str(output_path),
                     )
@@ -7814,7 +7812,7 @@ class RemoteCodexProbeChunkTests(unittest.TestCase):
             stderr="",
         )
         args = argparse.Namespace(
-            host=["miku-bot-dev"],
+            host=["hoteng-srv-01"],
             date=["2026/05/26"],
             from_date=None,
             to_date=None,
@@ -7861,7 +7859,7 @@ class RemoteCodexProbeChunkTests(unittest.TestCase):
             stderr="",
         )
         args = argparse.Namespace(
-            host="miku-bot-dev",
+            host="hoteng-srv-01",
             rollout="sessions/2026/05/26/rollout-a.jsonl",
             keyword=[],
             limit=20,
@@ -7944,7 +7942,7 @@ class RemoteCodexProbeChunkTests(unittest.TestCase):
             ):
                 rc = MODULE.cmd_fetch_rollout_chunk(
                     argparse.Namespace(
-                        host="miku-bot-dev",
+                        host="hoteng-srv-01",
                         rollout="sessions/2026/05/26/rollout-a.jsonl",
                         byte_start=0,
                         byte_end=3,
@@ -8829,7 +8827,7 @@ class RemoteCodexProbeTerminalTailTests(unittest.TestCase):
             with remote_mock, redirect_stdout(stdout), redirect_stderr(stderr):
                 rc = MODULE.cmd_terminal_tail(
                     argparse.Namespace(
-                        host="miku-bot-dev",
+                        host="hoteng-srv-01",
                         rollout=(
                             "sessions/2026/07/23/"
                             "rollout-2026-07-23T10-00-00-remote.jsonl"
@@ -10538,7 +10536,7 @@ class RemoteCodexProbeTerminalTailTests(unittest.TestCase):
                 ):
                     rc = MODULE.cmd_terminal_tail(
                         argparse.Namespace(
-                            host="miku-bot-dev",
+                            host="hoteng-srv-01",
                             rollout=(
                                 "sessions/2026/07/23/"
                                 "rollout-2026-07-23T10-00-00-remote.jsonl"
@@ -10685,7 +10683,7 @@ class RemoteCodexProbeTerminalTailTests(unittest.TestCase):
             ):
                 result, message = MODULE._extract_framed_terminal_tail_payload(
                     self._remote_terminal_tail_frame(header),
-                    host="miku-bot-dev",
+                    host="hoteng-srv-01",
                 )
 
                 self.assertEqual(result.status, expected_status)
@@ -10749,7 +10747,7 @@ class RemoteCodexProbeTerminalTailTests(unittest.TestCase):
             ):
                 MODULE._extract_framed_terminal_tail_payload(
                     frame,
-                    host="miku-bot-dev",
+                    host="hoteng-srv-01",
                 )
 
     def test_remote_terminal_tail_rejects_invalid_records_examined(self) -> None:
@@ -10847,7 +10845,7 @@ class RemoteCodexProbeTerminalTailTests(unittest.TestCase):
             ):
                 MODULE._extract_framed_terminal_tail_payload(
                     self._remote_terminal_tail_frame(header),
-                    host="miku-bot-dev",
+                    host="hoteng-srv-01",
                 )
 
     def test_remote_terminal_tail_rejects_complete_without_coordinate_evidence(
@@ -10906,7 +10904,7 @@ class RemoteCodexProbeTerminalTailTests(unittest.TestCase):
                 ):
                     rc = MODULE.cmd_terminal_tail(
                         argparse.Namespace(
-                            host="miku-bot-dev",
+                            host="hoteng-srv-01",
                             rollout=(
                                 "sessions/2026/07/23/"
                                 "rollout-2026-07-23T10-00-00-remote.jsonl"
@@ -11224,7 +11222,7 @@ class RemoteCodexProbeTerminalTailTests(unittest.TestCase):
                     message=message,
                 )
             ),
-            host="miku-bot-dev",
+            host="hoteng-srv-01",
         )
         self.assertEqual(result.status, "complete")
         self.assertEqual(extracted, message)
@@ -11702,7 +11700,7 @@ class RemoteCodexProbeTerminalTailTests(unittest.TestCase):
 
         result, extracted = MODULE._extract_framed_terminal_tail_payload(
             self._remote_terminal_tail_frame(header, message=message),
-            host="miku-bot-dev",
+            host="hoteng-srv-01",
         )
 
         self.assertEqual(result.status, "complete")

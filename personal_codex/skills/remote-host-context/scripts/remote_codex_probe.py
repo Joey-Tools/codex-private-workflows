@@ -257,18 +257,6 @@ HOSTS: dict[str, dict[str, str]] = {
         "ssh_target": "BL-mac-mini-m4-hoteng",
         "codex_root": "/Users/hoteng/.codex",
     },
-    "miku-bot-dev": {
-        "kind": "ssh",
-        "label": "miku-bot-dev",
-        "ssh_target": "miku-bot-dev",
-        "codex_root": "/home/hoteng/.codex",
-    },
-    "miku-server-dev": {
-        "kind": "ssh",
-        "label": "miku-bot-dev",
-        "ssh_target": "miku-bot-dev",
-        "codex_root": "/home/hoteng/.codex",
-    },
     "hoteng-srv-01": {
         "kind": "ssh",
         "label": "hoteng-srv-01",
