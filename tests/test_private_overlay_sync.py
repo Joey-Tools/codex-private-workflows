@@ -13683,8 +13683,10 @@ jobs:
             with self.subTest(repository=repository):
                 self.assertNotIn(f"`{repository}`", agents)
 
-    def test_codex_review_gate_is_compatibility_status_only(self) -> None:
-        workflow_path = REPO_ROOT / ".github" / "workflows" / "codex-review-gate.yml"
+    def test_codex_review_gate_uses_v2_verifier_and_controlled_legacy_bridge(
+        self,
+    ) -> None:
+        verifier_path = REPO_ROOT / ".github" / "workflows" / "codex-review-gate.yml"
         canonical_fixture = (
             REPO_ROOT
             / "personal_codex"
@@ -13695,56 +13697,103 @@ jobs:
             / "compat"
             / "codex-review-gate.yml"
         )
-        self.assertEqual(workflow_path.read_bytes(), canonical_fixture.read_bytes())
+        legacy_bridge_path = (
+            REPO_ROOT / ".github" / "workflows" / "codex-review-gate-legacy-bridge.yml"
+        )
+        self.assertEqual(verifier_path.read_bytes(), canonical_fixture.read_bytes())
 
-        workflow = workflow_path.read_text(encoding="utf-8")
+        verifier = verifier_path.read_text(encoding="utf-8")
         for anchor in (
-            "name: Codex Review Gate Compatibility Status",
-            "name: codex/review-gate compatibility publisher",
-            "context=codex/review-gate",
-            "Compatibility only; no reviewer or review lane.",
-            "permissions: {}",
-            "workflow_dispatch:",
+            "name: Codex Review Gate Verifier",
+            "pull_request:",
+            "types: [opened, reopened, synchronize, ready_for_review]",
+            "contents: read",
+            "issues: read",
+            "pull-requests: read",
+            "group: codex-review-gate-verifier-${{ github.repository }}-${{ github.event.pull_request.number }}",
+            "cancel-in-progress: true",
+            "name: codex/github-review-gate",
+            "uses: JoeyTeng/codex-review-gate-action@v2",
+            "github_token: ${{ github.token }}",
+            "operation: reconcile",
+            "request_review: false",
         ):
             with self.subTest(anchor=anchor):
-                self.assertIn(anchor, workflow)
+                self.assertIn(anchor, verifier)
 
-        for retired in (
-            "JoeyTeng/codex-review-gate-action",
-            "Gate on Codex review",
+        for unsupported in (
+            "pull_request_target:",
+            "statuses: write",
+            "workflow_dispatch:",
             "issue_comment:",
             "pull_request_review:",
-            "schedule:",
-            "CODEX_REVIEW_GATE_EVENT_MODE",
+            "context=codex/review-gate",
+            "Compatibility only; no reviewer or review lane.",
             "@codex review",
         ):
-            with self.subTest(retired=retired):
-                self.assertNotIn(retired, workflow)
+            with self.subTest(unsupported=unsupported):
+                self.assertNotIn(unsupported, verifier)
+
+        legacy_bridge = legacy_bridge_path.read_text(encoding="utf-8")
+        for anchor in (
+            "name: Codex Review Gate Legacy Bridge",
+            "pull_request_target:",
+            "issue_comment:\n    types: [created]",
+            "statuses: write",
+            "name: codex/review-gate legacy bridge",
+            "uses: JoeyTeng/codex-review-gate-action/.github/workflows/codex-review-gate.yml@v1",
+        ):
+            with self.subTest(legacy_bridge_anchor=anchor):
+                self.assertIn(anchor, legacy_bridge)
+        self.assertNotIn("pull_request_review:", legacy_bridge)
+        self.assertNotIn("JoeyTeng/codex-review-gate-action@v2", legacy_bridge)
 
     def test_scheduled_workflow_opens_pr_for_sync_changes(self) -> None:
         workflow = (
             REPO_ROOT / ".github" / "workflows" / "scheduled-sync-release.yml"
         ).read_text(encoding="utf-8")
 
-        self.assertIn("pull-requests: write", workflow)
+        permissions_match = re.search(
+            r"(?ms)^permissions:\n(?P<permissions>.*?)(?=^env:)",
+            workflow,
+        )
+        self.assertIsNotNone(permissions_match)
+        top_level_permissions = permissions_match.group("permissions")
+        self.assertIn("actions: read", top_level_permissions)
+        self.assertIn("contents: write", top_level_permissions)
+        self.assertNotIn("pull-requests:", top_level_permissions)
+
+        sync_pr_step = workflow.split(
+            "      - name: Open synced overlay pull request\n",
+            maxsplit=1,
+        )[1].split("\n      - name: Revalidate release checkout", maxsplit=1)[0]
         self.assertIn("persist-credentials: false", workflow)
         self.assertIn("PRIVATE_OVERLAY_SYNC_PR_TOKEN", workflow)
         self.assertIn(
-            'git remote set-url origin "https://x-access-token:${SYNC_PR_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"',
-            workflow,
+            "GH_TOKEN: ${{ secrets.PRIVATE_OVERLAY_SYNC_PR_TOKEN }}",
+            sync_pr_step,
         )
-        self.assertIn("gh pr create", workflow)
-        self.assertIn("gh pr edit", workflow)
-        self.assertIn('label="codex-automation"', workflow)
         self.assertIn(
-            'gh api --method GET "repos/$GITHUB_REPOSITORY/labels/$label"', workflow
+            "SYNC_PR_TOKEN: ${{ secrets.PRIVATE_OVERLAY_SYNC_PR_TOKEN }}",
+            sync_pr_step,
         )
-        self.assertNotIn("gh label list --repo", workflow)
-        self.assertIn('--label "$label"', workflow)
-        self.assertIn('--add-label "$label"', workflow)
-        self.assertIn('head="$owner:$branch"', workflow)
-        self.assertIn('gh api --method GET "repos/$GITHUB_REPOSITORY/pulls"', workflow)
-        self.assertNotIn('git push origin "HEAD:${GITHUB_REF_NAME}"', workflow)
+        self.assertNotIn("${{ github.token }}", sync_pr_step)
+        self.assertIn(
+            'git remote set-url origin "https://x-access-token:${SYNC_PR_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"',
+            sync_pr_step,
+        )
+        self.assertIn("gh pr create", sync_pr_step)
+        self.assertIn("gh pr edit", sync_pr_step)
+        self.assertIn('label="codex-automation"', sync_pr_step)
+        self.assertIn(
+            'gh api --method GET "repos/$GITHUB_REPOSITORY/labels/$label"', sync_pr_step
+        )
+        self.assertNotIn("gh label list --repo", sync_pr_step)
+        self.assertIn('--label "$label"', sync_pr_step)
+        self.assertIn('--add-label "$label"', sync_pr_step)
+        self.assertIn('head="$owner:$branch"', sync_pr_step)
+        self.assertIn('gh api --method GET "repos/$GITHUB_REPOSITORY/pulls"', sync_pr_step)
+        self.assertNotIn('git push origin "HEAD:${GITHUB_REF_NAME}"', sync_pr_step)
 
     def test_scheduled_workflow_enables_auto_merge_for_generated_pr(self) -> None:
         workflow = (
