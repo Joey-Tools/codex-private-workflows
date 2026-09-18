@@ -13739,13 +13739,13 @@ jobs:
             "name: Codex Review Gate Legacy Bridge",
             "pull_request_target:",
             "issue_comment:\n    types: [created]",
-            "pull_request_review:\n    types: [submitted]",
             "statuses: write",
             "name: codex/review-gate legacy bridge",
             "uses: JoeyTeng/codex-review-gate-action/.github/workflows/codex-review-gate.yml@v1",
         ):
             with self.subTest(legacy_bridge_anchor=anchor):
                 self.assertIn(anchor, legacy_bridge)
+        self.assertNotIn("pull_request_review:", legacy_bridge)
         self.assertNotIn("JoeyTeng/codex-review-gate-action@v2", legacy_bridge)
 
     def test_scheduled_workflow_opens_pr_for_sync_changes(self) -> None:
