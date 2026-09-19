@@ -32,8 +32,14 @@ superseded_by:
 ## Next Steps
 
 - 解决两个特殊目标的安装与双保护证据，再重新读取完整 11 仓库 cohort。
-- cohort 全部满足后，按已确认的顺序执行 organization v2 ruleset activation、repository legacy cleanup，以及最终 v1 bridge removal。
-- 不因当前完成状态提前删除 legacy bridge、组织 v1 required context、repository v1 required context，或现有 deletion/non-fast-forward 保护。
+- cohort 全部满足后，按不可跳过的 phase gate 执行：
+  1. 记录精确 v2 organization ruleset ID、target repository IDs、payload digest，以及旧 organization/repository protection 的 before snapshot；此处是 rollback/reconcile 的身份边界。
+  2. 激活精确 v2 organization ruleset，但保留所有旧 v1 contexts 与 deletion/non-fast-forward 保护。
+  3. 对全部 11 个仓库做稳定完整 reread，证明 v2 是实际 required 的严格 context、target 覆盖精确，且旧 protection 仍有效。
+  4. 仅在第 3 步通过后，按受控 repository cleanup 从所有有效 organization/repository rules 中移除 `codex/review-gate`；保留旧 ruleset 的其余保护。
+  5. 再次完整 reread，要求全部有效规则都不再要求 `codex/review-gate`，同时 v2 coverage 与 deletion/non-fast-forward 仍存在。
+  6. 只有第 5 步通过后，才在各仓库删除 legacy bridge，并验证 bridge removal 后的新 PR 不会等待旧 context。
+- 任一阶段读回不完整、identity/payload 漂移或覆盖不符时停止后续写入；根据已记录的 before snapshot 重新 reconcile，绝不先删 v2 或 bridge 再尝试恢复旧 v1 保护。
 
 ## Evidence
 
