@@ -40,4 +40,16 @@ superseded_by:
 - Source release PR: `Joey-Tools/codex-review-gate#55` (`149769eac4b51df023a0edb79ad4a611d7a3edc3`).
 - Release workflow: `Joey-Tools/codex-review-gate` run `35403192145`; target release `JoeyTeng/codex-review-gate-action@v2.0.1`.
 - Controller refresh merges: `codex-review-workflows#117` (`0c9c6343963d4915ce4fea10193dd7a06622a6db`) and `codex-private-workflows#194` (`af1e7a0fb5aa66048b2964d5d85bb6b5f1c44382`), plus the seven earlier regular-repository refresh merges.
-- Final canaries: `Joey-Tools/codex-review-workflows#116` and `Joey-Tools/codex-private-workflows#195`.
+- 每条 canary 的成功定位如下；`v2 verifier` 是 `codex/github-review-gate` success 的 workflow run，`legacy status` 是同一 head 上 `codex/review-gate` success 的 commit status ID：
+
+| Repository | Closed canary | Head | v2 verifier | Legacy status |
+| --- | --- | --- | --- | --- |
+| `codex-apple-notes-toolkit` | #7 | `535a365489872fd6b294fc844fd605dd4c3c13b5` | `35441985737` | `54504397189` |
+| `codex-personal-sync` | #23 | `8618eb3fd2a57287c12210d0379d15e97a985b2d` | `35441985612` | `54504392585` |
+| `codex-rollout-backup` | #9 | `df6f577e26eb581bb4dc5a162ef7cb4ac6a6563b` | `35441985957` | `54504394096` |
+| `codex-debug-triage` | #10 | `e42202fe04b857a38f00c3fc9a76c429516220de` | `35441985492` | `54504392554` |
+| `codex-project-journal` | #8 | `ffc808d98fe440e1d646c55f953519babb6c24a4` | `35441985707` | `54504392167` |
+| `codex-toolbox` | #34 | `33768d043450f20e95faf275f1ddeee72b6b9ddb` | `35441985549` | `54504392029` |
+| `codex-workflow-hygiene` | #78 | `7af0a238bd474b94644f4bff76d09d01a53c8256` | `35441986029` | `54504403801` |
+| `codex-review-workflows` | #116 | `58fd209c5760d83053f5ce7c0a1ddeaa28b4c82b` | `35442677862` (attempt 3) | `54504770723` |
+| `codex-private-workflows` | #195 | `bc8ed7d4eeba39cb0c964902f8d7ba05a0010caf` | `35442918011` (attempt 3) | `54504839487` |
