@@ -48,7 +48,7 @@ superseded_by:
 - Controller refresh merges: `codex-review-workflows#117` (`0c9c6343963d4915ce4fea10193dd7a06622a6db`) and `codex-private-workflows#194` (`af1e7a0fb5aa66048b2964d5d85bb6b5f1c44382`), plus the seven earlier regular-repository refresh merges.
 - 每条 canary 的成功定位如下；`v2 verifier` 是 `codex/github-review-gate` success 的 workflow run，`legacy status` 是同一 head 上 `codex/review-gate` success 的 commit status ID：
 
-| Repository | Closed canary | Head | v2 verifier | Legacy status |
+| Repository | Canary PR | Head | v2 verifier | Legacy status |
 | --- | --- | --- | --- | --- |
 | `codex-apple-notes-toolkit` | #7 | `535a365489872fd6b294fc844fd605dd4c3c13b5` | `35441985737` | `54504397189` |
 | `codex-personal-sync` | #23 | `8618eb3fd2a57287c12210d0379d15e97a985b2d` | `35441985612` | `54504392585` |
