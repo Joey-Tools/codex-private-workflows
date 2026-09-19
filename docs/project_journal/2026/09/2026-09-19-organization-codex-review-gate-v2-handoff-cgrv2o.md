@@ -26,7 +26,7 @@ superseded_by:
 
 ## Blockers
 
-- `codex-waited-delivery` 不在 workspace manifest，无法按受控 workspace 流程创建 worktree 或安装；需先恢复其 workspace 配置。
+- `codex-waited-delivery` 被 workspace manifest 标记为 retired，且不是活动 `[[repos]]` 配置；无法按受控 workspace 流程创建 worktree 或安装，需先恢复其 workspace 配置。
 - `codex-session-retrospective-history` 缺少可证明的 legacy v1 producer/证据路径；在选择并授权一次性 v1 proof 路径前，不能安全进入双保护或组织 ruleset 切换。
 
 ## Next Steps
