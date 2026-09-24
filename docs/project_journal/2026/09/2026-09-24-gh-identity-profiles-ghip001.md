@@ -26,8 +26,9 @@ superseded_by:
 - rules、wrapper、doctor 与 skill 均已加入 private sync manifest；profile directory、
   hosts.yml、Keychain、Linux secret store 和 token 不会进入 release。
 - wrapper 使用运行时 PATH 中的 gh，不绑定 Homebrew、apt 或其他机器特定路径。
-- Cisco GHE probe 通过 gh-hoteng wrapper 访问 sqbu-github.cisco.com，不会落回裸 gh
-  或环境默认身份；wrapper 的 gh auth 路径只允许只读的 status。
+- Cisco GHE probe 从已安装 overlay 的确定性路径调用 gh-hoteng，清除继承 token/GH
+  路由变量，不会落回裸 gh、环境默认身份或 PATH 中的同名替代程序；wrapper 的 gh auth
+  路径只允许无额外 flag 的只读 status。
 - 当前 Mac 已完成 JoeyTeng、JoeyTeng-Codex、hoteng_cisco 与 hoteng 的显式、本机
   认证；gh-profile-doctor --verify 已逐一确认四个实际 login 与目标 host。凭据仍只
   存在于本机，不会随 release 同步。
@@ -39,7 +40,7 @@ superseded_by:
 - 已通过 wrapper 的 shell syntax 与 shellcheck 校验。
 - 已通过聚焦的 private overlay package、安装 symlink、wrapper 环境隔离、doctor
   版本/login 验证与 manifest/skill 路由测试。
-- 已通过全量 Python 测试套件：2,070 项通过、4 项跳过。
+- 已通过全量 Python 测试套件：2,072 项通过、4 项跳过。
 - 已完成 GPT-5.6 Terra Ultra 本地 review，并采纳最低 gh 版本与 remote-host 匹配
   规则的两个有效发现。
 

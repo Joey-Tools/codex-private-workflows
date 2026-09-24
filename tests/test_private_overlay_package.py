@@ -1796,9 +1796,26 @@ printf '\\n' >> "$FAKE_GH_CAPTURE"
                     )
                     self.assertEqual(auth_result.returncode, 64)
                     self.assertIn(
-                        f"does not permit gh auth {auth_subcommand}",
+                        "only permits gh auth status",
                         auth_result.stderr,
                     )
+
+            token_status_result = subprocess.run(
+                [
+                    str(REPO_ROOT / "personal_codex" / "bin" / wrapper_name),
+                    "auth",
+                    "status",
+                    "--show-token",
+                ],
+                text=True,
+                capture_output=True,
+                check=False,
+                env=auth_environment,
+            )
+            self.assertEqual(token_status_result.returncode, 64)
+            self.assertIn(
+                "only permits gh auth status", token_status_result.stderr
+            )
             self.assertFalse(auth_capture.exists())
 
             status_result = subprocess.run(

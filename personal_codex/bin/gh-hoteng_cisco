@@ -17,15 +17,11 @@ export GH_NO_UPDATE_NOTIFIER=1
 export GH_TELEMETRY=0
 
 if [ "$#" -ge 1 ] && [ "$1" = "auth" ]; then
-    case "${2-}" in
-        status)
-            ;;
-        *)
-            printf '%s\n' \
-                "gh-hoteng_cisco does not permit gh auth ${2-} through this wrapper." >&2
-            exit 64
-            ;;
-    esac
+    if [ "$#" -ne 2 ] || [ "$2" != "status" ]; then
+        printf '%s\n' \
+            "gh-hoteng_cisco only permits gh auth status through this wrapper." >&2
+        exit 64
+    fi
 fi
 
 gh_version=unknown

@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+import tempfile
 import unittest
 from unittest import mock
 
@@ -22,7 +23,43 @@ SPEC.loader.exec_module(MODULE)
 
 
 class CiscoGheProbeProfileTests(unittest.TestCase):
-    def test_transport_uses_hoteng_wrapper_and_cisco_host(self) -> None:
+    def test_wrapper_path_is_anchored_to_source_tree(self) -> None:
+        self.assertEqual(
+            MODULE._profile_wrapper_path(SCRIPT),
+            REPO_ROOT / "personal_codex" / "bin" / "gh-hoteng",
+        )
+
+    def test_wrapper_path_resolves_installed_skill_symlink(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_root:
+            root = Path(temporary_root)
+            overlay_root = (
+                root
+                / "personal-sync/overlays/private/releases/release-id/personal_codex"
+            )
+            source_skill = overlay_root / "skills" / "cisco-trackers-lookup"
+            source_script = source_skill / "scripts" / "cisco_ghe_probe.py"
+            source_script.parent.mkdir(parents=True)
+            source_script.touch()
+            wrapper = overlay_root / "bin" / "gh-hoteng"
+            wrapper.parent.mkdir()
+            wrapper.touch()
+
+            installed_skills = root / "home/.codex/skills"
+            installed_skills.mkdir(parents=True)
+            (installed_skills / "cisco-trackers-lookup").symlink_to(
+                source_skill,
+                target_is_directory=True,
+            )
+
+            self.assertEqual(
+                MODULE._profile_wrapper_path(
+                    installed_skills
+                    / "cisco-trackers-lookup/scripts/cisco_ghe_probe.py"
+                ),
+                wrapper.resolve(),
+            )
+
+    def test_transport_uses_overlay_wrapper_and_cisco_host(self) -> None:
         completed = subprocess.CompletedProcess(
             args=[],
             returncode=0,
@@ -33,8 +70,12 @@ class CiscoGheProbeProfileTests(unittest.TestCase):
             os.environ,
             {
                 "GH_HOST": "wrong.example",
-                "GH_CONFIG_DIR": "/tmp/wrong-profile",
                 "GH_TOKEN": "wrong-token",
+                "GITHUB_TOKEN": "wrong-github-token",
+                "GH_ENTERPRISE_TOKEN": "wrong-enterprise-token",
+                "GITHUB_ENTERPRISE_TOKEN": "wrong-github-enterprise-token",
+                "GH_PATH": "wrong/path",
+                "GH_REPO": "wrong/repository",
             },
             clear=False,
         ):
@@ -49,9 +90,19 @@ class CiscoGheProbeProfileTests(unittest.TestCase):
         self.assertEqual(payload, {"login": "hoteng"})
         argv = run.call_args.args[0]
         env = run.call_args.kwargs["env"]
-        self.assertEqual(argv, ["gh-hoteng", "api", "user"])
-        self.assertNotEqual(argv[0], "gh")
+        self.assertEqual(
+            argv,
+            [
+                str(REPO_ROOT / "personal_codex" / "bin" / "gh-hoteng"),
+                "api",
+                "user",
+            ],
+        )
+        self.assertNotEqual(Path(argv[0]).name, "gh")
         self.assertEqual(env["GH_HOST"], "sqbu-github.cisco.com")
+        for key in MODULE.GH_INHERITED_ENVIRONMENT_KEYS:
+            with self.subTest(key=key):
+                self.assertNotIn(key, env)
 
 
 if __name__ == "__main__":
