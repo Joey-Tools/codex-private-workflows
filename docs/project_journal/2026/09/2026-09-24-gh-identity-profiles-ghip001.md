@@ -26,8 +26,11 @@ superseded_by:
 - rules、wrapper、doctor 与 skill 均已加入 private sync manifest；profile directory、
   hosts.yml、Keychain、Linux secret store 和 token 不会进入 release。
 - wrapper 使用运行时 PATH 中的 gh，不绑定 Homebrew、apt 或其他机器特定路径。
-- 按用户要求，四个 profile 尚未初始化。只有在 release 安装完成后，才在每台机器上
-  逐一进行显式、本机认证和 doctor 验证；因此此 workstream 仍保持 active。
+- 当前 Mac 已完成 JoeyTeng、JoeyTeng-Codex、hoteng_cisco 与 hoteng 的显式、本机
+  认证；gh-profile-doctor --verify 已逐一确认四个实际 login 与目标 host。凭据仍只
+  存在于本机，不会随 release 同步。
+- 尚未发布到其他机器；release 安装完成后，各机器仍需按需逐一进行显式、本机认证和
+  doctor 验证，因此此 workstream 保持 active。
 
 ## Validation
 
@@ -40,5 +43,5 @@ superseded_by:
 
 ## Follow-up
 
-- 在每台目标机器运行 gh-profile-doctor，随后按 gh-identity-profiles skill 的单
-  profile 流程逐一初始化实际需要的身份。
+- 合并并发布 private overlay 后，在每台目标机器运行 gh-profile-doctor，随后按
+  gh-identity-profiles skill 的单 profile 流程逐一初始化实际需要的身份。
