@@ -1,0 +1,190 @@
+#!/bin/sh
+set -e
+
+minimum_version=2.75.0
+all_profiles="JoeyTeng JoeyTeng-Codex hoteng_cisco hoteng"
+
+die() {
+    printf '%s\n' "gh-profile-doctor: $*" >&2
+    exit 78
+}
+
+usage() {
+    printf '%s\n' "Usage: gh-profile-doctor [--verify [PROFILE ...]]"
+    printf '%s\n' "Known profiles: JoeyTeng, JoeyTeng-Codex, hoteng_cisco, hoteng"
+}
+
+if [ "$#" -gt 0 ]; then
+    case "$1" in
+        --help|-h)
+            usage
+            exit 0
+            ;;
+    esac
+fi
+
+if [ -n "$XDG_CONFIG_HOME" ]; then
+    profile_root=$XDG_CONFIG_HOME/gh-profiles
+elif [ -n "$HOME" ]; then
+    profile_root=$HOME/.config/gh-profiles
+else
+    die "XDG_CONFIG_HOME or HOME must be set."
+fi
+
+unset GH_TOKEN GITHUB_TOKEN GH_ENTERPRISE_TOKEN GITHUB_ENTERPRISE_TOKEN
+unset GH_CONFIG_DIR GH_HOST GH_PATH GH_REPO
+export GH_NO_UPDATE_NOTIFIER=1
+export GH_TELEMETRY=0
+
+profile_host() {
+    case "$1" in
+        JoeyTeng|JoeyTeng-Codex|hoteng_cisco)
+            printf '%s\n' "github.com"
+            ;;
+        hoteng)
+            printf '%s\n' "sqbu-github.cisco.com"
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+profile_config_dir() {
+    profile_host_value=$(profile_host "$1") || return 1
+    printf '%s/%s/%s\n' "$profile_root" "$profile_host_value" "$1"
+}
+
+version_is_supported() {
+    awk -v actual="$1" -v minimum="$2" '
+        BEGIN {
+            if (actual !~ /^[0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*$/) {
+                exit 1
+            }
+            split(actual, actual_parts, ".")
+            split(minimum, minimum_parts, ".")
+            for (part = 1; part <= 3; part++) {
+                if ((actual_parts[part] + 0) > (minimum_parts[part] + 0)) {
+                    exit 0
+                }
+                if ((actual_parts[part] + 0) < (minimum_parts[part] + 0)) {
+                    exit 1
+                }
+            }
+            exit 0
+        }
+    '
+}
+
+verify=false
+if [ "$#" -gt 0 ]; then
+    case "$1" in
+        --help|-h)
+            usage
+            exit 0
+            ;;
+        --verify)
+            verify=true
+            shift
+            ;;
+        *)
+            die "unknown argument: $1"
+            ;;
+    esac
+fi
+
+if [ "$verify" = false ] && [ "$#" -gt 0 ]; then
+    die "profile names require --verify"
+fi
+
+for profile in "$@"; do
+    if ! profile_host "$profile" >/dev/null; then
+        die "unknown profile: $profile"
+    fi
+done
+
+if ! command -v gh >/dev/null 2>&1; then
+    die "gh is not available on PATH."
+fi
+
+if gh_version_output=$(gh --version 2>&1); then
+    :
+else
+    die "unable to run gh --version: $gh_version_output"
+fi
+
+gh_version=$(printf '%s\n' "$gh_version_output" | awk 'NR == 1 { print $3; exit }')
+if ! version_is_supported "$gh_version" "$minimum_version"; then
+    if [ -z "$gh_version" ]; then
+        found_version=unknown
+    else
+        found_version=$gh_version
+    fi
+    die "gh $minimum_version or newer is required; found $found_version."
+fi
+
+if [ "$verify" = false ]; then
+    printf '%s\n' "gh version $gh_version is supported."
+    for profile in $all_profiles; do
+        host=$(profile_host "$profile")
+        config_dir=$(profile_config_dir "$profile")
+        if [ -r "$config_dir/hosts.yml" ]; then
+            status=initialized
+        else
+            status=uninitialized
+        fi
+        printf '%s\n' "$profile: $status host=$host config=$config_dir"
+    done
+    printf '%s\n' "Use --verify to validate initialized profiles without prompting."
+    exit 0
+fi
+
+requested_count=$#
+if [ "$requested_count" -eq 0 ]; then
+    profiles_to_verify=$all_profiles
+else
+    profiles_to_verify="$*"
+fi
+
+verified_count=0
+skipped_count=0
+failed_count=0
+for profile in $profiles_to_verify; do
+    host=$(profile_host "$profile")
+    config_dir=$(profile_config_dir "$profile")
+    if [ ! -r "$config_dir/hosts.yml" ]; then
+        if [ "$requested_count" -gt 0 ]; then
+            printf '%s\n' \
+                "$profile: uninitialized ($config_dir/hosts.yml is missing or unreadable)" >&2
+            failed_count=$((failed_count + 1))
+        else
+            printf '%s\n' "$profile: skipped (uninitialized)"
+            skipped_count=$((skipped_count + 1))
+        fi
+        continue
+    fi
+
+    if actual_login=$(GH_CONFIG_DIR="$config_dir" GH_HOST="$host" GH_PROMPT_DISABLED=1 gh api user --jq .login); then
+        :
+    else
+        printf '%s\n' "$profile: verification request failed for $host" >&2
+        failed_count=$((failed_count + 1))
+        continue
+    fi
+
+    if [ "$actual_login" != "$profile" ]; then
+        printf '%s\n' \
+            "$profile: expected $profile but gh authenticated as $actual_login" >&2
+        failed_count=$((failed_count + 1))
+        continue
+    fi
+
+    printf '%s\n' "$profile: verified host=$host config=$config_dir"
+    verified_count=$((verified_count + 1))
+done
+
+if [ "$failed_count" -ne 0 ]; then
+    exit 1
+fi
+
+printf '%s\n' "verified=$verified_count skipped=$skipped_count"

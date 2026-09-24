@@ -51,6 +51,7 @@
 - For any long-running command you may need to poll, interrupt, or harvest final output from, start it with a pollable TTY/PTY shape; do not assume `write_stdin` can attach to a plain-pipe session after stdin closes. For external review helpers, if the subprocess is still alive but output goes dark, change the session shape before launching a second reviewer.
 - When polling with `wait_agent`, omit `timeout_ms` to use the `30000` millisecond default or keep it within the supported `10000`–`3600000` millisecond range. Prefer `10000` when a response is imminent and `30000`–`60000` for ordinary or reviewer polling; longer single waits are valid but usually weaken user-facing progress updates.
 - Prefer `gh` CLI for GitHub-specific interactions.
+- In ordinary agent GitHub CLI work, use an explicit gh-<identity> wrapper; never use bare gh or mutate gh auth state. Load $gh-identity-profiles to select, provision, verify, or repair a profile.
 - For debugging or review tasks, lead with the decisive evidence or findings rather than narrating the whole search.
 - When only key evidence matters, quote or summarize the most relevant 5-10 log lines and label them as key lines instead of pasting whole logs.
 - When build or tooling details matter, include the relevant tool path and version to reduce follow-up questions.

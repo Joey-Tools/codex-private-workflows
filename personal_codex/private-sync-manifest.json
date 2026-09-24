@@ -17,6 +17,31 @@
       "kind": "file"
     },
     {
+      "source": "personal_codex/bin/gh-JoeyTeng",
+      "target": "bin/gh-JoeyTeng",
+      "kind": "file"
+    },
+    {
+      "source": "personal_codex/bin/gh-JoeyTeng-Codex",
+      "target": "bin/gh-JoeyTeng-Codex",
+      "kind": "file"
+    },
+    {
+      "source": "personal_codex/bin/gh-hoteng_cisco",
+      "target": "bin/gh-hoteng_cisco",
+      "kind": "file"
+    },
+    {
+      "source": "personal_codex/bin/gh-hoteng",
+      "target": "bin/gh-hoteng",
+      "kind": "file"
+    },
+    {
+      "source": "personal_codex/bin/gh-profile-doctor",
+      "target": "bin/gh-profile-doctor",
+      "kind": "file"
+    },
+    {
       "source": "personal_codex/agents/reviewer.toml",
       "target": "agents/reviewer.toml",
       "kind": "file"
@@ -54,6 +79,11 @@
     {
       "source": "personal_codex/skills/codex-session-mining",
       "target": "skills/codex-session-mining",
+      "kind": "skill"
+    },
+    {
+      "source": "personal_codex/skills/gh-identity-profiles",
+      "target": "skills/gh-identity-profiles",
       "kind": "skill"
     },
     {

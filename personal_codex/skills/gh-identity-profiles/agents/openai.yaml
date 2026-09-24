@@ -1,0 +1,4 @@
+interface:
+  display_name: "GH Identity Profiles"
+  short_description: "Select and verify host-local GH CLI profiles."
+  default_prompt: "Use $gh-identity-profiles to select, initialize, verify, or repair a host-local GitHub CLI profile."
