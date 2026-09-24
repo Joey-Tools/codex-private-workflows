@@ -1764,43 +1764,58 @@ printf '\\n' >> "$FAKE_GH_CAPTURE"
             f"config={xdg_profile_dir}", xdg_capture.read_text(encoding="utf-8")
         )
 
-        auth_capture = self.root / "auth-capture"
-        auth_environment = dict(environment)
-        auth_environment["FAKE_GH_CAPTURE"] = str(auth_capture)
-        for auth_subcommand in ("login", "logout", "switch"):
-            with self.subTest(auth_subcommand=auth_subcommand):
-                auth_result = subprocess.run(
-                    [
-                        str(REPO_ROOT / "personal_codex" / "bin" / "gh-JoeyTeng"),
-                        "auth",
-                        auth_subcommand,
-                    ],
-                    text=True,
-                    capture_output=True,
-                    check=False,
-                    env=auth_environment,
-                )
-                self.assertEqual(auth_result.returncode, 64)
-                self.assertIn(
-                    f"does not permit gh auth {auth_subcommand}", auth_result.stderr
-                )
-        self.assertFalse(auth_capture.exists())
+        for wrapper_name in GH_PROFILE_WRAPPERS:
+            auth_capture = self.root / f"auth-capture-{wrapper_name}"
+            auth_environment = dict(environment)
+            auth_environment["FAKE_GH_CAPTURE"] = str(auth_capture)
+            for auth_subcommand in (
+                "login",
+                "logout",
+                "switch",
+                "refresh",
+                "setup-git",
+            ):
+                with self.subTest(
+                    wrapper=wrapper_name, auth_subcommand=auth_subcommand
+                ):
+                    auth_result = subprocess.run(
+                        [
+                            str(
+                                REPO_ROOT
+                                / "personal_codex"
+                                / "bin"
+                                / wrapper_name
+                            ),
+                            "auth",
+                            auth_subcommand,
+                        ],
+                        text=True,
+                        capture_output=True,
+                        check=False,
+                        env=auth_environment,
+                    )
+                    self.assertEqual(auth_result.returncode, 64)
+                    self.assertIn(
+                        f"does not permit gh auth {auth_subcommand}",
+                        auth_result.stderr,
+                    )
+            self.assertFalse(auth_capture.exists())
 
-        status_result = subprocess.run(
-            [
-                str(REPO_ROOT / "personal_codex" / "bin" / "gh-JoeyTeng"),
-                "auth",
-                "status",
-            ],
-            text=True,
-            capture_output=True,
-            check=False,
-            env=auth_environment,
-        )
-        self.assertEqual(status_result.returncode, 0, status_result.stderr)
-        status_record = auth_capture.read_text(encoding="utf-8")
-        self.assertIn("args=<auth><status>", status_record)
-        self.assertNotIn("inherited-", status_record)
+            status_result = subprocess.run(
+                [
+                    str(REPO_ROOT / "personal_codex" / "bin" / wrapper_name),
+                    "auth",
+                    "status",
+                ],
+                text=True,
+                capture_output=True,
+                check=False,
+                env=auth_environment,
+            )
+            self.assertEqual(status_result.returncode, 0, status_result.stderr)
+            status_record = auth_capture.read_text(encoding="utf-8")
+            self.assertIn("args=<auth><status>", status_record)
+            self.assertNotIn("inherited-", status_record)
 
         uninitialized_environment = dict(environment)
         uninitialized_environment["HOME"] = str(self.root / "uninitialized-home")

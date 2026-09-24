@@ -10,6 +10,7 @@ import subprocess
 import sys
 
 GH_HOST = "sqbu-github.cisco.com"
+GH_PROFILE_WRAPPER = "gh-hoteng"
 MAX_LIMIT = 20
 GH_COMMAND_TIMEOUT_SECONDS = 60
 REPO_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
@@ -75,12 +76,12 @@ def _normalize_pull_item(value: object) -> dict[str, object]:
     }
 
 
-def _run_gh_json(argv: list[str]) -> tuple[int, object]:
+def _run_gh_json(arguments: list[str]) -> tuple[int, object]:
     env = os.environ.copy()
     env["GH_HOST"] = GH_HOST
     try:
         result = subprocess.run(
-            argv,
+            [GH_PROFILE_WRAPPER, *arguments],
             env=env,
             capture_output=True,
             text=True,
@@ -118,7 +119,6 @@ def cmd_pr_view(args: argparse.Namespace) -> int:
 
     rc, payload = _run_gh_json(
         [
-            "gh",
             "pr",
             "view",
             str(pr),
@@ -150,7 +150,6 @@ def cmd_search_prs(args: argparse.Namespace) -> int:
 
     rc, payload = _run_gh_json(
         [
-            "gh",
             "search",
             "prs",
             "--repo",
@@ -178,7 +177,6 @@ def cmd_commit_pulls(args: argparse.Namespace) -> int:
 
     rc, payload = _run_gh_json(
         [
-            "gh",
             "api",
             f"repos/{repo}/commits/{commit}/pulls",
         ]

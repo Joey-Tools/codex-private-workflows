@@ -12700,7 +12700,9 @@ class PrivateOverlaySyncTests(unittest.TestCase):
                     REPO_ROOT / "personal_codex" / "bin" / wrapper_name
                 ).read_text(encoding="utf-8")
                 self.assertIn("GH_PATH GH_REPO", wrapper)
-                self.assertIn("does not permit gh auth $2", wrapper)
+                self.assertIn('case "${2-}" in', wrapper)
+                self.assertIn("status)", wrapper)
+                self.assertIn("does not permit gh auth ${2-}", wrapper)
                 self.assertIn("GH_NO_UPDATE_NOTIFIER=1", wrapper)
                 self.assertIn("GH_TELEMETRY=0", wrapper)
                 self.assertIn("requires gh 2.75.0 or newer", wrapper)
