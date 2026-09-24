@@ -1,0 +1,74 @@
+#!/bin/sh
+set -e
+
+if [ -n "$XDG_CONFIG_HOME" ]; then
+    profile_root=$XDG_CONFIG_HOME/gh-profiles
+elif [ -n "$HOME" ]; then
+    profile_root=$HOME/.config/gh-profiles
+else
+    printf '%s\n' "gh-JoeyTeng requires XDG_CONFIG_HOME or HOME to be set." >&2
+    exit 78
+fi
+
+unset GH_TOKEN GITHUB_TOKEN GH_ENTERPRISE_TOKEN GITHUB_ENTERPRISE_TOKEN GH_PATH GH_REPO
+export GH_CONFIG_DIR="$profile_root/github.com/JoeyTeng"
+export GH_HOST="github.com"
+export GH_NO_UPDATE_NOTIFIER=1
+export GH_TELEMETRY=0
+
+if [ "$#" -ge 1 ] && [ "$1" = "auth" ]; then
+    if [ "$#" -ne 2 ] || [ "$2" != "status" ]; then
+        printf '%s\n' \
+            "gh-JoeyTeng only permits gh auth status through this wrapper." >&2
+        exit 64
+    fi
+fi
+
+gh_version=unknown
+
+gh_version_is_supported() {
+    if gh_version_output=$(gh --version 2>&1); then
+        :
+    else
+        return 1
+    fi
+
+    gh_version=$(printf '%s\n' "$gh_version_output" | awk 'NR == 1 { print $3; exit }')
+    awk -v actual="$gh_version" '
+        BEGIN {
+            if (actual !~ /^[0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*$/) {
+                exit 1
+            }
+            split(actual, actual_parts, ".")
+            if ((actual_parts[1] + 0) > 2) {
+                exit 0
+            }
+            if ((actual_parts[1] + 0) < 2) {
+                exit 1
+            }
+            if ((actual_parts[2] + 0) >= 75) {
+                exit 0
+            }
+            exit 1
+        }
+    '
+}
+
+if [ ! -r "$GH_CONFIG_DIR/hosts.yml" ]; then
+    printf '%s\n' \
+        "gh profile JoeyTeng for github.com is not initialized: $GH_CONFIG_DIR/hosts.yml" >&2
+    exit 78
+fi
+
+if ! command -v gh >/dev/null 2>&1; then
+    printf '%s\n' "gh-JoeyTeng requires gh to be available on PATH." >&2
+    exit 127
+fi
+
+if ! gh_version_is_supported; then
+    printf '%s\n' \
+        "gh-JoeyTeng requires gh 2.75.0 or newer; found $gh_version." >&2
+    exit 78
+fi
+
+exec gh "$@"

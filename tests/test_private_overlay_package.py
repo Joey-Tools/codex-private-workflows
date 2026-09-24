@@ -32,6 +32,13 @@ SPEC.loader.exec_module(MODULE)
 
 PUBLIC_SHA = "255372d2b0dd96f39faf1e52a9168ca2aa7ece69"
 PRIVATE_SHA = "2" * 40
+GH_PROFILE_WRAPPERS = {
+    "gh-JoeyTeng": ("JoeyTeng", "github.com"),
+    "gh-JoeyTeng-Codex": ("JoeyTeng-Codex", "github.com"),
+    "gh-hoteng_cisco": ("hoteng_cisco", "github.com"),
+    "gh-hoteng": ("hoteng", "sqbu-github.cisco.com"),
+}
+GH_PROFILE_BINARIES = (*GH_PROFILE_WRAPPERS, "gh-profile-doctor")
 
 
 def automation_prompt(automation_id: str) -> str:
@@ -133,6 +140,59 @@ class PrivateOverlayPackageTests(unittest.TestCase):
         with contextlib.redirect_stdout(io.StringIO()):
             return callback(*args, **kwargs)
 
+    def write_fake_gh(self, directory: Path) -> Path:
+        binary = directory / "gh"
+        binary.write_text(
+            """#!/bin/sh
+if [ "$1" = "--version" ]; then
+    printf 'version no_update=%s telemetry=%s token=%s github_token=%s enterprise_token=%s github_enterprise_token=%s gh_repo=%s config=%s\\n' \\
+        "$GH_NO_UPDATE_NOTIFIER" "$GH_TELEMETRY" "$GH_TOKEN" "$GITHUB_TOKEN" "$GH_ENTERPRISE_TOKEN" "$GITHUB_ENTERPRISE_TOKEN" "$GH_REPO" "$GH_CONFIG_DIR" >> "$FAKE_GH_CAPTURE"
+    printf '%s\\n' "gh version $FAKE_GH_VERSION"
+    exit 0
+fi
+
+if [ "$1" = "api" ]; then
+    if [ "$#" -ne 4 ] || [ "$2" != "user" ] || [ "$3" != "--jq" ] || [ "$4" != ".login" ]; then
+        exit 8
+    fi
+    printf 'api host=%s config=%s prompt=%s no_update=%s telemetry=%s token=%s github_token=%s enterprise_token=%s github_enterprise_token=%s gh_path=%s gh_repo=%s\\n' \\
+        "$GH_HOST" "$GH_CONFIG_DIR" "$GH_PROMPT_DISABLED" "$GH_NO_UPDATE_NOTIFIER" "$GH_TELEMETRY" "$GH_TOKEN" "$GITHUB_TOKEN" "$GH_ENTERPRISE_TOKEN" "$GITHUB_ENTERPRISE_TOKEN" "$GH_PATH" "$GH_REPO" >> "$FAKE_GH_CAPTURE"
+    if [ -n "$FAKE_GH_LOGIN" ]; then
+        printf '%s\\n' "$FAKE_GH_LOGIN"
+        exit 0
+    fi
+    case "$GH_CONFIG_DIR" in
+        */github.com/JoeyTeng)
+            printf '%s\\n' "JoeyTeng"
+            ;;
+        */github.com/JoeyTeng-Codex)
+            printf '%s\\n' "JoeyTeng-Codex"
+            ;;
+        */github.com/hoteng_cisco)
+            printf '%s\\n' "hoteng_cisco"
+            ;;
+        */sqbu-github.cisco.com/hoteng)
+            printf '%s\\n' "hoteng"
+            ;;
+        *)
+            exit 9
+            ;;
+    esac
+    exit 0
+fi
+
+printf 'run host=%s config=%s no_update=%s telemetry=%s token=%s github_token=%s enterprise_token=%s github_enterprise_token=%s gh_path=%s gh_repo=%s args=' \\
+    "$GH_HOST" "$GH_CONFIG_DIR" "$GH_NO_UPDATE_NOTIFIER" "$GH_TELEMETRY" "$GH_TOKEN" "$GITHUB_TOKEN" "$GH_ENTERPRISE_TOKEN" "$GITHUB_ENTERPRISE_TOKEN" "$GH_PATH" "$GH_REPO" >> "$FAKE_GH_CAPTURE"
+for argument in "$@"; do
+    printf '<%s>' "$argument" >> "$FAKE_GH_CAPTURE"
+done
+printf '\\n' >> "$FAKE_GH_CAPTURE"
+""",
+            encoding="utf-8",
+        )
+        binary.chmod(0o755)
+        return binary
+
     def build_private_package(
         self,
         *,
@@ -207,6 +267,7 @@ class PrivateOverlayPackageTests(unittest.TestCase):
         self.assertIn("skills/agile-delivery-workflow", targets)
         self.assertIn("skills/cisco-trackers-lookup", targets)
         self.assertIn("skills/remote-host-context", targets)
+        self.assertIn("skills/gh-identity-profiles", targets)
         self.assertNotIn("skills/apple-notes-db-guardrails", targets)
         self.assertNotIn("skills/apple-notes-work-report", targets)
         self.assertNotIn("skills/codex-rules-hygiene", targets)
@@ -221,6 +282,17 @@ class PrivateOverlayPackageTests(unittest.TestCase):
         )
         self.assertTrue(packaged_helper.is_file())
         self.assertEqual(stat.S_IMODE(packaged_helper.stat().st_mode), 0o755)
+        for binary_name in GH_PROFILE_BINARIES:
+            with self.subTest(binary=binary_name):
+                target = f"bin/{binary_name}"
+                packaged_binary = (
+                    release_root / "personal_codex" / "bin" / binary_name
+                )
+                self.assertIn(target, targets)
+                self.assertEqual(targets[target].owner, "private")
+                self.assertEqual(targets[target].kind, "file")
+                self.assertTrue(packaged_binary.is_file())
+                self.assertEqual(stat.S_IMODE(packaged_binary.stat().st_mode), 0o755)
         self.assertTrue(packaged_inventory.is_file())
         self.assertIn(
             "personal_codex/private-sync-hosts.json",
@@ -1585,6 +1657,22 @@ class PrivateOverlayPackageTests(unittest.TestCase):
         self.assertFalse((home / "config" / "private-sync-hosts.json").exists())
         self.assertTrue((home / "AGENTS.md").is_symlink())
         self.assertTrue((home / "skills" / "cisco-trackers-lookup").is_symlink())
+        gh_identity_skill = home / "skills" / "gh-identity-profiles"
+        self.assertTrue(gh_identity_skill.is_symlink())
+        self.assertEqual(
+            os.readlink(gh_identity_skill),
+            "../personal-sync/overlays/private/current/"
+            "personal_codex/skills/gh-identity-profiles",
+        )
+        for binary_name in GH_PROFILE_BINARIES:
+            with self.subTest(binary=binary_name):
+                installed_binary = home / "bin" / binary_name
+                self.assertTrue(installed_binary.is_symlink())
+                self.assertEqual(
+                    os.readlink(installed_binary),
+                    "../personal-sync/overlays/private/current/"
+                    f"personal_codex/bin/{binary_name}",
+                )
         grilling = home / "skills" / "grilling"
         self.assertTrue(grilling.is_symlink())
         self.assertEqual(
@@ -1592,6 +1680,319 @@ class PrivateOverlayPackageTests(unittest.TestCase):
             "../personal-sync/current/personal_codex/skills/grilling",
         )
         self.run_quietly(MODULE.verify_overlay, home, "private")
+
+    def test_gh_identity_wrappers_select_local_profiles_and_reject_auth_state_changes(
+        self,
+    ) -> None:
+        home = self.root / "gh-home"
+        fake_bin = self.root / "fake-bin"
+        fake_bin.mkdir()
+        self.write_fake_gh(fake_bin)
+        capture = self.root / "gh-capture"
+
+        for wrapper_name, (profile, host) in GH_PROFILE_WRAPPERS.items():
+            config_dir = home / ".config" / "gh-profiles" / host / profile
+            config_dir.mkdir(parents=True)
+            (config_dir / "hosts.yml").write_text("hosts:\n", encoding="utf-8")
+
+        environment = dict(os.environ)
+        environment.update(
+            {
+                "HOME": str(home),
+                "PATH": os.pathsep.join([str(fake_bin), os.defpath]),
+                "FAKE_GH_CAPTURE": str(capture),
+                "FAKE_GH_VERSION": "2.75.0",
+                "GH_TOKEN": "inherited-gh-token",
+                "GITHUB_TOKEN": "inherited-github-token",
+                "GH_ENTERPRISE_TOKEN": "inherited-enterprise-token",
+                "GITHUB_ENTERPRISE_TOKEN": "inherited-github-enterprise-token",
+                "GH_CONFIG_DIR": "/inherited-config",
+                "GH_HOST": "inherited-host",
+                "GH_PATH": "/inherited-gh-path",
+                "GH_REPO": "inherited-repository",
+            }
+        )
+        environment.pop("XDG_CONFIG_HOME", None)
+
+        for wrapper_name, (profile, host) in GH_PROFILE_WRAPPERS.items():
+            with self.subTest(wrapper=wrapper_name):
+                result = subprocess.run(
+                    [
+                        str(REPO_ROOT / "personal_codex" / "bin" / wrapper_name),
+                        "repo",
+                        "view",
+                        "owner/repository",
+                    ],
+                    text=True,
+                    capture_output=True,
+                    check=False,
+                    env=environment,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                record = capture.read_text(encoding="utf-8").splitlines()[-1]
+                expected_config = home / ".config" / "gh-profiles" / host / profile
+                self.assertIn(f"host={host}", record)
+                self.assertIn(f"config={expected_config}", record)
+                self.assertIn("args=<repo><view><owner/repository>", record)
+                self.assertIn("no_update=1", record)
+                self.assertIn("telemetry=0", record)
+                self.assertNotIn("inherited-", record)
+
+        xdg_config_home = self.root / "xdg-config"
+        xdg_profile_dir = xdg_config_home / "gh-profiles" / "github.com" / "JoeyTeng"
+        xdg_profile_dir.mkdir(parents=True)
+        (xdg_profile_dir / "hosts.yml").write_text("hosts:\n", encoding="utf-8")
+        xdg_capture = self.root / "xdg-capture"
+        xdg_environment = dict(environment)
+        xdg_environment["XDG_CONFIG_HOME"] = str(xdg_config_home)
+        xdg_environment["FAKE_GH_CAPTURE"] = str(xdg_capture)
+        xdg_environment.pop("HOME", None)
+        xdg_result = subprocess.run(
+            [
+                str(REPO_ROOT / "personal_codex" / "bin" / "gh-JoeyTeng"),
+                "repo",
+                "view",
+                "owner/repository",
+            ],
+            text=True,
+            capture_output=True,
+            check=False,
+            env=xdg_environment,
+        )
+        self.assertEqual(xdg_result.returncode, 0, xdg_result.stderr)
+        self.assertIn(
+            f"config={xdg_profile_dir}", xdg_capture.read_text(encoding="utf-8")
+        )
+
+        for wrapper_name in GH_PROFILE_WRAPPERS:
+            auth_capture = self.root / f"auth-capture-{wrapper_name}"
+            auth_environment = dict(environment)
+            auth_environment["FAKE_GH_CAPTURE"] = str(auth_capture)
+            for auth_subcommand in (
+                "login",
+                "logout",
+                "switch",
+                "refresh",
+                "setup-git",
+            ):
+                with self.subTest(
+                    wrapper=wrapper_name, auth_subcommand=auth_subcommand
+                ):
+                    auth_result = subprocess.run(
+                        [
+                            str(
+                                REPO_ROOT
+                                / "personal_codex"
+                                / "bin"
+                                / wrapper_name
+                            ),
+                            "auth",
+                            auth_subcommand,
+                        ],
+                        text=True,
+                        capture_output=True,
+                        check=False,
+                        env=auth_environment,
+                    )
+                    self.assertEqual(auth_result.returncode, 64)
+                    self.assertIn(
+                        "only permits gh auth status",
+                        auth_result.stderr,
+                    )
+
+            token_status_result = subprocess.run(
+                [
+                    str(REPO_ROOT / "personal_codex" / "bin" / wrapper_name),
+                    "auth",
+                    "status",
+                    "--show-token",
+                ],
+                text=True,
+                capture_output=True,
+                check=False,
+                env=auth_environment,
+            )
+            self.assertEqual(token_status_result.returncode, 64)
+            self.assertIn(
+                "only permits gh auth status", token_status_result.stderr
+            )
+            self.assertFalse(auth_capture.exists())
+
+            status_result = subprocess.run(
+                [
+                    str(REPO_ROOT / "personal_codex" / "bin" / wrapper_name),
+                    "auth",
+                    "status",
+                ],
+                text=True,
+                capture_output=True,
+                check=False,
+                env=auth_environment,
+            )
+            self.assertEqual(status_result.returncode, 0, status_result.stderr)
+            status_record = auth_capture.read_text(encoding="utf-8")
+            self.assertIn("args=<auth><status>", status_record)
+            self.assertNotIn("inherited-", status_record)
+
+        uninitialized_environment = dict(environment)
+        uninitialized_environment["HOME"] = str(self.root / "uninitialized-home")
+        uninitialized_capture = self.root / "uninitialized-capture"
+        uninitialized_environment["FAKE_GH_CAPTURE"] = str(uninitialized_capture)
+        uninitialized_result = subprocess.run(
+            [str(REPO_ROOT / "personal_codex" / "bin" / "gh-JoeyTeng"), "status"],
+            text=True,
+            capture_output=True,
+            check=False,
+            env=uninitialized_environment,
+        )
+        self.assertEqual(uninitialized_result.returncode, 78)
+        self.assertIn("is not initialized", uninitialized_result.stderr)
+        self.assertFalse(uninitialized_capture.exists())
+
+        unavailable_environment = dict(environment)
+        unavailable_environment["PATH"] = ""
+        unavailable_result = subprocess.run(
+            [str(REPO_ROOT / "personal_codex" / "bin" / "gh-JoeyTeng"), "status"],
+            text=True,
+            capture_output=True,
+            check=False,
+            env=unavailable_environment,
+        )
+        self.assertEqual(unavailable_result.returncode, 127)
+
+        old_version_environment = dict(environment)
+        old_version_environment["FAKE_GH_VERSION"] = "2.74.0"
+        old_version_capture = self.root / "old-version-capture"
+        old_version_environment["FAKE_GH_CAPTURE"] = str(old_version_capture)
+        old_version_result = subprocess.run(
+            [str(REPO_ROOT / "personal_codex" / "bin" / "gh-JoeyTeng"), "status"],
+            text=True,
+            capture_output=True,
+            check=False,
+            env=old_version_environment,
+        )
+        self.assertEqual(old_version_result.returncode, 78)
+        self.assertIn("requires gh 2.75.0 or newer", old_version_result.stderr)
+        old_version_record = old_version_capture.read_text(encoding="utf-8")
+        self.assertIn("version no_update=1 telemetry=0", old_version_record)
+        self.assertNotIn("inherited-", old_version_record)
+
+    def test_gh_profile_doctor_checks_runtime_and_verifies_selected_profile(self) -> None:
+        home = self.root / "gh-doctor-home"
+        fake_bin = self.root / "fake-bin"
+        fake_bin.mkdir()
+        self.write_fake_gh(fake_bin)
+        capture = self.root / "gh-doctor-capture"
+        config_dir = home / ".config" / "gh-profiles" / "github.com" / "JoeyTeng"
+        config_dir.mkdir(parents=True)
+        (config_dir / "hosts.yml").write_text("hosts:\n", encoding="utf-8")
+
+        environment = dict(os.environ)
+        environment.update(
+            {
+                "HOME": str(home),
+                "PATH": os.pathsep.join([str(fake_bin), os.defpath]),
+                "FAKE_GH_CAPTURE": str(capture),
+                "FAKE_GH_VERSION": "2.75.0",
+                "GH_TOKEN": "inherited-gh-token",
+                "GITHUB_TOKEN": "inherited-github-token",
+                "GH_ENTERPRISE_TOKEN": "inherited-enterprise-token",
+                "GITHUB_ENTERPRISE_TOKEN": "inherited-github-enterprise-token",
+                "GH_CONFIG_DIR": "/inherited-config",
+                "GH_HOST": "inherited-host",
+                "GH_PATH": "/inherited-gh-path",
+                "GH_REPO": "inherited-repository",
+            }
+        )
+        environment.pop("XDG_CONFIG_HOME", None)
+        doctor = REPO_ROOT / "personal_codex" / "bin" / "gh-profile-doctor"
+
+        help_environment = dict(environment)
+        help_environment.pop("HOME", None)
+        help_result = subprocess.run(
+            [str(doctor), "--help"],
+            text=True,
+            capture_output=True,
+            check=False,
+            env=help_environment,
+        )
+        self.assertEqual(help_result.returncode, 0, help_result.stderr)
+        self.assertIn("Usage: gh-profile-doctor", help_result.stdout)
+
+        xdg_config_home = self.root / "gh-doctor-xdg"
+        xdg_config_dir = (
+            xdg_config_home / "gh-profiles" / "github.com" / "JoeyTeng"
+        )
+        xdg_config_dir.mkdir(parents=True)
+        (xdg_config_dir / "hosts.yml").write_text("hosts:\n", encoding="utf-8")
+        xdg_environment = dict(environment)
+        xdg_environment["XDG_CONFIG_HOME"] = str(xdg_config_home)
+        xdg_environment["FAKE_GH_CAPTURE"] = str(self.root / "gh-doctor-xdg-capture")
+        xdg_environment.pop("HOME", None)
+        xdg_result = subprocess.run(
+            [str(doctor)],
+            text=True,
+            capture_output=True,
+            check=False,
+            env=xdg_environment,
+        )
+        self.assertEqual(xdg_result.returncode, 0, xdg_result.stderr)
+        self.assertIn(f"config={xdg_config_dir}", xdg_result.stdout)
+
+        status_result = subprocess.run(
+            [str(doctor)],
+            text=True,
+            capture_output=True,
+            check=False,
+            env=environment,
+        )
+        self.assertEqual(status_result.returncode, 0, status_result.stderr)
+        self.assertIn("gh version 2.75.0", status_result.stdout)
+        self.assertIn("JoeyTeng: initialized host=github.com", status_result.stdout)
+        self.assertIn("hoteng: uninitialized host=sqbu-github.cisco.com", status_result.stdout)
+        status_records = capture.read_text(encoding="utf-8").splitlines()
+        self.assertEqual(len(status_records), 1)
+        self.assertIn("version no_update=1 telemetry=0", status_records[0])
+        self.assertNotIn("inherited-", status_records[0])
+
+        verify_result = subprocess.run(
+            [str(doctor), "--verify", "JoeyTeng"],
+            text=True,
+            capture_output=True,
+            check=False,
+            env=environment,
+        )
+        self.assertEqual(verify_result.returncode, 0, verify_result.stderr)
+        self.assertIn("JoeyTeng: verified host=github.com", verify_result.stdout)
+        verification_record = capture.read_text(encoding="utf-8").splitlines()[-1]
+        self.assertIn("prompt=1", verification_record)
+        self.assertIn("no_update=1", verification_record)
+        self.assertIn("telemetry=0", verification_record)
+        self.assertNotIn("inherited-", verification_record)
+
+        wrong_login_environment = dict(environment)
+        wrong_login_environment["FAKE_GH_LOGIN"] = "unexpected-login"
+        wrong_login_result = subprocess.run(
+            [str(doctor), "--verify", "JoeyTeng"],
+            text=True,
+            capture_output=True,
+            check=False,
+            env=wrong_login_environment,
+        )
+        self.assertEqual(wrong_login_result.returncode, 1)
+        self.assertIn("expected JoeyTeng but gh authenticated as unexpected-login", wrong_login_result.stderr)
+
+        old_version_environment = dict(environment)
+        old_version_environment["FAKE_GH_VERSION"] = "2.74.0"
+        old_version_result = subprocess.run(
+            [str(doctor)],
+            text=True,
+            capture_output=True,
+            check=False,
+            env=old_version_environment,
+        )
+        self.assertEqual(old_version_result.returncode, 78)
+        self.assertIn("gh 2.75.0 or newer is required", old_version_result.stderr)
 
     def test_install_private_downloads_public_base_and_overlay(self) -> None:
         public_release = self.root / "public-release"
