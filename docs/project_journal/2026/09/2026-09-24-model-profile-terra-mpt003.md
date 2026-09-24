@@ -19,6 +19,8 @@ superseded_by:
 
 ## Current State
 - Private review contracts, stream validation, attribution guidance, and regression tests are aligned with the requested policy.
+- Claude and Copilot retry slots stay within the Opus 5 family: `claude-opus-5` is primary and `claude-opus-5.0` is the closed wire alias; the stream validator accepts both current identities.
+- Attribution maps an observed Luna runtime explicitly while retaining Terra Ultra as the no-evidence fallback.
 - The four host automations were updated through the Codex app to Terra/xhigh.
 
 ## Next Steps

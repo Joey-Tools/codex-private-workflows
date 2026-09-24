@@ -1280,7 +1280,11 @@ def _load_contract_with_binding() -> tuple[
     expected_identities = {
         "claude-opus-5": {
             "init_model": "claude-opus-5",
-            "accepted_model_usage_keys": ["claude-opus-5"],
+            "accepted_model_usage_keys": ["claude-opus-5", "claude-opus-5.0"],
+        },
+        "claude-opus-5.0": {
+            "init_model": "claude-opus-5.0",
+            "accepted_model_usage_keys": ["claude-opus-5", "claude-opus-5.0"],
         },
         "claude-opus-4-7": {
             "init_model": "claude-opus-4-7",
