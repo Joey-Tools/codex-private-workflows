@@ -13683,7 +13683,7 @@ jobs:
             with self.subTest(repository=repository):
                 self.assertNotIn(f"`{repository}`", agents)
 
-    def test_codex_review_gate_uses_v2_verifier_and_controlled_legacy_bridge(
+    def test_codex_review_gate_uses_v2_verifier_without_legacy_bridge(
         self,
     ) -> None:
         verifier_path = REPO_ROOT / ".github" / "workflows" / "codex-review-gate.yml"
@@ -13734,19 +13734,18 @@ jobs:
             with self.subTest(unsupported=unsupported):
                 self.assertNotIn(unsupported, verifier)
 
-        legacy_bridge = legacy_bridge_path.read_text(encoding="utf-8")
-        for anchor in (
-            "name: Codex Review Gate Legacy Bridge",
-            "pull_request_target:",
-            "issue_comment:\n    types: [created]",
-            "statuses: write",
-            "name: codex/review-gate legacy bridge",
-            "uses: JoeyTeng/codex-review-gate-action/.github/workflows/codex-review-gate.yml@v1",
-        ):
-            with self.subTest(legacy_bridge_anchor=anchor):
-                self.assertIn(anchor, legacy_bridge)
-        self.assertNotIn("pull_request_review:", legacy_bridge)
-        self.assertNotIn("JoeyTeng/codex-review-gate-action@v2", legacy_bridge)
+        self.assertFalse(legacy_bridge_path.exists())
+        workflow_text = "\n".join(
+            workflow_path.read_text(encoding="utf-8")
+            for workflow_path in sorted(
+                (REPO_ROOT / ".github" / "workflows").glob("*.yml")
+            )
+        )
+        self.assertNotIn(
+            "JoeyTeng/codex-review-gate-action/.github/workflows/codex-review-gate.yml@v1",
+            workflow_text,
+        )
+        self.assertNotIn("name: Codex Review Gate Legacy Bridge", workflow_text)
 
     def test_scheduled_workflow_opens_pr_for_sync_changes(self) -> None:
         workflow = (
