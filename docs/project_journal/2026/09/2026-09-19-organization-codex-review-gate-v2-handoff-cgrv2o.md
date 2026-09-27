@@ -23,6 +23,7 @@ superseded_by:
 
 - The organization v2 ruleset cutover and the full active-10 post-cutover audit completed before this cleanup. The admitted closure receipt was exactly recovered from persistent GitHub PR, Actions, and organization-ruleset evidence; its canonical SHA-256 is `9a8b38f2188a14168423a07639d6662c87e198fe2dd12041f67fc224f363817e`.
 - This repository no longer contains the temporary v1 legacy bridge or produces `codex/review-gate`; pull requests use the canonical v2 verifier and controller only.
+- The regression guard scans both GitHub Actions workflow extensions (`.yml` and `.yaml`) before accepting that no legacy v1 caller or bridge remains.
 - The retained legacy organization ruleset continues to protect deletion and non-fast-forward updates without reintroducing a v1 required status.
 
 ## Historical State (2026-09-20)

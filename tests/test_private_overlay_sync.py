@@ -13735,11 +13735,15 @@ jobs:
                 self.assertNotIn(unsupported, verifier)
 
         self.assertFalse(legacy_bridge_path.exists())
+        workflow_paths = sorted(
+            (
+                *(REPO_ROOT / ".github" / "workflows").glob("*.yml"),
+                *(REPO_ROOT / ".github" / "workflows").glob("*.yaml"),
+            )
+        )
         workflow_text = "\n".join(
             workflow_path.read_text(encoding="utf-8")
-            for workflow_path in sorted(
-                (REPO_ROOT / ".github" / "workflows").glob("*.yml")
-            )
+            for workflow_path in workflow_paths
         )
         self.assertNotIn(
             "JoeyTeng/codex-review-gate-action/.github/workflows/codex-review-gate.yml@v1",
