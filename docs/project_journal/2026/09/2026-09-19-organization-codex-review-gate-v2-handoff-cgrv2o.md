@@ -17,11 +17,11 @@ superseded_by:
 - 已签名发布并验证 `JoeyTeng/codex-review-gate-action` `v2.0.1`；该版本仅修正发布包中的 controller 权限模板与安装文档，运行时 gate 逻辑未变。
 - 九个常规目标仓库与 `codex-session-retrospective-history` 已完成 v2 安装或刷新，并以未合并 canary 证明同一 PR head 上的 native v2 check 与 legacy v1 bridge status 都能成功。
 - `codex-waited-delivery` 已归档，不再属于活动 consumer cohort，也不会安装 v2。
-- 组织 ruleset 切换和 v1 清理尚未开始；旧 ruleset 继续保留 deletion/non-fast-forward 等保护，最终只移除 v1 context。
+- 组织 ruleset 切换、active-10 post-cutover audit 与 v1 required-status 清理均已完成；旧 ruleset 仅继续保留 deletion/non-fast-forward 等保护，不再要求 v1 context。
 
 ## Completion (2026-09-27)
 
-- The organization v2 ruleset cutover and the full active-10 post-cutover audit completed before this cleanup; the admitted receipt is `9a8b38f2188a14168423a07639d6662c87e198fe2dd12041f67fc224f363817e`.
+- The organization v2 ruleset cutover and the full active-10 post-cutover audit completed before this cleanup. The admitted closure receipt was exactly recovered from persistent GitHub PR, Actions, and organization-ruleset evidence; its canonical SHA-256 is `9a8b38f2188a14168423a07639d6662c87e198fe2dd12041f67fc224f363817e`.
 - This repository no longer contains the temporary v1 legacy bridge or produces `codex/review-gate`; pull requests use the canonical v2 verifier and controller only.
 - The retained legacy organization ruleset continues to protect deletion and non-fast-forward updates without reintroducing a v1 required status.
 
@@ -33,10 +33,10 @@ superseded_by:
 - `codex-session-retrospective-history#7` 是首次安装例外：默认分支此前没有 legacy producer 或 controller。仅在该 PR 的固定 base/head 窗口内，临时从旧 organization ruleset 的目标列表移除该 repository ID，完成 squash merge 后立即恢复原有 ruleset；没有增加 bypass actor 或改变 required-status、strictness、deletion/non-fast-forward 语义。恢复 payload 的 sorted-JSON (`jq -S -c`) SHA-256 是 `ed59cb148cdeecaeb471427011151ed3fbc02d30574a232033f97d139ca85a5a`，其 target IDs 精确为 `1242512097, 1242512092, 1242511852, 1242512336, 1242511845, 1242511842, 1242512323, 1242511840, 1242512099, 1242512084, 1246526548`，`bypass_actors` 为空。随后对该仓库默认分支的 effective-rules readback 已确认 organization source `Joey-Tools`、ruleset `16590367` 仍提供 deletion、non-fast-forward 和 strict `codex/review-gate`。
 - `codex-session-retrospective-history#8` 已关闭且未合并。它在同一 exact head 上获得 v1 `codex/review-gate` status success、v2 `codex/github-review-gate` success、CI success 与 current-head Codex terminal clean；两次完整读取相隔 5 秒且未漂移。
 
-## Historical Boundary
+## Historical Pre-Cutover Boundary (2026-09-20)
 
 - 活动 cohort 现在是 10 个仓库：九个常规目标与 `codex-session-retrospective-history`。归档仓库不作为 v2 安装或 canary admission 的成员。
-- organization ruleset 切换仍未开始。它只能在受控 handoff executor 的实现、验证与完整 cohort reread 完成后推进；在此之前保留所有 legacy contexts 和 bridges。
+- 当时 organization ruleset 尚未切换：受控 handoff executor 的实现、验证与完整 cohort reread 尚在进行，因而暂时保留了所有 legacy contexts 和 bridges。该限制已在后续 cutover 完成后解除；当前只保留旧 ruleset 的 deletion/non-fast-forward 保护。
 
 ## Completed Cutover
 
@@ -53,7 +53,7 @@ superseded_by:
 - Bootstrap installation: `codex-session-retrospective-history#7`, squash commit `53c9a16545147be15c8a5330c5397304a3edb332`. Its authorized exception temporarily excluded only repository ID `1246526548` from organization ruleset `#16590367`, then restored the exact required-status payload and target list immediately after merge. The restored sorted-JSON payload fingerprint is `ed59cb148cdeecaeb471427011151ed3fbc02d30574a232033f97d139ca85a5a`; the post-restore effective-rule readback binds the same organization source/ruleset ID and the three expected legacy rules.
 - Bootstrap canary: `codex-session-retrospective-history#8`, closed unmerged. Canonical request `#5752956871`, terminal clean `#5752960740`, v1 status `54546138115`, v2 verifier [run `35540038644` attempt 4](https://github.com/Joey-Tools/codex-session-retrospective-history/actions/runs/35540038644/attempts/4), and 5-second stable double-read evidence are recorded on the PR.
 - Post-cutover audit implementation: `Joey-Tools/codex-review-gate#81`.
-- Final audit receipt: `9a8b38f2188a14168423a07639d6662c87e198fe2dd12041f67fc224f363817e`.
+- Final audit receipt: `9a8b38f2188a14168423a07639d6662c87e198fe2dd12041f67fc224f363817e`. Its exact recovery used only durable GitHub PR, Actions, and organization-ruleset records, reconstructing the original canonical receipt rather than minting a replacement receipt.
 - 每条 canary 的成功定位如下；`v2 verifier` 是 `codex/github-review-gate` success 的 workflow run，`legacy status` 是同一 head 上 `codex/review-gate` success 的 commit status ID：
 
 | Repository | Canary PR | Head | v2 verifier | Legacy status |
