@@ -12657,7 +12657,7 @@ class PrivateOverlaySyncTests(unittest.TestCase):
         trigger = (
             "- In ordinary agent GitHub CLI work, use an explicit gh-<identity> "
             "wrapper; never use bare gh or mutate gh auth state. Load "
-            "$gh-identity-profiles to select, provision, verify, or repair a profile."
+            "$gh-identity-profiles to select, check, verify, or configure a named identity."
         )
         self.assertEqual(agents_lines.count(trigger), 1)
 
@@ -12672,22 +12672,23 @@ class PrivateOverlaySyncTests(unittest.TestCase):
             / "references"
             / "profile-contract.md"
         ).read_text(encoding="utf-8")
-        self.assertIn("GH_CONFIG_DIR", skill)
+        self.assertIn("gh auth token --hostname <host> --user <identity>", skill)
         self.assertIn("gh-profile-doctor", skill)
-        self.assertIn("不分发 token、hosts.yml", skill)
-        self.assertIn("不要使用裸 gh", skill)
-        self.assertIn("GH_HOST 与 remote host 匹配", skill)
+        self.assertIn("不分发 token、普通 `gh auth` 配置", skill)
+        self.assertIn("不要使用裸 `gh`", skill)
+        self.assertIn("`GH_HOST` 与 remote host 匹配", skill)
         self.assertIn(
-            "unset GH_TOKEN GITHUB_TOKEN GH_ENTERPRISE_TOKEN GITHUB_ENTERPRISE_TOKEN",
+            "unset GH_CONFIG_DIR GH_TOKEN GITHUB_TOKEN",
             contract,
         )
         self.assertLess(
             contract.index(
-                "unset GH_TOKEN GITHUB_TOKEN GH_ENTERPRISE_TOKEN GITHUB_ENTERPRISE_TOKEN"
+                "unset GH_CONFIG_DIR GH_TOKEN GITHUB_TOKEN"
             ),
             contract.index("gh auth login --hostname github.com"),
         )
         self.assertIn("GH_NO_UPDATE_NOTIFIER=1", contract)
+        self.assertIn("GH_ENTERPRISE_TOKEN", contract)
 
         for wrapper_name in (
             "gh-JoeyTeng",
@@ -12699,12 +12700,13 @@ class PrivateOverlaySyncTests(unittest.TestCase):
                 wrapper = (
                     REPO_ROOT / "personal_codex" / "bin" / wrapper_name
                 ).read_text(encoding="utf-8")
-                self.assertIn("GH_PATH GH_REPO", wrapper)
+                self.assertIn("GH_CONFIG_DIR GH_HOST GH_PATH GH_REPO", wrapper)
                 self.assertIn('[ "$#" -ne 2 ] || [ "$2" != "status" ]', wrapper)
                 self.assertIn("only permits gh auth status", wrapper)
+                self.assertIn("gh auth token --hostname", wrapper)
                 self.assertIn("GH_NO_UPDATE_NOTIFIER=1", wrapper)
                 self.assertIn("GH_TELEMETRY=0", wrapper)
-                self.assertIn("requires gh 2.75.0 or newer", wrapper)
+                self.assertNotIn("requires gh 2.75.0 or newer", wrapper)
 
     def test_scheduled_workflow_checks_out_all_sync_rule_repos(self) -> None:
         workflow = (

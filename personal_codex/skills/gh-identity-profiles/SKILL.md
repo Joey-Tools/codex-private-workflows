@@ -1,69 +1,77 @@
 ---
 name: gh-identity-profiles
-description: "Select, initialize, verify, or troubleshoot Joey's host-local GitHub CLI profiles on macOS or Linux using explicit GH_CONFIG_DIR wrappers. Use when choosing a gh identity or diagnosing profile isolation; not for Git or SSH identity setup."
+description: "Select, verify, or troubleshoot Joey's named GitHub CLI identities on macOS or Linux using explicit wrappers backed by the ordinary global gh auth pool. Use when choosing a gh identity, checking whether an optional account is available, or diagnosing identity selection; not for Git or SSH identity setup."
 ---
 
 # GH Identity Profiles
 
-本 skill 管理跨 macOS 和 Linux 的 GitHub CLI 身份隔离。它分发规则和
-wrapper，不分发 token、hosts.yml、Keychain、Linux secret store 或任何 profile
-目录。
+本 skill 管理跨 macOS 和 Linux 的 GitHub CLI 命名身份选择。它分发规则和
+wrapper，不分发 token、普通 `gh auth` 配置、Keychain、Linux secret store 或浏览器
+登录状态。
 
 ## 身份映射
 
-| Wrapper | Host | Expected login |
-| --- | --- | --- |
-| gh-JoeyTeng | github.com | JoeyTeng |
-| gh-JoeyTeng-Codex | github.com | JoeyTeng-Codex |
-| gh-hoteng_cisco | github.com | hoteng_cisco |
-| gh-hoteng | sqbu-github.cisco.com | hoteng |
+| Wrapper | Host | Expected login | Action token variable |
+| --- | --- | --- | --- |
+| gh-JoeyTeng | github.com | JoeyTeng | GH_TOKEN |
+| gh-JoeyTeng-Codex | github.com | JoeyTeng-Codex | GH_TOKEN |
+| gh-hoteng_cisco | github.com | hoteng_cisco | GH_TOKEN |
+| gh-hoteng | sqbu-github.cisco.com | hoteng | GH_ENTERPRISE_TOKEN |
 
-每个 wrapper 使用 XDG_CONFIG_HOME/gh-profiles；未设置
-XDG_CONFIG_HOME 时使用 HOME/.config/gh-profiles。它覆盖 GH_CONFIG_DIR、设置
-GH_HOST 为目标 host、清除可能覆盖 profile 的 token/GH_REPO 环境变量，并通过
-运行时 PATH 执行 gh。
+每个 wrapper 都从普通默认 `gh auth` 账号池精确执行
+`gh auth token --hostname <host> --user <identity>`。它会先清除继承的
+`GH_CONFIG_DIR`、token 和 GitHub CLI 路由变量，再仅为这一次 `gh` action 注入上表
+对应的 token 变量，并设置目标 `GH_HOST`。wrapper 不创建、读取或要求专属
+`GH_CONFIG_DIR` profile，也不会输出 token。
 
 ## 日常 agent 使用
 
-1. 根据用户明确指定的身份选择对应的 gh-<identity> wrapper；不要从仓库 owner、
-remote 或当前 gh active account 推断身份。
-2. 对非交互 agent 调用添加 GH_PROMPT_DISABLED=1。例如：
+1. 根据用户明确指定的身份选择对应的 `gh-<identity>` wrapper；不要从仓库 owner、
+   remote 或当前 `gh` active account 推断身份。
+2. 对非交互 agent 调用添加 `GH_PROMPT_DISABLED=1`。例如：
 
 ~~~sh
 GH_PROMPT_DISABLED=1 gh-JoeyTeng pr view 123
 ~~~
 
-3. 不要使用裸 gh。agent 不得调用 gh auth login、logout 或 switch；wrapper 对这
-三个直接调用也会拒绝。其他认证状态变更仍需要用户明确授权。
-4. wrapper 报 profile 未初始化时停下并报告；不要以登录、切换账号或读取 token 的
-方式自行修复。
-5. 对依赖当前仓库 remote 的命令，选择 GH_HOST 与 remote host 匹配的 wrapper；
-不匹配时 gh 可能直接报 remote host 不匹配。跨 host 或非当前仓库操作时，使用目标
-host 的 HOST/OWNER/REPO 形式 --repo 参数，或该子命令的 --hostname 参数。
+3. 不要使用裸 `gh` 执行 GitHub action。不要通过 wrapper 调用 `gh auth login`、
+   `logout` 或 `switch`；wrapper 内部按 host/user 调用只读的 `gh auth token` 是其
+   正常身份选择机制。维护普通账号池仍需要用户明确授权。
+4. 某个命名身份在普通账号池中缺失是正常的可选配置状态，不是安装或 release 失败。
+   停下并报告该身份不可用；不要创建 profile 目录、复制凭据或擅自登录。
+5. 对依赖当前仓库 remote 的命令，选择 `GH_HOST` 与 remote host 匹配的 wrapper；
+   不匹配时 `gh` 可能直接报 remote host 不匹配。跨 host 或非当前仓库操作时，使用
+   目标 host 的 `HOST/OWNER/REPO` 形式 `--repo` 参数，或该子命令的 `--hostname`
+   参数。
 
-## 初始化、验证与修复
+## 账号可用性、验证与配置
 
-只有用户明确授权配置或修复某一个命名 profile 时，才可执行认证状态变更。先运行：
+先运行：
 
 ~~~sh
 gh-profile-doctor
 ~~~
 
-然后遵循 references/profile-contract.md 的单 profile 流程。完成后以
-gh-profile-doctor --verify <profile> 和 gh api user 的实际 login 验收。profile
-缺失在只有两个身份的机器上是正常状态；不要把它当成整个安装失败。
+无参数的 doctor 检查 PATH 中的 `gh` 及其 `auth token` 支持，并针对每个映射以相同的
+host/user token lookup 报告 `available` 或 `unavailable`；它不打印 token、不联网且不
+修改认证状态。
+`gh-profile-doctor --verify <profile>` 会无提示地以该身份执行 `gh api user`，验证实际
+login。省略 `--verify` 后的 profile 名会验证所有可用身份，并跳过不可用身份；显式要求
+验证一个不可用身份会失败。
 
-无参数的 doctor 只做本机检查；--verify 会对已初始化 profile 发起 gh api user
-请求。省略 --verify 后的 profile 名会验证所有已初始化 profile，并跳过缺失的 profile。
+若普通账号池已经有目标 host/login，该 wrapper 可立刻使用，无需为它再登录或初始化
+profile。只有用户明确授权新增或修复一个缺失的可选身份时，才遵循
+`references/profile-contract.md` 的单账号流程。完成后以
+`gh-profile-doctor --verify <profile>` 的实际 login 验收。
 
 ## 边界
 
-- GH_CONFIG_DIR 隔离 gh 配置，但不能替代 Git commit identity、SSH key、remote
-  authorization 或 credential-store policy。
-- GH_HOST 选择 wrapper 的目标 host。对 current-repository 命令，它必须与 remote
-  host 匹配；wrapper 清除继承的 GH_REPO，但显式 repository target 仍应使用目标
+- 普通 `gh auth` 账号池是机器本地状态；它不能替代 Git commit identity、SSH key、
+  remote authorization 或 credential-store policy。
+- wrapper 为单次 action 注入 token，但不应把 token 写入脚本、日志、sync manifest、
+  agent prompt 或命令输出。
+- `GH_HOST` 选择 wrapper 的目标 host。对 current-repository 命令，它必须与 remote
+  host 匹配；wrapper 清除继承的 `GH_REPO`，但显式 repository target 仍应使用目标
   host 的完整形式。
-- 每个 profile 必须对应唯一的 host 和实际 login。相同 host/login 的不同 PAT
-  权限集合不适合用此机制作为隔离边界。
-- wrapper 使用 PATH 中的 gh，不绑定某个包管理器路径；需要 gh 2.75.0 或更高版本，
-  以保证同 host 的不同 profile 不会使用旧版 Keychain 的共享 active-token 槽位。
+- 每个映射必须对应唯一的 host 和实际 login。同一 host/login 的不同 PAT 权限集合不能
+  由此机制区分；需要不同权限模型时，先停止并选择适当的 credential-store 或账号设计。

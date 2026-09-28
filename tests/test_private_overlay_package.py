@@ -39,6 +39,13 @@ GH_PROFILE_WRAPPERS = {
     "gh-hoteng": ("hoteng", "sqbu-github.cisco.com"),
 }
 GH_PROFILE_BINARIES = (*GH_PROFILE_WRAPPERS, "gh-profile-doctor")
+# Synthetic token catalog IDs: access-a, access-b, access-c, access-d.
+SYNTHETIC_GH_TOKENS = {
+    "JoeyTeng": "codex_synth_v1_access_a",
+    "JoeyTeng-Codex": "codex_synth_v1_access_b",
+    "hoteng_cisco": "JoeyPrivateV3AccessSlotC8R2N6Y4",
+    "hoteng": "JoeyPrivateV3AccessSlotD9S3P7Z5",
+}
 
 
 def automation_prompt(automation_id: str) -> str:
@@ -151,6 +158,43 @@ if [ "$1" = "--version" ]; then
     exit 0
 fi
 
+if [ "$1" = "auth" ] && [ "$2" = "token" ] && [ "$3" = "--help" ]; then
+    if [ -n "$FAKE_GH_NO_TOKEN_HELP" ]; then
+        exit 7
+    fi
+    printf '%s\\n' "Print an authentication token."
+    exit 0
+fi
+
+if [ "$1" = "auth" ] && [ "$2" = "token" ]; then
+    if [ "$#" -ne 6 ] || [ "$3" != "--hostname" ] || [ "$5" != "--user" ]; then
+        exit 8
+    fi
+    printf 'lookup host=%s user=%s config=%s gh_host=%s prompt=%s no_update=%s telemetry=%s token=%s github_token=%s enterprise_token=%s github_enterprise_token=%s gh_path=%s gh_repo=%s\\n' \\
+        "$4" "$6" "$GH_CONFIG_DIR" "$GH_HOST" "$GH_PROMPT_DISABLED" "$GH_NO_UPDATE_NOTIFIER" "$GH_TELEMETRY" "$GH_TOKEN" "$GITHUB_TOKEN" "$GH_ENTERPRISE_TOKEN" "$GITHUB_ENTERPRISE_TOKEN" "$GH_PATH" "$GH_REPO" >> "$FAKE_GH_CAPTURE"
+    if [ "$FAKE_GH_MISSING_PROFILE" = "$6" ]; then
+        exit 1
+    fi
+    case "$4/$6" in
+        github.com/JoeyTeng)
+            printf '%s\\n' "$FAKE_GH_TOKEN_JOEYTENG"
+            ;;
+        github.com/JoeyTeng-Codex)
+            printf '%s\\n' "$FAKE_GH_TOKEN_JOEYTENG_CODEX"
+            ;;
+        github.com/hoteng_cisco)
+            printf '%s\\n' "$FAKE_GH_TOKEN_HOTENG_CISCO"
+            ;;
+        sqbu-github.cisco.com/hoteng)
+            printf '%s\\n' "$FAKE_GH_TOKEN_HOTENG"
+            ;;
+        *)
+            exit 9
+            ;;
+    esac
+    exit 0
+fi
+
 if [ "$1" = "api" ]; then
     if [ "$#" -ne 4 ] || [ "$2" != "user" ] || [ "$3" != "--jq" ] || [ "$4" != ".login" ]; then
         exit 8
@@ -161,17 +205,17 @@ if [ "$1" = "api" ]; then
         printf '%s\\n' "$FAKE_GH_LOGIN"
         exit 0
     fi
-    case "$GH_CONFIG_DIR" in
-        */github.com/JoeyTeng)
+    case "$GH_TOKEN/$GH_ENTERPRISE_TOKEN" in
+        "$FAKE_GH_TOKEN_JOEYTENG/")
             printf '%s\\n' "JoeyTeng"
             ;;
-        */github.com/JoeyTeng-Codex)
+        "$FAKE_GH_TOKEN_JOEYTENG_CODEX/")
             printf '%s\\n' "JoeyTeng-Codex"
             ;;
-        */github.com/hoteng_cisco)
+        "$FAKE_GH_TOKEN_HOTENG_CISCO/")
             printf '%s\\n' "hoteng_cisco"
             ;;
-        */sqbu-github.cisco.com/hoteng)
+        "/$FAKE_GH_TOKEN_HOTENG")
             printf '%s\\n' "hoteng"
             ;;
         *)
@@ -1681,27 +1725,27 @@ printf '\\n' >> "$FAKE_GH_CAPTURE"
         )
         self.run_quietly(MODULE.verify_overlay, home, "private")
 
-    def test_gh_identity_wrappers_select_local_profiles_and_reject_auth_state_changes(
+    def test_gh_identity_wrappers_select_global_accounts_and_reject_auth_state_changes(
         self,
     ) -> None:
-        home = self.root / "gh-home"
         fake_bin = self.root / "fake-bin"
         fake_bin.mkdir()
         self.write_fake_gh(fake_bin)
         capture = self.root / "gh-capture"
 
-        for wrapper_name, (profile, host) in GH_PROFILE_WRAPPERS.items():
-            config_dir = home / ".config" / "gh-profiles" / host / profile
-            config_dir.mkdir(parents=True)
-            (config_dir / "hosts.yml").write_text("hosts:\n", encoding="utf-8")
-
         environment = dict(os.environ)
         environment.update(
             {
-                "HOME": str(home),
                 "PATH": os.pathsep.join([str(fake_bin), os.defpath]),
                 "FAKE_GH_CAPTURE": str(capture),
-                "FAKE_GH_VERSION": "2.75.0",
+                "FAKE_GH_TOKEN_JOEYTENG": SYNTHETIC_GH_TOKENS["JoeyTeng"],
+                "FAKE_GH_TOKEN_JOEYTENG_CODEX": SYNTHETIC_GH_TOKENS[
+                    "JoeyTeng-Codex"
+                ],
+                "FAKE_GH_TOKEN_HOTENG_CISCO": SYNTHETIC_GH_TOKENS[
+                    "hoteng_cisco"
+                ],
+                "FAKE_GH_TOKEN_HOTENG": SYNTHETIC_GH_TOKENS["hoteng"],
                 "GH_TOKEN": "inherited-gh-token",
                 "GITHUB_TOKEN": "inherited-github-token",
                 "GH_ENTERPRISE_TOKEN": "inherited-enterprise-token",
@@ -1712,8 +1756,6 @@ printf '\\n' >> "$FAKE_GH_CAPTURE"
                 "GH_REPO": "inherited-repository",
             }
         )
-        environment.pop("XDG_CONFIG_HOME", None)
-
         for wrapper_name, (profile, host) in GH_PROFILE_WRAPPERS.items():
             with self.subTest(wrapper=wrapper_name):
                 result = subprocess.run(
@@ -1729,40 +1771,33 @@ printf '\\n' >> "$FAKE_GH_CAPTURE"
                     env=environment,
                 )
                 self.assertEqual(result.returncode, 0, result.stderr)
-                record = capture.read_text(encoding="utf-8").splitlines()[-1]
-                expected_config = home / ".config" / "gh-profiles" / host / profile
+                lookup_record, record = capture.read_text(
+                    encoding="utf-8"
+                ).splitlines()[-2:]
+                self.assertIn(f"lookup host={host} user={profile}", lookup_record)
+                self.assertIn("config= gh_host= prompt=1", lookup_record)
+                self.assertIn(
+                    "token= github_token= enterprise_token= github_enterprise_token=",
+                    lookup_record,
+                )
                 self.assertIn(f"host={host}", record)
-                self.assertIn(f"config={expected_config}", record)
+                self.assertIn("config= no_update=1", record)
                 self.assertIn("args=<repo><view><owner/repository>", record)
                 self.assertIn("no_update=1", record)
                 self.assertIn("telemetry=0", record)
+                if host == "github.com":
+                    self.assertIn(f"token={SYNTHETIC_GH_TOKENS[profile]}", record)
+                    self.assertIn(
+                        "enterprise_token= github_enterprise_token=", record
+                    )
+                else:
+                    self.assertIn(
+                        "token= github_token= enterprise_token="
+                        f"{SYNTHETIC_GH_TOKENS[profile]}",
+                        record,
+                    )
+                self.assertNotIn("inherited-", lookup_record)
                 self.assertNotIn("inherited-", record)
-
-        xdg_config_home = self.root / "xdg-config"
-        xdg_profile_dir = xdg_config_home / "gh-profiles" / "github.com" / "JoeyTeng"
-        xdg_profile_dir.mkdir(parents=True)
-        (xdg_profile_dir / "hosts.yml").write_text("hosts:\n", encoding="utf-8")
-        xdg_capture = self.root / "xdg-capture"
-        xdg_environment = dict(environment)
-        xdg_environment["XDG_CONFIG_HOME"] = str(xdg_config_home)
-        xdg_environment["FAKE_GH_CAPTURE"] = str(xdg_capture)
-        xdg_environment.pop("HOME", None)
-        xdg_result = subprocess.run(
-            [
-                str(REPO_ROOT / "personal_codex" / "bin" / "gh-JoeyTeng"),
-                "repo",
-                "view",
-                "owner/repository",
-            ],
-            text=True,
-            capture_output=True,
-            check=False,
-            env=xdg_environment,
-        )
-        self.assertEqual(xdg_result.returncode, 0, xdg_result.stderr)
-        self.assertIn(
-            f"config={xdg_profile_dir}", xdg_capture.read_text(encoding="utf-8")
-        )
 
         for wrapper_name in GH_PROFILE_WRAPPERS:
             auth_capture = self.root / f"auth-capture-{wrapper_name}"
@@ -1774,6 +1809,7 @@ printf '\\n' >> "$FAKE_GH_CAPTURE"
                 "switch",
                 "refresh",
                 "setup-git",
+                "token",
             ):
                 with self.subTest(
                     wrapper=wrapper_name, auth_subcommand=auth_subcommand
@@ -1834,20 +1870,29 @@ printf '\\n' >> "$FAKE_GH_CAPTURE"
             self.assertIn("args=<auth><status>", status_record)
             self.assertNotIn("inherited-", status_record)
 
-        uninitialized_environment = dict(environment)
-        uninitialized_environment["HOME"] = str(self.root / "uninitialized-home")
-        uninitialized_capture = self.root / "uninitialized-capture"
-        uninitialized_environment["FAKE_GH_CAPTURE"] = str(uninitialized_capture)
-        uninitialized_result = subprocess.run(
+        unavailable_profile_environment = dict(environment)
+        unavailable_profile_environment["FAKE_GH_MISSING_PROFILE"] = "JoeyTeng"
+        unavailable_profile_capture = self.root / "unavailable-profile-capture"
+        unavailable_profile_environment["FAKE_GH_CAPTURE"] = str(
+            unavailable_profile_capture
+        )
+        unavailable_profile_result = subprocess.run(
             [str(REPO_ROOT / "personal_codex" / "bin" / "gh-JoeyTeng"), "status"],
             text=True,
             capture_output=True,
             check=False,
-            env=uninitialized_environment,
+            env=unavailable_profile_environment,
         )
-        self.assertEqual(uninitialized_result.returncode, 78)
-        self.assertIn("is not initialized", uninitialized_result.stderr)
-        self.assertFalse(uninitialized_capture.exists())
+        self.assertEqual(unavailable_profile_result.returncode, 78)
+        self.assertIn(
+            "could not read the github.com token for JoeyTeng",
+            unavailable_profile_result.stderr,
+        )
+        unavailable_profile_records = unavailable_profile_capture.read_text(
+            encoding="utf-8"
+        ).splitlines()
+        self.assertEqual(len(unavailable_profile_records), 1)
+        self.assertTrue(unavailable_profile_records[0].startswith("lookup "))
 
         unavailable_environment = dict(environment)
         unavailable_environment["PATH"] = ""
@@ -1860,40 +1905,25 @@ printf '\\n' >> "$FAKE_GH_CAPTURE"
         )
         self.assertEqual(unavailable_result.returncode, 127)
 
-        old_version_environment = dict(environment)
-        old_version_environment["FAKE_GH_VERSION"] = "2.74.0"
-        old_version_capture = self.root / "old-version-capture"
-        old_version_environment["FAKE_GH_CAPTURE"] = str(old_version_capture)
-        old_version_result = subprocess.run(
-            [str(REPO_ROOT / "personal_codex" / "bin" / "gh-JoeyTeng"), "status"],
-            text=True,
-            capture_output=True,
-            check=False,
-            env=old_version_environment,
-        )
-        self.assertEqual(old_version_result.returncode, 78)
-        self.assertIn("requires gh 2.75.0 or newer", old_version_result.stderr)
-        old_version_record = old_version_capture.read_text(encoding="utf-8")
-        self.assertIn("version no_update=1 telemetry=0", old_version_record)
-        self.assertNotIn("inherited-", old_version_record)
-
-    def test_gh_profile_doctor_checks_runtime_and_verifies_selected_profile(self) -> None:
-        home = self.root / "gh-doctor-home"
+    def test_gh_profile_doctor_checks_optional_accounts_and_verifies_login(self) -> None:
         fake_bin = self.root / "fake-bin"
         fake_bin.mkdir()
         self.write_fake_gh(fake_bin)
         capture = self.root / "gh-doctor-capture"
-        config_dir = home / ".config" / "gh-profiles" / "github.com" / "JoeyTeng"
-        config_dir.mkdir(parents=True)
-        (config_dir / "hosts.yml").write_text("hosts:\n", encoding="utf-8")
 
         environment = dict(os.environ)
         environment.update(
             {
-                "HOME": str(home),
                 "PATH": os.pathsep.join([str(fake_bin), os.defpath]),
                 "FAKE_GH_CAPTURE": str(capture),
-                "FAKE_GH_VERSION": "2.75.0",
+                "FAKE_GH_TOKEN_JOEYTENG": SYNTHETIC_GH_TOKENS["JoeyTeng"],
+                "FAKE_GH_TOKEN_JOEYTENG_CODEX": SYNTHETIC_GH_TOKENS[
+                    "JoeyTeng-Codex"
+                ],
+                "FAKE_GH_TOKEN_HOTENG_CISCO": SYNTHETIC_GH_TOKENS[
+                    "hoteng_cisco"
+                ],
+                "FAKE_GH_TOKEN_HOTENG": SYNTHETIC_GH_TOKENS["hoteng"],
                 "GH_TOKEN": "inherited-gh-token",
                 "GITHUB_TOKEN": "inherited-github-token",
                 "GH_ENTERPRISE_TOKEN": "inherited-enterprise-token",
@@ -1904,11 +1934,9 @@ printf '\\n' >> "$FAKE_GH_CAPTURE"
                 "GH_REPO": "inherited-repository",
             }
         )
-        environment.pop("XDG_CONFIG_HOME", None)
         doctor = REPO_ROOT / "personal_codex" / "bin" / "gh-profile-doctor"
 
         help_environment = dict(environment)
-        help_environment.pop("HOME", None)
         help_result = subprocess.run(
             [str(doctor), "--help"],
             text=True,
@@ -1919,26 +1947,6 @@ printf '\\n' >> "$FAKE_GH_CAPTURE"
         self.assertEqual(help_result.returncode, 0, help_result.stderr)
         self.assertIn("Usage: gh-profile-doctor", help_result.stdout)
 
-        xdg_config_home = self.root / "gh-doctor-xdg"
-        xdg_config_dir = (
-            xdg_config_home / "gh-profiles" / "github.com" / "JoeyTeng"
-        )
-        xdg_config_dir.mkdir(parents=True)
-        (xdg_config_dir / "hosts.yml").write_text("hosts:\n", encoding="utf-8")
-        xdg_environment = dict(environment)
-        xdg_environment["XDG_CONFIG_HOME"] = str(xdg_config_home)
-        xdg_environment["FAKE_GH_CAPTURE"] = str(self.root / "gh-doctor-xdg-capture")
-        xdg_environment.pop("HOME", None)
-        xdg_result = subprocess.run(
-            [str(doctor)],
-            text=True,
-            capture_output=True,
-            check=False,
-            env=xdg_environment,
-        )
-        self.assertEqual(xdg_result.returncode, 0, xdg_result.stderr)
-        self.assertIn(f"config={xdg_config_dir}", xdg_result.stdout)
-
         status_result = subprocess.run(
             [str(doctor)],
             text=True,
@@ -1947,13 +1955,27 @@ printf '\\n' >> "$FAKE_GH_CAPTURE"
             env=environment,
         )
         self.assertEqual(status_result.returncode, 0, status_result.stderr)
-        self.assertIn("gh version 2.75.0", status_result.stdout)
-        self.assertIn("JoeyTeng: initialized host=github.com", status_result.stdout)
-        self.assertIn("hoteng: uninitialized host=sqbu-github.cisco.com", status_result.stdout)
+        self.assertIn("gh auth token is available.", status_result.stdout)
+        self.assertIn("JoeyTeng: available host=github.com", status_result.stdout)
+        self.assertIn(
+            "hoteng: available host=sqbu-github.cisco.com", status_result.stdout
+        )
         status_records = capture.read_text(encoding="utf-8").splitlines()
-        self.assertEqual(len(status_records), 1)
-        self.assertIn("version no_update=1 telemetry=0", status_records[0])
-        self.assertNotIn("inherited-", status_records[0])
+        self.assertEqual(len(status_records), 4)
+        for profile, host in GH_PROFILE_WRAPPERS.values():
+            with self.subTest(profile=profile):
+                lookup_record = next(
+                    record
+                    for record in status_records
+                    if f"lookup host={host} user={profile}" in record
+                )
+                self.assertIn("prompt=1", lookup_record)
+                self.assertIn("config= gh_host=", lookup_record)
+                self.assertIn(
+                    "token= github_token= enterprise_token= github_enterprise_token=",
+                    lookup_record,
+                )
+                self.assertNotIn("inherited-", lookup_record)
 
         verify_result = subprocess.run(
             [str(doctor), "--verify", "JoeyTeng"],
@@ -1965,9 +1987,13 @@ printf '\\n' >> "$FAKE_GH_CAPTURE"
         self.assertEqual(verify_result.returncode, 0, verify_result.stderr)
         self.assertIn("JoeyTeng: verified host=github.com", verify_result.stdout)
         verification_record = capture.read_text(encoding="utf-8").splitlines()[-1]
+        self.assertIn("host=github.com", verification_record)
         self.assertIn("prompt=1", verification_record)
         self.assertIn("no_update=1", verification_record)
         self.assertIn("telemetry=0", verification_record)
+        self.assertIn(
+            f"token={SYNTHETIC_GH_TOKENS['JoeyTeng']}", verification_record
+        )
         self.assertNotIn("inherited-", verification_record)
 
         wrong_login_environment = dict(environment)
@@ -1982,17 +2008,45 @@ printf '\\n' >> "$FAKE_GH_CAPTURE"
         self.assertEqual(wrong_login_result.returncode, 1)
         self.assertIn("expected JoeyTeng but gh authenticated as unexpected-login", wrong_login_result.stderr)
 
-        old_version_environment = dict(environment)
-        old_version_environment["FAKE_GH_VERSION"] = "2.74.0"
-        old_version_result = subprocess.run(
+        unavailable_environment = dict(environment)
+        unavailable_environment["FAKE_GH_MISSING_PROFILE"] = "hoteng"
+        unavailable_status_result = subprocess.run(
             [str(doctor)],
             text=True,
             capture_output=True,
             check=False,
-            env=old_version_environment,
+            env=unavailable_environment,
         )
-        self.assertEqual(old_version_result.returncode, 78)
-        self.assertIn("gh 2.75.0 or newer is required", old_version_result.stderr)
+        self.assertEqual(unavailable_status_result.returncode, 0)
+        self.assertIn(
+            "hoteng: unavailable host=sqbu-github.cisco.com",
+            unavailable_status_result.stdout,
+        )
+
+        unavailable_verify_result = subprocess.run(
+            [str(doctor), "--verify", "hoteng"],
+            text=True,
+            capture_output=True,
+            check=False,
+            env=unavailable_environment,
+        )
+        self.assertEqual(unavailable_verify_result.returncode, 1)
+        self.assertIn(
+            "hoteng: unavailable in the default gh configuration",
+            unavailable_verify_result.stderr,
+        )
+
+        unsupported_environment = dict(environment)
+        unsupported_environment["FAKE_GH_NO_TOKEN_HELP"] = "1"
+        unsupported_result = subprocess.run(
+            [str(doctor)],
+            text=True,
+            capture_output=True,
+            check=False,
+            env=unsupported_environment,
+        )
+        self.assertEqual(unsupported_result.returncode, 78)
+        self.assertIn("must support the auth token command", unsupported_result.stderr)
 
     def test_install_private_downloads_public_base_and_overlay(self) -> None:
         public_release = self.root / "public-release"

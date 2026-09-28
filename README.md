@@ -9,7 +9,7 @@
 - private `AGENTS.md`
 - private reviewer agent config
 - private personal skills and private variants of personal skills
-- host-local GH CLI identity-profile wrappers; profile directories and credentials are never packaged
+- named GH CLI identity wrappers backed by the ordinary local gh auth pool; credentials are never packaged
 - Apple Notes Work Report overlay
 - private automation `automation.toml` references
 - private automation workspace routing, including Daily Skill Friction's
