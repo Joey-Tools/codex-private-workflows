@@ -11,6 +11,11 @@ if [ "$#" -ge 1 ] && [ "$1" = "auth" ]; then
     fi
 fi
 
+if [ "$#" -ge 1 ] && [ "$1" = "alias" ]; then
+    printf '%s\n' "gh-JoeyTeng-Codex does not permit gh alias commands through this wrapper." >&2
+    exit 64
+fi
+
 unset GH_TOKEN GITHUB_TOKEN GH_ENTERPRISE_TOKEN GITHUB_ENTERPRISE_TOKEN
 unset GH_CONFIG_DIR GH_HOST GH_PATH GH_REPO
 export GH_NO_UPDATE_NOTIFIER=1
@@ -19,6 +24,23 @@ export GH_TELEMETRY=0
 if ! command -v gh >/dev/null 2>&1; then
     printf '%s\n' "gh-JoeyTeng-Codex requires gh to be available on PATH." >&2
     exit 127
+fi
+
+if [ "$#" -ge 1 ]; then
+    if aliases=$(GH_PROMPT_DISABLED=1 gh alias list 2>/dev/null); then
+        :
+    else
+        printf '%s\n' "gh-JoeyTeng-Codex could not inspect global gh aliases." >&2
+        exit 78
+    fi
+    while IFS=: read -r alias_name _; do
+        if [ "$1" = "$alias_name" ]; then
+            printf '%s\n' "gh-JoeyTeng-Codex does not permit global gh aliases through this wrapper." >&2
+            exit 64
+        fi
+    done <<EOF
+$aliases
+EOF
 fi
 
 if token=$(GH_PROMPT_DISABLED=1 gh auth token --hostname "$host" --user "$user"); then

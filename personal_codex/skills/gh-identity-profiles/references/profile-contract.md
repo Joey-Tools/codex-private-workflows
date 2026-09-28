@@ -24,6 +24,9 @@
 wrapper 以表中的精确 host 和 account 执行 `gh auth token --hostname <host> --user
 <account>`，把结果保留在进程内，并仅为随后的一个 `gh` action 设置相应 token 变量。
 它不打印 token、不把它写入文件，也不以默认 active account 作为选择依据。
+wrapper 不允许 `gh alias` 管理命令，且会在 token lookup 前拒绝已配置全局 alias 的名称；
+这避免 alias 把看似普通的 wrapper action 改写为认证命令。请使用对应的规范 `gh`
+子命令，而不是 alias。
 
 ## Before account setup
 

@@ -166,6 +166,13 @@ if [ "$1" = "auth" ] && [ "$2" = "token" ] && [ "$3" = "--help" ]; then
     exit 0
 fi
 
+if [ "$1" = "alias" ] && [ "$2" = "list" ]; then
+    if [ -n "$FAKE_GH_ALIAS_NAME" ]; then
+        printf '%s: %s\\n' "$FAKE_GH_ALIAS_NAME" "$FAKE_GH_ALIAS_TARGET"
+    fi
+    exit 0
+fi
+
 if [ "$1" = "auth" ] && [ "$2" = "token" ]; then
     if [ "$#" -ne 6 ] || [ "$3" != "--hostname" ] || [ "$5" != "--user" ]; then
         exit 8
@@ -1869,6 +1876,78 @@ printf '\\n' >> "$FAKE_GH_CAPTURE"
             status_record = auth_capture.read_text(encoding="utf-8")
             self.assertIn("args=<auth><status>", status_record)
             self.assertNotIn("inherited-", status_record)
+
+            alias_command_capture = self.root / f"alias-command-{wrapper_name}"
+            alias_command_environment = dict(environment)
+            alias_command_environment["FAKE_GH_CAPTURE"] = str(
+                alias_command_capture
+            )
+            alias_command_result = subprocess.run(
+                [
+                    str(REPO_ROOT / "personal_codex" / "bin" / wrapper_name),
+                    "alias",
+                    "list",
+                ],
+                text=True,
+                capture_output=True,
+                check=False,
+                env=alias_command_environment,
+            )
+            self.assertEqual(alias_command_result.returncode, 64)
+            self.assertIn(
+                "does not permit gh alias commands",
+                alias_command_result.stderr,
+            )
+            self.assertFalse(alias_command_capture.exists())
+
+            for alias_name, alias_target in (
+                ("show-token", "auth status --show-token"),
+                ("logout-account", "auth logout"),
+            ):
+                with self.subTest(
+                    wrapper=wrapper_name,
+                    alias_name=alias_name,
+                    alias_target=alias_target,
+                ):
+                    alias_capture = self.root / (
+                        f"alias-{alias_name}-{wrapper_name}"
+                    )
+                    alias_mutation_file = self.root / (
+                        f"alias-mutation-{alias_name}-{wrapper_name}"
+                    )
+                    alias_environment = dict(environment)
+                    alias_environment.update(
+                        {
+                            "FAKE_GH_CAPTURE": str(alias_capture),
+                            "FAKE_GH_ALIAS_NAME": alias_name,
+                            "FAKE_GH_ALIAS_TARGET": alias_target,
+                            "FAKE_GH_ALIAS_MUTATION_FILE": str(
+                                alias_mutation_file
+                            ),
+                        }
+                    )
+                    alias_result = subprocess.run(
+                        [
+                            str(
+                                REPO_ROOT
+                                / "personal_codex"
+                                / "bin"
+                                / wrapper_name
+                            ),
+                            alias_name,
+                        ],
+                        text=True,
+                        capture_output=True,
+                        check=False,
+                        env=alias_environment,
+                    )
+                    self.assertEqual(alias_result.returncode, 64)
+                    self.assertIn(
+                        "does not permit global gh aliases",
+                        alias_result.stderr,
+                    )
+                    self.assertFalse(alias_mutation_file.exists())
+                    self.assertFalse(alias_capture.exists())
 
         unavailable_profile_environment = dict(environment)
         unavailable_profile_environment["FAKE_GH_MISSING_PROFILE"] = "JoeyTeng"

@@ -36,7 +36,8 @@ GH_PROMPT_DISABLED=1 gh-JoeyTeng pr view 123
 
 3. 不要使用裸 `gh` 执行 GitHub action。不要通过 wrapper 调用 `gh auth login`、
    `logout` 或 `switch`；wrapper 内部按 host/user 调用只读的 `gh auth token` 是其
-   正常身份选择机制。维护普通账号池仍需要用户明确授权。
+   正常身份选择机制。wrapper 也不允许 `gh alias` 或已配置的全局 alias，以避免 alias
+   改写认证命令；改用对应的规范 `gh` 子命令。维护普通账号池仍需要用户明确授权。
 4. 某个命名身份在普通账号池中缺失是正常的可选配置状态，不是安装或 release 失败。
    停下并报告该身份不可用；不要创建 profile 目录、复制凭据或擅自登录。
 5. 对依赖当前仓库 remote 的命令，选择 `GH_HOST` 与 remote host 匹配的 wrapper；
