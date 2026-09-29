@@ -12604,112 +12604,59 @@ class PrivateOverlaySyncTests(unittest.TestCase):
         )
         self.assertEqual(agents_lines.count(trigger), 1)
 
-    def test_gh_identity_profiles_are_installed_and_routed(self) -> None:
+    def test_global_gh_identity_policy_is_installed_and_routed(self) -> None:
         manifest = json.loads(
             (REPO_ROOT / "personal_codex" / "private-sync-manifest.json").read_text(
                 encoding="utf-8"
             )
         )
-        expected_links = [
-            {
-                "source": "personal_codex/bin/gh-JoeyTeng",
-                "target": "bin/gh-JoeyTeng",
-                "kind": "file",
-            },
-            {
-                "source": "personal_codex/bin/gh-JoeyTeng-Codex",
-                "target": "bin/gh-JoeyTeng-Codex",
-                "kind": "file",
-            },
-            {
-                "source": "personal_codex/bin/gh-hoteng_cisco",
-                "target": "bin/gh-hoteng_cisco",
-                "kind": "file",
-            },
-            {
-                "source": "personal_codex/bin/gh-hoteng",
-                "target": "bin/gh-hoteng",
-                "kind": "file",
-            },
-            {
-                "source": "personal_codex/bin/gh-profile-doctor",
-                "target": "bin/gh-profile-doctor",
-                "kind": "file",
-            },
-            {
-                "source": "personal_codex/skills/gh-identity-profiles",
-                "target": "skills/gh-identity-profiles",
-                "kind": "skill",
-            },
-        ]
-        for expected_link in expected_links:
-            with self.subTest(target=expected_link["target"]):
-                self.assertIn(expected_link, manifest["links"])
-        self.assertTrue(
-            all("hosts.yml" not in link["source"] for link in manifest["links"])
-        )
-
-        agents_lines = (
-            (REPO_ROOT / "personal_codex" / "AGENTS.md")
-            .read_text(encoding="utf-8")
-            .splitlines()
-        )
-        trigger = (
-            "- In ordinary agent GitHub CLI work, use an explicit gh-<identity> "
-            "wrapper; never use bare gh or mutate gh auth state. Load "
-            "$gh-identity-profiles to select, check, verify, or configure a named identity."
-        )
-        self.assertEqual(agents_lines.count(trigger), 1)
-
-        skill = (
-            REPO_ROOT / "personal_codex" / "skills" / "gh-identity-profiles" / "SKILL.md"
-        ).read_text(encoding="utf-8")
-        contract = (
-            REPO_ROOT
-            / "personal_codex"
-            / "skills"
-            / "gh-identity-profiles"
-            / "references"
-            / "profile-contract.md"
-        ).read_text(encoding="utf-8")
-        self.assertIn("gh auth token --hostname <host> --user <identity>", skill)
-        self.assertIn("gh-profile-doctor", skill)
-        self.assertIn("不分发 token、普通 `gh auth` 配置", skill)
-        self.assertIn("不要使用裸 `gh`", skill)
-        self.assertIn("`GH_HOST` 与 remote host 匹配", skill)
         self.assertIn(
-            "unset GH_CONFIG_DIR GH_TOKEN GITHUB_TOKEN",
-            contract,
+            {
+                "source": "personal_codex/AGENTS.md",
+                "target": "AGENTS.md",
+                "kind": "file",
+            },
+            manifest["links"],
         )
-        self.assertLess(
-            contract.index(
-                "unset GH_CONFIG_DIR GH_TOKEN GITHUB_TOKEN"
-            ),
-            contract.index("gh auth login --hostname github.com"),
-        )
-        self.assertIn("GH_NO_UPDATE_NOTIFIER=1", contract)
-        self.assertIn("GH_ENTERPRISE_TOKEN", contract)
-
-        for wrapper_name in (
-            "gh-JoeyTeng",
-            "gh-JoeyTeng-Codex",
-            "gh-hoteng_cisco",
-            "gh-hoteng",
+        active_targets = {link["target"] for link in manifest["links"]}
+        removed_by_target = {
+            link["target"]: link for link in manifest["removed_links"]
+        }
+        for target in (
+            "bin/gh-JoeyTeng",
+            "bin/gh-JoeyTeng-Codex",
+            "bin/gh-hoteng_cisco",
+            "bin/gh-hoteng",
+            "bin/gh-profile-doctor",
+            "skills/gh-identity-profiles",
         ):
-            with self.subTest(wrapper=wrapper_name):
-                wrapper = (
-                    REPO_ROOT / "personal_codex" / "bin" / wrapper_name
-                ).read_text(encoding="utf-8")
-                self.assertIn("GH_CONFIG_DIR GH_HOST GH_PATH GH_REPO", wrapper)
-                self.assertIn('[ "$#" -ne 2 ] || [ "$2" != "status" ]', wrapper)
-                self.assertIn("only permits gh auth status", wrapper)
-                self.assertIn("does not permit gh alias commands", wrapper)
-                self.assertIn("does not permit global gh aliases", wrapper)
-                self.assertIn("gh alias list", wrapper)
-                self.assertIn("gh auth token --hostname", wrapper)
-                self.assertIn("GH_NO_UPDATE_NOTIFIER=1", wrapper)
-                self.assertIn("GH_TELEMETRY=0", wrapper)
-                self.assertNotIn("requires gh 2.75.0 or newer", wrapper)
+            with self.subTest(retired_target=target):
+                self.assertNotIn(target, active_targets)
+                self.assertIn(target, removed_by_target)
+                self.assertTrue(removed_by_target[target].get("legacy", False))
+
+        agents = (REPO_ROOT / "personal_codex" / "AGENTS.md").read_text(
+            encoding="utf-8"
+        )
+        for constraint in (
+            "authenticated `gh` actions",
+            "non-sandbox execution with network access",
+            "gh auth login",
+            "gh auth logout",
+            "gh auth switch",
+            "gh auth refresh",
+            "failed or empty token lookup stops the action",
+            'gh auth token --hostname "$gh_host" --user "$gh_user"',
+            'test -n "$gh_token" || exit 1',
+            "GH_TOKEN",
+            "GH_ENTERPRISE_TOKEN",
+            "github.com/JoeyTeng",
+            "github.com/JoeyTeng-Codex",
+            "github.com/hoteng_cisco",
+            "sqbu-github.cisco.com/hoteng",
+        ):
+            with self.subTest(constraint=constraint):
+                self.assertIn(constraint, agents)
 
     def test_scheduled_workflow_checks_out_all_sync_rule_repos(self) -> None:
         workflow = (
@@ -13508,7 +13455,6 @@ jobs:
         )
         private_only_sources = {
             "personal_codex/skills/cisco-trackers-lookup",
-            "personal_codex/skills/gh-identity-profiles",
             "personal_codex/skills/remote-host-context",
         }
         manifest_sources = {

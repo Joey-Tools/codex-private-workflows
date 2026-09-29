@@ -1,55 +1,46 @@
 ---
 id: 20260924-ghip001
-title: Named GH Identity Wrappers
+title: Global GH Auth Identity Policy
 status: active
 created: 2026-09-24
-updated: 2026-09-28
+updated: 2026-09-29
 branch: wip/gh-identity-profiles
 pr: https://github.com/Joey-Tools/codex-private-workflows/pull/200
 supersedes: []
 superseded_by:
 ---
 
-# Named GH Identity Wrappers
+# Global GH Auth Identity Policy
 
 ## Summary
 
-- 在 private overlay 中新增四个明确命名的 GitHub CLI wrapper：JoeyTeng、
-  JoeyTeng-Codex、hoteng_cisco 与 hoteng。
-- wrapper 从普通全局 `gh auth` 账号池按精确 host/login 执行 `gh auth token`，仅为
-  单次 action 注入 `GH_TOKEN` 或 `GH_ENTERPRISE_TOKEN`，并设置目标 host。
-- 新增 `gh-profile-doctor` 与 `gh-identity-profiles` skill，分别报告可选账号可用性、
-  提供无提示实际 login 验证，以及按需的普通 `gh auth login` 配置合同。
+- 在 private overlay 的全局 `AGENTS.md` 中加入 GitHub CLI 身份选择规则；该文件由
+  manifest 同步至每台机器的 `~/.codex/AGENTS.md`。
+- 每个认证 action 从普通全局 `gh auth` 账号池按精确 host/login 读取 token，并仅对该
+  action 注入 `GH_TOKEN` 或 `GH_ENTERPRISE_TOKEN`；不会创建、同步或切换
+  `GH_CONFIG_DIR` profile。
+- 身份映射为 `github.com` 的 JoeyTeng、JoeyTeng-Codex、hoteng_cisco，以及
+  `sqbu-github.cisco.com` 的 hoteng。账号可按机器选择性配置，凭据始终保留在本机。
 
 ## Current State
 
-- rules、wrapper、doctor 与 skill 均已加入 private sync manifest；普通 `gh auth`
-  配置、Keychain、Linux secret store 和 token 不会进入 release。此设计不再创建或同步
-  `GH_CONFIG_DIR` profile directory 与专属 `hosts.yml`。
-- wrapper 使用运行时 PATH 中的 `gh`，不绑定 Homebrew、apt 或其他机器特定路径；每次
-  action 前清除继承的配置、token 和路由变量，从默认账号池以 `--hostname` 与 `--user`
-  精确取得目标账号的 token。
-- Cisco GHE probe 从已安装 overlay 的确定性路径调用 `gh-hoteng`，使 GHE action 选择
-  `hoteng@sqbu-github.cisco.com`，而非裸 `gh` 或环境默认身份。
-- 目标机器可先运行 `gh-profile-doctor` 检查当前普通账号池。已有的 host/login 可立即由
-  对应 wrapper 使用；缺少的命名身份是正常的可选状态，只在实际需要且获授权时进行一次
-  普通 `gh auth login`，随后用 doctor 验证。凭据仍只存在于各机器，不会随 release 同步。
-- 当前 Mac 的默认账号池已确认包含全部四个映射；新 doctor 已逐一验证
-  JoeyTeng、JoeyTeng-Codex、hoteng_cisco 与 hoteng 的实际 login 和目标 host，未触发
-  任何重新登录。
-- 此 workstream 保持 active，直到 private overlay release 可用并已在实际需要的目标机器上
-  通过 doctor 完成可用性或 login 验证。
+- `personal_codex/AGENTS.md` 已是 manifest 的普通文件链接，因此安装器会将同一条规则
+  同步到每台机器；没有新的 wrapper、doctor 或 identity skill 需要安装。
+- 认证型 `gh` action 必须在窄范围、非 sandbox 且允许网络的执行中运行。规则要求 token
+  lookup 失败或为空时停止，禁止回退到当前 active account，并清除继承的认证变量。
+- 未经明确授权不得运行 `gh auth login`、`logout`、`switch` 或 `refresh`。需要的可选
+  账号应由操作者按需在本机普通账号池中初始化。
+- 注入 token 的调用只允许直接核心 `gh` 子命令，不能使用 aliases 或 extensions；Cisco
+  GHE 使用 `GH_ENTERPRISE_TOKEN`，公网 GitHub 使用 `GH_TOKEN`。
+- 此 workstream 保持 active，直到 private overlay release 可用并完成新的 policy 迁移验证。
 
 ## Validation
 
-- 已通过 wrapper 的 shell syntax 与 shellcheck 校验。
-- 已通过聚焦的 private overlay package、安装 symlink、wrapper 身份选择、doctor
-  可用性/login 验证与 manifest/skill 路由测试。
-- 已通过 token-wrapper 迁移后的全量 Python 测试套件：2,072 项通过、4 项跳过。
-- 已完成 GPT-5.6 Terra Ultra 本地 review，并采纳 wrapper 身份选择与 remote-host
-  匹配规则的有效发现。
+- 已通过 private overlay package、sync routing 与 Cisco GHE probe 聚焦测试：395 项通过。
+- 已通过全量 Python 测试：2,070 项通过、4 项跳过。
+- 已通过 private sync manifest JSON 解析与 project journal validation。
 
 ## Follow-up
 
-- 合并并发布 private overlay 后，在每台目标机器运行 `gh-profile-doctor`；普通账号池
-  已有的身份无需重复登录，只按需为缺失身份执行一次普通 `gh auth login` 并复验。
+- 合并并发布 private overlay 后，按新的 `AGENTS.md` 规则对需要使用的身份运行一次窄范围
+  `gh api user --jq .login` 验证；普通账号池已有的身份无需重复登录。

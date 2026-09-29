@@ -1,4 +1,0 @@
-interface:
-  display_name: "GH Identity Profiles"
-  short_description: "Select and verify named identities from the global gh auth pool."
-  default_prompt: "Use $gh-identity-profiles to select, verify, or troubleshoot a named GitHub CLI identity from the ordinary global gh auth pool."
