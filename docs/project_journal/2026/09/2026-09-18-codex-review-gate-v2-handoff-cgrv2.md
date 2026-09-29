@@ -3,7 +3,7 @@ id: 20260918-cgrv2
 title: Install Codex Review Gate v2
 status: completed
 created: 2026-09-18
-updated: 2026-09-18
+updated: 2026-09-29
 branch: codex/organization-v2-handoff
 pr:
 supersedes: []
@@ -19,11 +19,12 @@ superseded_by:
 
 ## Current State
 
-- After this change lands, the repository emits the v2 native check while continuing to emit the legacy v1 context during the organization-wide dual-protection handoff.
+- 仓库继续产生 v2 native check；在组织收尾回执核验通过后，临时 v1 bridge 已移除。
 - The scheduled sync workflow still uses `PRIVATE_OVERLAY_SYNC_PR_TOKEN` for its explicitly separate sync-PR mutation contract; this installation does not claim that the token is runtime-discoverable or absent.
-- The legacy bridge remains until the organization handoff receipt proves that no effective rule requires `codex/review-gate`.
+- v2 verifier 和 controller 已对齐 canonical 模板：请求者权限策略为 `any`，controller 仅响应新建评论。
 
 ## Evidence
 
 - Canonical installer: `Joey-Tools/codex-review-gate` v2 bootstrap.
 - Validation: canonical installer byte-idempotence and repository workflow diff checks.
+- Post-cutover audit receipt SHA-256: `9a8b38f2188a14168423a07639d6662c87e198fe2dd12041f67fc224f363817e`.

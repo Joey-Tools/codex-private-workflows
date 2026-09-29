@@ -3,7 +3,7 @@ id: 20260919-cgrv2o
 title: Organization Codex Review Gate v2 Handoff
 status: active
 created: 2026-09-19
-updated: 2026-09-20
+updated: 2026-09-29
 branch: wip/codex-review-gate-v2-handoff-journal-replacement-retry
 pr:
 supersedes: []
@@ -17,7 +17,7 @@ superseded_by:
 - 已签名发布并验证 `JoeyTeng/codex-review-gate-action` `v2.0.1`；该版本仅修正发布包中的 controller 权限模板与安装文档，运行时 gate 逻辑未变。
 - 九个常规目标仓库与 `codex-session-retrospective-history` 已完成 v2 安装或刷新，并以未合并 canary 证明同一 PR head 上的 native v2 check 与 legacy v1 bridge status 都能成功。
 - `codex-waited-delivery` 已归档，不再属于活动 consumer cohort，也不会安装 v2。
-- 组织 ruleset 切换和 v1 清理尚未开始；旧 ruleset 继续保留 deletion/non-fast-forward 等保护，最终只移除 v1 context。
+- 组织 ruleset 已完成 v2 切换和 v1 context 清理；收尾审计回执覆盖 10 个活动仓库，本仓库已移除临时 v1 bridge。
 
 ## Current State
 
@@ -30,22 +30,16 @@ superseded_by:
 ## Active Boundary
 
 - 活动 cohort 现在是 10 个仓库：九个常规目标与 `codex-session-retrospective-history`。归档仓库不作为 v2 安装或 canary admission 的成员。
-- organization ruleset 切换仍未开始。它只能在受控 handoff executor 的实现、验证与完整 cohort reread 完成后推进；在此之前保留所有 legacy contexts 和 bridges。
+- 组织收尾审计已验证旧 v1 context 不再是有效 required status，同时保留 v2 coverage 和既有 deletion/non-fast-forward 保护。本仓库的 bridge 清理已完成；其余仓库按各自变更继续清理。
 
 ## Next Steps
 
-- 重新读取完整 10 仓库活动 cohort，并将归档仓库从最终 handoff manifest / organization target 计划中显式排除。
-- cohort 全部满足后，按不可跳过的 phase gate 执行：
-  1. 记录精确 v2 organization ruleset ID、target repository IDs、payload digest，以及旧 organization/repository protection 的 before snapshot；此处是 rollback/reconcile 的身份边界。
-  2. 激活精确 v2 organization ruleset，但保留所有旧 v1 contexts 与 deletion/non-fast-forward 保护。
-  3. 对全部 10 个活动仓库做稳定完整 reread，证明 v2 是实际 required 的严格 context、target 覆盖精确，且旧 protection 仍有效。
-  4. 仅在第 3 步通过后，按受控 repository cleanup 从所有有效 organization/repository rules 中移除 `codex/review-gate`；保留旧 ruleset 的其余保护。
-  5. 再次完整 reread，要求全部有效规则都不再要求 `codex/review-gate`，同时 v2 coverage 与 deletion/non-fast-forward 仍存在。
-  6. 只有第 5 步通过后，才在各仓库删除 legacy bridge，并验证 bridge removal 后的新 PR 不会等待旧 context。
-- 任一阶段读回不完整、identity/payload 漂移或覆盖不符时停止后续写入；根据已记录的 before snapshot 重新 reconcile，绝不先删 v2 或 bridge 再尝试恢复旧 v1 保护。
+- 对其余活动仓库按同一收尾回执逐仓清理精确 legacy bridge，并完成各自的 PR 验证。
+- 完成全部清理后确认活动 cohort 不再保留 v1 producer；归档仓库继续排除在 cohort 外。
 
 ## Evidence
 
+- Post-cutover audit output/v1: `fresh-v2-canaries-verified`，10 个活动仓库；receipt SHA-256 `9a8b38f2188a14168423a07639d6662c87e198fe2dd12041f67fc224f363817e`。
 - Source release PR: `Joey-Tools/codex-review-gate#55` (`149769eac4b51df023a0edb79ad4a611d7a3edc3`).
 - Release workflow: `Joey-Tools/codex-review-gate` run `35403192145`; target release `JoeyTeng/codex-review-gate-action@v2.0.1`.
 - Controller refresh merges: `codex-review-workflows#117` (`0c9c6343963d4915ce4fea10193dd7a06622a6db`) and `codex-private-workflows#194` (`af1e7a0fb5aa66048b2964d5d85bb6b5f1c44382`), plus the seven earlier regular-repository refresh merges.
