@@ -56,9 +56,9 @@
 - Resolve a selected identity before the action, then inject its token only into that one direct core `gh` subcommand. Clear inherited auth variables first; use `GH_TOKEN` for `github.com` and `GH_ENTERPRISE_TOKEN` for `sqbu-github.cisco.com`.
 
   ```sh
-  gh_token="$(env -u GH_CONFIG_DIR -u XDG_CONFIG_HOME -u GH_HOST -u GH_PATH -u GH_REPO -u GH_TOKEN -u GITHUB_TOKEN -u GH_ENTERPRISE_TOKEN -u GITHUB_ENTERPRISE_TOKEN GH_PROMPT_DISABLED=1 gh auth token --hostname "$gh_host" --user "$gh_user")" || exit 1
+  gh_token="$(env -u GH_CONFIG_DIR -u GH_HOST -u GH_PATH -u GH_REPO -u GH_TOKEN -u GITHUB_TOKEN -u GH_ENTERPRISE_TOKEN -u GITHUB_ENTERPRISE_TOKEN GH_PROMPT_DISABLED=1 gh auth token --hostname "$gh_host" --user "$gh_user")" || exit 1
   test -n "$gh_token" || exit 1
-  env -u GH_CONFIG_DIR -u XDG_CONFIG_HOME -u GH_HOST -u GH_PATH -u GH_REPO -u GH_TOKEN -u GITHUB_TOKEN -u GH_ENTERPRISE_TOKEN -u GITHUB_ENTERPRISE_TOKEN GH_PROMPT_DISABLED=1 GH_HOST="$gh_host" GH_TOKEN="$gh_token" gh <action>
+  env -u GH_CONFIG_DIR -u GH_HOST -u GH_PATH -u GH_REPO -u GH_TOKEN -u GITHUB_TOKEN -u GH_ENTERPRISE_TOKEN -u GITHUB_ENTERPRISE_TOKEN GH_PROMPT_DISABLED=1 GH_HOST="$gh_host" GH_TOKEN="$gh_token" gh <action>
   ```
 
   For Cisco GHE, replace the final `GH_TOKEN` assignment with `GH_ENTERPRISE_TOKEN="$gh_token"`.

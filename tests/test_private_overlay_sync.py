@@ -12646,7 +12646,6 @@ class PrivateOverlaySyncTests(unittest.TestCase):
             "gh auth switch",
             "gh auth refresh",
             "failed or empty token lookup stops the action",
-            "XDG_CONFIG_HOME",
             'gh auth token --hostname "$gh_host" --user "$gh_user"',
             'test -n "$gh_token" || exit 1',
             "GH_TOKEN",
