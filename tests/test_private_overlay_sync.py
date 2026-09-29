@@ -13683,24 +13683,16 @@ jobs:
             with self.subTest(repository=repository):
                 self.assertNotIn(f"`{repository}`", agents)
 
-    def test_codex_review_gate_uses_v2_verifier_and_controlled_legacy_bridge(
+    def test_codex_review_gate_uses_v2_only_verifier_and_controller(
         self,
     ) -> None:
         verifier_path = REPO_ROOT / ".github" / "workflows" / "codex-review-gate.yml"
-        canonical_fixture = (
-            REPO_ROOT
-            / "personal_codex"
-            / "skills"
-            / "review-orchestration-playbook"
-            / "tests"
-            / "fixtures"
-            / "compat"
-            / "codex-review-gate.yml"
+        controller_path = (
+            REPO_ROOT / ".github" / "workflows" / "codex-review-gate-controller.yml"
         )
         legacy_bridge_path = (
             REPO_ROOT / ".github" / "workflows" / "codex-review-gate-legacy-bridge.yml"
         )
-        self.assertEqual(verifier_path.read_bytes(), canonical_fixture.read_bytes())
 
         verifier = verifier_path.read_text(encoding="utf-8")
         for anchor in (
@@ -13714,6 +13706,7 @@ jobs:
             "cancel-in-progress: true",
             "name: codex/github-review-gate",
             "uses: JoeyTeng/codex-review-gate-action@v2",
+            "CODEX_REVIEW_GATE_REQUEST_AUTHOR_PERMISSION: any",
             "github_token: ${{ github.token }}",
             "operation: reconcile",
             "request_review: false",
@@ -13728,25 +13721,30 @@ jobs:
             "issue_comment:",
             "pull_request_review:",
             "context=codex/review-gate",
+            "codex-review-gate.yml@v1",
+            "vars.CODEX_REVIEW_GATE_REQUEST_AUTHOR_PERMISSION",
             "Compatibility only; no reviewer or review lane.",
             "@codex review",
         ):
             with self.subTest(unsupported=unsupported):
                 self.assertNotIn(unsupported, verifier)
 
-        legacy_bridge = legacy_bridge_path.read_text(encoding="utf-8")
+        self.assertFalse(legacy_bridge_path.exists())
+
+        controller = controller_path.read_text(encoding="utf-8")
         for anchor in (
-            "name: Codex Review Gate Legacy Bridge",
-            "pull_request_target:",
             "issue_comment:\n    types: [created]",
-            "statuses: write",
-            "name: codex/review-gate legacy bridge",
-            "uses: JoeyTeng/codex-review-gate-action/.github/workflows/codex-review-gate.yml@v1",
+            "github.event_name == 'issue_comment' &&\n"
+            "          github.event.action == 'created' &&",
+            "CODEX_REVIEW_GATE_REQUEST_AUTHOR_PERMISSION: any",
+            "uses: JoeyTeng/codex-review-gate-action@v2",
         ):
-            with self.subTest(legacy_bridge_anchor=anchor):
-                self.assertIn(anchor, legacy_bridge)
-        self.assertNotIn("pull_request_review:", legacy_bridge)
-        self.assertNotIn("JoeyTeng/codex-review-gate-action@v2", legacy_bridge)
+            with self.subTest(controller_anchor=anchor):
+                self.assertIn(anchor, controller)
+        self.assertNotIn("types: [created, edited]", controller)
+        self.assertNotIn("github.event.action == 'edited'", controller)
+        self.assertNotIn("codex-review-gate.yml@v1", controller)
+        self.assertNotIn("vars.CODEX_REVIEW_GATE_REQUEST_AUTHOR_PERMISSION", controller)
 
     def test_scheduled_workflow_opens_pr_for_sync_changes(self) -> None:
         workflow = (
