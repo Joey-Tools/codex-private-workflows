@@ -48,6 +48,7 @@ class CiscoGheProbeAuthTests(unittest.TestCase):
                 "GH_ENTERPRISE_TOKEN": "wrong-enterprise-token",
                 "GITHUB_ENTERPRISE_TOKEN": "wrong-github-enterprise-token",
                 "GH_CONFIG_DIR": "wrong/config",
+                "XDG_CONFIG_HOME": "wrong/xdg-config",
                 "GH_PATH": "wrong/path",
                 "GH_REPO": "wrong/repository",
             },

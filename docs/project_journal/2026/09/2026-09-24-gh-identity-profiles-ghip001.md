@@ -39,6 +39,8 @@ superseded_by:
 - 已通过 private overlay package、sync routing 与 Cisco GHE probe 聚焦测试：395 项通过。
 - 已通过全量 Python 测试：2,070 项通过、4 项跳过。
 - 已通过 private sync manifest JSON 解析与 project journal validation。
+- GPT-5.6 Terra Ultra 本地审查发现并修复了 `XDG_CONFIG_HOME` 可重定向 token lookup
+  的问题；修复后已重跑上述聚焦与全量测试。
 
 ## Follow-up
 
