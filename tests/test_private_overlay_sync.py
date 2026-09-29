@@ -13690,20 +13690,9 @@ jobs:
         controller_path = (
             REPO_ROOT / ".github" / "workflows" / "codex-review-gate-controller.yml"
         )
-        canonical_fixture = (
-            REPO_ROOT
-            / "personal_codex"
-            / "skills"
-            / "review-orchestration-playbook"
-            / "tests"
-            / "fixtures"
-            / "compat"
-            / "codex-review-gate.yml"
-        )
         legacy_bridge_path = (
             REPO_ROOT / ".github" / "workflows" / "codex-review-gate-legacy-bridge.yml"
         )
-        self.assertEqual(verifier_path.read_bytes(), canonical_fixture.read_bytes())
 
         verifier = verifier_path.read_text(encoding="utf-8")
         for anchor in (
@@ -13732,6 +13721,8 @@ jobs:
             "issue_comment:",
             "pull_request_review:",
             "context=codex/review-gate",
+            "codex-review-gate.yml@v1",
+            "vars.CODEX_REVIEW_GATE_REQUEST_AUTHOR_PERMISSION",
             "Compatibility only; no reviewer or review lane.",
             "@codex review",
         ):
@@ -13752,6 +13743,8 @@ jobs:
                 self.assertIn(anchor, controller)
         self.assertNotIn("types: [created, edited]", controller)
         self.assertNotIn("github.event.action == 'edited'", controller)
+        self.assertNotIn("codex-review-gate.yml@v1", controller)
+        self.assertNotIn("vars.CODEX_REVIEW_GATE_REQUEST_AUTHOR_PERMISSION", controller)
 
     def test_scheduled_workflow_opens_pr_for_sync_changes(self) -> None:
         workflow = (
