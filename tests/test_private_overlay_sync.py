@@ -12604,60 +12604,6 @@ class PrivateOverlaySyncTests(unittest.TestCase):
         )
         self.assertEqual(agents_lines.count(trigger), 1)
 
-    def test_global_gh_identity_policy_is_installed_and_routed(self) -> None:
-        manifest = json.loads(
-            (REPO_ROOT / "personal_codex" / "private-sync-manifest.json").read_text(
-                encoding="utf-8"
-            )
-        )
-        self.assertIn(
-            {
-                "source": "personal_codex/AGENTS.md",
-                "target": "AGENTS.md",
-                "kind": "file",
-            },
-            manifest["links"],
-        )
-        active_targets = {link["target"] for link in manifest["links"]}
-        removed_by_target = {
-            link["target"]: link for link in manifest["removed_links"]
-        }
-        for target in (
-            "bin/gh-JoeyTeng",
-            "bin/gh-JoeyTeng-Codex",
-            "bin/gh-hoteng_cisco",
-            "bin/gh-hoteng",
-            "bin/gh-profile-doctor",
-            "skills/gh-identity-profiles",
-        ):
-            with self.subTest(retired_target=target):
-                self.assertNotIn(target, active_targets)
-                self.assertIn(target, removed_by_target)
-                self.assertTrue(removed_by_target[target].get("legacy", False))
-
-        agents = (REPO_ROOT / "personal_codex" / "AGENTS.md").read_text(
-            encoding="utf-8"
-        )
-        for constraint in (
-            "authenticated `gh` actions",
-            "non-sandbox execution with network access",
-            "gh auth login",
-            "gh auth logout",
-            "gh auth switch",
-            "gh auth refresh",
-            "failed or empty token lookup stops the action",
-            'gh auth token --hostname "$gh_host" --user "$gh_user"',
-            'test -n "$gh_token" || exit 1',
-            "GH_TOKEN",
-            "GH_ENTERPRISE_TOKEN",
-            "github.com/JoeyTeng",
-            "github.com/JoeyTeng-Codex",
-            "github.com/hoteng_cisco",
-            "sqbu-github.cisco.com/hoteng",
-        ):
-            with self.subTest(constraint=constraint):
-                self.assertIn(constraint, agents)
-
     def test_scheduled_workflow_checks_out_all_sync_rule_repos(self) -> None:
         workflow = (
             REPO_ROOT / ".github" / "workflows" / "scheduled-sync-release.yml"

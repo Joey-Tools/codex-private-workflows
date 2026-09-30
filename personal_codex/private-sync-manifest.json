@@ -144,48 +144,6 @@
       "source": "personal_codex/skills/codex-session-retrospective",
       "target": "skills/codex-session-retrospective",
       "kind": "skill"
-    },
-    {
-      "id": "2026-09-29-retire-gh-joeyteng-wrapper",
-      "source": "personal_codex/bin/gh-JoeyTeng",
-      "target": "bin/gh-JoeyTeng",
-      "kind": "file",
-      "legacy": true
-    },
-    {
-      "id": "2026-09-29-retire-gh-joeyteng-codex-wrapper",
-      "source": "personal_codex/bin/gh-JoeyTeng-Codex",
-      "target": "bin/gh-JoeyTeng-Codex",
-      "kind": "file",
-      "legacy": true
-    },
-    {
-      "id": "2026-09-29-retire-gh-hoteng-cisco-wrapper",
-      "source": "personal_codex/bin/gh-hoteng_cisco",
-      "target": "bin/gh-hoteng_cisco",
-      "kind": "file",
-      "legacy": true
-    },
-    {
-      "id": "2026-09-29-retire-gh-hoteng-wrapper",
-      "source": "personal_codex/bin/gh-hoteng",
-      "target": "bin/gh-hoteng",
-      "kind": "file",
-      "legacy": true
-    },
-    {
-      "id": "2026-09-29-retire-gh-profile-doctor",
-      "source": "personal_codex/bin/gh-profile-doctor",
-      "target": "bin/gh-profile-doctor",
-      "kind": "file",
-      "legacy": true
-    },
-    {
-      "id": "2026-09-29-retire-gh-identity-profiles",
-      "source": "personal_codex/skills/gh-identity-profiles",
-      "target": "skills/gh-identity-profiles",
-      "kind": "skill",
-      "legacy": true
     }
   ],
   "reference_only": [
