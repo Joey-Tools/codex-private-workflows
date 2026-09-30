@@ -3,7 +3,7 @@ id: 20260918-cgrv2
 title: Install Codex Review Gate v2
 status: completed
 created: 2026-09-18
-updated: 2026-09-29
+updated: 2026-09-30
 branch: codex/organization-v2-handoff
 pr:
 supersedes: []
@@ -22,6 +22,7 @@ superseded_by:
 - 仓库继续产生 v2 native check；在组织收尾回执核验通过后，临时 v1 bridge 已移除。
 - The scheduled sync workflow still uses `PRIVATE_OVERLAY_SYNC_PR_TOKEN` for its explicitly separate sync-PR mutation contract; this installation does not claim that the token is runtime-discoverable or absent.
 - v2 verifier 和 controller 已对齐 canonical 模板：请求者权限策略为 `any`，controller 仅响应新建评论。
+- The controller matches the canonical fix from `Joey-Tools/codex-review-gate#93`: automatic requests no longer depend on a static `workflow_run.name` payload value.
 
 ## Evidence
 
