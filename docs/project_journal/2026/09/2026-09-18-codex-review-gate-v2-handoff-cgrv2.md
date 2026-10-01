@@ -24,6 +24,11 @@ superseded_by:
 - v2 verifier 和 controller 已对齐 canonical 模板：请求者权限策略为 `any`，`issue_comment` 入口仅响应新建评论。
 - The controller matches the canonical fix from `Joey-Tools/codex-review-gate#93`: when `CODEX_REVIEW_GATE_AUTO_REQUEST` is `true`, a first-attempt failed verifier can request a review for its associated PR without a static `workflow_run.name` payload guard. The variable defaults off until a selected-repository canary is enabled.
 
+## Automatic Request Pilot
+
+- This change uses a pilot-first sequence: land the controller here, enable `CODEX_REVIEW_GATE_AUTO_REQUEST` for this repository only, and verify that a fresh PR commit produces one automatic `@codex review` request. Then apply the controller to the remaining consumers and expand the organization variable's selected-repository visibility.
+- This sequence intentionally precedes the wider consumer rollout. The source project's older rollout journal may still describe installing every controller first until that separate record is updated.
+
 ## Evidence
 
 - Canonical installer: `Joey-Tools/codex-review-gate` v2 bootstrap.
