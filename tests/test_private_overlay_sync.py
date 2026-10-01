@@ -13699,6 +13699,7 @@ jobs:
             "name: Codex Review Gate Verifier",
             "pull_request:",
             "types: [opened, reopened, synchronize, ready_for_review]",
+            "actions: read",
             "contents: read",
             "issues: read",
             "pull-requests: read",

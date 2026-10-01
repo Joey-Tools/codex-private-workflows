@@ -3,7 +3,7 @@ id: 20260919-cgrv2o
 title: Organization Codex Review Gate v2 Handoff
 status: active
 created: 2026-09-19
-updated: 2026-09-29
+updated: 2026-10-01
 branch: wip/codex-review-gate-v2-handoff-journal-replacement-retry
 pr:
 supersedes: []
@@ -21,6 +21,7 @@ superseded_by:
 
 ## Current State
 
+- 本仓库的 v2 verifier workflow 已在现有只读权限基础上增加 `actions: read`，供 gate action 读取 Actions 运行证据。
 - 已完成常规双保护实证的仓库：`codex-apple-notes-toolkit`、`codex-debug-triage`、`codex-personal-sync`、`codex-private-workflows`、`codex-project-journal`、`codex-review-workflows`、`codex-rollout-backup`、`codex-toolbox`、`codex-workflow-hygiene`。
 - `codex-review-workflows#116` 与 `codex-private-workflows#195` 是最后两条无害 canary；均已关闭且未合并，保留成功的 gate 证据。#195 的未完成通用 CI 已在 gate 证据完成后取消，以避免额外 Actions minutes。
 - GitHub 当前把 `JoeyTeng/codex-review-gate-action@v2` 的 Node 20 action runtime 强制到 Node 24 并给出弃用 warning；未观察到功能失败。这是后续 source release 的兼容性债务，不阻塞本次交接。
