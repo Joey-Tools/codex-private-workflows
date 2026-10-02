@@ -1278,9 +1278,13 @@ def _load_contract_with_binding() -> tuple[
 
     identities = contract.get("model_identity")
     expected_identities = {
-        "claude-opus-4-8": {
-            "init_model": "claude-opus-4-8",
-            "accepted_model_usage_keys": ["claude-opus-4-8", "claude-opus-4.8"],
+        "claude-opus-5": {
+            "init_model": "claude-opus-5",
+            "accepted_model_usage_keys": ["claude-opus-5", "claude-opus-5.0"],
+        },
+        "claude-opus-5.0": {
+            "init_model": "claude-opus-5.0",
+            "accepted_model_usage_keys": ["claude-opus-5", "claude-opus-5.0"],
         },
         "claude-opus-4-7": {
             "init_model": "claude-opus-4-7",
@@ -3701,7 +3705,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--model",
         required=True,
-        choices=("claude-opus-4-8", "claude-opus-4-7"),
+        choices=("claude-opus-5",),
         help="Concrete model passed to Claude Code",
     )
     parser.add_argument(
