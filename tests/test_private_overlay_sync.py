@@ -13737,6 +13737,17 @@ jobs:
             "issue_comment:\n    types: [created]",
             "github.event_name == 'issue_comment' &&\n"
             "          github.event.action == 'created' &&",
+            "workflow_run:\n    workflows: [Codex Review Gate Verifier]\n"
+            "    types: [completed]",
+            "vars.CODEX_REVIEW_GATE_AUTO_REQUEST == 'true'",
+            "github.event.workflow_run.event == 'pull_request'",
+            "github.event.workflow_run.run_attempt == 1",
+            "github.event.workflow_run.conclusion == 'failure'",
+            "!github.event.workflow_run.pull_requests[1]",
+            "github.event.workflow_run.head_sha",
+            "github.event_name == 'workflow_run' && 'begin-review'",
+            "request_review: ${{ github.event_name == 'workflow_run' ||",
+            "CODEX_REVIEW_GATE_AUTO_REQUEST: ${{ vars.CODEX_REVIEW_GATE_AUTO_REQUEST }}",
             "CODEX_REVIEW_GATE_REQUEST_AUTHOR_PERMISSION: any",
             "uses: JoeyTeng/codex-review-gate-action@v2",
         ):
@@ -13744,6 +13755,7 @@ jobs:
                 self.assertIn(anchor, controller)
         self.assertNotIn("types: [created, edited]", controller)
         self.assertNotIn("github.event.action == 'edited'", controller)
+        self.assertNotIn("github.event.workflow_run.name ==", controller)
         self.assertNotIn("codex-review-gate.yml@v1", controller)
         self.assertNotIn("vars.CODEX_REVIEW_GATE_REQUEST_AUTHOR_PERMISSION", controller)
 
