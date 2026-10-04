@@ -3,7 +3,7 @@ id: 20260924-ghip001
 title: Global GH Auth Identity Policy
 status: active
 created: 2026-09-24
-updated: 2026-09-29
+updated: 2026-10-04
 branch: wip/gh-identity-profiles
 pr: https://github.com/Joey-Tools/codex-private-workflows/pull/200
 supersedes: []
@@ -28,7 +28,7 @@ superseded_by:
   同步到每台机器；没有新的 wrapper、doctor 或 identity skill 需要安装。
 - 认证型 `gh` action 必须在窄范围、非 sandbox 且允许网络的执行中运行。规则要求 token
   lookup 失败或为空时停止，禁止回退到当前 active account，并清除继承的认证变量。
-- 未经明确授权不得运行 `gh auth login`、`logout`、`switch` 或 `refresh`。需要的可选
+- 未经明确授权不得运行 `gh auth login`、`logout`、`switch`、`refresh` 或 `setup-git`。需要的可选
   账号应由操作者按需在本机普通账号池中初始化。
 - 注入 token 的调用只允许直接核心 `gh` 子命令，不能使用 aliases 或 extensions；Cisco
   GHE 使用 `GH_ENTERPRISE_TOKEN`，公网 GitHub 使用 `GH_TOKEN`。

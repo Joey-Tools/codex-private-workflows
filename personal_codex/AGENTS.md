@@ -52,7 +52,7 @@
 - When polling with `wait_agent`, omit `timeout_ms` to use the `30000` millisecond default or keep it within the supported `10000`–`3600000` millisecond range. Prefer `10000` when a response is imminent and `30000`–`60000` for ordinary or reviewer polling; longer single waits are valid but usually weaken user-facing progress updates.
 - Prefer `gh` CLI for GitHub-specific interactions.
 - For authenticated `gh` actions, request a narrow non-sandbox execution with network access; do not run them inside the sandbox.
-- Do not run `gh auth login`, `gh auth logout`, `gh auth switch`, or `gh auth refresh` unless Joey explicitly authorizes that exact auth change. Use the ordinary global `gh auth` account pool with an exact host/login; never set `GH_CONFIG_DIR` or fall back to the active account. A failed or empty token lookup stops the action.
+- Do not run `gh auth login`, `gh auth logout`, `gh auth switch`, `gh auth refresh`, or `gh auth setup-git` unless Joey explicitly authorizes that exact auth change. Use the ordinary global `gh auth` account pool with an exact host/login; never set `GH_CONFIG_DIR` or fall back to the active account. A failed or empty token lookup stops the action.
 - Resolve a selected identity before the action, then inject its token only into that one direct core `gh` subcommand. Clear inherited auth variables first; use `GH_TOKEN` for `github.com` and `GH_ENTERPRISE_TOKEN` for `sqbu-github.cisco.com`.
 
   ```sh
