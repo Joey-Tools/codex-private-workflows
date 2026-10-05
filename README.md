@@ -9,6 +9,7 @@
 - private `AGENTS.md`
 - private reviewer agent config
 - private personal skills and private variants of personal skills
+- host-wide `AGENTS.md` rules for exact GitHub CLI identity selection from the ordinary local gh auth pool; credentials are never packaged
 - Apple Notes Work Report overlay
 - private automation `automation.toml` references
 - private automation workspace routing, including Daily Skill Friction's

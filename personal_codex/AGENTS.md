@@ -51,6 +51,18 @@
 - For any long-running command you may need to poll, interrupt, or harvest final output from, start it with a pollable TTY/PTY shape; do not assume `write_stdin` can attach to a plain-pipe session after stdin closes. For external review helpers, if the subprocess is still alive but output goes dark, change the session shape before launching a second reviewer.
 - When polling with `wait_agent`, omit `timeout_ms` to use the `30000` millisecond default or keep it within the supported `10000`–`3600000` millisecond range. Prefer `10000` when a response is imminent and `30000`–`60000` for ordinary or reviewer polling; longer single waits are valid but usually weaken user-facing progress updates.
 - Prefer `gh` CLI for GitHub-specific interactions.
+- For authenticated `gh` actions, request a narrow non-sandbox execution with network access; do not run them inside the sandbox.
+- Do not run `gh auth login`, `gh auth logout`, `gh auth switch`, `gh auth refresh`, or `gh auth setup-git` unless Joey explicitly authorizes that exact auth change. Use the ordinary global `gh auth` account pool with an exact host/login; never set `GH_CONFIG_DIR` or fall back to the active account. A failed or empty token lookup stops the action.
+- Resolve a selected identity before the action, then inject its token only into that one direct core `gh` subcommand. Clear inherited auth variables first; use `GH_TOKEN` for `github.com` and `GH_ENTERPRISE_TOKEN` for `sqbu-github.cisco.com`.
+
+  ```sh
+  gh_token="$(env -u GH_CONFIG_DIR -u GH_HOST -u GH_PATH -u GH_REPO -u GH_TOKEN -u GITHUB_TOKEN -u GH_ENTERPRISE_TOKEN -u GITHUB_ENTERPRISE_TOKEN GH_PROMPT_DISABLED=1 gh auth token --hostname "$gh_host" --user "$gh_user")" || exit 1
+  test -n "$gh_token" || exit 1
+  env -u GH_CONFIG_DIR -u GH_HOST -u GH_PATH -u GH_REPO -u GH_TOKEN -u GITHUB_TOKEN -u GH_ENTERPRISE_TOKEN -u GITHUB_ENTERPRISE_TOKEN GH_PROMPT_DISABLED=1 GH_HOST="$gh_host" GH_TOKEN="$gh_token" gh <action>
+  ```
+
+  For Cisco GHE, replace the final `GH_TOKEN` assignment with `GH_ENTERPRISE_TOKEN="$gh_token"`.
+- Do not use `gh` aliases or extensions with an injected token. Select exactly one mapping: `github.com/JoeyTeng` → `GH_TOKEN`; `github.com/JoeyTeng-Codex` → `GH_TOKEN`; `github.com/hoteng_cisco` → `GH_TOKEN`; `sqbu-github.cisco.com/hoteng` → `GH_ENTERPRISE_TOKEN`.
 - For debugging or review tasks, lead with the decisive evidence or findings rather than narrating the whole search.
 - When only key evidence matters, quote or summarize the most relevant 5-10 log lines and label them as key lines instead of pasting whole logs.
 - When build or tooling details matter, include the relevant tool path and version to reduce follow-up questions.
