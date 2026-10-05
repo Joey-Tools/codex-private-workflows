@@ -13745,8 +13745,10 @@ jobs:
             "github.event.workflow_run.conclusion == 'failure'",
             "!github.event.workflow_run.pull_requests[1]",
             "github.event.workflow_run.head_sha",
-            "github.event_name == 'workflow_run' && 'begin-review'",
-            "request_review: ${{ github.event_name == 'workflow_run' ||",
+            "&& 'begin-review' || "
+            "github.event_name == 'workflow_run' && 'report-completion'",
+            "request_review: ${{ github.event_name == 'workflow_run' && "
+            "vars.CODEX_REVIEW_GATE_AUTO_REQUEST == 'true'",
             "CODEX_REVIEW_GATE_AUTO_REQUEST: ${{ vars.CODEX_REVIEW_GATE_AUTO_REQUEST }}",
             "CODEX_REVIEW_GATE_REQUEST_AUTHOR_PERMISSION: any",
             "uses: JoeyTeng/codex-review-gate-action@v2",
@@ -13759,6 +13761,102 @@ jobs:
         self.assertNotIn("codex-review-gate.yml@v1", controller)
         self.assertNotIn("vars.CODEX_REVIEW_GATE_REQUEST_AUTHOR_PERMISSION", controller)
 
+    def test_controller_completion_report_routing_is_narrow_and_independent(
+        self,
+    ) -> None:
+        controller_path = (
+            REPO_ROOT / ".github" / "workflows" / "codex-review-gate-controller.yml"
+        )
+        controller = controller_path.read_text(encoding="utf-8")
+        job_condition = controller.split("    if: >-\n", 1)[1].split(
+            "    runs-on:", 1
+        )[0]
+
+        for admission in (
+            "github.event.action == 'completed'",
+            "github.event.workflow_run.event == 'pull_request'",
+            "github.event.workflow_run.path == "
+            "'.github/workflows/codex-review-gate.yml'",
+            "startsWith(github.event.workflow_run.path, "
+            "'.github/workflows/codex-review-gate.yml@')",
+            "!github.event.workflow_run.pull_requests[1]",
+        ):
+            with self.subTest(admission=admission):
+                self.assertIn(admission, job_condition)
+        for request_only_guard in (
+            "CODEX_REVIEW_GATE_AUTO_REQUEST",
+            "workflow_run.run_attempt",
+            "workflow_run.conclusion",
+            "workflow_run.pull_requests[0].number",
+        ):
+            with self.subTest(request_only_guard=request_only_guard):
+                self.assertNotIn(request_only_guard, job_condition)
+
+        action_inputs = controller.split("        with:\n", 1)[1]
+        operation = next(
+            line.strip()
+            for line in action_inputs.splitlines()
+            if line.startswith("          operation: ")
+        )
+        automatic_branch, completion_branch = operation.split(
+            " || github.event_name == 'workflow_run' && 'report-completion' ||",
+            1,
+        )
+        automatic_request_guards = (
+            "vars.CODEX_REVIEW_GATE_AUTO_REQUEST == 'true'",
+            "github.event.workflow_run.run_attempt == 1",
+            "github.event.workflow_run.conclusion == 'failure'",
+            "github.event.workflow_run.pull_requests[0].number",
+            "!github.event.workflow_run.pull_requests[1]",
+            "'begin-review'",
+        )
+        for request_guard in automatic_request_guards:
+            with self.subTest(request_guard=request_guard):
+                self.assertIn(request_guard, automatic_branch)
+        for request_only_guard in (
+            "CODEX_REVIEW_GATE_AUTO_REQUEST",
+            "workflow_run.run_attempt",
+            "workflow_run.conclusion",
+            "pull_requests[0].number",
+        ):
+            with self.subTest(completion_request_only_guard=request_only_guard):
+                self.assertNotIn(request_only_guard, completion_branch)
+
+        self.assertIn(
+            "(github.event.workflow_run.pull_requests[0].number || '0')",
+            action_inputs,
+        )
+        self.assertIn(
+            "request_review: ${{ github.event_name == 'workflow_run' && "
+            "vars.CODEX_REVIEW_GATE_AUTO_REQUEST == 'true'",
+            action_inputs,
+        )
+        request_review = next(
+            line.strip()
+            for line in action_inputs.splitlines()
+            if line.startswith("          request_review: ")
+        )
+        for guard in automatic_request_guards[:-1]:
+            with self.subTest(request_review_guard=guard):
+                self.assertIn(guard, request_review)
+        self.assertIn(
+            "github.event_name == 'workflow_dispatch' && inputs.request_review || false",
+            request_review,
+        )
+
+        canonical_path = ".github/workflows/codex-review-gate.yml"
+        self.assertIn(
+            f"github.event.workflow_run.path == '{canonical_path}'",
+            job_condition,
+        )
+        self.assertIn(
+            f"startsWith(github.event.workflow_run.path, '{canonical_path}@')",
+            job_condition,
+        )
+        self.assertNotIn(
+            f"startsWith(github.event.workflow_run.path, '{canonical_path}')",
+            job_condition,
+        )
     def test_scheduled_workflow_opens_pr_for_sync_changes(self) -> None:
         workflow = (
             REPO_ROOT / ".github" / "workflows" / "scheduled-sync-release.yml"
