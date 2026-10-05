@@ -13745,6 +13745,9 @@ jobs:
             "github.event.workflow_run.conclusion == 'failure'",
             "!github.event.workflow_run.pull_requests[1]",
             "github.event.workflow_run.head_sha",
+            "github.event.workflow_run.pull_requests[0].number || "
+            "github.event.issue.number || inputs.pr_number || "
+            "github.event.workflow_run.id || github.run_id",
             "&& 'begin-review' || "
             "github.event_name == 'workflow_run' && 'report-completion'",
             "request_review: ${{ github.event_name == 'workflow_run' && "
@@ -13768,6 +13771,15 @@ jobs:
             REPO_ROOT / ".github" / "workflows" / "codex-review-gate-controller.yml"
         )
         controller = controller_path.read_text(encoding="utf-8")
+        concurrency = controller.split("concurrency:\n", 1)[1].split(
+            "\njobs:", 1
+        )[0]
+        self.assertIn(
+            "github.event.workflow_run.pull_requests[0].number || "
+            "github.event.issue.number || inputs.pr_number || "
+            "github.event.workflow_run.id || github.run_id",
+            concurrency,
+        )
         job_condition = controller.split("    if: >-\n", 1)[1].split(
             "    runs-on:", 1
         )[0]
@@ -13778,7 +13790,8 @@ jobs:
             "github.event.workflow_run.path == "
             "'.github/workflows/codex-review-gate.yml'",
             "startsWith(github.event.workflow_run.path, "
-            "'.github/workflows/codex-review-gate.yml@')",
+            "'.github/workflows/codex-review-gate.yml@refs/pull/')",
+            "endsWith(github.event.workflow_run.path, '/merge')",
             "!github.event.workflow_run.pull_requests[1]",
         ):
             with self.subTest(admission=admission):
@@ -13793,6 +13806,14 @@ jobs:
                 self.assertNotIn(request_only_guard, job_condition)
 
         action_inputs = controller.split("        with:\n", 1)[1]
+        pr_number = next(
+            line.strip()
+            for line in action_inputs.splitlines()
+            if line.startswith("          pr_number: ")
+        )
+        self.assertIn("pull_requests[0].number || '0'", pr_number)
+        self.assertNotIn("workflow_run.id", pr_number)
+        self.assertNotIn("github.run_id", pr_number)
         operation = next(
             line.strip()
             for line in action_inputs.splitlines()
@@ -13850,6 +13871,14 @@ jobs:
             job_condition,
         )
         self.assertIn(
+            f"startsWith(github.event.workflow_run.path, '{canonical_path}@refs/pull/')",
+            job_condition,
+        )
+        self.assertIn(
+            "endsWith(github.event.workflow_run.path, '/merge')",
+            job_condition,
+        )
+        self.assertNotIn(
             f"startsWith(github.event.workflow_run.path, '{canonical_path}@')",
             job_condition,
         )
