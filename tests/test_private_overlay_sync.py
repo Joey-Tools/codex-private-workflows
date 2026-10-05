@@ -3142,6 +3142,60 @@ class PrivateOverlaySyncTests(unittest.TestCase):
             "current",
         )
 
+    def test_approved_review_sync_migrates_previous_personal_agents(
+        self,
+    ) -> None:
+        rule, _target = self._create_canonical_regular_file_overlay_rule(
+            authoritative=True
+        )
+        agents, legacy, legacy_digest = self._synthetic_legacy_personal_agents()
+        source = self.source_root / rule.repo / rule.source
+        locked_sources = self._locked_canonical_review_source(rule, source)
+
+        with mock.patch.object(
+            SYNC_MODULE,
+            "PERSONAL_AGENTS_LEGACY_REVIEW_BLOCK_SHA256",
+            legacy_digest,
+        ):
+            current = SYNC_MODULE._migrated_personal_agents_bytes(legacy)
+        previous = current.replace(
+            SYNC_MODULE.PERSONAL_AGENTS_CURRENT_CONSENT_LINE,
+            SYNC_MODULE.PERSONAL_AGENTS_PREVIOUS_CONSENT_LINE,
+            1,
+        ).replace(
+            SYNC_MODULE.PERSONAL_AGENTS_CURRENT_REVIEW_BLOCK,
+            SYNC_MODULE.PERSONAL_AGENTS_PREVIOUS_REVIEW_BLOCK,
+            1,
+        )
+        self.assertEqual(
+            SYNC_MODULE._personal_agents_review_guidance_state(previous),
+            "previous",
+        )
+        agents.write_bytes(previous)
+
+        with mock.patch.object(
+            SYNC_MODULE,
+            "PERSONAL_AGENTS_LEGACY_REVIEW_BLOCK_SHA256",
+            legacy_digest,
+        ):
+            SYNC_MODULE.sync_sources(
+                self.repo_root,
+                self.source_root,
+                (rule,),
+                locked_sources=locked_sources,
+            )
+            self.assertEqual(agents.read_bytes(), current)
+            current_inode = agents.stat().st_ino
+            SYNC_MODULE.sync_sources(
+                self.repo_root,
+                self.source_root,
+                (rule,),
+                locked_sources=locked_sources,
+            )
+
+        self.assertEqual(agents.read_bytes(), current)
+        self.assertEqual(agents.stat().st_ino, current_inode)
+
     def test_locked_authoritative_review_sync_migrates_personal_agents(
         self,
     ) -> None:
@@ -4493,6 +4547,15 @@ class PrivateOverlaySyncTests(unittest.TestCase):
             legacy_digest,
         ):
             current = SYNC_MODULE._migrated_personal_agents_bytes(legacy)
+            previous = current.replace(
+                SYNC_MODULE.PERSONAL_AGENTS_CURRENT_CONSENT_LINE,
+                SYNC_MODULE.PERSONAL_AGENTS_PREVIOUS_CONSENT_LINE,
+                1,
+            ).replace(
+                SYNC_MODULE.PERSONAL_AGENTS_CURRENT_REVIEW_BLOCK,
+                SYNC_MODULE.PERSONAL_AGENTS_PREVIOUS_REVIEW_BLOCK,
+                1,
+            )
             cases = {
                 "legacy-drift": legacy.replace(
                     b"Synthetic legacy review detail",
@@ -4528,6 +4591,12 @@ class PrivateOverlaySyncTests(unittest.TestCase):
                     + SYNC_MODULE.PERSONAL_AGENTS_CURRENT_CONSENT_LINE,
                     1,
                 ),
+                "previous-consent-suffix-drift": previous.replace(
+                    SYNC_MODULE.PERSONAL_AGENTS_PREVIOUS_CONSENT_LINE,
+                    SYNC_MODULE.PERSONAL_AGENTS_PREVIOUS_CONSENT_LINE.rstrip(b"\n")
+                    + b" Extra authorization.\n",
+                    1,
+                ),
                 "legacy-consent-reordered": legacy.replace(
                     SYNC_MODULE.PERSONAL_AGENTS_LEGACY_CONSENT_LINE,
                     b"",
@@ -4546,7 +4615,34 @@ class PrivateOverlaySyncTests(unittest.TestCase):
                     + SYNC_MODULE.PERSONAL_AGENTS_CURRENT_REVIEW_BLOCK,
                     1,
                 ),
+                "previous-block-drift": previous.replace(
+                    b"Single uses one fresh-context local Codex review session",
+                    b"Single uses a fresh-context local Codex review session",
+                    1,
+                ),
                 "mixed": legacy + current,
+                "mixed-previous-and-current": current.replace(
+                    SYNC_MODULE.PERSONAL_AGENTS_REVIEW_BLOCK_BOUNDARY,
+                    SYNC_MODULE.PERSONAL_AGENTS_PREVIOUS_REVIEW_BLOCK
+                    + SYNC_MODULE.PERSONAL_AGENTS_REVIEW_BLOCK_BOUNDARY,
+                    1,
+                ),
+                "previous-consent-current-block": previous.replace(
+                    SYNC_MODULE.PERSONAL_AGENTS_PREVIOUS_REVIEW_BLOCK,
+                    SYNC_MODULE.PERSONAL_AGENTS_CURRENT_REVIEW_BLOCK,
+                    1,
+                ),
+                "current-consent-previous-block": current.replace(
+                    SYNC_MODULE.PERSONAL_AGENTS_CURRENT_REVIEW_BLOCK,
+                    SYNC_MODULE.PERSONAL_AGENTS_PREVIOUS_REVIEW_BLOCK,
+                    1,
+                ),
+                "duplicate-previous": previous.replace(
+                    SYNC_MODULE.PERSONAL_AGENTS_REVIEW_BLOCK_BOUNDARY,
+                    SYNC_MODULE.PERSONAL_AGENTS_PREVIOUS_REVIEW_BLOCK
+                    + SYNC_MODULE.PERSONAL_AGENTS_REVIEW_BLOCK_BOUNDARY,
+                    1,
+                ),
                 "duplicate-current": current.replace(
                     SYNC_MODULE.PERSONAL_AGENTS_REVIEW_BLOCK_BOUNDARY,
                     SYNC_MODULE.PERSONAL_AGENTS_CURRENT_REVIEW_BLOCK
@@ -4563,6 +4659,32 @@ class PrivateOverlaySyncTests(unittest.TestCase):
                     ),
                 ):
                     SYNC_MODULE._migrated_personal_agents_bytes(data)
+
+    def test_personal_agents_previous_migration_preserves_current_preamble(
+        self,
+    ) -> None:
+        current = (REPO_ROOT / SYNC_MODULE.PERSONAL_AGENTS_TARGET).read_bytes()
+        self.assertEqual(
+            SYNC_MODULE._personal_agents_review_guidance_state(current),
+            "current",
+        )
+        previous = current.replace(
+            SYNC_MODULE.PERSONAL_AGENTS_CURRENT_CONSENT_LINE,
+            SYNC_MODULE.PERSONAL_AGENTS_PREVIOUS_CONSENT_LINE,
+            1,
+        ).replace(
+            SYNC_MODULE.PERSONAL_AGENTS_CURRENT_REVIEW_BLOCK,
+            SYNC_MODULE.PERSONAL_AGENTS_PREVIOUS_REVIEW_BLOCK,
+            1,
+        )
+        migrated = SYNC_MODULE._migrated_personal_agents_bytes(previous)
+
+        self.assertEqual(
+            SYNC_MODULE._personal_agents_review_guidance_state(previous),
+            "previous",
+        )
+        self.assertEqual(migrated, current)
+        self.assertEqual(SYNC_MODULE._migrated_personal_agents_bytes(current), current)
 
     def test_personal_agents_drift_fails_before_new_review_tree_is_installed(
         self,
@@ -5182,13 +5304,22 @@ class PrivateOverlaySyncTests(unittest.TestCase):
         )
 
         self.assertEqual(
-            rule.replacements[0],
-            SYNC_MODULE.Replacement(
-                SYNC_MODULE.CHANGE_DELIVERY_PUBLIC_DESCRIPTION_PREFIX,
-                "description: \"Run Joey's local ",
-                path=SYNC_MODULE.CHANGE_DELIVERY_SKILL_PATH,
-                required_count=1,
-                frontmatter_key="description",
+            rule.replacements[:2],
+            (
+                SYNC_MODULE.Replacement(
+                    SYNC_MODULE.CHANGE_DELIVERY_PUBLIC_DESCRIPTION_PREFIX,
+                    "description: \"Run Joey's local ",
+                    path=SYNC_MODULE.CHANGE_DELIVERY_SKILL_PATH,
+                    required=False,
+                    frontmatter_key="description",
+                ),
+                SYNC_MODULE.Replacement(
+                    SYNC_MODULE.CHANGE_DELIVERY_NEW_PUBLIC_DESCRIPTION_PREFIX,
+                    "description: \"Run Joey's implementation-to-commit gate for ",
+                    path=SYNC_MODULE.CHANGE_DELIVERY_SKILL_PATH,
+                    required=False,
+                    frontmatter_key="description",
+                ),
             ),
         )
 
@@ -5208,6 +5339,50 @@ class PrivateOverlaySyncTests(unittest.TestCase):
             "Ask Joey before expanding scope.\n"
             "Historical public example:\n"
             'description: "Run a local delivery gate for old work."\n',
+        )
+
+    def test_change_delivery_sync_rule_builds_new_private_variant(self) -> None:
+        source = (
+            self.source_root
+            / "codex-review-workflows"
+            / "skills"
+            / "change-delivery-workflow"
+            / "SKILL.md"
+        )
+        source.parent.mkdir(parents=True)
+        source.write_text(
+            "---\n"
+            "name: change-delivery-workflow\n"
+            'description: "Run the implementation-to-commit gate for non-trivial '
+            "repo changes: implement, build, test, update docs, freeze the landing "
+            "head, and hand review selection to review-orchestration-playbook. "
+            "Use for local delivery or before PR readiness; an eligible remote PR "
+            'reviewer avoids duplicate local review unless explicitly requested."\n'
+            "---\n\n"
+            "Keep the implementation focused.\n",
+            encoding="utf-8",
+        )
+        rule = next(
+            rule
+            for rule in SYNC_MODULE.SYNC_RULES
+            if rule.target == SYNC_MODULE.CHANGE_DELIVERY_TARGET
+        )
+
+        SYNC_MODULE.sync_sources(self.repo_root, self.source_root, (rule,))
+
+        target = self.repo_root / rule.target / "SKILL.md"
+        self.assertEqual(
+            target.read_text(encoding="utf-8"),
+            "---\n"
+            "name: change-delivery-workflow\n"
+            "description: \"Run Joey's implementation-to-commit gate for "
+            "non-trivial repo changes: implement, build, test, update docs, freeze "
+            "the landing head, and hand review selection to "
+            "review-orchestration-playbook. Use for local delivery or before PR "
+            "readiness; an eligible remote PR reviewer avoids duplicate local "
+            'review unless explicitly requested."\n'
+            "---\n\n"
+            "Keep the implementation focused.\n",
         )
 
     def test_change_delivery_sync_rule_replays_locked_legacy_private_variant(
@@ -13667,6 +13842,25 @@ jobs:
         ):
             with self.subTest(retired=retired):
                 self.assertNotIn(retired, agents)
+
+    def test_agents_guidance_uses_sol_parent_luna_workers_and_remote_first_review(self) -> None:
+        agents = _final_personal_agents_text()
+        for anchor in (
+            "Default the parent/orchestrator to GPT-6.1 Sol",
+            "GPT-6 Luna, up to Max",
+            "also explicitly authorizes that allocation for local reviewers",
+            "local-review default remains GPT-6.1 Sol at model-default reasoning",
+            "not the parent's effort",
+            "Other reviewer models/efforts and Claude Code require explicit opt-in",
+            "Claude reviewer defaults to Opus 5.5",
+            "defaults to remote-only",
+            "without local review unless explicitly requested",
+            "native GitHub Copilot PR code review",
+            "Generic workflow requests do not opt into Claude or default triple",
+        ):
+            with self.subTest(anchor=anchor):
+                self.assertIn(anchor, agents)
+        self.assertNotIn("run local/internal review, then commit", agents)
 
     def test_agents_guidance_leaves_skill_repo_gate_to_scoped_guidance(self) -> None:
         agents = _final_personal_agents_text()

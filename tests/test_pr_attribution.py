@@ -927,7 +927,9 @@ class PrAttributionTests(unittest.TestCase):
         ).read_text(encoding="utf-8")
         self.assertIn("scripts/pr_attribution.py", agents)
         self.assertIn("immediately before merge", agents)
-        self.assertIn("GPT-5.6 Sol Ultra", agents)
+        self.assertIn("documented missing-evidence fallback", agents)
+        self.assertIn("do not duplicate a pinned fallback label here", agents)
+        self.assertNotIn("GPT-5.6 Sol Ultra", agents)
         self.assertNotIn("summaries auto", agents)
         self.assertIn("## PR Attribution", skill)
 
