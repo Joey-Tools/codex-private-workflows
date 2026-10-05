@@ -10,11 +10,22 @@ import subprocess
 import sys
 
 GH_HOST = "sqbu-github.cisco.com"
+GH_USER = "hoteng"
 MAX_LIMIT = 20
 GH_COMMAND_TIMEOUT_SECONDS = 60
 REPO_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 COMMIT_RE = re.compile(r"^[0-9a-fA-F]{7,64}$")
 QUERY_SCOPE_OVERRIDE_RE = re.compile(r"(?i)(?:^|[\s(])(?:repo|org|user):\S")
+GH_INHERITED_ENVIRONMENT_KEYS = (
+    "GH_TOKEN",
+    "GITHUB_TOKEN",
+    "GH_ENTERPRISE_TOKEN",
+    "GITHUB_ENTERPRISE_TOKEN",
+    "GH_CONFIG_DIR",
+    "GH_HOST",
+    "GH_PATH",
+    "GH_REPO",
+)
 
 
 def _error(message: str) -> int:
@@ -75,12 +86,55 @@ def _normalize_pull_item(value: object) -> dict[str, object]:
     }
 
 
-def _run_gh_json(argv: list[str]) -> tuple[int, object]:
+def _global_gh_environment() -> dict[str, str]:
     env = os.environ.copy()
-    env["GH_HOST"] = GH_HOST
+    for key in GH_INHERITED_ENVIRONMENT_KEYS:
+        env.pop(key, None)
+    env["GH_PROMPT_DISABLED"] = "1"
+    return env
+
+
+def _read_global_gh_token() -> tuple[int, str | None]:
     try:
         result = subprocess.run(
-            argv,
+            ["gh", "auth", "token", "--hostname", GH_HOST, "--user", GH_USER],
+            env=_global_gh_environment(),
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=GH_COMMAND_TIMEOUT_SECONDS,
+        )
+    except FileNotFoundError:
+        print("error=gh command not found", file=sys.stderr)
+        return 1, None
+    except subprocess.TimeoutExpired:
+        print(
+            f"error=gh command timed out after {GH_COMMAND_TIMEOUT_SECONDS}s",
+            file=sys.stderr,
+        )
+        return 1, None
+    if result.returncode != 0:
+        message = result.stderr.strip() or "gh auth token failed"
+        print(f"error={message}", file=sys.stderr)
+        return 1, None
+    token = result.stdout.strip()
+    if not token:
+        print("error=gh auth token returned no token", file=sys.stderr)
+        return 1, None
+    return 0, token
+
+
+def _run_gh_json(arguments: list[str]) -> tuple[int, object]:
+    token_rc, token = _read_global_gh_token()
+    if token_rc != 0 or token is None:
+        return 1, None
+
+    env = _global_gh_environment()
+    env["GH_HOST"] = GH_HOST
+    env["GH_ENTERPRISE_TOKEN"] = token
+    try:
+        result = subprocess.run(
+            ["gh", *arguments],
             env=env,
             capture_output=True,
             text=True,
@@ -118,7 +172,6 @@ def cmd_pr_view(args: argparse.Namespace) -> int:
 
     rc, payload = _run_gh_json(
         [
-            "gh",
             "pr",
             "view",
             str(pr),
@@ -150,7 +203,6 @@ def cmd_search_prs(args: argparse.Namespace) -> int:
 
     rc, payload = _run_gh_json(
         [
-            "gh",
             "search",
             "prs",
             "--repo",
@@ -178,7 +230,6 @@ def cmd_commit_pulls(args: argparse.Namespace) -> int:
 
     rc, payload = _run_gh_json(
         [
-            "gh",
             "api",
             f"repos/{repo}/commits/{commit}/pulls",
         ]
