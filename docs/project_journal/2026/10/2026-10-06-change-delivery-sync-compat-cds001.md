@@ -1,7 +1,7 @@
 ---
 id: 20261006-cds001
 title: Change-Delivery Source Sync Compatibility
-status: active
+status: completed
 created: 2026-10-06
 updated: 2026-10-06
 branch: codex/private-sync-description-compat-20261006
@@ -26,13 +26,13 @@ superseded_by:
 - [x] Add a regression reproducing the locked prepared-source rejection.
 - [x] Implement the explicit alternative-prefix transform and cardinality check.
 - [x] Run focused and broader relevant Python 3.13 tests plus journal/diff validation.
-- [x] Prepare a focused local repair for handoff without merging, publishing a release, or installing it.
+- [x] Isolate the compatibility repair from broader model-policy promotion, source-sync dispatch, and installation.
 
 ## Validation and Next Steps
 
 - Python 3.13.0: all 10 selected change-delivery tests passed; the complete private overlay sync module passed 348 tests; generated source-lock and sync-manifest modules passed 112 tests. The two broader runs contain 460 tests in total, without counting the repeated focused subset twice.
 - Python syntax compilation, `git diff --check`, and project-journal validation passed. No bytecode artifacts were introduced under `scripts/` or `tests/`.
-- This is a local implementation/validation checkpoint, not a remote-reviewed or merged head. Deliver the focused repair through the normal remote review and CI gate before resuming source promotion.
+- This entry describes the focused repair's target-branch state after squash merge. PR review, CI, and transient delivery state belong in the repair PR rather than this journal. The broader model-policy migration remains separate.
 - Draft PR #211 overlaps this compatibility slice. Reconcile that overlap with the landed repair when continuing the broader policy work; keep its global model/AGENTS migration separate.
 - Full live source-checkout admission, successful scheduled sync, release publication, and installation remain unverified. No new default-branch success is inferred from unit or fixture replay.
 
