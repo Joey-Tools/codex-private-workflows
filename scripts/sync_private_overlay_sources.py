@@ -205,9 +205,13 @@ COMMON_JOEY_TEXT_REPLACEMENTS = (
 CHANGE_DELIVERY_TARGET = _path("personal_codex/skills/change-delivery-workflow")
 CHANGE_DELIVERY_SKILL_PATH = Path("SKILL.md")
 CHANGE_DELIVERY_PUBLIC_DESCRIPTION_PREFIX = 'description: "Run a local '
+CHANGE_DELIVERY_NEW_PUBLIC_DESCRIPTION_PREFIX = (
+    'description: "Run the implementation-to-commit gate for '
+)
 CHANGE_DELIVERY_PRIVATE_DESCRIPTION_PREFIXES = (
     "description: \"Run Joey's local pre-commit delivery gate for ",
     "description: \"Run Joey's local delivery gate for ",
+    "description: \"Run Joey's implementation-to-commit gate for ",
 )
 FRONTMATTER_SAFE_KEY_CHARACTERS = frozenset(
     "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-"
@@ -767,7 +771,14 @@ SYNC_RULES = (
                 CHANGE_DELIVERY_PUBLIC_DESCRIPTION_PREFIX,
                 "description: \"Run Joey's local ",
                 path=CHANGE_DELIVERY_SKILL_PATH,
-                required_count=1,
+                required=False,
+                frontmatter_key="description",
+            ),
+            Replacement(
+                CHANGE_DELIVERY_NEW_PUBLIC_DESCRIPTION_PREFIX,
+                "description: \"Run Joey's implementation-to-commit gate for ",
+                path=CHANGE_DELIVERY_SKILL_PATH,
+                required=False,
                 frontmatter_key="description",
             ),
         ),
@@ -2223,6 +2234,36 @@ def _apply_rule_replacements(target: Path, rule: SyncRule) -> None:
 
 
 def _validate_replacement_counts(rule: SyncRule, found: dict[int, int]) -> None:
+    if rule.target == CHANGE_DELIVERY_TARGET:
+        allowed_prefixes = {
+            CHANGE_DELIVERY_PUBLIC_DESCRIPTION_PREFIX,
+            CHANGE_DELIVERY_NEW_PUBLIC_DESCRIPTION_PREFIX,
+        }
+        replacement_indexes = [
+            index
+            for index, replacement in enumerate(rule.replacements)
+            if replacement.path == CHANGE_DELIVERY_SKILL_PATH
+            and replacement.frontmatter_key == "description"
+            and replacement.old in allowed_prefixes
+        ]
+        matched_prefixes = {
+            rule.replacements[index].old for index in replacement_indexes
+        }
+        actual_count = sum(found.get(index, 0) for index in replacement_indexes)
+        if (
+            matched_prefixes != allowed_prefixes
+            or len(replacement_indexes) != len(allowed_prefixes)
+        ):
+            raise SyncError(
+                "invalid change-delivery description replacement alternatives: "
+                "expected exactly one definition for each recognized public prefix"
+            )
+        if actual_count != 1:
+            raise SyncError(
+                "required replacement count mismatch for "
+                f"{rule.target}: recognized change-delivery description "
+                f"({actual_count} != 1)"
+            )
     for index, replacement in enumerate(rule.replacements):
         actual_count = found.get(index, 0)
         if replacement.required_count is not None:
