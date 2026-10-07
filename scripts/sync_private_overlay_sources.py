@@ -1109,6 +1109,19 @@ SYNC_RULES = (
                 required_count=1,
             ),
             Replacement(
+                "2. Read one matching schema in `schemas/`, `schemas/common.schema.json`, and one matching JSON example in `examples/`. Read only those files.",
+                "2. Before the first resource read or command, resolve "
+                "`<loaded-skill-dir>` as the absolute directory containing the "
+                "loaded `SKILL.md`. Anchor all `schemas/`, `examples/`, and "
+                "`references/` paths to that directory; keep the target repository "
+                "as the working directory. Use `<loaded-skill-dir>` for CLI paths "
+                "without guessing an installation name. Read one matching schema "
+                "in `schemas/`, `schemas/common.schema.json`, and one matching "
+                "JSON example in `examples/`. Read only those files.",
+                path=Path("SKILL.md"),
+                required_count=1,
+            ),
+            Replacement(
                 "node bin/archify.mjs",
                 "node <loaded-skill-dir>/bin/archify.mjs",
                 path=Path("SKILL.md"),
@@ -1260,7 +1273,7 @@ PERSONAL_AGENTS_LEGACY_CONSENT_LINE = (
     b"reviewers; approval justifications must still name the exact repo/PR and data "
     b"scope.\n"
 )
-PERSONAL_AGENTS_CURRENT_CONSENT_LINE = (
+PERSONAL_AGENTS_PREVIOUS_CONSENT_LINE = (
     b"- For Joey-requested Codex/GitHub PR or repo workflows, treat OpenAI Codex "
     b"services and GitHub-owned PR/review APIs as trusted destinations for scoped "
     b"repo/PR data: PR diffs, changed files, necessary nearby context, review "
@@ -1269,6 +1282,17 @@ PERSONAL_AGENTS_CURRENT_CONSENT_LINE = (
     b"files, unrelated repositories, broad workspace dumps, and non-Codex external "
     b"reviewers; approval justifications must still name the exact repo/PR and data "
     b"scope.\n"
+)
+PERSONAL_AGENTS_CURRENT_CONSENT_LINE = (
+    b"- For Joey-requested Codex/GitHub PR or repo workflows, treat OpenAI Codex "
+    b"services and GitHub-owned PR/review APIs, including native GitHub Copilot "
+    b"PR code review when selected by the remote-first route, as trusted destinations "
+    b"for scoped repo/PR data: PR diffs, changed files, necessary nearby context, "
+    b"review prompts/results, PR comments, statuses, and same-PR fix-loop reruns. "
+    b"This standing consent excludes runtime secrets and credentials, untracked "
+    b"private files, unrelated repositories, broad workspace dumps, Claude Code, "
+    b"Copilot CLI, and other external reviewers without explicit opt-in; approval "
+    b"justifications must still name the exact repo/PR and data scope.\n"
 )
 PERSONAL_AGENTS_LEGACY_REVIEW_BLOCK_START = (
     b"- For catalogued low-level-helper Claude local-login artifacts,"
@@ -1940,6 +1964,7 @@ def _personal_agents_review_guidance_state(data: bytes) -> str:
         raise SyncError("personal AGENTS guidance is not valid UTF-8") from exc
 
     legacy_consent_count = data.count(PERSONAL_AGENTS_LEGACY_CONSENT_LINE)
+    previous_consent_count = data.count(PERSONAL_AGENTS_PREVIOUS_CONSENT_LINE)
     current_consent_count = data.count(PERSONAL_AGENTS_CURRENT_CONSENT_LINE)
     legacy_start_count = data.count(PERSONAL_AGENTS_LEGACY_REVIEW_BLOCK_START)
     current_block_count = data.count(PERSONAL_AGENTS_CURRENT_REVIEW_BLOCK)
@@ -1947,6 +1972,7 @@ def _personal_agents_review_guidance_state(data: bytes) -> str:
 
     if (
         legacy_consent_count == 1
+        and previous_consent_count == 0
         and current_consent_count == 0
         and legacy_start_count == 1
         and current_block_count == 0
@@ -1967,6 +1993,28 @@ def _personal_agents_review_guidance_state(data: bytes) -> str:
 
     if (
         legacy_consent_count == 0
+        and previous_consent_count == 1
+        and current_consent_count == 0
+        and legacy_start_count == 0
+        and current_block_count == 1
+        and boundary_count == 1
+    ):
+        consent = data.index(PERSONAL_AGENTS_PREVIOUS_CONSENT_LINE)
+        start = data.index(PERSONAL_AGENTS_CURRENT_REVIEW_BLOCK)
+        boundary = data.index(PERSONAL_AGENTS_REVIEW_BLOCK_BOUNDARY)
+        consent_starts_line = consent == 0 or data[consent - 1 : consent] == b"\n"
+        block_starts_line = start == 0 or data[start - 1 : start] == b"\n"
+        if (
+            consent_starts_line
+            and block_starts_line
+            and consent < start
+            and start + len(PERSONAL_AGENTS_CURRENT_REVIEW_BLOCK) == boundary
+        ):
+            return "previous"
+
+    if (
+        legacy_consent_count == 0
+        and previous_consent_count == 0
         and current_consent_count == 1
         and legacy_start_count == 0
         and current_block_count == 1
@@ -1996,14 +2044,21 @@ def _migrated_personal_agents_bytes(data: bytes) -> bytes:
     if state == "current":
         return data
 
-    start = data.index(PERSONAL_AGENTS_LEGACY_REVIEW_BLOCK_START)
-    boundary = data.index(PERSONAL_AGENTS_REVIEW_BLOCK_BOUNDARY)
-    migrated = data[:start] + PERSONAL_AGENTS_CURRENT_REVIEW_BLOCK + data[boundary:]
-    migrated = migrated.replace(
-        PERSONAL_AGENTS_LEGACY_CONSENT_LINE,
-        PERSONAL_AGENTS_CURRENT_CONSENT_LINE,
-        1,
-    )
+    if state == "previous":
+        migrated = data.replace(
+            PERSONAL_AGENTS_PREVIOUS_CONSENT_LINE,
+            PERSONAL_AGENTS_CURRENT_CONSENT_LINE,
+            1,
+        )
+    else:
+        start = data.index(PERSONAL_AGENTS_LEGACY_REVIEW_BLOCK_START)
+        boundary = data.index(PERSONAL_AGENTS_REVIEW_BLOCK_BOUNDARY)
+        migrated = data[:start] + PERSONAL_AGENTS_CURRENT_REVIEW_BLOCK + data[boundary:]
+        migrated = migrated.replace(
+            PERSONAL_AGENTS_LEGACY_CONSENT_LINE,
+            PERSONAL_AGENTS_CURRENT_CONSENT_LINE,
+            1,
+        )
     if _personal_agents_review_guidance_state(migrated) != "current":
         raise SyncError("personal AGENTS review-guidance migration did not converge")
     return migrated
@@ -7213,7 +7268,7 @@ def _assert_pinned_personal_agents_file(
         or pinned.target_parent.path != expected_target.parent
         or pinned.entry.name != expected_target.name
         or pinned.snapshot.access_policy[1] != 0o644
-        or pinned.guidance_state not in {"legacy", "current"}
+        or pinned.guidance_state not in {"legacy", "previous", "current"}
         or _personal_agents_review_guidance_state(pinned.snapshot.data)
         != pinned.guidance_state
     ):
@@ -7904,7 +7959,7 @@ def _bind_canonical_review_personal_agents_plan(
                 "or advance the canonical source lock"
             )
         action = _PERSONAL_AGENTS_ACTION_LEGACY_NOOP
-    elif pinned_file.guidance_state == "legacy":
+    elif pinned_file.guidance_state in {"legacy", "previous"}:
         action = _PERSONAL_AGENTS_ACTION_MIGRATE
     else:
         action = _PERSONAL_AGENTS_ACTION_CURRENT_NOOP
@@ -7958,7 +8013,7 @@ def _assert_canonical_review_personal_agents_plan(
         _PERSONAL_AGENTS_ACTION_LEGACY_NOOP
         if not migration_source and state == "legacy"
         else _PERSONAL_AGENTS_ACTION_MIGRATE
-        if migration_source and state == "legacy"
+        if migration_source and state in {"legacy", "previous"}
         else _PERSONAL_AGENTS_ACTION_CURRENT_NOOP
         if migration_source and state == "current"
         else None
