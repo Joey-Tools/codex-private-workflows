@@ -1284,6 +1284,11 @@ PERSONAL_AGENTS_MODEL_ROUTING_MARKERS = (
     b"authorized Claude reviewer defaults to Opus 5.5",
     b"Record actual selections; do not silently substitute models",
 )
+PERSONAL_AGENTS_MODEL_ROUTING_HISTORICAL_SUCCESSOR = (
+    b"- Explanations, discussion, analysis, and summaries use Simplified Chinese. "
+    b"Code, comments, identifiers, commit messages, and Markdown code blocks use "
+    b"English.\n"
+)
 PERSONAL_AGENTS_LEGACY_CONSENT_LINE = (
     b"- For Joey-requested Codex/GitHub PR or repo workflows, treat OpenAI Codex "
     b"services and GitHub-owned PR/review APIs as trusted destinations for scoped "
@@ -2020,6 +2025,24 @@ def _personal_agents_model_routing_state(data: bytes) -> str:
             raise SyncError(
                 "personal AGENTS model-routing paragraph is drifted or misplaced"
             )
+        anchor_count = data.count(PERSONAL_AGENTS_SHORT_FILE_GUIDELINE)
+        if anchor_count != 1:
+            raise SyncError(
+                "personal AGENTS model-routing absence requires one exact short-file "
+                "guideline anchor"
+            )
+        anchor_end = (
+            data.index(PERSONAL_AGENTS_SHORT_FILE_GUIDELINE)
+            + len(PERSONAL_AGENTS_SHORT_FILE_GUIDELINE)
+        )
+        if data[
+            anchor_end : anchor_end
+            + len(PERSONAL_AGENTS_MODEL_ROUTING_HISTORICAL_SUCCESSOR)
+        ] != PERSONAL_AGENTS_MODEL_ROUTING_HISTORICAL_SUCCESSOR:
+            raise SyncError(
+                "personal AGENTS model-routing absence is not the exact historical "
+                "successor state"
+            )
         return "missing"
 
     remaining = data.replace(PERSONAL_AGENTS_MODEL_ROUTING_PARAGRAPH, b"", 1)
@@ -2043,6 +2066,14 @@ def _personal_agents_model_routing_state(data: bytes) -> str:
         raise SyncError(
             "personal AGENTS model-routing paragraph is not at its exact top-level "
             "position"
+        )
+    successor_start = anchor_end + len(PERSONAL_AGENTS_MODEL_ROUTING_PARAGRAPH)
+    if data[
+        successor_start : successor_start
+        + len(PERSONAL_AGENTS_MODEL_ROUTING_HISTORICAL_SUCCESSOR)
+    ] != PERSONAL_AGENTS_MODEL_ROUTING_HISTORICAL_SUCCESSOR:
+        raise SyncError(
+            "personal AGENTS model-routing paragraph has an unexpected successor"
         )
     return "present"
 

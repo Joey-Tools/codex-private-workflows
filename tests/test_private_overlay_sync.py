@@ -945,6 +945,7 @@ class PrivateOverlaySyncTests(unittest.TestCase):
         data = (
             b"# Personal Guidelines\n\n"
             + SYNC_MODULE.PERSONAL_AGENTS_SHORT_FILE_GUIDELINE
+            + SYNC_MODULE.PERSONAL_AGENTS_MODEL_ROUTING_HISTORICAL_SUCCESSOR
             + SYNC_MODULE.PERSONAL_AGENTS_LEGACY_CONSENT_LINE
             + legacy_block
             + SYNC_MODULE.PERSONAL_AGENTS_REVIEW_BLOCK_BOUNDARY
@@ -3363,6 +3364,15 @@ class PrivateOverlaySyncTests(unittest.TestCase):
             SYNC_MODULE.PERSONAL_AGENTS_MODEL_ROUTING_PARAGRAPH,
             intermediate,
         )
+        historical_slot = intermediate.split(
+            SYNC_MODULE.PERSONAL_AGENTS_SHORT_FILE_GUIDELINE,
+            1,
+        )[1]
+        self.assertTrue(
+            historical_slot.startswith(
+                SYNC_MODULE.PERSONAL_AGENTS_MODEL_ROUTING_HISTORICAL_SUCCESSOR
+            )
+        )
         self.assertEqual(
             SYNC_MODULE._personal_agents_review_guidance_state(intermediate),
             "intermediate",
@@ -3656,6 +3666,12 @@ class PrivateOverlaySyncTests(unittest.TestCase):
                 SYNC_MODULE.PERSONAL_AGENTS_PREVIOUS_REVIEW_BLOCK,
                 1,
             )
+            previous_without_model_routing = intermediate_without_model_routing.replace(
+                SYNC_MODULE.PERSONAL_AGENTS_CURRENT_CONSENT_LINE,
+                SYNC_MODULE.PERSONAL_AGENTS_PREVIOUS_CONSENT_LINE,
+                1,
+            )
+            conflicting_slot_policy = b"- Use GPT-6.2 as the default model.\n"
             cases = {
                 "current-without-model-routing": current_without_model_routing,
                 "model-routing-drift": current.replace(
@@ -3701,6 +3717,30 @@ class PrivateOverlaySyncTests(unittest.TestCase):
                 "ambiguous-insertion-anchor": intermediate_without_model_routing.replace(
                     SYNC_MODULE.PERSONAL_AGENTS_SHORT_FILE_GUIDELINE,
                     SYNC_MODULE.PERSONAL_AGENTS_SHORT_FILE_GUIDELINE * 2,
+                    1,
+                ),
+                "legacy-marker-free-slot-rewrite": legacy.replace(
+                    SYNC_MODULE.PERSONAL_AGENTS_MODEL_ROUTING_HISTORICAL_SUCCESSOR,
+                    conflicting_slot_policy,
+                    1,
+                ),
+                "previous-marker-free-slot-rewrite": (
+                    previous_without_model_routing.replace(
+                        SYNC_MODULE.PERSONAL_AGENTS_MODEL_ROUTING_HISTORICAL_SUCCESSOR,
+                        conflicting_slot_policy,
+                        1,
+                    )
+                ),
+                "intermediate-marker-free-slot-rewrite": (
+                    intermediate_without_model_routing.replace(
+                        SYNC_MODULE.PERSONAL_AGENTS_MODEL_ROUTING_HISTORICAL_SUCCESSOR,
+                        conflicting_slot_policy,
+                        1,
+                    )
+                ),
+                "current-post-insertion-slot-rewrite": current.replace(
+                    SYNC_MODULE.PERSONAL_AGENTS_MODEL_ROUTING_HISTORICAL_SUCCESSOR,
+                    conflicting_slot_policy,
                     1,
                 ),
             }
