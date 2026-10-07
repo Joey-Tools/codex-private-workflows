@@ -1728,6 +1728,56 @@ class PrivateOverlaySyncTests(unittest.TestCase):
             target.read_text(encoding="utf-8"), "Use this when Joey asks.\n"
         )
 
+    def test_common_joey_text_replacements_distinguish_request_noun_from_verb(
+        self,
+    ) -> None:
+        source = self.source_root / "example-repo" / "skill" / "SKILL.md"
+        source.parent.mkdir(parents=True)
+        source.write_text(
+            "The user request is documented.\n"
+            "Only when the user requests model discovery.\n"
+            "Joey requester details are separate.\n",
+            encoding="utf-8",
+        )
+        rule = SYNC_MODULE.SyncRule(
+            repo="example-repo",
+            source=Path("skill"),
+            target=Path("personal_codex/skills/example"),
+            replacements=SYNC_MODULE.COMMON_JOEY_TEXT_REPLACEMENTS,
+        )
+
+        SYNC_MODULE.sync_sources(self.repo_root, self.source_root, (rule,))
+
+        target = self.repo_root / "personal_codex" / "skills" / "example" / "SKILL.md"
+        generated = target.read_text(encoding="utf-8")
+        self.assertEqual(
+            generated,
+            "Joey's request is documented.\n"
+            "Only when Joey requests model discovery.\n"
+            "Joey requester details are separate.\n",
+        )
+        normalized = generated.lower()
+        self.assertIn("only when joey requests model discovery", normalized)
+        self.assertNotIn("joey's requests model discovery", normalized)
+        self.assertIn("joey requester details are separate", normalized)
+
+    def test_whole_word_replacement_keeps_backslashes_literal(self) -> None:
+        transformed, found = SYNC_MODULE._apply_text_replacements(
+            "Joey request",
+            Path("fixture.txt"),
+            (
+                SYNC_MODULE.Replacement(
+                    "Joey request",
+                    r"\1",
+                    whole_word=True,
+                ),
+            ),
+            surface="fixture",
+        )
+
+        self.assertEqual(transformed, r"\1")
+        self.assertEqual(found, {0: 1})
+
     def test_archify_sync_rule_builds_clean_package_with_loaded_skill_paths(self) -> None:
         rule = next(
             candidate
@@ -1810,6 +1860,8 @@ class PrivateOverlaySyncTests(unittest.TestCase):
         )
         (source / "renderers" / "shared").mkdir(parents=True)
         (source / "renderers" / "shared" / "brand-marks.mjs").write_text(
+            "import { BRAND_MARKS } from './generated-brand-marks.mjs';\n"
+            "import { throwDiagnosticError } from './diagnostics.mjs';\n"
             "import { esc, textUnits } from './utils.mjs';\n"
             "unknown.push(`/${collection}/${index}/brand ${JSON.stringify(node.brand)} is an unpinned URL; capture it first with \\`archify brands capture ${url.href} --json\\``);\n"
             "? ['run `archify brands capture <url> --json` and author the returned digest-pinned brand object']\n"
@@ -1852,9 +1904,19 @@ class PrivateOverlaySyncTests(unittest.TestCase):
                 f"node archify/renderers/{renderer}/render.mjs\n",
                 encoding="utf-8",
             )
+        skill_dir_replacement = next(
+            replacement
+            for replacement in rule.replacements
+            if replacement.path == Path("SKILL.md")
+            and replacement.required_count == 1
+            and replacement.old.startswith(
+                "2. Read one matching schema in `schemas/`"
+            )
+        )
         (source / "SKILL.md").write_text(
-            "node bin/archify.mjs validate\n"
-            "scripts/check-update.mjs\n",
+            skill_dir_replacement.old
+            + "\nnode bin/archify.mjs validate\n"
+            + "scripts/check-update.mjs\n",
             encoding="utf-8",
         )
 
@@ -1907,7 +1969,33 @@ class PrivateOverlaySyncTests(unittest.TestCase):
         )
         self.assertFalse((target / "scripts" / "generate-brand-marks.mjs").exists())
         self.assertFalse((target / "scripts" / "generate-validators.mjs").exists())
+        brand_marks = (target / "renderers" / "shared" / "brand-marks.mjs").read_text(
+            encoding="utf-8"
+        )
+        for import_statement in (
+            "import { BRAND_MARKS } from './generated-brand-marks.mjs';",
+            "import { throwDiagnosticError } from './diagnostics.mjs';",
+            "import path from 'node:path';",
+            "import { fileURLToPath } from 'node:url';",
+        ):
+            self.assertEqual(brand_marks.count(import_statement), 1)
         skill = (target / "SKILL.md").read_text(encoding="utf-8")
+        directory_definition = (
+            "resolve `<loaded-skill-dir>` as the absolute directory containing "
+            "the loaded `SKILL.md`"
+        )
+        first_schema_read = "Read one matching schema in `schemas/`"
+        self.assertLess(skill.index(directory_definition), skill.index(first_schema_read))
+        self.assertIn(
+            "Anchor all `schemas/`, `examples/`, and `references/` paths to that directory",
+            skill,
+        )
+        self.assertIn("keep the target repository as the working directory", skill)
+        self.assertIn("without guessing an installation name", skill)
+        self.assertLess(
+            skill.index(directory_definition),
+            skill.index("node <loaded-skill-dir>/bin/archify.mjs validate"),
+        )
         self.assertIn("node <loaded-skill-dir>/bin/archify.mjs validate", skill)
         self.assertIn(
             "<loaded-skill-dir>/scripts/check-update.mjs",
@@ -2011,17 +2099,58 @@ class PrivateOverlaySyncTests(unittest.TestCase):
             Path("scripts/verify_generated_sync_source_lock.py"),
             Path("tests/test_generated_sync_source_lock.py"),
         }
+        atomic_promotion_test_paths = {
+            Path("tests/test_pending_agent_claim_compatibility.py"),
+            Path("tests/test_pending_staging_cleanup.py"),
+            Path("tests/test_quarantine_empty_batch_reclaim.py"),
+            Path("tests/test_regular_agent_materialization.py"),
+            Path("tests/test_regular_overlay_uninstall_status_regressions.py"),
+        }
         toolbox_rules = {
             (rule.source, rule.target)
             for rule in SYNC_MODULE.SYNC_RULES
             if rule.repo == "codex-toolbox"
         }
+        toolbox_source_keys = [
+            (rule.repo, rule.source)
+            for rule in SYNC_MODULE.SYNC_RULES
+            if rule.repo == "codex-toolbox"
+        ]
+        toolbox_targets = [
+            rule.target
+            for rule in SYNC_MODULE.SYNC_RULES
+            if rule.repo == "codex-toolbox"
+        ]
 
+        self.assertEqual(len(toolbox_source_keys), len(set(toolbox_source_keys)))
+        self.assertEqual(len(toolbox_targets), len(set(toolbox_targets)))
         self.assertTrue(
             {
                 (path, path) for path in generated_paths | receipt_contract_paths
             }.issubset(toolbox_rules)
         )
+        self.assertEqual(
+            {
+                (source, target)
+                for source, target in toolbox_rules
+                if source in atomic_promotion_test_paths
+                or target in atomic_promotion_test_paths
+            },
+            {(path, path) for path in atomic_promotion_test_paths},
+        )
+        for path in atomic_promotion_test_paths:
+            matching_rules = [
+                rule
+                for rule in SYNC_MODULE.SYNC_RULES
+                if rule.repo == "codex-toolbox"
+                and (rule.source == path or rule.target == path)
+            ]
+            with self.subTest(path=path):
+                self.assertEqual(len(matching_rules), 1)
+                self.assertEqual(
+                    (matching_rules[0].source, matching_rules[0].target),
+                    (path, path),
+                )
 
     def test_review_sync_preserves_private_ci_fixture_and_personalization(
         self,
@@ -3217,9 +3346,18 @@ class PrivateOverlaySyncTests(unittest.TestCase):
             legacy_digest,
         ):
             current = SYNC_MODULE._migrated_personal_agents_bytes(legacy)
+            previous = current.replace(
+                SYNC_MODULE.PERSONAL_AGENTS_CURRENT_CONSENT_LINE,
+                SYNC_MODULE.PERSONAL_AGENTS_PREVIOUS_CONSENT_LINE,
+                1,
+            )
             cases = {
                 "current": (
                     current,
+                    "exact legacy canonical review source requires exact legacy",
+                ),
+                "previous": (
+                    previous,
                     "exact legacy canonical review source requires exact legacy",
                 ),
                 "mixed": (legacy + current, "exact legacy or migrated state"),
@@ -3375,6 +3513,85 @@ class PrivateOverlaySyncTests(unittest.TestCase):
         self.assertEqual(agents.stat().st_ino, initial_inode)
         self.assertFalse((target / "old-marker").exists())
         self.assertEqual((target / "SKILL.md").read_bytes(), b"public\n")
+
+    def test_candidate_review_source_migrates_previous_agents_then_noops(self) -> None:
+        rule, target = self._create_canonical_regular_file_overlay_rule(
+            authoritative=True
+        )
+        agents, legacy, legacy_digest = self._synthetic_legacy_personal_agents()
+        source = self.source_root / rule.repo / rule.source
+        locked_sources = self._locked_canonical_review_source(rule, source)
+
+        with mock.patch.object(
+            SYNC_MODULE,
+            "PERSONAL_AGENTS_LEGACY_REVIEW_BLOCK_SHA256",
+            legacy_digest,
+        ):
+            current = SYNC_MODULE._migrated_personal_agents_bytes(legacy)
+            previous = current.replace(
+                SYNC_MODULE.PERSONAL_AGENTS_CURRENT_CONSENT_LINE,
+                SYNC_MODULE.PERSONAL_AGENTS_PREVIOUS_CONSENT_LINE,
+                1,
+            )
+            agents.write_bytes(previous)
+            agents.chmod(0o644)
+            initial_inode = agents.stat().st_ino
+            with mock.patch.object(
+                SYNC_MODULE,
+                "_migrate_personal_agents_after_canonical_review_sync",
+                wraps=SYNC_MODULE._migrate_personal_agents_after_canonical_review_sync,
+            ) as migrate_agents, mock.patch.object(
+                SYNC_MODULE,
+                "_verify_current_personal_agents_after_canonical_review_sync",
+                wraps=SYNC_MODULE._verify_current_personal_agents_after_canonical_review_sync,
+            ) as verify_current:
+                SYNC_MODULE.sync_sources(
+                    self.repo_root,
+                    self.source_root,
+                    (rule,),
+                    locked_sources=locked_sources,
+                )
+
+        migrate_agents.assert_called_once()
+        verify_current.assert_not_called()
+        migration_plan = migrate_agents.call_args.args[-1]
+        self.assertEqual(
+            migration_plan.action,
+            SYNC_MODULE._PERSONAL_AGENTS_ACTION_MIGRATE,
+        )
+        self.assertEqual(migration_plan.pinned_file.guidance_state, "previous")
+        self.assertEqual(agents.read_bytes(), current)
+        self.assertNotEqual(agents.stat().st_ino, initial_inode)
+        self.assertFalse((target / "old-marker").exists())
+        self.assertEqual((target / "SKILL.md").read_bytes(), b"public\n")
+
+        migrated_inode = agents.stat().st_ino
+        with mock.patch.object(
+            SYNC_MODULE,
+            "_migrate_personal_agents_after_canonical_review_sync",
+            wraps=SYNC_MODULE._migrate_personal_agents_after_canonical_review_sync,
+        ) as migrate_again, mock.patch.object(
+            SYNC_MODULE,
+            "_verify_current_personal_agents_after_canonical_review_sync",
+            wraps=SYNC_MODULE._verify_current_personal_agents_after_canonical_review_sync,
+        ) as verify_current_again:
+            SYNC_MODULE.sync_sources(
+                self.repo_root,
+                self.source_root,
+                (rule,),
+                locked_sources=locked_sources,
+            )
+
+        migrate_again.assert_not_called()
+        verify_current_again.assert_called_once()
+        noop_plan = verify_current_again.call_args.args[-1]
+        self.assertEqual(
+            noop_plan.action,
+            SYNC_MODULE._PERSONAL_AGENTS_ACTION_CURRENT_NOOP,
+        )
+        self.assertEqual(noop_plan.pinned_file.guidance_state, "current")
+        self.assertEqual(agents.read_bytes(), current)
+        self.assertEqual(agents.stat().st_ino, migrated_inode)
 
     def test_candidate_current_noop_fails_on_post_install_checkout_drift(
         self,
@@ -4493,6 +4710,30 @@ class PrivateOverlaySyncTests(unittest.TestCase):
             legacy_digest,
         ):
             current = SYNC_MODULE._migrated_personal_agents_bytes(legacy)
+            previous = current.replace(
+                SYNC_MODULE.PERSONAL_AGENTS_CURRENT_CONSENT_LINE,
+                SYNC_MODULE.PERSONAL_AGENTS_PREVIOUS_CONSENT_LINE,
+                1,
+            )
+            self.assertEqual(
+                SYNC_MODULE._personal_agents_review_guidance_state(legacy),
+                "legacy",
+            )
+            self.assertEqual(
+                SYNC_MODULE._personal_agents_review_guidance_state(previous),
+                "previous",
+            )
+            self.assertEqual(
+                SYNC_MODULE._personal_agents_review_guidance_state(current),
+                "current",
+            )
+            self.assertEqual(SYNC_MODULE._migrated_personal_agents_bytes(previous), current)
+            prefix = b"# Unrelated private heading\n"
+            suffix = b"\n# Unrelated private footer\n"
+            self.assertEqual(
+                SYNC_MODULE._migrated_personal_agents_bytes(prefix + previous + suffix),
+                prefix + current + suffix,
+            )
             cases = {
                 "legacy-drift": legacy.replace(
                     b"Synthetic legacy review detail",
@@ -4502,6 +4743,11 @@ class PrivateOverlaySyncTests(unittest.TestCase):
                 "half-migrated": legacy.replace(
                     SYNC_MODULE.PERSONAL_AGENTS_LEGACY_CONSENT_LINE,
                     SYNC_MODULE.PERSONAL_AGENTS_CURRENT_CONSENT_LINE,
+                    1,
+                ),
+                "previous-consent-with-legacy-block": legacy.replace(
+                    SYNC_MODULE.PERSONAL_AGENTS_LEGACY_CONSENT_LINE,
+                    SYNC_MODULE.PERSONAL_AGENTS_PREVIOUS_CONSENT_LINE,
                     1,
                 ),
                 "legacy-consent-suffix-drift": legacy.replace(
@@ -4528,6 +4774,18 @@ class PrivateOverlaySyncTests(unittest.TestCase):
                     + SYNC_MODULE.PERSONAL_AGENTS_CURRENT_CONSENT_LINE,
                     1,
                 ),
+                "previous-consent-suffix-drift": previous.replace(
+                    SYNC_MODULE.PERSONAL_AGENTS_PREVIOUS_CONSENT_LINE,
+                    SYNC_MODULE.PERSONAL_AGENTS_PREVIOUS_CONSENT_LINE.rstrip(b"\n")
+                    + b" Extra authorization.\n",
+                    1,
+                ),
+                "previous-consent-prefix-drift": previous.replace(
+                    SYNC_MODULE.PERSONAL_AGENTS_PREVIOUS_CONSENT_LINE,
+                    b"Extra authorization. "
+                    + SYNC_MODULE.PERSONAL_AGENTS_PREVIOUS_CONSENT_LINE,
+                    1,
+                ),
                 "legacy-consent-reordered": legacy.replace(
                     SYNC_MODULE.PERSONAL_AGENTS_LEGACY_CONSENT_LINE,
                     b"",
@@ -4546,7 +4804,18 @@ class PrivateOverlaySyncTests(unittest.TestCase):
                     + SYNC_MODULE.PERSONAL_AGENTS_CURRENT_REVIEW_BLOCK,
                     1,
                 ),
+                "previous-block-prefix-drift": previous.replace(
+                    SYNC_MODULE.PERSONAL_AGENTS_CURRENT_REVIEW_BLOCK,
+                    b"Extra policy. "
+                    + SYNC_MODULE.PERSONAL_AGENTS_CURRENT_REVIEW_BLOCK,
+                    1,
+                ),
                 "mixed": legacy + current,
+                "previous-and-current-mixed": previous + current,
+                "duplicate-previous-consent": previous
+                + SYNC_MODULE.PERSONAL_AGENTS_PREVIOUS_CONSENT_LINE,
+                "duplicate-current-consent": current
+                + SYNC_MODULE.PERSONAL_AGENTS_CURRENT_CONSENT_LINE,
                 "duplicate-current": current.replace(
                     SYNC_MODULE.PERSONAL_AGENTS_REVIEW_BLOCK_BOUNDARY,
                     SYNC_MODULE.PERSONAL_AGENTS_CURRENT_REVIEW_BLOCK
@@ -12362,14 +12631,61 @@ class PrivateOverlaySyncTests(unittest.TestCase):
         private_replacements = rule.replacements[
             : -len(SYNC_MODULE.COMMON_JOEY_TEXT_REPLACEMENTS)
         ]
-        self.assertEqual(private_replacements, ())
+        self.assertEqual(
+            private_replacements,
+            (
+                SYNC_MODULE.Replacement(
+                    "when the user explicitly includes reviewers",
+                    "when joey explicitly includes reviewers",
+                    path=Path("tests/test_contracts.py"),
+                    required=False,
+                ),
+                SYNC_MODULE.Replacement(
+                    "only when the user requests model discovery",
+                    "only when joey requests model discovery",
+                    path=Path("tests/test_contracts.py"),
+                    required=False,
+                ),
+            ),
+        )
+        self.assertEqual(
+            {replacement.path for replacement in private_replacements},
+            {Path("tests/test_contracts.py")},
+        )
+        canonical_assertions = (
+            'self.assertIn("when the user explicitly includes reviewers", normalized)\n'
+            'self.assertIn("only when the user requests model discovery", normalized)\n'
+        )
+        adapted_assertions, found = SYNC_MODULE._apply_text_replacements(
+            canonical_assertions,
+            Path("tests/test_contracts.py"),
+            private_replacements,
+            surface="fixture",
+        )
+        self.assertEqual(
+            adapted_assertions,
+            'self.assertIn("when joey explicitly includes reviewers", normalized)\n'
+            'self.assertIn("only when joey requests model discovery", normalized)\n',
+        )
+        self.assertEqual(found, {0: 1, 1: 1})
+        self.assertIn(
+            "when joey explicitly includes reviewers", adapted_assertions.lower()
+        )
+        self.assertIn(
+            "only when joey requests model discovery", adapted_assertions.lower()
+        )
+        untouched_assertions, untouched_found = SYNC_MODULE._apply_text_replacements(
+            canonical_assertions,
+            Path("references/local-codex-lane.md"),
+            private_replacements,
+            surface="fixture",
+        )
+        self.assertEqual(untouched_assertions, canonical_assertions)
+        self.assertEqual(untouched_found, {})
         self.assertFalse(
             any(
                 replacement.path
-                in {
-                    Path("references/github-pr-probes.md"),
-                    Path("tests/test_contracts.py"),
-                }
+                == Path("references/github-pr-probes.md")
                 for replacement in rule.replacements
             )
         )
@@ -12989,23 +13305,32 @@ class PrivateOverlaySyncTests(unittest.TestCase):
         )
         self.assertEqual(
             receipt["canonical_commit"],
-            "7803eebe63782f5539c22e1b7f0d7a7ec587ac3f",
+            "b78febccb199c38c48cf9a3bd49f151723524e9d",
+        )
+        self.assertEqual(
+            receipt["canonical_repository"],
+            "Joey-Tools/codex-personal-sync",
         )
         self.assertEqual(receipt["mirror"], "toolbox")
         self.assertEqual(
             receipt["mirror_repository"],
             "Joey-Tools/codex-toolbox",
         )
-        expected_paths = {
+        expected_paths = (
             "scripts/codex_personal_sync.py",
             "tests/test_codex_personal_sync.py",
             "schema/sync-manifest.schema.json",
+            "tests/test_pending_agent_claim_compatibility.py",
+            "tests/test_pending_staging_cleanup.py",
+            "tests/test_quarantine_empty_batch_reclaim.py",
             "tests/test_personal_sync_reconciliation_safety.py",
+            "tests/test_regular_agent_materialization.py",
+            "tests/test_regular_overlay_uninstall_status_regressions.py",
             "tests/test_release_retention.py",
             "tests/test_scheduler_doctor.py",
-        }
+        )
         self.assertEqual(
-            {entry["target_path"] for entry in receipt["files"]},
+            tuple(entry["target_path"] for entry in receipt["files"]),
             expected_paths,
         )
         for entry in receipt["files"]:
@@ -13965,6 +14290,8 @@ jobs:
             "contemporaneous consent for scoped review egress to that shape",
             "including tracked repository secrets",
             "excludes runtime secrets and credentials",
+            "native GitHub Copilot PR code review when selected by the remote-first route",
+            "Claude Code, Copilot CLI, and other external reviewers without explicit opt-in",
             "A bare named-review request is report-only",
             "scoped exact `@codex review` producer operation",
             "single-owner, single-flight recovery after ambiguous delivery",
@@ -13994,6 +14321,11 @@ jobs:
         ):
             with self.subTest(retired=retired):
                 self.assertNotIn(retired, agents)
+
+        self.assertIn("helper owns model/effort labels", agents)
+        self.assertIn("do not duplicate a pinned fallback label", agents)
+        self.assertIn("<sentence printed by pr_attribution.py>", agents)
+        self.assertNotIn("GPT-5.6 Sol Ultra", agents)
 
     def test_agents_guidance_leaves_skill_repo_gate_to_scoped_guidance(self) -> None:
         agents = _final_personal_agents_text()
