@@ -944,6 +944,7 @@ class PrivateOverlaySyncTests(unittest.TestCase):
         )
         data = (
             b"# Personal Guidelines\n\n"
+            + SYNC_MODULE.PERSONAL_AGENTS_SHORT_FILE_GUIDELINE
             + SYNC_MODULE.PERSONAL_AGENTS_LEGACY_CONSENT_LINE
             + legacy_block
             + SYNC_MODULE.PERSONAL_AGENTS_REVIEW_BLOCK_BOUNDARY
@@ -3295,6 +3296,14 @@ class PrivateOverlaySyncTests(unittest.TestCase):
             SYNC_MODULE.PERSONAL_AGENTS_CURRENT_REVIEW_BLOCK,
             SYNC_MODULE.PERSONAL_AGENTS_PREVIOUS_REVIEW_BLOCK,
             1,
+        ).replace(
+            SYNC_MODULE.PERSONAL_AGENTS_MODEL_ROUTING_PARAGRAPH,
+            b"",
+            1,
+        )
+        self.assertNotIn(
+            SYNC_MODULE.PERSONAL_AGENTS_MODEL_ROUTING_PARAGRAPH,
+            previous,
         )
         self.assertEqual(
             SYNC_MODULE._personal_agents_review_guidance_state(previous),
@@ -3342,9 +3351,17 @@ class PrivateOverlaySyncTests(unittest.TestCase):
         ):
             current = SYNC_MODULE._migrated_personal_agents_bytes(legacy)
         intermediate = current.replace(
+            SYNC_MODULE.PERSONAL_AGENTS_MODEL_ROUTING_PARAGRAPH,
+            b"",
+            1,
+        ).replace(
             SYNC_MODULE.PERSONAL_AGENTS_CURRENT_REVIEW_BLOCK,
             SYNC_MODULE.PERSONAL_AGENTS_PREVIOUS_REVIEW_BLOCK,
             1,
+        )
+        self.assertNotIn(
+            SYNC_MODULE.PERSONAL_AGENTS_MODEL_ROUTING_PARAGRAPH,
+            intermediate,
         )
         self.assertEqual(
             SYNC_MODULE._personal_agents_review_guidance_state(intermediate),
@@ -3464,6 +3481,27 @@ class PrivateOverlaySyncTests(unittest.TestCase):
                 SYNC_MODULE.PERSONAL_AGENTS_PREVIOUS_REVIEW_BLOCK,
                 1,
             )
+            current_without_model_routing = current.replace(
+                SYNC_MODULE.PERSONAL_AGENTS_MODEL_ROUTING_PARAGRAPH,
+                b"",
+                1,
+            )
+            previous_without_model_routing = previous.replace(
+                SYNC_MODULE.PERSONAL_AGENTS_MODEL_ROUTING_PARAGRAPH,
+                b"",
+                1,
+            )
+            intermediate_without_model_routing = intermediate.replace(
+                SYNC_MODULE.PERSONAL_AGENTS_MODEL_ROUTING_PARAGRAPH,
+                b"",
+                1,
+            )
+            legacy_with_model_routing = legacy.replace(
+                SYNC_MODULE.PERSONAL_AGENTS_SHORT_FILE_GUIDELINE,
+                SYNC_MODULE.PERSONAL_AGENTS_SHORT_FILE_GUIDELINE
+                + SYNC_MODULE.PERSONAL_AGENTS_MODEL_ROUTING_PARAGRAPH,
+                1,
+            )
             cases = {
                 "current": (
                     current,
@@ -3477,7 +3515,27 @@ class PrivateOverlaySyncTests(unittest.TestCase):
                     intermediate,
                     "exact legacy canonical review source requires exact legacy",
                 ),
-                "mixed": (legacy + current, "exact legacy or migrated state"),
+                "current-without-model-routing": (
+                    current_without_model_routing,
+                    "exact legacy or migrated state",
+                ),
+                "previous-without-model-routing": (
+                    previous_without_model_routing,
+                    "exact legacy canonical review source requires exact legacy",
+                ),
+                "intermediate-without-model-routing": (
+                    intermediate_without_model_routing,
+                    "exact legacy canonical review source requires exact legacy",
+                ),
+                "legacy-with-model-routing": (
+                    legacy_with_model_routing,
+                    "exact legacy canonical review source requires exact legacy",
+                ),
+                "mixed": (
+                    legacy + current,
+                    "personal AGENTS model-routing paragraph requires one exact "
+                    "short-file guideline anchor",
+                ),
                 "compact-current": (
                     current.replace(
                         SYNC_MODULE.PERSONAL_AGENTS_CURRENT_REVIEW_BLOCK,
@@ -3535,14 +3593,21 @@ class PrivateOverlaySyncTests(unittest.TestCase):
         ):
             current = SYNC_MODULE._migrated_personal_agents_bytes(legacy)
             cases = {
-                "mixed": legacy + current,
-                "legacy-byte-drift": legacy.replace(
-                    b"Synthetic legacy review detail",
-                    b"Synthetic legacy review detaiL",
-                    1,
+                "mixed": (
+                    legacy + current,
+                    "personal AGENTS model-routing paragraph requires one exact "
+                    "short-file guideline anchor",
+                ),
+                "legacy-byte-drift": (
+                    legacy.replace(
+                        b"Synthetic legacy review detail",
+                        b"Synthetic legacy review detaiL",
+                        1,
+                    ),
+                    "exact legacy or migrated state",
                 ),
             }
-            for name, payload in cases.items():
+            for name, (payload, error_pattern) in cases.items():
                 agents.write_bytes(payload)
                 agents.chmod(0o644)
                 with (
@@ -3553,7 +3618,7 @@ class PrivateOverlaySyncTests(unittest.TestCase):
                     ) as sync_impl,
                     self.assertRaisesRegex(
                         SYNC_MODULE.SyncError,
-                        "exact legacy or migrated state",
+                        error_pattern,
                     ),
                 ):
                     SYNC_MODULE.sync_sources(
@@ -3564,6 +3629,117 @@ class PrivateOverlaySyncTests(unittest.TestCase):
                     )
                 sync_impl.assert_not_called()
                 self.assertTrue((target / "old-marker").is_file())
+
+    def test_candidate_review_source_rejects_model_routing_drift_before_any_write(
+        self,
+    ) -> None:
+        rule, target = self._create_canonical_regular_file_overlay_rule(
+            authoritative=True
+        )
+        agents, legacy, legacy_digest = self._synthetic_legacy_personal_agents()
+        source = self.source_root / rule.repo / rule.source
+        locked_sources = self._locked_canonical_review_source(rule, source)
+
+        with mock.patch.object(
+            SYNC_MODULE,
+            "PERSONAL_AGENTS_LEGACY_REVIEW_BLOCK_SHA256",
+            legacy_digest,
+        ):
+            current = SYNC_MODULE._migrated_personal_agents_bytes(legacy)
+            current_without_model_routing = current.replace(
+                SYNC_MODULE.PERSONAL_AGENTS_MODEL_ROUTING_PARAGRAPH,
+                b"",
+                1,
+            )
+            intermediate_without_model_routing = current_without_model_routing.replace(
+                SYNC_MODULE.PERSONAL_AGENTS_CURRENT_REVIEW_BLOCK,
+                SYNC_MODULE.PERSONAL_AGENTS_PREVIOUS_REVIEW_BLOCK,
+                1,
+            )
+            cases = {
+                "current-without-model-routing": current_without_model_routing,
+                "model-routing-drift": current.replace(
+                    SYNC_MODULE.PERSONAL_AGENTS_MODEL_ROUTING_PARAGRAPH,
+                    SYNC_MODULE.PERSONAL_AGENTS_MODEL_ROUTING_PARAGRAPH.replace(
+                        b"GPT-6.1 Sol",
+                        b"GPT-6.1 Xol",
+                        1,
+                    ),
+                    1,
+                ),
+                "duplicate-model-routing": current.replace(
+                    SYNC_MODULE.PERSONAL_AGENTS_MODEL_ROUTING_PARAGRAPH,
+                    SYNC_MODULE.PERSONAL_AGENTS_MODEL_ROUTING_PARAGRAPH
+                    + SYNC_MODULE.PERSONAL_AGENTS_MODEL_ROUTING_PARAGRAPH,
+                    1,
+                ),
+                "misplaced-model-routing": current.replace(
+                    SYNC_MODULE.PERSONAL_AGENTS_SHORT_FILE_GUIDELINE
+                    + SYNC_MODULE.PERSONAL_AGENTS_MODEL_ROUTING_PARAGRAPH,
+                    SYNC_MODULE.PERSONAL_AGENTS_MODEL_ROUTING_PARAGRAPH
+                    + SYNC_MODULE.PERSONAL_AGENTS_SHORT_FILE_GUIDELINE,
+                    1,
+                ),
+                "model-routing-order-drift": current.replace(
+                    SYNC_MODULE.PERSONAL_AGENTS_SHORT_FILE_GUIDELINE
+                    + SYNC_MODULE.PERSONAL_AGENTS_MODEL_ROUTING_PARAGRAPH,
+                    SYNC_MODULE.PERSONAL_AGENTS_SHORT_FILE_GUIDELINE
+                    + b"- Unrelated inserted guideline.\n"
+                    + SYNC_MODULE.PERSONAL_AGENTS_MODEL_ROUTING_PARAGRAPH,
+                    1,
+                ),
+                "duplicate-model-routing-anchor": current.replace(
+                    SYNC_MODULE.PERSONAL_AGENTS_SHORT_FILE_GUIDELINE,
+                    SYNC_MODULE.PERSONAL_AGENTS_SHORT_FILE_GUIDELINE * 2,
+                    1,
+                ),
+                "missing-insertion-anchor": intermediate_without_model_routing.replace(
+                    SYNC_MODULE.PERSONAL_AGENTS_SHORT_FILE_GUIDELINE,
+                    b"",
+                    1,
+                ),
+                "ambiguous-insertion-anchor": intermediate_without_model_routing.replace(
+                    SYNC_MODULE.PERSONAL_AGENTS_SHORT_FILE_GUIDELINE,
+                    SYNC_MODULE.PERSONAL_AGENTS_SHORT_FILE_GUIDELINE * 2,
+                    1,
+                ),
+            }
+            for name, payload in cases.items():
+                agents.write_bytes(payload)
+                agents.chmod(0o644)
+                target_before = tuple(
+                    sorted(
+                        (path.name, path.read_bytes())
+                        for path in target.iterdir()
+                        if path.is_file()
+                    )
+                )
+                with (
+                    self.subTest(name=name),
+                    mock.patch.object(
+                        SYNC_MODULE,
+                        "_sync_sources_with_repo_binding",
+                    ) as sync_impl,
+                    self.assertRaises(SYNC_MODULE.SyncError),
+                ):
+                    SYNC_MODULE.sync_sources(
+                        self.repo_root,
+                        self.source_root,
+                        (rule,),
+                        locked_sources=locked_sources,
+                    )
+                sync_impl.assert_not_called()
+                self.assertEqual(agents.read_bytes(), payload)
+                self.assertEqual(
+                    tuple(
+                        sorted(
+                            (path.name, path.read_bytes())
+                            for path in target.iterdir()
+                            if path.is_file()
+                        )
+                    ),
+                    target_before,
+                )
 
     def test_candidate_review_source_accepts_current_agents_without_migration(
         self,
@@ -4845,6 +5021,27 @@ class PrivateOverlaySyncTests(unittest.TestCase):
                 SYNC_MODULE.PERSONAL_AGENTS_PREVIOUS_REVIEW_BLOCK,
                 1,
             )
+            current_without_model_routing = current.replace(
+                SYNC_MODULE.PERSONAL_AGENTS_MODEL_ROUTING_PARAGRAPH,
+                b"",
+                1,
+            )
+            previous_without_model_routing = previous.replace(
+                SYNC_MODULE.PERSONAL_AGENTS_MODEL_ROUTING_PARAGRAPH,
+                b"",
+                1,
+            )
+            intermediate_without_model_routing = intermediate.replace(
+                SYNC_MODULE.PERSONAL_AGENTS_MODEL_ROUTING_PARAGRAPH,
+                b"",
+                1,
+            )
+            legacy_with_model_routing = legacy.replace(
+                SYNC_MODULE.PERSONAL_AGENTS_SHORT_FILE_GUIDELINE,
+                SYNC_MODULE.PERSONAL_AGENTS_SHORT_FILE_GUIDELINE
+                + SYNC_MODULE.PERSONAL_AGENTS_MODEL_ROUTING_PARAGRAPH,
+                1,
+            )
             self.assertEqual(
                 SYNC_MODULE._personal_agents_review_guidance_state(legacy),
                 "legacy",
@@ -4862,6 +5059,18 @@ class PrivateOverlaySyncTests(unittest.TestCase):
                 "intermediate",
             )
             self.assertEqual(
+                SYNC_MODULE._personal_agents_review_guidance_state(
+                    previous_without_model_routing
+                ),
+                "previous",
+            )
+            self.assertEqual(
+                SYNC_MODULE._personal_agents_review_guidance_state(
+                    intermediate_without_model_routing
+                ),
+                "intermediate",
+            )
+            self.assertEqual(
                 SYNC_MODULE._migrated_personal_agents_bytes(previous),
                 current,
             )
@@ -4869,11 +5078,30 @@ class PrivateOverlaySyncTests(unittest.TestCase):
                 SYNC_MODULE._migrated_personal_agents_bytes(intermediate),
                 current,
             )
+            for state_without_model in (
+                legacy,
+                previous_without_model_routing,
+                intermediate_without_model_routing,
+            ):
+                self.assertEqual(
+                    SYNC_MODULE._migrated_personal_agents_bytes(
+                        state_without_model
+                    ),
+                    current,
+                )
+            self.assertEqual(
+                SYNC_MODULE._migrated_personal_agents_bytes(legacy_with_model_routing),
+                current,
+            )
+            self.assertEqual(
+                current.count(SYNC_MODULE.PERSONAL_AGENTS_MODEL_ROUTING_PARAGRAPH),
+                1,
+            )
             prefix = b"# Unrelated private heading\n"
             suffix = b"\n# Unrelated private footer\n"
             self.assertEqual(
                 SYNC_MODULE._migrated_personal_agents_bytes(
-                    prefix + intermediate + suffix
+                    prefix + intermediate_without_model_routing + suffix
                 ),
                 prefix + current + suffix,
             )
@@ -4893,6 +5121,47 @@ class PrivateOverlaySyncTests(unittest.TestCase):
                 separated_current,
             )
             cases = {
+                "current-without-model-routing": current_without_model_routing,
+                "model-routing-drift": current.replace(
+                    SYNC_MODULE.PERSONAL_AGENTS_MODEL_ROUTING_PARAGRAPH,
+                    SYNC_MODULE.PERSONAL_AGENTS_MODEL_ROUTING_PARAGRAPH.replace(
+                        b"GPT-6.1 Sol",
+                        b"GPT-6.1 Xol",
+                        1,
+                    ),
+                    1,
+                ),
+                "duplicate-model-routing": current.replace(
+                    SYNC_MODULE.PERSONAL_AGENTS_MODEL_ROUTING_PARAGRAPH,
+                    SYNC_MODULE.PERSONAL_AGENTS_MODEL_ROUTING_PARAGRAPH
+                    + SYNC_MODULE.PERSONAL_AGENTS_MODEL_ROUTING_PARAGRAPH,
+                    1,
+                ),
+                "misplaced-model-routing": current.replace(
+                    SYNC_MODULE.PERSONAL_AGENTS_SHORT_FILE_GUIDELINE
+                    + SYNC_MODULE.PERSONAL_AGENTS_MODEL_ROUTING_PARAGRAPH,
+                    SYNC_MODULE.PERSONAL_AGENTS_MODEL_ROUTING_PARAGRAPH
+                    + SYNC_MODULE.PERSONAL_AGENTS_SHORT_FILE_GUIDELINE,
+                    1,
+                ),
+                "model-routing-order-drift": current.replace(
+                    SYNC_MODULE.PERSONAL_AGENTS_SHORT_FILE_GUIDELINE
+                    + SYNC_MODULE.PERSONAL_AGENTS_MODEL_ROUTING_PARAGRAPH,
+                    SYNC_MODULE.PERSONAL_AGENTS_SHORT_FILE_GUIDELINE
+                    + b"- Unrelated inserted guideline.\n"
+                    + SYNC_MODULE.PERSONAL_AGENTS_MODEL_ROUTING_PARAGRAPH,
+                    1,
+                ),
+                "duplicate-model-routing-anchor": current.replace(
+                    SYNC_MODULE.PERSONAL_AGENTS_SHORT_FILE_GUIDELINE,
+                    SYNC_MODULE.PERSONAL_AGENTS_SHORT_FILE_GUIDELINE * 2,
+                    1,
+                ),
+                "missing-model-routing-anchor": current.replace(
+                    SYNC_MODULE.PERSONAL_AGENTS_SHORT_FILE_GUIDELINE,
+                    b"",
+                    1,
+                ),
                 "legacy-drift": legacy.replace(
                     b"Synthetic legacy review detail",
                     b"Synthetic legacy review detaiL",
@@ -5026,10 +5295,7 @@ class PrivateOverlaySyncTests(unittest.TestCase):
             for name, data in cases.items():
                 with (
                     self.subTest(name=name),
-                    self.assertRaisesRegex(
-                        SYNC_MODULE.SyncError,
-                        "exact legacy or migrated state",
-                    ),
+                    self.assertRaises(SYNC_MODULE.SyncError),
                 ):
                     SYNC_MODULE._migrated_personal_agents_bytes(data)
 
@@ -14574,6 +14840,17 @@ jobs:
 
     def test_agents_guidance_uses_sol_parent_luna_workers_and_remote_first_review(self) -> None:
         agents = _final_personal_agents_text()
+        model_routing = (
+            SYNC_MODULE.PERSONAL_AGENTS_MODEL_ROUTING_PARAGRAPH.decode("utf-8")
+        )
+        short_file_guideline = (
+            SYNC_MODULE.PERSONAL_AGENTS_SHORT_FILE_GUIDELINE.decode("utf-8")
+        )
+        self.assertEqual(agents.count(model_routing), 1)
+        self.assertEqual(
+            agents.index(model_routing),
+            agents.index(short_file_guideline) + len(short_file_guideline),
+        )
         for anchor in (
             "Default the parent/orchestrator to GPT-6.1 Sol",
             "GPT-6 Luna, up to Max",

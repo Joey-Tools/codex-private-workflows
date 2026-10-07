@@ -1263,6 +1263,27 @@ PERSONAL_AGENTS_TARGET = _path("personal_codex/AGENTS.md")
 _CANONICAL_REVIEW_SYNC_RULE = next(
     rule for rule in SYNC_RULES if rule.target == CANONICAL_REVIEW_TARGET
 )
+PERSONAL_AGENTS_SHORT_FILE_GUIDELINE = (
+    b"- Keep this file short. Cross-repo rules belong here; repo-specific policy "
+    b"belongs in the repo `AGENTS.md` or a repo-local skill.\n"
+)
+PERSONAL_AGENTS_MODEL_ROUTING_PARAGRAPH = (
+    b"- Default the parent/orchestrator to GPT-6.1 Sol. Use GPT-6 Luna, up to Max, "
+    b"for delegated token-intensive work; Joey also explicitly authorizes that "
+    b"allocation for local reviewers. The local-review default remains GPT-6.1 Sol "
+    b"at model-default reasoning, not the parent's effort. Other reviewer "
+    b"models/efforts and Claude Code require explicit opt-in; an authorized Claude "
+    b"reviewer defaults to Opus 5.5. Record actual selections; do not silently "
+    b"substitute models or change an explicitly selected parent session.\n"
+)
+PERSONAL_AGENTS_MODEL_ROUTING_MARKERS = (
+    b"- Default the parent/orchestrator",
+    b"GPT-6 Luna, up to Max",
+    b"the local-review default remains",
+    b"Other reviewer models/efforts",
+    b"authorized Claude reviewer defaults to Opus 5.5",
+    b"Record actual selections; do not silently substitute models",
+)
 PERSONAL_AGENTS_LEGACY_CONSENT_LINE = (
     b"- For Joey-requested Codex/GitHub PR or repo workflows, treat OpenAI Codex "
     b"services and GitHub-owned PR/review APIs as trusted destinations for scoped "
@@ -1988,12 +2009,51 @@ def _validate_canonical_review_target(
     )
 
 
+def _personal_agents_model_routing_state(data: bytes) -> str:
+    paragraph_count = data.count(PERSONAL_AGENTS_MODEL_ROUTING_PARAGRAPH)
+    if paragraph_count > 1:
+        raise SyncError(
+            "personal AGENTS model-routing paragraph must occur exactly once"
+        )
+    if paragraph_count == 0:
+        if any(marker in data for marker in PERSONAL_AGENTS_MODEL_ROUTING_MARKERS):
+            raise SyncError(
+                "personal AGENTS model-routing paragraph is drifted or misplaced"
+            )
+        return "missing"
+
+    remaining = data.replace(PERSONAL_AGENTS_MODEL_ROUTING_PARAGRAPH, b"", 1)
+    if any(marker in remaining for marker in PERSONAL_AGENTS_MODEL_ROUTING_MARKERS):
+        raise SyncError(
+            "personal AGENTS model-routing paragraph is duplicated or drifted"
+        )
+    anchor_count = data.count(PERSONAL_AGENTS_SHORT_FILE_GUIDELINE)
+    if anchor_count != 1:
+        raise SyncError(
+            "personal AGENTS model-routing paragraph requires one exact short-file "
+            "guideline anchor"
+        )
+    anchor_end = (
+        data.index(PERSONAL_AGENTS_SHORT_FILE_GUIDELINE)
+        + len(PERSONAL_AGENTS_SHORT_FILE_GUIDELINE)
+    )
+    if data[anchor_end : anchor_end + len(PERSONAL_AGENTS_MODEL_ROUTING_PARAGRAPH)] != (
+        PERSONAL_AGENTS_MODEL_ROUTING_PARAGRAPH
+    ):
+        raise SyncError(
+            "personal AGENTS model-routing paragraph is not at its exact top-level "
+            "position"
+        )
+    return "present"
+
+
 def _personal_agents_review_guidance_state(data: bytes) -> str:
     try:
         data.decode("utf-8")
     except UnicodeDecodeError as exc:
         raise SyncError("personal AGENTS guidance is not valid UTF-8") from exc
 
+    model_routing_state = _personal_agents_model_routing_state(data)
     legacy_consent_count = data.count(PERSONAL_AGENTS_LEGACY_CONSENT_LINE)
     previous_consent_count = data.count(PERSONAL_AGENTS_PREVIOUS_CONSENT_LINE)
     current_consent_count = data.count(PERSONAL_AGENTS_CURRENT_CONSENT_LINE)
@@ -2076,6 +2136,7 @@ def _personal_agents_review_guidance_state(data: bytes) -> str:
         and previous_block_count == 0
         and current_block_count == 1
         and boundary_count == 1
+        and model_routing_state == "present"
     ):
         consent = data.index(PERSONAL_AGENTS_CURRENT_CONSENT_LINE)
         start = data.index(PERSONAL_AGENTS_CURRENT_REVIEW_BLOCK)
@@ -2100,6 +2161,7 @@ def _migrated_personal_agents_bytes(data: bytes) -> bytes:
     state = _personal_agents_review_guidance_state(data)
     if state == "current":
         return data
+    model_routing_state = _personal_agents_model_routing_state(data)
 
     boundary = data.index(PERSONAL_AGENTS_REVIEW_BLOCK_BOUNDARY)
     if state == "legacy":
@@ -2121,6 +2183,22 @@ def _migrated_personal_agents_bytes(data: bytes) -> bytes:
             source_consent,
             PERSONAL_AGENTS_CURRENT_CONSENT_LINE,
             1,
+        )
+    if model_routing_state == "missing":
+        anchor_count = migrated.count(PERSONAL_AGENTS_SHORT_FILE_GUIDELINE)
+        if anchor_count != 1:
+            raise SyncError(
+                "personal AGENTS model-routing migration requires one exact "
+                "short-file guideline anchor"
+            )
+        insertion_point = (
+            migrated.index(PERSONAL_AGENTS_SHORT_FILE_GUIDELINE)
+            + len(PERSONAL_AGENTS_SHORT_FILE_GUIDELINE)
+        )
+        migrated = (
+            migrated[:insertion_point]
+            + PERSONAL_AGENTS_MODEL_ROUTING_PARAGRAPH
+            + migrated[insertion_point:]
         )
     if _personal_agents_review_guidance_state(migrated) != "current":
         raise SyncError("personal AGENTS review-guidance migration did not converge")
@@ -8016,7 +8094,13 @@ def _bind_canonical_review_personal_agents_plan(
     )
     pinned_file = _pin_personal_agents_file(stack, repo_binding)
     if not migration_source:
-        if pinned_file.guidance_state != "legacy":
+        if (
+            pinned_file.guidance_state != "legacy"
+            or _personal_agents_model_routing_state(
+                pinned_file.snapshot.data
+            )
+            != "missing"
+        ):
             raise SyncError(
                 "exact legacy canonical review source requires exact legacy "
                 "personal AGENTS review guidance; restore the legacy guidance "
@@ -8025,6 +8109,7 @@ def _bind_canonical_review_personal_agents_plan(
         action = _PERSONAL_AGENTS_ACTION_LEGACY_NOOP
     elif pinned_file.guidance_state in {"legacy", "previous", "intermediate"}:
         action = _PERSONAL_AGENTS_ACTION_MIGRATE
+        _migrated_personal_agents_bytes(pinned_file.snapshot.data)
     else:
         action = _PERSONAL_AGENTS_ACTION_CURRENT_NOOP
     plan = _CanonicalReviewPersonalAgentsPlan(
