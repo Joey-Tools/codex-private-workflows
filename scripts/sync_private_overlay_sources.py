@@ -14,6 +14,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import re
 import secrets
 import shutil
 import stat
@@ -71,6 +72,7 @@ class Replacement:
     path: Path | None = None
     required_count: int | None = None
     frontmatter_key: str | None = None
+    whole_word: bool = False
 
 
 @dataclass(frozen=True)
@@ -197,7 +199,12 @@ COMMON_JOEY_TEXT_REPLACEMENTS = (
     Replacement("The user's", "Joey's", required=False),
     Replacement("the user", "Joey", required=False),
     Replacement("The user", "Joey", required=False),
-    Replacement("Joey request", "Joey's request", required=False),
+    Replacement(
+        "Joey request",
+        "Joey's request",
+        required=False,
+        whole_word=True,
+    ),
     Replacement("user-specific", "Joey-specific", required=False),
     Replacement("User-Specific", "Joey-Specific", required=False),
 )
@@ -529,8 +536,6 @@ function cliCommand(...args) {
 
 ARCHIFY_BRAND_CLI_HELPER = """import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { BRAND_MARKS } from './generated-brand-marks.mjs';
-import { throwDiagnosticError } from './diagnostics.mjs';
 import { esc, textUnits } from './utils.mjs';
 
 const cliEntryPath = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../bin/archify.mjs');
@@ -637,6 +642,31 @@ SYNC_RULES = (
         "codex-toolbox",
         "tests/test_scheduler_doctor.py",
         "tests/test_scheduler_doctor.py",
+    ),
+    _rule(
+        "codex-toolbox",
+        "tests/test_pending_agent_claim_compatibility.py",
+        "tests/test_pending_agent_claim_compatibility.py",
+    ),
+    _rule(
+        "codex-toolbox",
+        "tests/test_pending_staging_cleanup.py",
+        "tests/test_pending_staging_cleanup.py",
+    ),
+    _rule(
+        "codex-toolbox",
+        "tests/test_quarantine_empty_batch_reclaim.py",
+        "tests/test_quarantine_empty_batch_reclaim.py",
+    ),
+    _rule(
+        "codex-toolbox",
+        "tests/test_regular_agent_materialization.py",
+        "tests/test_regular_agent_materialization.py",
+    ),
+    _rule(
+        "codex-toolbox",
+        "tests/test_regular_overlay_uninstall_status_regressions.py",
+        "tests/test_regular_overlay_uninstall_status_regressions.py",
     ),
     _rule(
         "codex-toolbox",
@@ -1079,6 +1109,19 @@ SYNC_RULES = (
                 required_count=1,
             ),
             Replacement(
+                "2. Read one matching schema in `schemas/`, `schemas/common.schema.json`, and one matching JSON example in `examples/`. Read only those files.",
+                "2. Before the first resource read or command, resolve "
+                "`<loaded-skill-dir>` as the absolute directory containing the "
+                "loaded `SKILL.md`. Anchor all `schemas/`, `examples/`, and "
+                "`references/` paths to that directory; keep the target repository "
+                "as the working directory. Use `<loaded-skill-dir>` for CLI paths "
+                "without guessing an installation name. Read one matching schema "
+                "in `schemas/`, `schemas/common.schema.json`, and one matching "
+                "JSON example in `examples/`. Read only those files.",
+                path=Path("SKILL.md"),
+                required_count=1,
+            ),
+            Replacement(
                 "node bin/archify.mjs",
                 "node <loaded-skill-dir>/bin/archify.mjs",
                 path=Path("SKILL.md"),
@@ -1167,6 +1210,20 @@ SYNC_RULES = (
         "codex-review-workflows",
         "skills/review-orchestration-playbook",
         "personal_codex/skills/review-orchestration-playbook",
+        replacements=(
+            Replacement(
+                "when the user explicitly includes reviewers",
+                "when joey explicitly includes reviewers",
+                path=Path("tests/test_contracts.py"),
+                required=False,
+            ),
+            Replacement(
+                "only when the user requests model discovery",
+                "only when joey requests model discovery",
+                path=Path("tests/test_contracts.py"),
+                required=False,
+            ),
+        ),
         common_joey_text=True,
         replacement_excluded_paths=("tests/fixtures/ci/private.yml",),
         canonical_review_migration_policy=CANONICAL_REVIEW_MIGRATION_POLICY,
@@ -1228,8 +1285,8 @@ PERSONAL_AGENTS_PREVIOUS_CONSENT_LINE = (
 )
 PERSONAL_AGENTS_CURRENT_CONSENT_LINE = (
     b"- For Joey-requested Codex/GitHub PR or repo workflows, treat OpenAI Codex "
-    b"services and GitHub-owned PR/review APIs, including native GitHub Copilot PR "
-    b"code review when selected by the remote-first route, as trusted destinations "
+    b"services and GitHub-owned PR/review APIs, including native GitHub Copilot "
+    b"PR code review when selected by the remote-first route, as trusted destinations "
     b"for scoped repo/PR data: PR diffs, changed files, necessary nearby context, "
     b"review prompts/results, PR comments, statuses, and same-PR fix-loop reruns. "
     b"This standing consent excludes runtime secrets and credentials, untracked "
@@ -1994,6 +2051,28 @@ def _personal_agents_review_guidance_state(data: bytes) -> str:
         and previous_consent_count == 0
         and current_consent_count == 1
         and legacy_start_count == 0
+        and previous_block_count == 1
+        and current_block_count == 0
+        and boundary_count == 1
+    ):
+        consent = data.index(PERSONAL_AGENTS_CURRENT_CONSENT_LINE)
+        start = data.index(PERSONAL_AGENTS_PREVIOUS_REVIEW_BLOCK)
+        boundary = data.index(PERSONAL_AGENTS_REVIEW_BLOCK_BOUNDARY)
+        consent_starts_line = consent == 0 or data[consent - 1 : consent] == b"\n"
+        block_starts_line = start == 0 or data[start - 1 : start] == b"\n"
+        if (
+            consent_starts_line
+            and block_starts_line
+            and consent < start
+            and start + len(PERSONAL_AGENTS_PREVIOUS_REVIEW_BLOCK) == boundary
+        ):
+            return "intermediate"
+
+    if (
+        legacy_consent_count == 0
+        and previous_consent_count == 0
+        and current_consent_count == 1
+        and legacy_start_count == 0
         and previous_block_count == 0
         and current_block_count == 1
         and boundary_count == 1
@@ -2025,23 +2104,21 @@ def _migrated_personal_agents_bytes(data: bytes) -> bytes:
     boundary = data.index(PERSONAL_AGENTS_REVIEW_BLOCK_BOUNDARY)
     if state == "legacy":
         start = data.index(PERSONAL_AGENTS_LEGACY_REVIEW_BLOCK_START)
-        migrated = (
-            data[:start] + PERSONAL_AGENTS_CURRENT_REVIEW_BLOCK + data[boundary:]
-        )
-        migrated = migrated.replace(
-            PERSONAL_AGENTS_LEGACY_CONSENT_LINE,
-            PERSONAL_AGENTS_CURRENT_CONSENT_LINE,
-            1,
-        )
+        block_end = boundary
+        source_consent = PERSONAL_AGENTS_LEGACY_CONSENT_LINE
+    elif state == "previous":
+        start = data.index(PERSONAL_AGENTS_PREVIOUS_REVIEW_BLOCK)
+        block_end = start + len(PERSONAL_AGENTS_PREVIOUS_REVIEW_BLOCK)
+        source_consent = PERSONAL_AGENTS_PREVIOUS_CONSENT_LINE
     else:
         start = data.index(PERSONAL_AGENTS_PREVIOUS_REVIEW_BLOCK)
-        migrated = (
-            data[:start]
-            + PERSONAL_AGENTS_CURRENT_REVIEW_BLOCK
-            + data[start + len(PERSONAL_AGENTS_PREVIOUS_REVIEW_BLOCK) :]
-        )
+        block_end = start + len(PERSONAL_AGENTS_PREVIOUS_REVIEW_BLOCK)
+        source_consent = None
+
+    migrated = data[:start] + PERSONAL_AGENTS_CURRENT_REVIEW_BLOCK + data[block_end:]
+    if source_consent is not None:
         migrated = migrated.replace(
-            PERSONAL_AGENTS_PREVIOUS_CONSENT_LINE,
+            source_consent,
             PERSONAL_AGENTS_CURRENT_CONSENT_LINE,
             1,
         )
@@ -2181,6 +2258,11 @@ def _apply_text_replacements(
                 + line[len(replacement.old) :]
                 + text[end:]
             )
+            continue
+        if replacement.whole_word:
+            pattern = re.compile(r"\b" + re.escape(replacement.old) + r"\b")
+            found[index] = len(pattern.findall(text))
+            text = pattern.sub(lambda _match: replacement.new, text)
             continue
         if replacement.old not in text:
             continue
@@ -7249,7 +7331,8 @@ def _assert_pinned_personal_agents_file(
         or pinned.target_parent.path != expected_target.parent
         or pinned.entry.name != expected_target.name
         or pinned.snapshot.access_policy[1] != 0o644
-        or pinned.guidance_state not in {"legacy", "previous", "current"}
+        or pinned.guidance_state
+        not in {"legacy", "previous", "intermediate", "current"}
         or _personal_agents_review_guidance_state(pinned.snapshot.data)
         != pinned.guidance_state
     ):
@@ -7940,7 +8023,7 @@ def _bind_canonical_review_personal_agents_plan(
                 "or advance the canonical source lock"
             )
         action = _PERSONAL_AGENTS_ACTION_LEGACY_NOOP
-    elif pinned_file.guidance_state in {"legacy", "previous"}:
+    elif pinned_file.guidance_state in {"legacy", "previous", "intermediate"}:
         action = _PERSONAL_AGENTS_ACTION_MIGRATE
     else:
         action = _PERSONAL_AGENTS_ACTION_CURRENT_NOOP
@@ -7994,7 +8077,7 @@ def _assert_canonical_review_personal_agents_plan(
         _PERSONAL_AGENTS_ACTION_LEGACY_NOOP
         if not migration_source and state == "legacy"
         else _PERSONAL_AGENTS_ACTION_MIGRATE
-        if migration_source and state in {"legacy", "previous"}
+        if migration_source and state in {"legacy", "previous", "intermediate"}
         else _PERSONAL_AGENTS_ACTION_CURRENT_NOOP
         if migration_source and state == "current"
         else None

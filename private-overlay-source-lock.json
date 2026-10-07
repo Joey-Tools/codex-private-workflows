@@ -4,8 +4,8 @@
     {
       "name": "codex-toolbox",
       "repository": "Joey-Tools/codex-toolbox",
-      "sha": "255372d2b0dd96f39faf1e52a9168ca2aa7ece69",
-      "tree": "117699605432b44b6af190fdc944fe1f1b08b6a5"
+      "sha": "e716023be83c6c3132ebc530b8530ddf8c6b4c3f",
+      "tree": "4fa98a440a2a5784e32361cbe8771181eadde716"
     },
     {
       "name": "archify",
@@ -16,31 +16,31 @@
     {
       "name": "codex-debug-triage",
       "repository": "Joey-Tools/codex-debug-triage",
-      "sha": "d3b6fd26b021ef1a6aad8561a92a354c27510fbd",
-      "tree": "0441934d645703940407088346a464f014c934c8"
+      "sha": "9bf767be2388b402fa3fb2ad19713e5ec8cc4b1d",
+      "tree": "27d962a8f55a4feda036fb908824f6f25767718e"
     },
     {
       "name": "codex-review-workflows",
       "repository": "Joey-Tools/codex-review-workflows",
-      "sha": "06d8a1573ab04e6ccc58c79d944d3797fdc2a9bd",
-      "tree": "6a2ddb7b8cc6cf533f25703726a5741c8bb06161"
+      "sha": "534ad2c3f080007d290551762d1dd37ce5f79cb2",
+      "tree": "72aa92ca6def6a283a1069b1fd22a46b64d28d3f"
     },
     {
       "name": "codex-workflow-hygiene",
       "repository": "Joey-Tools/codex-workflow-hygiene",
-      "sha": "b3ccb2cd8809dcbd6c15a9be111b7892cf6fec65",
-      "tree": "1648b59fa0ae24a87abfc7ecf15e93dd10e9a567"
+      "sha": "df9b7d20dc5f286f2d9eb2eec11e479deab42a04",
+      "tree": "4380c6c4043a154a740eb0fb2aa25c6cae7dfcc3"
     },
     {
       "name": "codex-project-journal",
       "repository": "Joey-Tools/codex-project-journal",
-      "sha": "4f53fd1bf9ba0a7c85db8d183016210d3d0089e5",
-      "tree": "f933904c339058d3e3b2b9a92bbf77a8f1395e2b"
+      "sha": "cddeebfda200f92bb9bdeca057d22df2a94a3290",
+      "tree": "61de3886f99bfff77564a3ae31c90f10b8e41d49"
     }
   ],
   "toolbox_generated_provenance": {
     "repository": "Joey-Tools/codex-personal-sync",
-    "sha": "7803eebe63782f5539c22e1b7f0d7a7ec587ac3f",
-    "receipt_sha256": "9ea6cd232867fafaa7a72aa46586f8905dbb91ef97de2e5d2baeb75a918efa0a"
+    "sha": "b78febccb199c38c48cf9a3bd49f151723524e9d",
+    "receipt_sha256": "71ef3e4c86c8daca725432c5e9ea1130f249e47dfdd2f6d5458dea6c1c6a4ecf"
   }
 }

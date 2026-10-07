@@ -70,7 +70,7 @@ Add `--open` only when the user wants an immediate local preview. It runs after 
 
 ## Last-Good Live Preview
 
-For an active desktop authoring loop only; resolve the loaded skill directory before running the command:
+For an active desktop authoring loop only:
 
 ```bash
 node <loaded-skill-dir>/bin/archify.mjs preview <type> <input>.json <output>.html --quality showcase
