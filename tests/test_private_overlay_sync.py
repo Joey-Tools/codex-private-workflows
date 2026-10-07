@@ -1728,6 +1728,56 @@ class PrivateOverlaySyncTests(unittest.TestCase):
             target.read_text(encoding="utf-8"), "Use this when Joey asks.\n"
         )
 
+    def test_common_joey_text_replacements_distinguish_request_noun_from_verb(
+        self,
+    ) -> None:
+        source = self.source_root / "example-repo" / "skill" / "SKILL.md"
+        source.parent.mkdir(parents=True)
+        source.write_text(
+            "The user request is documented.\n"
+            "Only when the user requests model discovery.\n"
+            "Joey requester details are separate.\n",
+            encoding="utf-8",
+        )
+        rule = SYNC_MODULE.SyncRule(
+            repo="example-repo",
+            source=Path("skill"),
+            target=Path("personal_codex/skills/example"),
+            replacements=SYNC_MODULE.COMMON_JOEY_TEXT_REPLACEMENTS,
+        )
+
+        SYNC_MODULE.sync_sources(self.repo_root, self.source_root, (rule,))
+
+        target = self.repo_root / "personal_codex" / "skills" / "example" / "SKILL.md"
+        generated = target.read_text(encoding="utf-8")
+        self.assertEqual(
+            generated,
+            "Joey's request is documented.\n"
+            "Only when Joey requests model discovery.\n"
+            "Joey requester details are separate.\n",
+        )
+        normalized = generated.lower()
+        self.assertIn("only when joey requests model discovery", normalized)
+        self.assertNotIn("joey's requests model discovery", normalized)
+        self.assertIn("joey requester details are separate", normalized)
+
+    def test_whole_word_replacement_keeps_backslashes_literal(self) -> None:
+        transformed, found = SYNC_MODULE._apply_text_replacements(
+            "Joey request",
+            Path("fixture.txt"),
+            (
+                SYNC_MODULE.Replacement(
+                    "Joey request",
+                    r"\1",
+                    whole_word=True,
+                ),
+            ),
+            surface="fixture",
+        )
+
+        self.assertEqual(transformed, r"\1")
+        self.assertEqual(found, {0: 1})
+
     def test_archify_sync_rule_builds_clean_package_with_loaded_skill_paths(self) -> None:
         rule = next(
             candidate
@@ -12415,14 +12465,61 @@ class PrivateOverlaySyncTests(unittest.TestCase):
         private_replacements = rule.replacements[
             : -len(SYNC_MODULE.COMMON_JOEY_TEXT_REPLACEMENTS)
         ]
-        self.assertEqual(private_replacements, ())
+        self.assertEqual(
+            private_replacements,
+            (
+                SYNC_MODULE.Replacement(
+                    "when the user explicitly includes reviewers",
+                    "when joey explicitly includes reviewers",
+                    path=Path("tests/test_contracts.py"),
+                    required=False,
+                ),
+                SYNC_MODULE.Replacement(
+                    "only when the user requests model discovery",
+                    "only when joey requests model discovery",
+                    path=Path("tests/test_contracts.py"),
+                    required=False,
+                ),
+            ),
+        )
+        self.assertEqual(
+            {replacement.path for replacement in private_replacements},
+            {Path("tests/test_contracts.py")},
+        )
+        canonical_assertions = (
+            'self.assertIn("when the user explicitly includes reviewers", normalized)\n'
+            'self.assertIn("only when the user requests model discovery", normalized)\n'
+        )
+        adapted_assertions, found = SYNC_MODULE._apply_text_replacements(
+            canonical_assertions,
+            Path("tests/test_contracts.py"),
+            private_replacements,
+            surface="fixture",
+        )
+        self.assertEqual(
+            adapted_assertions,
+            'self.assertIn("when joey explicitly includes reviewers", normalized)\n'
+            'self.assertIn("only when joey requests model discovery", normalized)\n',
+        )
+        self.assertEqual(found, {0: 1, 1: 1})
+        self.assertIn(
+            "when joey explicitly includes reviewers", adapted_assertions.lower()
+        )
+        self.assertIn(
+            "only when joey requests model discovery", adapted_assertions.lower()
+        )
+        untouched_assertions, untouched_found = SYNC_MODULE._apply_text_replacements(
+            canonical_assertions,
+            Path("references/local-codex-lane.md"),
+            private_replacements,
+            surface="fixture",
+        )
+        self.assertEqual(untouched_assertions, canonical_assertions)
+        self.assertEqual(untouched_found, {})
         self.assertFalse(
             any(
                 replacement.path
-                in {
-                    Path("references/github-pr-probes.md"),
-                    Path("tests/test_contracts.py"),
-                }
+                == Path("references/github-pr-probes.md")
                 for replacement in rule.replacements
             )
         )

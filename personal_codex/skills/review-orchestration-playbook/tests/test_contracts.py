@@ -503,7 +503,7 @@ class RepositoryContractTest(unittest.TestCase):
                 self.assertIn("up to max", document)
 
         routing = _normalize(_read("references/review-lane-contracts.md"))
-        self.assertIn("when Joey explicitly includes reviewers", routing)
+        self.assertIn("when joey explicitly includes reviewers", routing)
         self.assertIn("not the new default or an automatic fallback", routing)
         self.assertIn("choose and record its exact effort", routing)
         local = _normalize(_read("references/local-codex-lane.md"))
@@ -1340,7 +1340,7 @@ class RepositoryContractTest(unittest.TestCase):
         self.assertIn("parent session's", normalized)
         self.assertIn("effective model family or codex mode", normalized)
         self.assertIn("never authorizes an automatic upgrade", normalized)
-        self.assertIn("only when Joey's requests model discovery", normalized)
+        self.assertIn("only when joey requests model discovery", normalized)
         self.assertIn("it never triggers latest-model discovery", normalized)
         self.assertIn("try the peer adapter with the exact same model", normalized)
         self.assertIn("do not silently lower the", normalized)

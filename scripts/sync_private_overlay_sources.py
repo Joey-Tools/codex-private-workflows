@@ -14,6 +14,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import re
 import secrets
 import shutil
 import stat
@@ -71,6 +72,7 @@ class Replacement:
     path: Path | None = None
     required_count: int | None = None
     frontmatter_key: str | None = None
+    whole_word: bool = False
 
 
 @dataclass(frozen=True)
@@ -197,7 +199,12 @@ COMMON_JOEY_TEXT_REPLACEMENTS = (
     Replacement("The user's", "Joey's", required=False),
     Replacement("the user", "Joey", required=False),
     Replacement("The user", "Joey", required=False),
-    Replacement("Joey request", "Joey's request", required=False),
+    Replacement(
+        "Joey request",
+        "Joey's request",
+        required=False,
+        whole_word=True,
+    ),
     Replacement("user-specific", "Joey-specific", required=False),
     Replacement("User-Specific", "Joey-Specific", required=False),
 )
@@ -1190,6 +1197,20 @@ SYNC_RULES = (
         "codex-review-workflows",
         "skills/review-orchestration-playbook",
         "personal_codex/skills/review-orchestration-playbook",
+        replacements=(
+            Replacement(
+                "when the user explicitly includes reviewers",
+                "when joey explicitly includes reviewers",
+                path=Path("tests/test_contracts.py"),
+                required=False,
+            ),
+            Replacement(
+                "only when the user requests model discovery",
+                "only when joey requests model discovery",
+                path=Path("tests/test_contracts.py"),
+                required=False,
+            ),
+        ),
         common_joey_text=True,
         replacement_excluded_paths=("tests/fixtures/ci/private.yml",),
         canonical_review_migration_policy=CANONICAL_REVIEW_MIGRATION_POLICY,
@@ -2119,6 +2140,11 @@ def _apply_text_replacements(
                 + line[len(replacement.old) :]
                 + text[end:]
             )
+            continue
+        if replacement.whole_word:
+            pattern = re.compile(r"\b" + re.escape(replacement.old) + r"\b")
+            found[index] = len(pattern.findall(text))
+            text = pattern.sub(lambda _match: replacement.new, text)
             continue
         if replacement.old not in text:
             continue

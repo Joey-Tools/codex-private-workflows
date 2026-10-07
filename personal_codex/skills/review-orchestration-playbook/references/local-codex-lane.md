@@ -583,7 +583,7 @@ Do not query the network or enumerate model catalogs for every review. The insta
 
 The parent session's effective model family or Codex mode never authorizes an
 automatic upgrade. Use the selected user-authorized profile, not a latest/strongest
-resolver. Consult current official model guidance only when Joey's requests
+resolver. Consult current official model guidance only when Joey requests
 model discovery or a policy migration needs capability verification.
 
 A runtime rejection, silent downgrade, or effective-profile mismatch is a

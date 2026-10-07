@@ -101,7 +101,7 @@ exclusions above.
 Example:
 
 ```text
-Joey's requested a Claude Code lane for <owner/repo> at <base_sha>..<head_sha>.
+Joey requested a Claude Code lane for <owner/repo> at <base_sha>..<head_sha>.
 This sends the committed tracked range, necessary tracked context, bounded
 review evidence, and prompt/result to Anthropic for read-only code review.
 Tracked repository secrets may be included because the reviewer is a trusted
