@@ -2331,8 +2331,19 @@ def _validate_replacement_counts(rule: SyncRule, found: dict[int, int]) -> None:
             and replacement.frontmatter_key == "description"
             and replacement.old in allowed_prefixes
         ]
+        matched_prefixes = {
+            rule.replacements[index].old for index in replacement_indexes
+        }
         actual_count = sum(found.get(index, 0) for index in replacement_indexes)
-        if len(replacement_indexes) != len(allowed_prefixes) or actual_count != 1:
+        if (
+            matched_prefixes != allowed_prefixes
+            or len(replacement_indexes) != len(allowed_prefixes)
+        ):
+            raise SyncError(
+                "invalid change-delivery description replacement alternatives: "
+                "expected exactly one definition for each recognized public prefix"
+            )
+        if actual_count != 1:
             raise SyncError(
                 "required replacement count mismatch for "
                 f"{rule.target}: recognized change-delivery description "

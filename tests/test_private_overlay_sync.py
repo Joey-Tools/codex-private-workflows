@@ -5303,6 +5303,12 @@ class PrivateOverlaySyncTests(unittest.TestCase):
             if rule.target == Path("personal_codex/skills/change-delivery-workflow")
         )
 
+        replacements_by_prefix = {
+            replacement.old: replacement
+            for replacement in rule.replacements
+            if replacement.path == SYNC_MODULE.CHANGE_DELIVERY_SKILL_PATH
+            and replacement.frontmatter_key == "description"
+        }
         self.assertEqual(
             rule.replacements[:2],
             (
@@ -5322,6 +5328,33 @@ class PrivateOverlaySyncTests(unittest.TestCase):
                 ),
             ),
         )
+        self.assertEqual(
+            set(replacements_by_prefix),
+            {
+                SYNC_MODULE.CHANGE_DELIVERY_PUBLIC_DESCRIPTION_PREFIX,
+                SYNC_MODULE.CHANGE_DELIVERY_NEW_PUBLIC_DESCRIPTION_PREFIX,
+            },
+        )
+        self.assertEqual(
+            replacements_by_prefix[
+                SYNC_MODULE.CHANGE_DELIVERY_PUBLIC_DESCRIPTION_PREFIX
+            ].new,
+            'description: "Run Joey\'s local ',
+        )
+        self.assertEqual(
+            replacements_by_prefix[
+                SYNC_MODULE.CHANGE_DELIVERY_NEW_PUBLIC_DESCRIPTION_PREFIX
+            ].new,
+            'description: "Run Joey\'s implementation-to-commit gate for ',
+        )
+        for replacement in replacements_by_prefix.values():
+            self.assertFalse(replacement.required)
+            self.assertIsNone(replacement.required_count)
+            self.assertEqual(
+                replacement.path,
+                SYNC_MODULE.CHANGE_DELIVERY_SKILL_PATH,
+            )
+            self.assertEqual(replacement.frontmatter_key, "description")
 
         SYNC_MODULE.sync_sources(self.repo_root, self.source_root, (rule,))
 
@@ -5341,7 +5374,68 @@ class PrivateOverlaySyncTests(unittest.TestCase):
             'description: "Run a local delivery gate for old work."\n',
         )
 
-    def test_change_delivery_sync_rule_builds_new_private_variant(self) -> None:
+    def test_change_delivery_description_alternatives_require_exactly_one_match(
+        self,
+    ) -> None:
+        rule = next(
+            rule
+            for rule in SYNC_MODULE.SYNC_RULES
+            if rule.target == SYNC_MODULE.CHANGE_DELIVERY_TARGET
+        )
+        description_indexes = [
+            index
+            for index, replacement in enumerate(rule.replacements)
+            if replacement.path == SYNC_MODULE.CHANGE_DELIVERY_SKILL_PATH
+            and replacement.frontmatter_key == "description"
+        ]
+        self.assertEqual(len(description_indexes), 2)
+
+        for index in description_indexes:
+            with self.subTest(accepted_index=index):
+                SYNC_MODULE._validate_replacement_counts(rule, {index: 1})
+
+        for label, counts in (
+            ("missing", {}),
+            ("both", {index: 1 for index in description_indexes}),
+        ):
+            with self.subTest(rejected_match_set=label):
+                with self.assertRaisesRegex(
+                    SYNC_MODULE.SyncError,
+                    "recognized change-delivery description",
+                ):
+                    SYNC_MODULE._validate_replacement_counts(rule, counts)
+
+        original_alternatives = tuple(
+            rule.replacements[index] for index in description_indexes
+        )
+        malformed_rules = (
+            dataclasses.replace(
+                rule,
+                replacements=tuple(
+                    replacement
+                    for index, replacement in enumerate(rule.replacements)
+                    if index != description_indexes[0]
+                ),
+            ),
+            dataclasses.replace(
+                rule,
+                replacements=(
+                    *rule.replacements,
+                    original_alternatives[0],
+                ),
+            ),
+        )
+        for malformed in malformed_rules:
+            with self.subTest(replacement_count=len(malformed.replacements)):
+                with self.assertRaisesRegex(
+                    SYNC_MODULE.SyncError,
+                    "exactly one definition for each recognized public prefix",
+                ):
+                    SYNC_MODULE._validate_replacement_counts(malformed, {})
+
+    def test_change_delivery_sync_rule_builds_implementation_to_commit_private_variant(
+        self,
+    ) -> None:
         source = (
             self.source_root
             / "codex-review-workflows"
@@ -5357,9 +5451,10 @@ class PrivateOverlaySyncTests(unittest.TestCase):
             "repo changes: implement, build, test, update docs, freeze the landing "
             "head, and hand review selection to review-orchestration-playbook. "
             "Use for local delivery or before PR readiness; an eligible remote PR "
-            'reviewer avoids duplicate local review unless explicitly requested."\n'
+            "reviewer avoids duplicate local review unless explicitly requested."
+            '"\n'
             "---\n\n"
-            "Keep the implementation focused.\n",
+            "Implementation-to-commit delivery policy.\n",
             encoding="utf-8",
         )
         rule = next(
@@ -5375,15 +5470,197 @@ class PrivateOverlaySyncTests(unittest.TestCase):
             target.read_text(encoding="utf-8"),
             "---\n"
             "name: change-delivery-workflow\n"
-            "description: \"Run Joey's implementation-to-commit gate for "
-            "non-trivial repo changes: implement, build, test, update docs, freeze "
-            "the landing head, and hand review selection to "
-            "review-orchestration-playbook. Use for local delivery or before PR "
-            "readiness; an eligible remote PR reviewer avoids duplicate local "
-            'review unless explicitly requested."\n'
+            'description: "Run Joey\'s implementation-to-commit gate for non-trivial '
+            "repo changes: implement, build, test, update docs, freeze the landing "
+            "head, and hand review selection to review-orchestration-playbook. "
+            "Use for local delivery or before PR readiness; an eligible remote PR "
+            "reviewer avoids duplicate local review unless explicitly requested."
+            '"\n'
             "---\n\n"
-            "Keep the implementation focused.\n",
+            "Implementation-to-commit delivery policy.\n",
         )
+
+    def test_change_delivery_sync_rule_replays_locked_implementation_to_commit_description(
+        self,
+    ) -> None:
+        skill = (
+            self.source_root
+            / "codex-review-workflows"
+            / "skills"
+            / "change-delivery-workflow"
+            / "SKILL.md"
+        )
+        skill.parent.mkdir(parents=True)
+        skill.write_text(
+            "---\n"
+            "name: change-delivery-workflow\n"
+            'description: "Run the implementation-to-commit gate for non-trivial '
+            "repo changes: implement, build, test, update docs, freeze the landing "
+            "head, and hand review selection to review-orchestration-playbook. "
+            "Use for local delivery or before PR readiness; an eligible remote PR "
+            "reviewer avoids duplicate local review unless explicitly requested."
+            '"\n'
+            "---\n\n"
+            "Implementation-to-commit delivery policy.\n",
+            encoding="utf-8",
+        )
+        rule = next(
+            rule
+            for rule in SYNC_MODULE.SYNC_RULES
+            if rule.target == SYNC_MODULE.CHANGE_DELIVERY_TARGET
+        )
+        policy = SYNC_MODULE.CANONICAL_REVIEW_MIGRATION_POLICY
+        source_pin = SYNC_MODULE._VerifiedLockedSourcePin(
+            repository=policy.repository,
+            revision=policy.reviewed_candidate_revision,
+            root_tree=policy.approved_root_tree,
+        )
+        locked_sources = self._locked_bug_triage_source(
+            rule,
+            skill.parent,
+            source_pin=source_pin,
+        )
+
+        SYNC_MODULE.sync_sources(
+            self.repo_root,
+            self.source_root,
+            (rule,),
+            locked_sources=locked_sources,
+        )
+
+        target = self.repo_root / rule.target / "SKILL.md"
+        self.assertEqual(
+            target.read_text(encoding="utf-8"),
+            "---\n"
+            "name: change-delivery-workflow\n"
+            'description: "Run Joey\'s implementation-to-commit gate for non-trivial '
+            "repo changes: implement, build, test, update docs, freeze the landing "
+            "head, and hand review selection to review-orchestration-playbook. "
+            "Use for local delivery or before PR readiness; an eligible remote PR "
+            "reviewer avoids duplicate local review unless explicitly requested."
+            '"\n'
+            "---\n\n"
+            "Implementation-to-commit delivery policy.\n",
+        )
+        target_bytes_before_repeat = target.read_bytes()
+        source_bytes_before_repeat = skill.read_bytes()
+
+        SYNC_MODULE.sync_sources(
+            self.repo_root,
+            self.source_root,
+            (rule,),
+            locked_sources=locked_sources,
+        )
+
+        self.assertEqual(target.read_bytes(), target_bytes_before_repeat)
+        self.assertEqual(skill.read_bytes(), source_bytes_before_repeat)
+
+    def test_change_delivery_locked_sync_rejects_body_and_cross_file_description_bait(
+        self,
+    ) -> None:
+        skill = (
+            self.source_root
+            / "codex-review-workflows"
+            / "skills"
+            / "change-delivery-workflow"
+            / "SKILL.md"
+        )
+        skill.parent.mkdir(parents=True)
+        target = self.repo_root / SYNC_MODULE.CHANGE_DELIVERY_TARGET
+        target.mkdir(parents=True)
+        sentinel = target / "SKILL.md"
+        sentinel_text = (
+            "---\n"
+            "name: change-delivery-workflow\n"
+            'description: "Run Joey\'s local delivery gate for the installed target."\n'
+            "---\n\n"
+            "Installed target sentinel.\n"
+        )
+        sentinel.write_text(sentinel_text, encoding="utf-8")
+        sentinel_identity = (sentinel.stat().st_dev, sentinel.stat().st_ino)
+        rule = next(
+            rule
+            for rule in SYNC_MODULE.SYNC_RULES
+            if rule.target == SYNC_MODULE.CHANGE_DELIVERY_TARGET
+        )
+        policy = SYNC_MODULE.CANONICAL_REVIEW_MIGRATION_POLICY
+        source_pin = SYNC_MODULE._VerifiedLockedSourcePin(
+            repository=policy.repository,
+            revision=policy.reviewed_candidate_revision,
+            root_tree=policy.approved_root_tree,
+        )
+        cases = (
+            (
+                "same-file body bait",
+                "---\n"
+                "name: change-delivery-workflow\n"
+                'description: "Run a repository delivery gate."\n'
+                "---\n\n"
+                'description: "Run the implementation-to-commit gate for old work."\n',
+                None,
+                "frontmatter description is not the recognized private legacy/current "
+                "form at prepared public source",
+            ),
+            (
+                "cross-file bait",
+                "---\n"
+                "name: change-delivery-workflow\n"
+                'description: "Run a repository delivery gate."\n'
+                "---\n",
+                'description: "Run the implementation-to-commit gate for old work."\n',
+                "frontmatter description is not the recognized private legacy/current "
+                "form at prepared public source",
+            ),
+            (
+                "unknown description",
+                "---\n"
+                "name: change-delivery-workflow\n"
+                'description: "Run an unrelated repository policy."\n'
+                "---\n",
+                None,
+                "frontmatter description is not the recognized private legacy/current "
+                "form at prepared public source",
+            ),
+        )
+
+        for label, skill_text, reference_text, error_pattern in cases:
+            with self.subTest(label=label):
+                skill.write_text(skill_text, encoding="utf-8")
+                reference = None
+                if reference_text is not None:
+                    references = skill.parent / "references"
+                    references.mkdir(exist_ok=True)
+                    reference = references / "wording-history.md"
+                    reference.write_text(reference_text, encoding="utf-8")
+                locked_sources = self._locked_bug_triage_source(
+                    rule,
+                    skill.parent,
+                    source_pin=source_pin,
+                )
+
+                with self.assertRaisesRegex(SYNC_MODULE.SyncError, error_pattern):
+                    SYNC_MODULE.sync_sources(
+                        self.repo_root,
+                        self.source_root,
+                        (rule,),
+                        locked_sources=locked_sources,
+                    )
+
+                self.assertEqual(skill.read_text(encoding="utf-8"), skill_text)
+                if reference is not None:
+                    assert reference_text is not None
+                    self.assertEqual(
+                        reference.read_text(encoding="utf-8"),
+                        reference_text,
+                    )
+                self.assertEqual(
+                    sentinel.read_text(encoding="utf-8"),
+                    sentinel_text,
+                )
+                self.assertEqual(
+                    (sentinel.stat().st_dev, sentinel.stat().st_ino),
+                    sentinel_identity,
+                )
 
     def test_change_delivery_sync_rule_replays_locked_legacy_private_variant(
         self,
@@ -5581,6 +5858,18 @@ class PrivateOverlaySyncTests(unittest.TestCase):
             for rule in SYNC_MODULE.SYNC_RULES
             if rule.target == SYNC_MODULE.CHANGE_DELIVERY_TARGET
         )
+        target = self.repo_root / rule.target
+        target.mkdir(parents=True)
+        sentinel = target / "SKILL.md"
+        sentinel_text = (
+            "---\n"
+            "name: change-delivery-workflow\n"
+            'description: "Run Joey\'s local delivery gate for the installed target."\n'
+            "---\n\n"
+            "Installed target sentinel.\n"
+        )
+        sentinel.write_text(sentinel_text, encoding="utf-8")
+        sentinel_identity = (sentinel.stat().st_dev, sentinel.stat().st_ino)
         policy = SYNC_MODULE.CANONICAL_REVIEW_MIGRATION_POLICY
         cases = (
             (
@@ -5644,7 +5933,11 @@ class PrivateOverlaySyncTests(unittest.TestCase):
                         locked_sources=locked_sources,
                     )
 
-                self.assertFalse((self.repo_root / rule.target).exists())
+                self.assertEqual(sentinel.read_text(encoding="utf-8"), sentinel_text)
+                self.assertEqual(
+                    (sentinel.stat().st_dev, sentinel.stat().st_ino),
+                    sentinel_identity,
+                )
 
     def test_bug_triage_sync_rule_builds_current_private_transport_variant(
         self,
@@ -13939,8 +14232,13 @@ jobs:
             "github.event.workflow_run.conclusion == 'failure'",
             "!github.event.workflow_run.pull_requests[1]",
             "github.event.workflow_run.head_sha",
-            "github.event_name == 'workflow_run' && 'begin-review'",
-            "request_review: ${{ github.event_name == 'workflow_run' ||",
+            "github.event.workflow_run.pull_requests[0].number || "
+            "github.event.issue.number || inputs.pr_number || "
+            "github.event.workflow_run.id || github.run_id",
+            "&& 'begin-review' || "
+            "github.event_name == 'workflow_run' && 'report-completion'",
+            "request_review: ${{ github.event_name == 'workflow_run' && "
+            "vars.CODEX_REVIEW_GATE_AUTO_REQUEST == 'true'",
             "CODEX_REVIEW_GATE_AUTO_REQUEST: ${{ vars.CODEX_REVIEW_GATE_AUTO_REQUEST }}",
             "CODEX_REVIEW_GATE_REQUEST_AUTHOR_PERMISSION: any",
             "uses: JoeyTeng/codex-review-gate-action@v2",
@@ -13953,6 +14251,128 @@ jobs:
         self.assertNotIn("codex-review-gate.yml@v1", controller)
         self.assertNotIn("vars.CODEX_REVIEW_GATE_REQUEST_AUTHOR_PERMISSION", controller)
 
+    def test_controller_completion_report_routing_is_narrow_and_independent(
+        self,
+    ) -> None:
+        controller_path = (
+            REPO_ROOT / ".github" / "workflows" / "codex-review-gate-controller.yml"
+        )
+        controller = controller_path.read_text(encoding="utf-8")
+        concurrency = controller.split("concurrency:\n", 1)[1].split(
+            "\njobs:", 1
+        )[0]
+        self.assertIn(
+            "github.event.workflow_run.pull_requests[0].number || "
+            "github.event.issue.number || inputs.pr_number || "
+            "github.event.workflow_run.id || github.run_id",
+            concurrency,
+        )
+        job_condition = controller.split("    if: >-\n", 1)[1].split(
+            "    runs-on:", 1
+        )[0]
+
+        for admission in (
+            "github.event.action == 'completed'",
+            "github.event.workflow_run.event == 'pull_request'",
+            "github.event.workflow_run.path == "
+            "'.github/workflows/codex-review-gate.yml'",
+            "startsWith(github.event.workflow_run.path, "
+            "'.github/workflows/codex-review-gate.yml@refs/pull/')",
+            "endsWith(github.event.workflow_run.path, '/merge')",
+            "!github.event.workflow_run.pull_requests[1]",
+        ):
+            with self.subTest(admission=admission):
+                self.assertIn(admission, job_condition)
+        for request_only_guard in (
+            "CODEX_REVIEW_GATE_AUTO_REQUEST",
+            "workflow_run.run_attempt",
+            "workflow_run.conclusion",
+            "workflow_run.pull_requests[0].number",
+        ):
+            with self.subTest(request_only_guard=request_only_guard):
+                self.assertNotIn(request_only_guard, job_condition)
+
+        action_inputs = controller.split("        with:\n", 1)[1]
+        pr_number = next(
+            line.strip()
+            for line in action_inputs.splitlines()
+            if line.startswith("          pr_number: ")
+        )
+        self.assertIn("pull_requests[0].number || '0'", pr_number)
+        self.assertNotIn("workflow_run.id", pr_number)
+        self.assertNotIn("github.run_id", pr_number)
+        operation = next(
+            line.strip()
+            for line in action_inputs.splitlines()
+            if line.startswith("          operation: ")
+        )
+        automatic_branch, completion_branch = operation.split(
+            " || github.event_name == 'workflow_run' && 'report-completion' ||",
+            1,
+        )
+        automatic_request_guards = (
+            "vars.CODEX_REVIEW_GATE_AUTO_REQUEST == 'true'",
+            "github.event.workflow_run.run_attempt == 1",
+            "github.event.workflow_run.conclusion == 'failure'",
+            "github.event.workflow_run.pull_requests[0].number",
+            "!github.event.workflow_run.pull_requests[1]",
+            "'begin-review'",
+        )
+        for request_guard in automatic_request_guards:
+            with self.subTest(request_guard=request_guard):
+                self.assertIn(request_guard, automatic_branch)
+        for request_only_guard in (
+            "CODEX_REVIEW_GATE_AUTO_REQUEST",
+            "workflow_run.run_attempt",
+            "workflow_run.conclusion",
+            "pull_requests[0].number",
+        ):
+            with self.subTest(completion_request_only_guard=request_only_guard):
+                self.assertNotIn(request_only_guard, completion_branch)
+
+        self.assertIn(
+            "(github.event.workflow_run.pull_requests[0].number || '0')",
+            action_inputs,
+        )
+        self.assertIn(
+            "request_review: ${{ github.event_name == 'workflow_run' && "
+            "vars.CODEX_REVIEW_GATE_AUTO_REQUEST == 'true'",
+            action_inputs,
+        )
+        request_review = next(
+            line.strip()
+            for line in action_inputs.splitlines()
+            if line.startswith("          request_review: ")
+        )
+        for guard in automatic_request_guards[:-1]:
+            with self.subTest(request_review_guard=guard):
+                self.assertIn(guard, request_review)
+        self.assertIn(
+            "github.event_name == 'workflow_dispatch' && inputs.request_review || false",
+            request_review,
+        )
+
+        canonical_path = ".github/workflows/codex-review-gate.yml"
+        self.assertIn(
+            f"github.event.workflow_run.path == '{canonical_path}'",
+            job_condition,
+        )
+        self.assertIn(
+            f"startsWith(github.event.workflow_run.path, '{canonical_path}@refs/pull/')",
+            job_condition,
+        )
+        self.assertIn(
+            "endsWith(github.event.workflow_run.path, '/merge')",
+            job_condition,
+        )
+        self.assertNotIn(
+            f"startsWith(github.event.workflow_run.path, '{canonical_path}@')",
+            job_condition,
+        )
+        self.assertNotIn(
+            f"startsWith(github.event.workflow_run.path, '{canonical_path}')",
+            job_condition,
+        )
     def test_scheduled_workflow_opens_pr_for_sync_changes(self) -> None:
         workflow = (
             REPO_ROOT / ".github" / "workflows" / "scheduled-sync-release.yml"

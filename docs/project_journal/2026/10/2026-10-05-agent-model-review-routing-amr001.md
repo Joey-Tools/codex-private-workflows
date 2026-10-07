@@ -3,9 +3,9 @@ id: 20261005-amr001
 title: Parent Models and Remote-First Review Routing
 status: active
 created: 2026-10-05
-updated: 2026-10-05
+updated: 2026-10-07
 branch: codex/agent-model-review-routing-20261005
-pr:
+pr: https://github.com/Joey-Tools/codex-private-workflows/pull/211
 supersedes: []
 superseded_by:
 ---
@@ -23,10 +23,12 @@ superseded_by:
 
 ## Delivery Dependencies
 
-- Canonical review policy is being prepared separately on `codex/review-model-routing-policy-20261005`; do not patch its generated private role or skills independently.
-- Canonical attribution labels are being prepared separately in workflow-hygiene. Promote their locked source commits only after canonical validation and merge.
+- Canonical review policy landed through `codex-review-workflows` PR #127 at `ed7fab2dafd813dc2df6e6dc10a61ab64d1319af`; do not patch its generated private role or skills independently.
+- Canonical attribution labels are delivered by `codex-workflow-hygiene` PR #89. Promote their locked source commits only after canonical validation and merge.
+- Source promotion owns the generated helper and its matching private output assertions. The four AGENTS-routing assertions in this companion change do not update the helper fallback; they must stay paired with the personal AGENTS policy instead.
+- Integrate the current base with merge commits, preserving #213's complete replacement-definition and exact-one-match checks and #200's per-action exact GitHub identity rules. Strict branch freshness is not a linear-history or rebase requirement.
 - Existing installer-recovery work and other threads' GitHub Actions/status-check/ruleset work are separate. Do not absorb unrelated open PRs.
-- The previous private-sync baseline has unrelated Archify generation and test-inventory failures; a successful focused policy test does not prove that a release or all-host install is ready.
+- Historical source-sync preparation failures are not current release evidence: #213 landed at `8e58181581c583ae6fec504d0a9d83162791d5bd`, and its default-branch release run `37535306846` succeeded. The new locked source promotion and companion release still require their own validation.
 
 ## Checklist
 
@@ -35,6 +37,12 @@ superseded_by:
 - [x] Validate exact previous/current AGENTS migration and source-description compatibility.
 - [ ] Merge canonical policy and attribution PRs, then promote through a locked private source-sync PR.
 - [ ] Verify default-branch release and native installer deployment on each reachable target host.
+
+## Deployment Boundary
+
+- Package installation covers the local account, `BL-mac-mini-m4-hoteng`, `hoteng-srv-01`, and `codex-hoteng-srv-01`, using each account's native Codex home. The two Linux aliases remain separate account destinations.
+- The macOS host-role inventory controls controller/headless scheduler behavior, not cross-platform package eligibility. This policy delivery does not authorize a new scheduler, activation migration, or edits to paused automations.
+- Use the existing native installer and verify public/private release identities, overlay integrity, and the materialized reviewer role before a fresh native Codex smoke test. Do not isolate `CODEX_HOME` or silently overwrite managed-file drift.
 
 ## Evidence
 
