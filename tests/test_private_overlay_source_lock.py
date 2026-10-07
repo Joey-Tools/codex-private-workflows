@@ -94,7 +94,7 @@ class SourceLockContractTests(unittest.TestCase):
         self.assertEqual(source_lock.digest, hashlib.sha256(raw).hexdigest())
         self.assertEqual(
             source_lock.pins[0].sha,
-            "255372d2b0dd96f39faf1e52a9168ca2aa7ece69",
+            "e716023be83c6c3132ebc530b8530ddf8c6b4c3f",
         )
 
     def test_rejects_unexpected_root_and_entry_fields(self) -> None:
@@ -115,6 +115,54 @@ class SourceLockContractTests(unittest.TestCase):
             "entry 0 fields",
         ):
             SOURCE_LOCK.load_source_lock(self.root)
+
+    def test_current_receipt_requires_complete_atomic_recovery_inventory(self) -> None:
+        expected = (
+            "scripts/codex_personal_sync.py",
+            "tests/test_codex_personal_sync.py",
+            "schema/sync-manifest.schema.json",
+            "tests/test_pending_agent_claim_compatibility.py",
+            "tests/test_pending_staging_cleanup.py",
+            "tests/test_quarantine_empty_batch_reclaim.py",
+            "tests/test_personal_sync_reconciliation_safety.py",
+            "tests/test_regular_agent_materialization.py",
+            "tests/test_regular_overlay_uninstall_status_regressions.py",
+            "tests/test_release_retention.py",
+            "tests/test_scheduler_doctor.py",
+        )
+        self.assertEqual(SOURCE_LOCK.EXPECTED_TOOLBOX_MANAGED_PATHS, expected)
+        receipt = json.loads(
+            (REPO_ROOT / SOURCE_LOCK.GENERATED_RECEIPT_PATH).read_bytes()
+        )
+        self.assertEqual(
+            tuple(entry["target_path"] for entry in receipt["files"]), expected
+        )
+        SOURCE_LOCK._validate_receipt_managed_tree(
+            REPO_ROOT, receipt, label="complete fixture"
+        )
+        for index, target in enumerate(expected):
+            with self.subTest(missing=target):
+                incomplete = dict(
+                    receipt,
+                    files=receipt["files"][:index] + receipt["files"][index + 1:],
+                )
+                with self.assertRaisesRegex(
+                    SOURCE_LOCK.SourceLockError, "managed inventory differs"
+                ):
+                    SOURCE_LOCK._validate_receipt_managed_tree(
+                        REPO_ROOT, incomplete, label="incomplete fixture"
+                    )
+        for files in (
+            receipt["files"] + receipt["files"][:1],
+            list(reversed(receipt["files"])),
+        ):
+            with self.subTest(targets=[entry["target_path"] for entry in files]):
+                with self.assertRaisesRegex(
+                    SOURCE_LOCK.SourceLockError, "managed inventory differs"
+                ):
+                    SOURCE_LOCK._validate_receipt_managed_tree(
+                        REPO_ROOT, dict(receipt, files=files), label="invalid fixture"
+                    )
 
     def test_rejects_source_order_drift(self) -> None:
         payload = self._read_lock_payload()

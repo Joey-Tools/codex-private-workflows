@@ -1810,6 +1810,8 @@ class PrivateOverlaySyncTests(unittest.TestCase):
         )
         (source / "renderers" / "shared").mkdir(parents=True)
         (source / "renderers" / "shared" / "brand-marks.mjs").write_text(
+            "import { BRAND_MARKS } from './generated-brand-marks.mjs';\n"
+            "import { throwDiagnosticError } from './diagnostics.mjs';\n"
             "import { esc, textUnits } from './utils.mjs';\n"
             "unknown.push(`/${collection}/${index}/brand ${JSON.stringify(node.brand)} is an unpinned URL; capture it first with \\`archify brands capture ${url.href} --json\\``);\n"
             "? ['run `archify brands capture <url> --json` and author the returned digest-pinned brand object']\n"
@@ -1907,6 +1909,16 @@ class PrivateOverlaySyncTests(unittest.TestCase):
         )
         self.assertFalse((target / "scripts" / "generate-brand-marks.mjs").exists())
         self.assertFalse((target / "scripts" / "generate-validators.mjs").exists())
+        brand_marks = (target / "renderers" / "shared" / "brand-marks.mjs").read_text(
+            encoding="utf-8"
+        )
+        for import_statement in (
+            "import { BRAND_MARKS } from './generated-brand-marks.mjs';",
+            "import { throwDiagnosticError } from './diagnostics.mjs';",
+            "import path from 'node:path';",
+            "import { fileURLToPath } from 'node:url';",
+        ):
+            self.assertEqual(brand_marks.count(import_statement), 1)
         skill = (target / "SKILL.md").read_text(encoding="utf-8")
         self.assertIn("node <loaded-skill-dir>/bin/archify.mjs validate", skill)
         self.assertIn(
@@ -2011,17 +2023,58 @@ class PrivateOverlaySyncTests(unittest.TestCase):
             Path("scripts/verify_generated_sync_source_lock.py"),
             Path("tests/test_generated_sync_source_lock.py"),
         }
+        atomic_promotion_test_paths = {
+            Path("tests/test_pending_agent_claim_compatibility.py"),
+            Path("tests/test_pending_staging_cleanup.py"),
+            Path("tests/test_quarantine_empty_batch_reclaim.py"),
+            Path("tests/test_regular_agent_materialization.py"),
+            Path("tests/test_regular_overlay_uninstall_status_regressions.py"),
+        }
         toolbox_rules = {
             (rule.source, rule.target)
             for rule in SYNC_MODULE.SYNC_RULES
             if rule.repo == "codex-toolbox"
         }
+        toolbox_source_keys = [
+            (rule.repo, rule.source)
+            for rule in SYNC_MODULE.SYNC_RULES
+            if rule.repo == "codex-toolbox"
+        ]
+        toolbox_targets = [
+            rule.target
+            for rule in SYNC_MODULE.SYNC_RULES
+            if rule.repo == "codex-toolbox"
+        ]
 
+        self.assertEqual(len(toolbox_source_keys), len(set(toolbox_source_keys)))
+        self.assertEqual(len(toolbox_targets), len(set(toolbox_targets)))
         self.assertTrue(
             {
                 (path, path) for path in generated_paths | receipt_contract_paths
             }.issubset(toolbox_rules)
         )
+        self.assertEqual(
+            {
+                (source, target)
+                for source, target in toolbox_rules
+                if source in atomic_promotion_test_paths
+                or target in atomic_promotion_test_paths
+            },
+            {(path, path) for path in atomic_promotion_test_paths},
+        )
+        for path in atomic_promotion_test_paths:
+            matching_rules = [
+                rule
+                for rule in SYNC_MODULE.SYNC_RULES
+                if rule.repo == "codex-toolbox"
+                and (rule.source == path or rule.target == path)
+            ]
+            with self.subTest(path=path):
+                self.assertEqual(len(matching_rules), 1)
+                self.assertEqual(
+                    (matching_rules[0].source, matching_rules[0].target),
+                    (path, path),
+                )
 
     def test_review_sync_preserves_private_ci_fixture_and_personalization(
         self,
@@ -12989,23 +13042,32 @@ class PrivateOverlaySyncTests(unittest.TestCase):
         )
         self.assertEqual(
             receipt["canonical_commit"],
-            "7803eebe63782f5539c22e1b7f0d7a7ec587ac3f",
+            "b78febccb199c38c48cf9a3bd49f151723524e9d",
+        )
+        self.assertEqual(
+            receipt["canonical_repository"],
+            "Joey-Tools/codex-personal-sync",
         )
         self.assertEqual(receipt["mirror"], "toolbox")
         self.assertEqual(
             receipt["mirror_repository"],
             "Joey-Tools/codex-toolbox",
         )
-        expected_paths = {
+        expected_paths = (
             "scripts/codex_personal_sync.py",
             "tests/test_codex_personal_sync.py",
             "schema/sync-manifest.schema.json",
+            "tests/test_pending_agent_claim_compatibility.py",
+            "tests/test_pending_staging_cleanup.py",
+            "tests/test_quarantine_empty_batch_reclaim.py",
             "tests/test_personal_sync_reconciliation_safety.py",
+            "tests/test_regular_agent_materialization.py",
+            "tests/test_regular_overlay_uninstall_status_regressions.py",
             "tests/test_release_retention.py",
             "tests/test_scheduler_doctor.py",
-        }
+        )
         self.assertEqual(
-            {entry["target_path"] for entry in receipt["files"]},
+            tuple(entry["target_path"] for entry in receipt["files"]),
             expected_paths,
         )
         for entry in receipt["files"]:

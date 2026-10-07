@@ -529,8 +529,6 @@ function cliCommand(...args) {
 
 ARCHIFY_BRAND_CLI_HELPER = """import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { BRAND_MARKS } from './generated-brand-marks.mjs';
-import { throwDiagnosticError } from './diagnostics.mjs';
 import { esc, textUnits } from './utils.mjs';
 
 const cliEntryPath = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../bin/archify.mjs');
@@ -637,6 +635,31 @@ SYNC_RULES = (
         "codex-toolbox",
         "tests/test_scheduler_doctor.py",
         "tests/test_scheduler_doctor.py",
+    ),
+    _rule(
+        "codex-toolbox",
+        "tests/test_pending_agent_claim_compatibility.py",
+        "tests/test_pending_agent_claim_compatibility.py",
+    ),
+    _rule(
+        "codex-toolbox",
+        "tests/test_pending_staging_cleanup.py",
+        "tests/test_pending_staging_cleanup.py",
+    ),
+    _rule(
+        "codex-toolbox",
+        "tests/test_quarantine_empty_batch_reclaim.py",
+        "tests/test_quarantine_empty_batch_reclaim.py",
+    ),
+    _rule(
+        "codex-toolbox",
+        "tests/test_regular_agent_materialization.py",
+        "tests/test_regular_agent_materialization.py",
+    ),
+    _rule(
+        "codex-toolbox",
+        "tests/test_regular_overlay_uninstall_status_regressions.py",
+        "tests/test_regular_overlay_uninstall_status_regressions.py",
     ),
     _rule(
         "codex-toolbox",
