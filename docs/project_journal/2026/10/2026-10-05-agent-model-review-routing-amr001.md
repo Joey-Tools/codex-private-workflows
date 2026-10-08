@@ -1,9 +1,9 @@
 ---
 id: 20261005-amr001
 title: Parent Models and Remote-First Review Routing
-status: active
+status: completed
 created: 2026-10-05
-updated: 2026-10-07
+updated: 2026-10-08
 branch: codex/agent-model-review-routing-20261005
 pr: https://github.com/Joey-Tools/codex-private-workflows/pull/211
 supersedes: []
@@ -38,8 +38,8 @@ superseded_by:
 - [x] Update short personal AGENTS routing/model defaults.
 - [x] Validate exact previous/current AGENTS migration and source-description compatibility.
 - [x] Merge canonical policy and attribution PRs, then promote through locked private replacement #214.
-- [ ] Validate this independent post-#214 exact-state integration and its own current-head hosted review/CI gates.
-- [ ] Verify default-branch release and native installer deployment on each reachable target host.
+- [x] Validate this independent post-#214 exact-state integration and its own current-head hosted review/CI gates.
+- [x] Verify default-branch release and native installer deployment on all four authorized account homes, with a separate local native CLI loading smoke.
 
 ## Deployment Boundary
 
@@ -48,6 +48,21 @@ superseded_by:
 - Use the existing native installer and verify public/private release identities, overlay integrity, and the materialized reviewer role before a fresh native Codex smoke test. Do not isolate `CODEX_HOME` or silently overwrite managed-file drift.
 
 ## Evidence
+
+### Final Delivery and Deployment
+
+- [#211](https://github.com/Joey-Tools/codex-private-workflows/pull/211) merged at `2026-10-07T20:40:48Z` as `7793dc1518671cc43474e8f72dffb8776d951dd4`, with actual #214 as its parent. Its merge tree equals frozen reviewed head `466584d7801ebc55730e4a97a1db75e7081ce43b`. Exact-head terminal clean comment `6046160540`, complete conversation with zero unresolved threads, required CI and two stable final readiness snapshots were accepted. Both original P2 findings remain preserved and resolved after their repairs.
+- [Private Overlay Release run37683859512](https://github.com/Joey-Tools/codex-private-workflows/actions/runs/37683859512) succeeded and published `personal-codex-20261007-210605-7793dc1` at `2026-10-07T21:06:11Z`. [Forced source-sync run37687265479](https://github.com/Joey-Tools/codex-private-workflows/actions/runs/37687265479) succeeded with `changed=false` and no private source changes; no additional sync PR or publication was required.
+- Normal native installation, strict status, overlay integrity and release-identity checks passed on local, `BL-mac-mini-m4-hoteng`, `hoteng-srv-01` and `codex-hoteng-srv-01`. Each account uses private `7793dc1518671cc43474e8f72dffb8776d951dd4` and public base `e716023be83c6c3132ebc530b8530ddf8c6b4c3f`, with matching private/public release-tree SHA256 values `3c39457bbc4ed1f640e3cfb2134802db988d3ac72e2d8dc908c5e26755d5f723` and `236fc5905f71f88edb49523b14af820eaf4824e0882c9e8be1b897bbd0805eec`.
+- Each installed reviewer is a unique, native-owner, single-link regular0600 file, SHA256 `d9db59ca773fa930e6a8a08f01592e53e56ce62de84aa3e6ca01d4e2da10c3d2`, with GPT-6.1 Sol/medium/read-only and no config reviewer override. The local newly activated published installer repaired the old role materialization through a normal rerun; its displaced entries remain recoverable in quarantine.
+- Native local CLI0.160.1 loading-only smoke returned0. Host-authored child `01a1183f-240e-7382-bf1a-bbfca903d95d` binds parent `01a1183e-fef4-7452-a1c0-1f1f79f0768c` and the fresh reviewer role, proving GPT-6.1 Sol/medium/read-only without a model/effort override or isolated `CODEX_HOME`. The child made zero tool calls and returned the expected missing-input inconclusive response. This is role-loading evidence, not a code-review pass, remote runtime test, existing Desktop-thread reload or backend-weight attestation.
+- Joey explicitly authorized the three remote native `github.com/JoeyTeng-Codex` pools; all worked without token transfer, active-account fallback or auth mutation. On2026-10-08 he separately approved removing group-write only from `/home/hoteng/.codex/agents`, `/home/codex/.codex` and `/home/codex/.codex/agents` (0775-to0755, non-recursive). Descriptor-bound verification preserved directory identity, ownership and group. Both Linux normal dry-runs, installs and strict checks then passed; no custody guard was bypassed.
+- Complete remote installation logs were retained locally and verified against their staging manifests before the three exact task staging directories were removed non-recursively. Installer quarantine and old #190 follow-ups remain preserved; no scheduler, paused automation, local code-review lane or pre-GPT-6 model was started.
+
+The following sections retain earlier validation epochs. Their pending gates,
+failed runs and historical heads do not contradict or replace the final evidence
+above. No delivery gate remains for this workstream; old #190 follow-up assessment
+is separate from the delivered policy and installation scope.
 
 ### Historical Pre-Integration Evidence
 

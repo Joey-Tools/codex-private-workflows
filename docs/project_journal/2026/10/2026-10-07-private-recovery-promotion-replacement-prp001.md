@@ -1,9 +1,9 @@
 ---
 id: 20261007-prp001
 title: Replace Stale Private Recovery Promotion
-status: active
+status: completed
 created: 2026-10-07
-updated: 2026-10-07
+updated: 2026-10-08
 branch: codex/reviewer-release-recovery-supersede190-20261007
 pr: https://github.com/Joey-Tools/codex-private-workflows/pull/214
 supersedes: []
@@ -23,7 +23,11 @@ superseded_by:
 - Address the four current-head remote findings atomically before merging #214. Move only the three conflicting governing clauses (remote-first delivery, native GitHub Copilot scoped consent, and helper-owned attribution fallback) forward from assigned #211; retain #211's independent parent/model guidance and named-route migration. Publishing the new skills before these governing clauses would leave an inconsistent intermediate release.
 - Preserve exact-state source-sync validation while admitting this intentional consent-policy transition. Do not broaden drift tolerance or overwrite unrelated AGENTS content. Restore Archify's loaded-package directory through its owning private source transformation, with a regression assertion before the first package read or command; do not hand-edit generated skill copies or change the canonical pin.
 
-## Evidence and Scope
+## Historical Preparation Evidence and Scope
+
+The entries below preserve the successive preparation epochs and their original
+pending boundaries. Final merge, release and deployment evidence appears in
+`Final Downstream Closure`; historical prerequisites are not current blockers.
 
 - Original PR: https://github.com/Joey-Tools/codex-private-workflows/pull/190
 - Original remote head: `7f1ed0fd9f863d80a09c5d630afd82c96ee8d682`; the old local worktree also contains later committed and uncommitted work.
@@ -74,6 +78,17 @@ Expected-head conditional squash merge completed at `2026-10-07T19:00:06Z`: actu
 - [x] Create the signed replacement PR with an explicit #190 carry-forward/supersession map.
 - [x] Obtain current-head provider clean, required CI, complete conversation evidence, and final merge-readiness validation; merge the exact reviewed head.
 - [x] Confirm #190 closed after the replacement merge, with an explicit superseded-by link.
-- [ ] Complete #211, verify source-sync/release outcomes, and install/smoke-test the four authorized native account homes without changing schedulers.
+- [x] Complete #211, verify source-sync/release outcomes, install and strictly verify all four authorized native account homes, and separately smoke-test local native CLI role loading without changing schedulers. Remote checks are package/static-profile evidence, not remote runtime-loading tests.
 
 Default-branch release run `37671143047` completed successfully, including the actual publish job. Tag `personal-codex-20261007-192511-b6ef345` was published at `2026-10-07T19:25:16Z`, not merely queued. A diagnostic local native normal-installer dry-run selected the admitted public base `e716023be83c6c3132ebc530b8530ddf8c6b4c3f` plus this #214 overlay and exited zero in 8.605 seconds; output SHA-256 `0588e99ee999fa4be509e793066ecbc2f8e7e26f31e83e4cbb8607ad1abd7144`. No actual installation or role-loading success is claimed. Final #211 release/deployment remains separate, and the three remote exact-account identity prerequisites remain open; no credentials were relayed or authentication/scheduler settings changed.
+
+## Final Downstream Closure
+
+- Independent [#211](https://github.com/Joey-Tools/codex-private-workflows/pull/211) completed its own exact-head remote review, complete conversation, required CI and stable readiness gates, then merged as `7793dc1518671cc43474e8f72dffb8776d951dd4` at `2026-10-07T20:40:48Z`, with actual #214 as its parent.
+- [Default-branch release37683859512](https://github.com/Joey-Tools/codex-private-workflows/actions/runs/37683859512) succeeded and published `personal-codex-20261007-210605-7793dc1`. [Required forced source-sync37687265479](https://github.com/Joey-Tools/codex-private-workflows/actions/runs/37687265479) succeeded with `changed=false`; no additional sync PR or release was needed.
+- Normal native installation, strict status, overlay verification and matching private/public release identities passed on local, `BL-mac-mini-m4-hoteng`, `hoteng-srv-01` and `codex-hoteng-srv-01`. All use private7793dc plus locked publice716023; each reviewer is the unique ordinary0600/current-owner/single-link released GPT-6.1 Sol/medium/read-only profile without a config override.
+- Separate native local CLI loading-only smoke passed without isolated `CODEX_HOME`, code review or pre-GPT-6 execution. Remote verification was package/static-profile-only; an existing Desktop thread's role reload is not claimed.
+- Explicitly authorized native `JoeyTeng-Codex` pools resolved the former remote auth prerequisite without credential transfer or storage changes. Only the three separately approved Linux custody directories lost group-write (0775-to0755, non-recursive), with identity/ownership preserved. Both normal Linux installs and their strict checks passed after that access-policy repair.
+- Full remote logs were retained locally before manifest-verified non-recursive removal of the three task staging directories. Installer quarantine, old #190 branch and dirty follow-ups remain preserved. The original remote #190 scope is replaced and closed as superseded; its later unassigned follow-ups are not claimed as delivered.
+
+See [the completed parent/model-routing journal](2026-10-05-agent-model-review-routing-amr001.md#final-delivery-and-deployment) for exact package digests and loading-session provenance. Historical dry-run-only and pending-account statements above remain historical evidence, not current blockers. No replacement or deployment gate remains for this workstream.
