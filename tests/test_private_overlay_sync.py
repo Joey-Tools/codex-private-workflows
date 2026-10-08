@@ -14954,6 +14954,11 @@ jobs:
         ):
             with self.subTest(anchor=anchor):
                 self.assertIn(anchor, verifier)
+        request_token_input = (
+            "review_request_token: "
+            "${{ secrets.CODEX_REVIEW_GATE_REQUEST_TOKEN }}"
+        )
+        self.assertNotIn(request_token_input, verifier)
 
         for unsupported in (
             "pull_request_target:",
@@ -14995,6 +15000,7 @@ jobs:
             "CODEX_REVIEW_GATE_AUTO_REQUEST: ${{ vars.CODEX_REVIEW_GATE_AUTO_REQUEST }}",
             "CODEX_REVIEW_GATE_REQUEST_AUTHOR_PERMISSION: any",
             "uses: JoeyTeng/codex-review-gate-action@v2",
+            request_token_input,
         ):
             with self.subTest(controller_anchor=anchor):
                 self.assertIn(anchor, controller)
