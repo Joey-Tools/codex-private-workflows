@@ -16,26 +16,26 @@
     {
       "name": "codex-debug-triage",
       "repository": "Joey-Tools/codex-debug-triage",
-      "sha": "9bf767be2388b402fa3fb2ad19713e5ec8cc4b1d",
-      "tree": "27d962a8f55a4feda036fb908824f6f25767718e"
+      "sha": "c6a0ba7a3451966a0b948728cd78876d086f52dd",
+      "tree": "2031d74b35c403dcb304b1c918632c524cb28b06"
     },
     {
       "name": "codex-review-workflows",
       "repository": "Joey-Tools/codex-review-workflows",
-      "sha": "534ad2c3f080007d290551762d1dd37ce5f79cb2",
-      "tree": "72aa92ca6def6a283a1069b1fd22a46b64d28d3f"
+      "sha": "4c089f5c4a6e250d16ce4eb79436ef583321fb03",
+      "tree": "97e445a3d1dbcadb15642f637e69c37f94e27520"
     },
     {
       "name": "codex-workflow-hygiene",
       "repository": "Joey-Tools/codex-workflow-hygiene",
-      "sha": "df9b7d20dc5f286f2d9eb2eec11e479deab42a04",
-      "tree": "4380c6c4043a154a740eb0fb2aa25c6cae7dfcc3"
+      "sha": "00bba7d7dd0123f5d26c043625538b03d1433397",
+      "tree": "b201f33e6870ddf28b5747a30720562313e3317c"
     },
     {
       "name": "codex-project-journal",
       "repository": "Joey-Tools/codex-project-journal",
-      "sha": "cddeebfda200f92bb9bdeca057d22df2a94a3290",
-      "tree": "61de3886f99bfff77564a3ae31c90f10b8e41d49"
+      "sha": "bd2909c9d41d3586267a9de83a416a137f81d793",
+      "tree": "e40a0e8864eab4f06fcf81dd788eee65c4589559"
     }
   ],
   "toolbox_generated_provenance": {
