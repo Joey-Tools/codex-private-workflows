@@ -14138,8 +14138,6 @@ jobs:
 
         for duplicate_step in (
             "Check helper syntax without bytecode",
-            "Run tests",
-            "Verify canonical review workflow",
         ):
             with self.subTest(skipped_on_pull_request=duplicate_step):
                 self.assertRegex(
@@ -14148,7 +14146,6 @@ jobs:
                 )
 
         for release_specific_step in (
-            "Validate sync manifest changes",
             "Build release package",
             "Verify release package",
         ):
@@ -14158,7 +14155,13 @@ jobs:
                     step_body(release_specific_step),
                 )
 
-        manifest_step = step_body("Validate sync manifest changes")
+        manifest_job = re.search(
+            r"(?ms)^  manifest_validation:\n(?P<body>.*?)(?=^  [-a-zA-Z0-9_]+:\n|\Z)",
+            workflow,
+        )
+        self.assertIsNotNone(manifest_job)
+        manifest_step = manifest_job.group("body")
+        self.assertNotIn("github.event_name != 'pull_request'", manifest_step)
         self.assertIn(
             '--release-repo "$GITHUB_REPOSITORY"',
             manifest_step,
@@ -14169,6 +14172,75 @@ jobs:
             step_body("Require source-only Python tree"),
             r"(?m)^        if: always\(\)$",
         )
+
+    def test_release_workflow_parallel_validation_gate_fails_closed(self) -> None:
+        workflow = (REPO_ROOT / ".github/workflows/release.yml").read_text()
+        release = re.search(
+            r"(?ms)^  release:\n(?P<body>.*?)(?=^  [-a-zA-Z0-9_]+:\n|\Z)",
+            workflow,
+        ).group("body")
+        gate = re.search(
+            r"(?ms)^      - name: Require release validation checks to pass\n"
+            r".*?^        run: \|\n(?P<script>.*?)(?=^      - name: |\Z)",
+            release,
+        ).group("script")
+        script = "\n".join(line[10:] for line in gate.splitlines())
+        dependencies = {
+            "controller_python_39": "PYTHON_39_RESULT",
+            "controller_macos": "MACOS_CONTROLLER_RESULT",
+            "release_tests": "RELEASE_TEST_RESULT",
+            "manifest_validation": "MANIFEST_RESULT",
+        }
+        self.assertIn("always() &&", release)
+        self.assertEqual(
+            set(re.findall(r"^      - (\w+)$", release, flags=re.M)),
+            set(dependencies),
+        )
+        for job, variable in dependencies.items():
+            self.assertIn(f"{variable}: ${{{{ needs.{job}.result }}}}", release)
+        self.assertIn("RELEASE_EVENT: ${{ github.event_name }}", release)
+        for event in ("push", "workflow_dispatch", "pull_request"):
+            expected_tests = "skipped" if event == "pull_request" else "success"
+            baseline = {variable: "success" for variable in dependencies.values()}
+            baseline.update(RELEASE_TEST_RESULT=expected_tests, RELEASE_EVENT=event)
+            cases = [(None, None, baseline, True)]
+            for variable in dependencies.values():
+                for result in ("success", "failure", "cancelled", "skipped"):
+                    expected = expected_tests if variable == "RELEASE_TEST_RESULT" else "success"
+                    cases.append((variable, result, {**baseline, variable: result}, result == expected))
+            for variable, result, environment, success in cases:
+                with self.subTest(event=event, variable=variable, result=result):
+                    completed = subprocess.run(
+                        ["bash", "-eu", "-c", script],
+                        env={**os.environ, **environment},
+                        capture_output=True,
+                        timeout=10,
+                    )
+                    self.assertEqual(completed.returncode == 0, success)
+
+    def test_release_test_groups_run_independently_with_complete_matrix(self) -> None:
+        workflow = (REPO_ROOT / ".github/workflows/release.yml").read_text()
+        for job in ("release_tests", "manifest_validation"):
+            body = re.search(
+                rf"(?ms)^  {job}:\n(?P<body>.*?)(?=^  [-a-zA-Z0-9_]+:\n|\Z)",
+                workflow,
+            ).group("body")
+            with self.subTest(job=job):
+                self.assertNotIn("    needs:", body)
+                self.assertIn("    runs-on: ubuntu-latest", body)
+                self.assertIn('python-version: "3.13"', body)
+                self.assertRegex(body, r"Require source-only Python tree\n        if: always\(\)")
+                self.assertNotIn("continue-on-error", body)
+        groups = re.search(
+            r"(?ms)^  release_tests:\n(?P<body>.*?)(?=^  [-a-zA-Z0-9_]+:\n|\Z)",
+            workflow,
+        ).group("body")
+        self.assertIn("github.event_name != 'pull_request'", groups)
+        self.assertIn("fail-fast: false", groups)
+        self.assertIn("suite: [overlay, review]", groups)
+        self.assertIn("group: [0, 1, 2, 3]", groups)
+        self.assertIn('scripts/run_release_test_group.py "$TEST_SUITE"', groups)
+        self.assertIn('--group-index "$TEST_GROUP" --group-count 4', groups)
 
     def test_full_canonical_suite_jobs_use_python_313_with_bounded_timeout(
         self,

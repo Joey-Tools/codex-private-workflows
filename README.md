@@ -251,16 +251,24 @@ On pull requests, `Private Overlay Release` makes the required
 `Build private overlay release` check depend on two controller prerequisites:
 the complete controller suite on Ubuntu with Python 3.9 and the same suite on
 macOS with Python 3.13. The required job explicitly rejects either prerequisite
-unless it succeeded, then performs release-specific validation: complete
-sync-manifest Release-history validation, package build and verification, and
-the source-only Python-tree guard. CI still owns the broader private and
+unless it succeeded, and also requires the independent complete sync-manifest
+Release-history validation before package build and verification. Each runner
+retains the source-only Python-tree guard. CI still owns the broader private and
 canonical review suites, so the release workflow repeats only the controller
-compatibility/platform coverage needed by this required check. Release
-validation retains its `ubuntu-latest` runner and 30-minute budget because
+compatibility/platform coverage needed by this required check. The history
+validator retains its `ubuntu-latest` runner and 30-minute budget because
 cross-version manifest safety requires inspecting complete Release history.
 
 On `master` pushes and eligible manual dispatches, `Private Overlay Release`
-still runs the complete validation set before publishing a GitHub release. New
+still runs the complete validation set before publishing a GitHub release. The
+private and canonical review suites each run in four independent Ubuntu groups
+on Python 3.13, alongside history validation and controller checks. The group
+runner discovers the same complete suites as `unittest discover`, keeps module
+fixtures together, and includes new modules automatically. Measured module
+weights only balance the groups; they do not remove tests. The existing
+`Build private overlay release` check rejects failed, cancelled, or unexpectedly
+skipped prerequisites. Only pull requests expect the full test groups to be
+skipped, since PR CI owns that coverage. New
 pull-request runs cancel superseded release validation for the same ref, while
 push, manual, and scheduled release work remains non-cancelling through the
 shared concurrency group. Release assets keep the same sync format used by the
