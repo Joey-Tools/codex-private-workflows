@@ -15,6 +15,7 @@ SUITE_ROOTS = {
     "overlay": REPO_ROOT / "tests",
     "review": REPO_ROOT / "personal_codex/skills/review-orchestration-playbook/tests",
 }
+SUITE_PATTERNS = {"overlay": "test*.py", "review": "test_*.py"}
 # Approximate Ubuntu test seconds from PR #219 CI run 37949290538. These
 # scheduling hints never filter discovery or determine whether a test runs.
 MODULE_WEIGHTS = {
@@ -69,11 +70,13 @@ def group_tests(
     return groups
 
 
-def run_group(test_root: pathlib.Path, group_index: int, group_count: int) -> int:
+def run_group(
+    test_root: pathlib.Path, group_index: int, group_count: int, pattern: str = "test*.py"
+) -> int:
     if group_count < 1 or not 0 <= group_index < group_count:
         raise ValueError("group index/count are out of range")
     loader = unittest.TestLoader()
-    tests = flatten_tests(loader.discover(str(test_root), pattern="test_*.py"))
+    tests = flatten_tests(loader.discover(str(test_root), pattern=pattern))
     if loader.errors:
         # A discovery error must fail every group, even outside its assignment.
         for error in loader.errors:
@@ -104,7 +107,9 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("group index/count are out of range")
     # Match `python -m unittest` imports such as `tests.test_other_module`.
     sys.path.insert(0, str(REPO_ROOT))
-    return run_group(SUITE_ROOTS[args.suite], args.group_index, args.group_count)
+    return run_group(
+        SUITE_ROOTS[args.suite], args.group_index, args.group_count, SUITE_PATTERNS[args.suite]
+    )
 
 
 if __name__ == "__main__":

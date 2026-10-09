@@ -137,8 +137,8 @@ class ReleaseTestGroupRunnerTests(unittest.TestCase):
             test_root = root / "tests"
             test_root.mkdir()
             marker = root / "executed.txt"
-            for name in ("alpha", "beta", "new_module"):
-                (test_root / f"test_{name}.py").write_text(
+            for name in ("test_alpha", "test_beta", "testfuture"):
+                (test_root / f"{name}.py").write_text(
                     "import multiprocessing, pathlib, unittest\n"
                     f"MARKER = pathlib.Path({str(marker)!r})\n"
                     "def record(value):\n"
@@ -151,14 +151,14 @@ class ReleaseTestGroupRunnerTests(unittest.TestCase):
                     "        process.start(); process.join(10)\n"
                     "        self.assertEqual(process.exitcode, 0)\n"
                     "    def test_other(self): record(__name__ + ':other')\n"
-                    + ("from tests.test_beta import record as companion_record\n" if name == "alpha" else "")
+                    + ("from tests.test_beta import record as companion_record\n" if name == "test_alpha" else "")
                 )
             for index in range(2):
                 completed = self._fixture_runner(root, index, 2)
                 self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
             expected = {
-                f"test_{name}:{operation}"
-                for name in ("alpha", "beta", "new_module")
+                f"{name}:{operation}"
+                for name in ("test_alpha", "test_beta", "testfuture")
                 for operation in ("setup", "teardown", "spawn", "other")
             }
             actual = marker.read_text().splitlines()

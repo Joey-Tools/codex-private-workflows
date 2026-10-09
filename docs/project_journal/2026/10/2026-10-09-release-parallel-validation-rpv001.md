@@ -19,7 +19,7 @@ superseded_by:
 ## Decision and Rationale
 - Release run 37951584197 spent 8m05s on private tests, 3m46s on history validation, and 13m43s on review tests in series; package construction and verification took approximately four seconds.
 - Preserve all tests, Python 3.13, published-history verification, package verification, and source-only guards. Parallelism removes serial waiting without relying on Python 3.10 PR evidence for the merged release commit.
-- Grouping dynamically discovers all modules. Historical timing weights affect assignment only; discovery failures and empty groups fail closed.
+- Grouping dynamically discovers all modules, retaining the private suite's `test*.py` and canonical review suite's `test_*.py` discovery patterns. Historical timing weights affect assignment only; discovery failures and empty groups fail closed.
 
 ## Current State
 - Four groups per suite run independently. Module and class fixtures remain together, including multiprocessing-spawn imports.
@@ -29,6 +29,7 @@ superseded_by:
 ## Validation
 - Python 3.13.0 ran all 2,516 private and 3,264 canonical review tests across the eight groups, with 11 platform/environment skips. One macOS broker fixture required an isolated rerun outside the outer sandbox so its nested `sandbox-exec` could start; that rerun passed.
 - Actionlint 1.7.12, `bash -n`, and ShellCheck passed for the release workflow; regression tests exercised prerequisite failure/cancellation/skip states, discovery errors, newly discovered modules, and module fixtures.
+- Discovery matched both original release commands exactly: 2,516 private and 3,264 review cases, assigned to the same eight groups. The grouping regression includes a newly added `testfuture.py` module without an underscore.
 - Local package build and verification passed with clean source enforcement. GitHub runner timing remains unmeasured until the workflow runs.
 
 ## Evidence
