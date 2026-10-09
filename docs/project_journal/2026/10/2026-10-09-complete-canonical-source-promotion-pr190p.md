@@ -38,6 +38,10 @@ superseded_by:
   promoted public commit. Updating its stale old-base expectation does not derive
   expected data from production or weaken the two independent attestation-chain
   membership checks.
+- Preserve the already published private #220 release parallel-validation changes
+  by merging `ebd0e072` into the promotion branch with an ordinary signed merge.
+  Keep its full module discovery and fail-closed release prerequisite aggregate;
+  do not rewrite the feature history or alter the unrelated published workflow.
 
 ## Source and Publication Evidence
 
@@ -92,8 +96,14 @@ superseded_by:
   with four skips and true exit zero. All 392 tracked input records were
   independently revalidated unchanged after completion. This result binds the
   original `112946c2` base; the pre-commit query discovered the newer published
-  private `ebd0e072` base, requiring a signed base refresh and renewed validation
-  rather than treating the original-base test result as current merge readiness.
+  private `ebd0e072` base. An ordinary signed two-parent merge incorporated that
+  base; original-base test results are not used as current merge readiness.
+- After the signed base refresh, strict six-source verification and exact-base
+  manifest validation passed. The declared Python 3.9 subset passed eight tests
+  in 2.043 seconds, private-layout contracts and exact trusted-manifest tests
+  passed 46 in 3.395 seconds, and the four Darwin process/deadline regressions
+  passed in 5.741 seconds. Generated-skill validation and the selected changed
+  consumer-source Ruff checks passed.
 
 ## Remaining Workstream Scope
 
