@@ -15415,13 +15415,14 @@ jobs:
             "Verify release package",
             "Publish GitHub release",
             "Validate repaired release history",
+            "Verify canonical review workflow",
         ):
             with self.subTest(step=step_name):
                 self.assertRegex(
                     workflow,
                     rf"- name: {re.escape(step_name)}\n\s+if: {re.escape(release_guard)}\n",
                 )
-        self.assertEqual(workflow.count(f"if: {release_guard}"), 6)
+        self.assertEqual(workflow.count(f"if: {release_guard}"), 7)
         self.assertNotIn("codex-waited-delivery", workflow)
         self.assertNotIn("personal_codex/skills/waited-delivery", workflow)
         self.assertIn('actual_sha="$(git rev-parse HEAD)"', workflow)
@@ -15464,6 +15465,155 @@ jobs:
             workflow.index("- name: Validate repaired release history"),
         )
         self.assertNotIn("steps.commit.outputs.sha", workflow)
+
+    def test_scheduled_sync_defers_canonical_suite_to_required_pr_ci(self) -> None:
+        scheduled = (
+            REPO_ROOT / ".github" / "workflows" / "scheduled-sync-release.yml"
+        ).read_text(encoding="utf-8")
+        ci = (REPO_ROOT / ".github" / "workflows" / "ci.yml").read_text(
+            encoding="utf-8"
+        )
+
+        def step_body(workflow: str, step_name: str) -> str:
+            step = re.search(
+                rf"(?ms)^      - name: {re.escape(step_name)}\n"
+                r"(?P<body>.*?)(?=^      - name: |\Z)",
+                workflow,
+            )
+            self.assertIsNotNone(step, step_name)
+            return step.group("body")
+
+        canonical_step = step_body(scheduled, "Verify canonical review workflow")
+        self.assertIn(
+            "if: steps.current-release.outputs.complete == 'false' && "
+            "steps.changes.outputs.changed != 'true'",
+            canonical_step,
+        )
+        self.assertNotIn("steps.changes.outputs.changed == 'true'", canonical_step)
+
+        deferred_step = step_body(scheduled, "Report canonical review suite deferral")
+        deferred_message = (
+            "The full canonical review suite is deferred to the required sync-PR "
+            "CI matrix; it has not run in this scheduled job."
+        )
+        self.assertIn("if: steps.changes.outputs.changed == 'true'", deferred_step)
+        self.assertIn(deferred_message, deferred_step)
+        self.assertIn('tee -a "$GITHUB_STEP_SUMMARY"', deferred_step)
+
+        pr_step = step_body(scheduled, "Open synced overlay pull request")
+        self.assertNotIn(
+            "python3 -m unittest discover -s "
+            "personal_codex/skills/review-orchestration-playbook/tests",
+            pr_step,
+        )
+        self.assertIn(
+            "Full canonical review suite runs in the required parallel "
+            "sync-PR CI matrix; it has not run in this scheduled job.",
+            pr_step,
+        )
+        self.assertLess(
+            scheduled.index("- name: Validate sync manifest changes"),
+            scheduled.index("- name: Report canonical review suite deferral"),
+        )
+        self.assertLess(
+            scheduled.index("- name: Report canonical review suite deferral"),
+            scheduled.index("- name: Open synced overlay pull request"),
+        )
+
+        review_job = re.search(
+            r"(?ms)^  review_tests:\n(?P<body>.*?)(?=^  [-a-zA-Z0-9_]+:\n|\Z)",
+            ci,
+        )
+        self.assertIsNotNone(review_job)
+        review_body = review_job.group("body")
+        modules_section = re.search(
+            r"(?ms)^        module:\n(?P<modules>.*?)(?=^    runs-on:)",
+            review_body,
+        )
+        self.assertIsNotNone(modules_section)
+        review_modules = re.findall(
+            r"(?m)^          - (test_[^\s]+\.py)$", modules_section.group("modules")
+        )
+        self.assertEqual(len(review_modules), len(set(review_modules)))
+        review_test_root = (
+            REPO_ROOT
+            / "personal_codex"
+            / "skills"
+            / "review-orchestration-playbook"
+            / "tests"
+        )
+        discovered_review_modules = sorted(
+            path.name for path in review_test_root.glob("test_*.py")
+        )
+        self.assertEqual(sorted(review_modules), discovered_review_modules)
+        self.assertIn("          - ubuntu-latest", review_body)
+        self.assertIn("          - macos-latest", review_body)
+        self.assertIn("fail-fast: false", review_body)
+
+        excluded_macos_modules = re.findall(
+            r"(?m)^          - os: macos-latest\n"
+            r"            module: (test_[^\s]+\.py)$",
+            review_body,
+        )
+        self.assertTrue(excluded_macos_modules)
+
+        shard_job = re.search(
+            r"(?ms)^  review_macos_shard_tests:\n"
+            r"(?P<body>.*?)(?=^  [-a-zA-Z0-9_]+:\n|\Z)",
+            ci,
+        )
+        self.assertIsNotNone(shard_job)
+        shard_body = shard_job.group("body")
+        max_parallel = re.search(r"(?m)^      max-parallel: [1-9][0-9]*$", shard_body)
+        self.assertIsNotNone(max_parallel)
+        self.assertIn("scripts/run_unittest_shard.py", shard_body)
+        shard_rows = re.findall(
+            r"(?m)^          - module: (test_[^\s]+\.py)\n"
+            r"            shard: ([0-9]+)\n"
+            r"            shard_count: ([0-9]+)$",
+            shard_body,
+        )
+        self.assertEqual(
+            {module for module, _shard, _count in shard_rows},
+            set(excluded_macos_modules),
+        )
+        for module in excluded_macos_modules:
+            with self.subTest(macos_sharded_module=module):
+                module_shards = [
+                    (int(shard), int(count))
+                    for row_module, shard, count in shard_rows
+                    if row_module == module
+                ]
+                shard_counts = {count for _shard, count in module_shards}
+                self.assertEqual(len(shard_counts), 1)
+                shard_count = next(iter(shard_counts))
+                self.assertEqual(
+                    sorted(shard for shard, _count in module_shards),
+                    list(range(shard_count)),
+                )
+
+        aggregate = re.search(
+            r"(?ms)^  test:\n(?P<body>.*?)(?=^  [-a-zA-Z0-9_]+:\n|\Z)",
+            ci,
+        )
+        self.assertIsNotNone(aggregate)
+        aggregate_body = aggregate.group("body")
+        self.assertIn("    name: test\n", aggregate_body)
+        self.assertIn("if: ${{ always() }}", aggregate_body)
+        required_leaf_results = (
+            ("review_syntax_tests", "REVIEW_SYNTAX_RESULT"),
+            ("review_tests", "REVIEW_RESULT"),
+            ("review_macos_shard_tests", "REVIEW_MACOS_SHARD_RESULT"),
+            ("private_overlay_sync_tests", "PRIVATE_OVERLAY_SYNC_RESULT"),
+            ("private_overlay_tests", "PRIVATE_OVERLAY_RESULT"),
+            ("private_overlay_contract_tests", "PRIVATE_OVERLAY_CONTRACT_RESULT"),
+        )
+        for job_name, result_name in required_leaf_results:
+            with self.subTest(required_ci_leaf=job_name):
+                self.assertIn(f"      - {job_name}\n", aggregate_body)
+                self.assertIn(
+                    f'test "${result_name}" = "success"', aggregate_body
+                )
 
     def test_scheduled_workflow_repairs_draft_current_release_assets_before_strict_validation(
         self,

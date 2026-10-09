@@ -315,7 +315,13 @@ is reserved for runs whose sync working tree remains unchanged. Immediately befo
 building, the workflow rechecks both `HEAD` and the complete Git working-tree state.
 The canonical review skill's `tests/fixtures/ci/private.yml` materializes the live
 private CI workflow byte-for-byte; scheduled sync tracks and stages `.github`, and
-the scheduled and release full-suite jobs run on Python 3.13.
+the scheduled and release full-suite jobs run on Python 3.13. When scheduled sync
+generates a changed candidate, it retains source-lock verification, syntax checks,
+private overlay tests, and manifest validation before opening the PR, then defers
+only the duplicate canonical review suite to the sync PR's existing required
+parallel CI matrix, and records that deferral in the job summary. The scheduler
+does not claim that suite passed before the PR; the unchanged incomplete-release
+repair path still runs it before publication.
 The generated PR records the exact review-workflow SHA and tree rather than treating
 a moving default branch as executable control-plane input. The current generated PR
 workflow declares only `contents: read` and contains no `secrets.*` references.
