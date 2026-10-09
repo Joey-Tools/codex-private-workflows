@@ -1,0 +1,108 @@
+---
+id: 20261009-pr190p
+title: Complete Canonical Recovery Source Promotion
+status: active
+created: 2026-10-09
+updated: 2026-10-09
+branch: codex/complete-canonical-source-promotion-20261009
+pr:
+supersedes: []
+superseded_by:
+---
+
+# Complete Canonical Recovery Source Promotion
+
+## Decisions and Reasons
+
+- Carry the applicable preserved private #190 follow-ups through their canonical
+  owner and the complete public/private consumer chain. The original #190 remains
+  superseded by #214; retain its branch and unique local work until independently
+  verified preservation permits the explicitly authorized worktree cleanup.
+- Bind every public-base surface to the actual immutable Toolbox merge, not a
+  feature head, synthetic PR merge, or older successful release. Advance the
+  private manifest, release verifier, six-source lock, and consumer expectations
+  together; a forced scheduled sync alone cannot advance that policy pin.
+- Use the stock complete generator and strict provenance checks. Generated
+  implementation, tests, and receipt bytes are never hand-edited. The private
+  consumer independently pins the canonical commit and receipt, retaining the
+  rejection of the former canonical commit even with a matching receipt digest.
+- Capacity validation requires one metadata-v11 projection and two independently
+  bounded v3 empty-proof projections for cleanup ticket v8. Keep terminal
+  validation receipts separate and reject unfamiliar overflow labels; independent
+  proofs need not contain different JSON.
+- Keep remote GitHub Codex review as the sole selected review lane. Local tests,
+  source admission, and dependency PR results are not this private PR's review or
+  CI pass. GitHub mutations remain parent-owned and expected-head bound. A moved
+  base is refreshed with a signed merge and a renewed complete verification loop.
+- Keep the controller's checked-in manifest assertion independently pinned to the
+  promoted public commit. Updating its stale old-base expectation does not derive
+  expected data from production or weaken the two independent attestation-chain
+  membership checks.
+
+## Source and Publication Evidence
+
+- Canonical [personal-sync #36](https://github.com/Joey-Tools/codex-personal-sync/pull/36)
+  merged as `110f2df02ee6388835d1eb6635e09e7f838658fb` after its own full native
+  and Linux 1,895-test gates. All twelve findings on superseded #34 were repaired
+  and completely reread as resolved before closure; its branch remains preserved.
+- [Toolbox #48](https://github.com/Joey-Tools/codex-toolbox/pull/48) merged as
+  `8361834d68b935d596f7e34345ba059a9e1203ea`, tree
+  `255bb6d1dd9c987aeb273d007fb170cd27fd18a7`, after its own two complete
+  1,920-test gates, current-head terminal clean, and strict merge-readiness checks.
+- [Public release](https://github.com/Joey-Tools/codex-toolbox/releases/tag/personal-codex-20261009-203407-8361834)
+  is immutable and binds that actual merge. Release run
+  [37983440706](https://github.com/Joey-Tools/codex-toolbox/actions/runs/37983440706)
+  passed its own 1,920 tests with 25 skips. Both assets were actually downloaded;
+  API sizes/digests, checksum, direct tag commit, and stock-consumer extraction
+  passed with identical initial/final release metadata.
+- The complete eleven-file generated receipt is independently pinned to
+  `0935f2b57b585c8a3620a6995554ad9f15917c67a6a4c4f6ed795a273328994b`.
+  The approved review source advances to
+  `be91d6b61f6b68143d9cb255df850796755694b8`, tree
+  `fd4624654cdd4937c7708cd81dc4140acce70498`, incorporating its published
+  Darwin deadline-test correction and matching trusted-source manifest. The
+  other four non-Toolbox source pairs remain unchanged, including Archify's
+  `joey-custom` branch; all exact values remain in the source lock.
+- Stock generation and independent post-generation verification passed. Initial
+  stale clean local source copies were rejected before generation and renewed
+  from the workspace-managed mirrors, without changing verification policy.
+  Before the corrected complete native run, fresh source inventory discovered
+  the review-source advance; official pin refresh and complete generation
+  incorporated it before further validation rather than validating stale inputs.
+
+## Validation Evidence
+
+- Focused consumer regressions passed seven tests; the two complete consumer
+  modules passed 113. The declared Python 3.9 compatibility subset passed eight,
+  actual private-layout review contracts passed 42, and exact-base manifest,
+  source-only syntax, Ruff, and journal validation passed.
+- The first complete native attempt ran 2,755 tests in 2,639.082 seconds and
+  correctly failed one stale public-base assertion, with four skips. Its 392
+  tracked inputs were revalidated unchanged before the consumer-owned assertion
+  was corrected. The entire controller module then passed 239 tests in 23.096
+  seconds, with one skip; this is not a claim that the failed full attempt passed.
+- After the final approved review-source refresh, the complete consumer and
+  source-lock modules passed 437 tests in 79.516 seconds, with one skip. The
+  private-layout review contracts and exact trusted-source manifest passed 46
+  tests in 4.707 seconds; four published Darwin deadline regressions, including
+  the live double-fork fixture, passed in 5.776 seconds. Skill-authoring validation
+  accepted the generated review skill; strict six-source verification passed
+  again with the new review pin and unchanged public/canonical bindings.
+- The corrected complete native attempt passed 2,755 tests in 2,564.686 seconds
+  with four skips and true exit zero. All 392 tracked input records were
+  independently revalidated unchanged after completion. This result binds the
+  original `112946c2` base; the pre-commit query discovered the newer published
+  private `ebd0e072` base, requiring a signed base refresh and renewed validation
+  rather than treating the original-base test result as current merge readiness.
+
+## Remaining Workstream Scope
+
+- Confirm the resulting immutable private release and declared forced source-sync
+  outcome, then renew drift/source/account evidence and install the exact new
+  public/private releases in all four authorized native account homes.
+- Revalidate the retained #190 preservation archive before removing only the
+  authorized old worktree; retain its branch, unique content, and recovery proof.
+
+This journal tracks the larger publication and deployment workstream. Dependency
+publication is verified; a private release, four new installations, and final
+cleanup are not claimed by these source-promotion changes.
