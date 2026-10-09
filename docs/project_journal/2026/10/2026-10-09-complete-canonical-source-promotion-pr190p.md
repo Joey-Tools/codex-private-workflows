@@ -3,7 +3,7 @@ id: 20261009-pr190p
 title: Complete Canonical Recovery Source Promotion
 status: active
 created: 2026-10-09
-updated: 2026-10-09
+updated: 2026-10-10
 branch: codex/complete-canonical-source-promotion-20261009
 pr:
 supersedes: []
@@ -104,6 +104,13 @@ superseded_by:
   passed 46 in 3.395 seconds, and the four Darwin process/deadline regressions
   passed in 5.741 seconds. Generated-skill validation and the selected changed
   consumer-source Ruff checks passed.
+- The renewed complete native suite on the published `ebd0e072` base passed
+  2,760 tests in 2,336.776 seconds with four skips and true exit zero. All 395
+  frozen tracked inputs, including this committed journal, were independently
+  revalidated unchanged after completion. Fresh remote acquisition confirmed
+  the exact base and all six approved source pairs unchanged. The subsequent
+  journal-only result update does not change tested implementation or test inputs;
+  it does not supply this private PR's remote review or CI result.
 
 ## Remaining Workstream Scope
 
