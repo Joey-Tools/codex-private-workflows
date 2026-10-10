@@ -14350,7 +14350,7 @@ jobs:
         independent_job = independent_job_match.group("body")
 
         self.assertEqual(
-            independent_job.count("\n    timeout-minutes: 20\n"),
+            independent_job.count("\n    timeout-minutes: 30\n"),
             1,
         )
         deterministic_step = """      - name: Run deterministic independent supervisor tests
@@ -14370,8 +14370,8 @@ jobs:
 """
         reconciliation_step = """      - name: Run platform reconciliation safety tests (Python 3.x)
         if: ${{ always() && steps.setup_latest_python.outcome == 'success' }}
-        timeout-minutes: 2
-        run: python3 -m unittest tests.test_personal_sync_reconciliation_safety
+        timeout-minutes: 10
+        run: python3 -m unittest -v tests.test_personal_sync_reconciliation_safety
 """
         broker_step = """      - name: Require hosted-runner byte reproduction
         if: always()
@@ -14392,12 +14392,17 @@ jobs:
             self.assertEqual(independent_job.count(step), 1)
         self.assertEqual(
             independent_job.count("\n        timeout-minutes: 10\n"),
-            1,
+            2,
         )
         self.assertEqual(
             independent_job.count("\n        timeout-minutes: 2\n"),
-            3,
+            2,
         )
+        step_budgets = re.findall(
+            r"(?m)^        timeout-minutes: ([0-9]+)$", independent_job
+        )
+        self.assertEqual(step_budgets, ["10", "2", "10", "2"])
+        self.assertGreaterEqual(30, sum(map(int, step_budgets)) + 5)
 
         for job_name in (
             "review_syntax_tests",

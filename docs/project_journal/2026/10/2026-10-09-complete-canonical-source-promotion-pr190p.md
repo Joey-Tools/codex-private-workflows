@@ -5,7 +5,7 @@ status: active
 created: 2026-10-09
 updated: 2026-10-10
 branch: codex/complete-canonical-source-promotion-20261009
-pr:
+pr: https://github.com/Joey-Tools/codex-private-workflows/pull/221
 supersedes: []
 superseded_by:
 ---
@@ -42,6 +42,12 @@ superseded_by:
   by merging `ebd0e072` into the promotion branch with an ordinary signed merge.
   Keep its full module discovery and fail-closed release prerequisite aggregate;
   do not rewrite the feature history or alter the unrelated published workflow.
+- Project the CI budget repair from its canonical fixture owner. The measured
+  complete reconciliation module exceeds the former two-minute step cap. Keep
+  the complete verbose module under a ten-minute finite cap and the parent under
+  thirty minutes, reserving six minutes beyond all declared step caps for setup
+  and final validation. Preserve failure-independent execution and every required
+  aggregate; this is a genuine CI repair, not an infrastructure retry.
 
 ## Source and Publication Evidence
 
@@ -62,9 +68,13 @@ superseded_by:
 - The complete eleven-file generated receipt is independently pinned to
   `0935f2b57b585c8a3620a6995554ad9f15917c67a6a4c4f6ed795a273328994b`.
   The approved review source advances to
-  `be91d6b61f6b68143d9cb255df850796755694b8`, tree
-  `fd4624654cdd4937c7708cd81dc4140acce70498`, incorporating its published
-  Darwin deadline-test correction and matching trusted-source manifest. The
+  `39ade7ab54613bffcac4aa959d9d2dbe8fd3cafe`, tree
+  `336e8f5e1eadbe4aef0dc07d8ab118127f520e12`, incorporating its published
+  Darwin deadline-test correction, matching trusted-source manifest, and
+  [canonical CI-budget repair #133](https://github.com/Joey-Tools/codex-review-workflows/pull/133).
+  That ordinary signed-server squash merge preserves the reviewed candidate tree
+  and passed its own current-head review, resolved finding, required CI and strict
+  readiness gates; the actual macOS suite passed 3,265 tests with fifteen skips. The
   other four non-Toolbox source pairs remain unchanged, including Archify's
   `joey-custom` branch; all exact values remain in the source lock.
 - Stock generation and independent post-generation verification passed. Initial
@@ -111,6 +121,25 @@ superseded_by:
   the exact base and all six approved source pairs unchanged. The subsequent
   journal-only result update does not change tested implementation or test inputs;
   it does not supply this private PR's remote review or CI result.
+
+## Canonical CI Budget Projection Validation
+
+- The official full generation at the actual `39ade7ab` merge passed in
+  151.285 seconds. Strict complete six-source/provenance verification passed in
+  21 seconds, and the exact published `ebd0e072` base manifest validator passed.
+  Toolbox/canonical recovery bindings and the other five source pairs are unchanged.
+- The renewed complete private consumer/source-lock modules passed 409 tests in
+  79.985 seconds with one skip. The independent generated-source consumer passed
+  all 30 tests; actual private-layout contracts and trusted-manifest tests passed
+  47 in 4.162 seconds, including the canonical CI-budget regression. The declared
+  native Python 3.9 subset passed eight in 1.817 seconds. Source-only syntax,
+  generated-skill validation, selected changed-test Ruff and whitespace passed.
+- Incremental changes from the previous `05545303` candidate affect only the
+  workflow, its canonical fixture/test projection, source lock, independent
+  consumer expectation and this journal; runtime implementation is unchanged.
+  These complete affected checks are proportionate to that CI-only projection.
+  The earlier 2,760-test native result remains historical evidence for its old
+  input scope, not a new-head review, CI or full-suite pass.
 
 ## Remaining Workstream Scope
 
