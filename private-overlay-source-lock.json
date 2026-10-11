@@ -4,8 +4,8 @@
     {
       "name": "codex-toolbox",
       "repository": "Joey-Tools/codex-toolbox",
-      "sha": "8361834d68b935d596f7e34345ba059a9e1203ea",
-      "tree": "255bb6d1dd9c987aeb273d007fb170cd27fd18a7"
+      "sha": "c498cf5aa132e28e9020d60ec4a9ebb1b884aec1",
+      "tree": "e790d82fd13b22683c2491b5af5b212808e6b288"
     },
     {
       "name": "archify",
@@ -22,8 +22,8 @@
     {
       "name": "codex-review-workflows",
       "repository": "Joey-Tools/codex-review-workflows",
-      "sha": "39ade7ab54613bffcac4aa959d9d2dbe8fd3cafe",
-      "tree": "336e8f5e1eadbe4aef0dc07d8ab118127f520e12"
+      "sha": "98d0753a65e4459c2fdf2bd0ee44c1cdb98bce85",
+      "tree": "9dd7d3c92e1a158e8fa63b2e0b9215f3dd3b2884"
     },
     {
       "name": "codex-workflow-hygiene",
