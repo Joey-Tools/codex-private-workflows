@@ -1502,8 +1502,10 @@ CANONICAL_REVIEW_REQUIRED_FILES = tuple(
         "references/claude-runtime-trust.md",
         "references/claude-stream-compatibility.json",
         "references/claude-stream-schema.json",
+        "references/default-review-routing.md",
         "references/egress-consent.md",
         "references/github-codex-evidence-authority.md",
+        "references/github-codex-producer-and-recovery.md",
         "references/github-codex-terminal-carriers-v1.json",
         "references/github-pr-probes.md",
         "references/local-codex-lane.md",
@@ -1609,6 +1611,8 @@ _CANONICAL_REVIEW_LEGACY_ONLY_FILES = frozenset(
 _CANONICAL_REVIEW_CURRENT_ONLY_FILES = frozenset(
     _path(path)
     for path in (
+        "references/default-review-routing.md",
+        "references/github-codex-producer-and-recovery.md",
         "references/github-codex-terminal-carriers-v1.json",
         "references/local-codex-lane.md",
         "references/review-workspace.md",
