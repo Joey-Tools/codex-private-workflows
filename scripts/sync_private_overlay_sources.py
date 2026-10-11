@@ -1357,7 +1357,7 @@ PERSONAL_AGENTS_PREVIOUS_REVIEW_BLOCK = (
     b"authorization for that external mutation; it never authorizes a different "
     b"workflow, input, scope, destination, PR, repository, or unrelated action.\n"
 )
-PERSONAL_AGENTS_CURRENT_REVIEW_BLOCK = (
+PERSONAL_AGENTS_ROUTING_PREVIOUS_REVIEW_BLOCK = (
     b"- Use `$review-orchestration-playbook` as the only entrypoint for default "
     b"routing, explicit named single, double, and triple review, and PR readiness. "
     b"Single uses one fresh-context local Codex review session, double adds actual "
@@ -1387,6 +1387,17 @@ PERSONAL_AGENTS_CURRENT_REVIEW_BLOCK = (
     b"scope and exact inputs, and separate current-task delivery or readiness "
     b"authorization for that external mutation; it never authorizes a different "
     b"workflow, input, scope, destination, PR, repository, or unrelated action.\n"
+)
+PERSONAL_AGENTS_CURRENT_REVIEW_BLOCK = (
+    b"- Use `$review-orchestration-playbook` as the only entrypoint for default routing, explicit named single, double, and triple review, and PR readiness. Single uses one fresh-context local Codex review session, double adds actual Claude Code, and triple adds current-head GitHub Codex only when explicitly requested. Generic workflow requests do not opt into Claude or default triple. The skill owns adapter selection, clean-workspace preparation, reviewer runtime checks, GitHub evidence and recovery, and PR-readiness algorithms; do not duplicate those contracts here.\n"
+    b"- An unambiguous named single, double, or triple request is contemporaneous consent for scoped review egress to that shape: OpenAI Codex for single, Anthropic Claude Code additionally for double, and GitHub Codex on an exact `github.com` PR additionally for triple. Reviewers may inspect the named repository tracked diff, necessary tracked context, bounded derived evidence, and review prompt/results, including tracked repository secrets. This excludes untracked files, unrelated repositories, broad workspace or home-directory content, credential discovery, GitHub Copilot, and substitute reviewers.\n"
+    b"- A bare named-review request is report-only and does not authorize branch creation or mutation, commits, push, PR creation/update or metadata changes, merge, any GitHub Actions rerun, dispatch, or reconciliation, or unrelated mutation. Bare triple authorizes only the scoped exact `@codex review` producer operation on an already-existing eligible PR. Before a first request or any proposed transport retry, read the complete exact current-head request set under one parent mutation owner and combine it with retained transport evidence: reuse an existing request; send only after independent proof that no create-comment HTTP action was invoked or no request byte could reach GitHub; unknown delivery stays read-only. A possibly delivered POST consumes the epoch budget, and an empty GET alone is not proof of non-delivery; it never authorizes a second logical request. Any GitHub Actions rerun, dispatch, or reconciliation requires both a repository-predeclared exact idempotent or reentrant contract for the frozen scope and exact inputs, and separate current-task delivery or readiness authorization for that external mutation; it never authorizes a different workflow, input, scope, destination, PR, repository, or unrelated action.\n"
+)
+PERSONAL_AGENTS_PREVIOUS_LANDING_LINE = (
+    b"- For reviewable tasks, prefer a `wip/<topic>` branch plus fixed `base_sha..head_sha` review ranges over live working-tree review; append fixes on the `wip/` branch, then squash onto the target branch after tests and the final whole-range review/gate. Use `~/.codex/bin/codex-wip-branch` and `~/.codex/bin/codex-squash-merge-wip` when they fit.\n"
+)
+PERSONAL_AGENTS_CURRENT_LANDING_LINE = (
+    b"- For reviewable tasks, prefer a `wip/<topic>` branch and a committed `base_sha..head_sha` range. Complete local squash/amend and signed landing-commit creation before the final exact-head review; any later head change invalidates it. Server-side squash merge occurs only after PR readiness and binds the reviewed head. Use `~/.codex/bin/codex-wip-branch` and `~/.codex/bin/codex-squash-merge-wip` only when they fit that order.\n"
 )
 INDEPENDENT_CODEX_REVIEW_ROOT = _path("scripts/independent_codex_pr_review")
 INDEPENDENT_CODEX_REVIEW_REQUIRED_FILES = tuple(
@@ -2079,6 +2090,31 @@ def _personal_agents_model_routing_state(data: bytes) -> str:
 
 
 def _personal_agents_review_guidance_state(data: bytes) -> str:
+    previous_landing = data.count(PERSONAL_AGENTS_PREVIOUS_LANDING_LINE)
+    current_landing = data.count(PERSONAL_AGENTS_CURRENT_LANDING_LINE)
+    landing_marker = b"- For reviewable tasks,"
+    if (
+        previous_landing + current_landing != 1
+        or data.count(landing_marker) != previous_landing + current_landing
+    ):
+        raise SyncError("personal AGENTS landing guidance is drifted or duplicated")
+    prior_count = data.count(PERSONAL_AGENTS_ROUTING_PREVIOUS_REVIEW_BLOCK)
+    if prior_count:
+        if prior_count != 1:
+            raise SyncError("personal AGENTS prior routing block is duplicated")
+        projected = data.replace(
+            PERSONAL_AGENTS_ROUTING_PREVIOUS_REVIEW_BLOCK,
+            PERSONAL_AGENTS_CURRENT_REVIEW_BLOCK,
+            1,
+        )
+        if _personal_agents_review_block_state(projected) != "current":
+            raise SyncError("personal AGENTS prior routing scope is not exact")
+        return "routing-previous"
+    state = _personal_agents_review_block_state(data)
+    return "landing-previous" if state == "current" and previous_landing else state
+
+
+def _personal_agents_review_block_state(data: bytes) -> str:
     try:
         data.decode("utf-8")
     except UnicodeDecodeError as exc:
@@ -2203,12 +2239,26 @@ def _migrated_personal_agents_bytes(data: bytes) -> bytes:
         start = data.index(PERSONAL_AGENTS_PREVIOUS_REVIEW_BLOCK)
         block_end = start + len(PERSONAL_AGENTS_PREVIOUS_REVIEW_BLOCK)
         source_consent = PERSONAL_AGENTS_PREVIOUS_CONSENT_LINE
+    elif state in {"routing-previous", "landing-previous"}:
+        source_block = (
+            PERSONAL_AGENTS_ROUTING_PREVIOUS_REVIEW_BLOCK
+            if state == "routing-previous"
+            else PERSONAL_AGENTS_CURRENT_REVIEW_BLOCK
+        )
+        start = data.index(source_block)
+        block_end = start + len(source_block)
+        source_consent = None
     else:
         start = data.index(PERSONAL_AGENTS_PREVIOUS_REVIEW_BLOCK)
         block_end = start + len(PERSONAL_AGENTS_PREVIOUS_REVIEW_BLOCK)
         source_consent = None
 
     migrated = data[:start] + PERSONAL_AGENTS_CURRENT_REVIEW_BLOCK + data[block_end:]
+    migrated = migrated.replace(
+        PERSONAL_AGENTS_PREVIOUS_LANDING_LINE,
+        PERSONAL_AGENTS_CURRENT_LANDING_LINE,
+        1,
+    )
     if source_consent is not None:
         migrated = migrated.replace(
             source_consent,
@@ -7441,7 +7491,14 @@ def _assert_pinned_personal_agents_file(
         or pinned.entry.name != expected_target.name
         or pinned.snapshot.access_policy[1] != 0o644
         or pinned.guidance_state
-        not in {"legacy", "previous", "intermediate", "current"}
+        not in {
+            "legacy",
+            "previous",
+            "intermediate",
+            "current",
+            "routing-previous",
+            "landing-previous",
+        }
         or _personal_agents_review_guidance_state(pinned.snapshot.data)
         != pinned.guidance_state
     ):
@@ -8138,7 +8195,13 @@ def _bind_canonical_review_personal_agents_plan(
                 "or advance the canonical source lock"
             )
         action = _PERSONAL_AGENTS_ACTION_LEGACY_NOOP
-    elif pinned_file.guidance_state in {"legacy", "previous", "intermediate"}:
+    elif pinned_file.guidance_state in {
+        "legacy",
+        "previous",
+        "intermediate",
+        "routing-previous",
+        "landing-previous",
+    }:
         action = _PERSONAL_AGENTS_ACTION_MIGRATE
         _migrated_personal_agents_bytes(pinned_file.snapshot.data)
     else:
@@ -8193,7 +8256,13 @@ def _assert_canonical_review_personal_agents_plan(
         _PERSONAL_AGENTS_ACTION_LEGACY_NOOP
         if not migration_source and state == "legacy"
         else _PERSONAL_AGENTS_ACTION_MIGRATE
-        if migration_source and state in {"legacy", "previous", "intermediate"}
+        if migration_source and state in {
+            "legacy",
+            "previous",
+            "intermediate",
+            "routing-previous",
+            "landing-previous",
+        }
         else _PERSONAL_AGENTS_ACTION_CURRENT_NOOP
         if migration_source and state == "current"
         else None

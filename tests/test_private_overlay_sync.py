@@ -947,6 +947,7 @@ class PrivateOverlaySyncTests(unittest.TestCase):
             + SYNC_MODULE.PERSONAL_AGENTS_SHORT_FILE_GUIDELINE
             + SYNC_MODULE.PERSONAL_AGENTS_MODEL_ROUTING_HISTORICAL_SUCCESSOR
             + SYNC_MODULE.PERSONAL_AGENTS_LEGACY_CONSENT_LINE
+            + SYNC_MODULE.PERSONAL_AGENTS_PREVIOUS_LANDING_LINE
             + legacy_block
             + SYNC_MODULE.PERSONAL_AGENTS_REVIEW_BLOCK_BOUNDARY
             + b"review evidence may span hosts.\n"
@@ -3273,6 +3274,76 @@ class PrivateOverlaySyncTests(unittest.TestCase):
             "current",
         )
 
+    def test_personal_agents_coherence_migration_is_exact_and_idempotent(self) -> None:
+        current = (REPO_ROOT / SYNC_MODULE.PERSONAL_AGENTS_TARGET).read_bytes()
+        previous = current.replace(
+            SYNC_MODULE.PERSONAL_AGENTS_CURRENT_REVIEW_BLOCK,
+            SYNC_MODULE.PERSONAL_AGENTS_ROUTING_PREVIOUS_REVIEW_BLOCK,
+            1,
+        ).replace(
+            SYNC_MODULE.PERSONAL_AGENTS_CURRENT_LANDING_LINE,
+            SYNC_MODULE.PERSONAL_AGENTS_PREVIOUS_LANDING_LINE,
+            1,
+        )
+        self.assertEqual(
+            SYNC_MODULE._personal_agents_review_guidance_state(previous),
+            "routing-previous",
+        )
+        self.assertEqual(SYNC_MODULE._migrated_personal_agents_bytes(previous), current)
+        self.assertEqual(SYNC_MODULE._migrated_personal_agents_bytes(current), current)
+        landing_only = current.replace(
+            SYNC_MODULE.PERSONAL_AGENTS_CURRENT_LANDING_LINE,
+            SYNC_MODULE.PERSONAL_AGENTS_PREVIOUS_LANDING_LINE,
+            1,
+        )
+        self.assertEqual(
+            SYNC_MODULE._personal_agents_review_guidance_state(landing_only),
+            "landing-previous",
+        )
+        self.assertEqual(SYNC_MODULE._migrated_personal_agents_bytes(landing_only), current)
+        for changed in (
+            previous.replace(b"by repeating", b"by silently repeating", 1),
+            previous + SYNC_MODULE.PERSONAL_AGENTS_PREVIOUS_LANDING_LINE,
+            previous.replace(SYNC_MODULE.PERSONAL_AGENTS_PREVIOUS_LANDING_LINE, b"", 1),
+            current.replace(SYNC_MODULE.PERSONAL_AGENTS_CURRENT_LANDING_LINE, b"", 1),
+            current.replace(b"before the final exact-head review", b"after review", 1),
+        ):
+            with self.subTest(digest=hashlib.sha256(changed).hexdigest()):
+                with self.assertRaises(SYNC_MODULE.SyncError):
+                    SYNC_MODULE._migrated_personal_agents_bytes(changed)
+
+    def test_approved_review_sync_migrates_coherence_policy_once(self) -> None:
+        rule, _target = self._create_canonical_regular_file_overlay_rule(
+            authoritative=True
+        )
+        source = self.source_root / rule.repo / rule.source
+        locked_sources = self._locked_canonical_review_source(rule, source)
+        current = (REPO_ROOT / SYNC_MODULE.PERSONAL_AGENTS_TARGET).read_bytes()
+        previous = current.replace(
+            SYNC_MODULE.PERSONAL_AGENTS_CURRENT_REVIEW_BLOCK,
+            SYNC_MODULE.PERSONAL_AGENTS_ROUTING_PREVIOUS_REVIEW_BLOCK,
+            1,
+        ).replace(
+            SYNC_MODULE.PERSONAL_AGENTS_CURRENT_LANDING_LINE,
+            SYNC_MODULE.PERSONAL_AGENTS_PREVIOUS_LANDING_LINE,
+            1,
+        )
+        agents = self.repo_root / SYNC_MODULE.PERSONAL_AGENTS_TARGET
+        agents.parent.mkdir(parents=True, exist_ok=True)
+        agents.write_bytes(previous)
+        agents.chmod(0o644)
+
+        SYNC_MODULE.sync_sources(
+            self.repo_root, self.source_root, (rule,), locked_sources=locked_sources
+        )
+        self.assertEqual(agents.read_bytes(), current)
+        current_inode = agents.stat().st_ino
+        SYNC_MODULE.sync_sources(
+            self.repo_root, self.source_root, (rule,), locked_sources=locked_sources
+        )
+        self.assertEqual(agents.read_bytes(), current)
+        self.assertEqual(agents.stat().st_ino, current_inode)
+
     def test_approved_review_sync_migrates_previous_personal_agents(
         self,
     ) -> None:
@@ -3543,8 +3614,7 @@ class PrivateOverlaySyncTests(unittest.TestCase):
                 ),
                 "mixed": (
                     legacy + current,
-                    "personal AGENTS model-routing paragraph requires one exact "
-                    "short-file guideline anchor",
+                    "personal AGENTS landing guidance is drifted or duplicated",
                 ),
                 "compact-current": (
                     current.replace(
@@ -3605,8 +3675,7 @@ class PrivateOverlaySyncTests(unittest.TestCase):
             cases = {
                 "mixed": (
                     legacy + current,
-                    "personal AGENTS model-routing paragraph requires one exact "
-                    "short-file guideline anchor",
+                    "personal AGENTS landing guidance is drifted or duplicated",
                 ),
                 "legacy-byte-drift": (
                     legacy.replace(
@@ -14922,8 +14991,15 @@ jobs:
             "Claude Code, Copilot CLI, and other external reviewers without explicit opt-in",
             "A bare named-review request is report-only",
             "scoped exact `@codex review` producer operation",
-            "single-owner, single-flight recovery after ambiguous delivery",
-            "repeating that exact POST for the same logical request",
+            "read the complete exact current-head request set under one parent mutation owner",
+            "combine it with retained transport evidence",
+            "reuse an existing request",
+            "independent proof that no create-comment HTTP action was invoked",
+            "unknown delivery stays read-only",
+            "A possibly delivered POST consumes the epoch budget",
+            "an empty GET alone is not proof of non-delivery",
+            "signed landing-commit creation before the final exact-head review",
+            "Server-side squash merge occurs only after PR readiness",
             "never authorizes a second logical request",
             "GitHub Actions rerun, dispatch, or reconciliation requires both",
             "repository-predeclared exact idempotent or reentrant contract",
@@ -14946,6 +15022,7 @@ jobs:
             "$external-review-playbook",
             "$copilot-review-playbook",
             "is the only mutation implied by bare triple",
+            "repeating that exact POST for the same logical request",
         ):
             with self.subTest(retired=retired):
                 self.assertNotIn(retired, agents)
