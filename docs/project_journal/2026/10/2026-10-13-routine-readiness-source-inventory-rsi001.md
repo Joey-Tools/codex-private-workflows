@@ -5,7 +5,7 @@ status: completed
 created: 2026-10-13
 updated: 2026-10-13
 branch: wip/routine-readiness-source-inventory-20261013
-pr:
+pr: https://github.com/Joey-Tools/codex-private-workflows/pull/224
 supersedes: []
 superseded_by:
 ---
@@ -14,18 +14,22 @@ superseded_by:
 
 ## Summary
 
-The current canonical review inventory now includes the readiness planner and
-its regression test. Both are required current-only files; legacy and
-independent inventories retain their prior scope.
+The current canonical review inventory includes the readiness planner and
+its regression test as required current-only files. Normal source generation
+also projects the canonical fixes for mandatory global queue revalidation and
+recursive rejection of duplicate JSON keys. Legacy and independent inventories
+retain their prior scope.
 
 ## Current State
 
 The current profile contains 155 required and 160 exact files, with 77
 independent required files. The legacy profile remains at 145 required, 150
 exact, and 78 independent required files. Existing raw exact-tree validation
-and publication guards are unchanged.
+and publication guards are unchanged. Queue retention requires complete global
+gate coverage or a proved non-bypassed completion hold. Both JSON CLI input
+routes reject duplicate keys rather than accepting the last value.
 
-## Evidence
+## Initial Inventory Validation
 
 - Canonical review source tree: `b1ddf393c6365d46c8e325609f51c78436494336`.
 - Canonical PR #137 merged as `4f181e3dc6576bb86651bd59b67bf0085480ba3d`.
@@ -58,3 +62,36 @@ run `38438348142` correctly rejected an unregistered planner file before opening
 a sync PR; it is a deterministic compatibility failure, not infrastructure
 recovery. No protection, credential, runtime permission, or installed-home state
 is weakened or changed by this repair.
+
+## Corrective Source Projection
+
+- The two applicable private PR #224 findings were corrected in canonical
+  PR #138, merged as `99c86dbfdf19c5e4ef8e12799f8c4aac6c1b2781` with tree
+  `c696ecaa90b42715d193cbadf5c97a585b940157`. Its own review and CI passed;
+  those results do not approve the private PR.
+- Complete six-source refresh passed in 44.391 seconds, official generation
+  in 220.172 seconds, and final checkout verification in 31.591 seconds.
+  Source lock `d5511306c630f1ac8722c4b98b6076c8b79207e8924cdacbb9a8916b0f88a8a3`
+  changes only the review pin; other five pins, Toolbox base, eleven-file
+  receipt, and approved Archify custom source remain fixed. All generated
+  recovery and prepared-tree locators remain in the task generation log.
+- Generated planner and test match actual canonical bytes exactly, with
+  SHA-256 `041dccce196b278ebc8d5244543b0a550b09764c6767023063ef5479c25284e1`
+  and `6c97e806307c5ec203ec0cbb1a43948054880a8b04f2456a2a090a076b5efc60`.
+  The reference matches the established user-to-Joey personalization, not raw
+  canonical bytes. Fixture, workflow, consumer implementation and complete
+  skill bytes are unchanged from initial private head `e3bdba7`.
+- Six complete consumer/source-lock/package/controller/manifest/provenance
+  modules passed: 817 tests, two skips, 185.398 seconds on CPython 3.10.19.
+  Supervisor zero/no incomplete output; log SHA-256
+  `4b667e0f524aaacb563d53cec92a0e2db9abf177f5ad35c4696e980cab01a4cb`.
+- Six complete generated review-contract/planner modules passed in the actual
+  private layout: 162 tests, no skips, 5.864 seconds on CPython 3.10.19 with
+  existing local `tomli`; log SHA-256
+  `35bfe983f3e6927e07da64da98d9f51db16e63f6e181f5455b8ba73d6ae01530`.
+- Exact-base9f manifest, changed-Python Ruff and source-only syntax passed.
+  Offline skill validation lacked cached PyYAML; its direct Python fallback
+  also failed to import it. Unchanged complete skill bytes and independent-9f
+  frontmatter equality are fallback evidence, not fresh YAML parsing. The
+  declared Python 3.9 remote job remains required; no new private whole-suite,
+  remote review, CI, merge, release or installed-home result is asserted here.
