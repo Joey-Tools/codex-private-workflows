@@ -2338,8 +2338,8 @@ class PrivateOverlaySyncTests(unittest.TestCase):
     ) -> None:
         current = SYNC_MODULE._CANONICAL_REVIEW_CURRENT_INVENTORY
         legacy = SYNC_MODULE._CANONICAL_REVIEW_LEGACY_INVENTORY
-        self.assertEqual(len(current.required_files), 153)
-        self.assertEqual(len(current.exact_files), 158)
+        self.assertEqual(len(current.required_files), 155)
+        self.assertEqual(len(current.exact_files), 160)
         self.assertEqual(len(current.independent_required_files), 77)
         self.assertEqual(len(legacy.required_files), 145)
         self.assertEqual(len(legacy.exact_files), 150)
@@ -2456,6 +2456,91 @@ class PrivateOverlaySyncTests(unittest.TestCase):
                     "missing required file" if missing else "raw exact tree inventory",
                 ):
                     SYNC_MODULE.sync_sources(self.repo_root, self.source_root, (rule,))
+                self.assertEqual((target / "old-marker").read_bytes(), b"old\n")
+                shutil.rmtree(source)
+                shutil.rmtree(target)
+                private_catalog = self.repo_root / rule.regular_file_overlays[0].source
+                private_catalog.unlink()
+                private_catalog.parent.rmdir()
+
+    def test_readiness_plan_files_are_required_current_only(self) -> None:
+        readiness_files = {
+            Path("scripts/readiness_plan.py"),
+            Path("tests/test_readiness_plan.py"),
+        }
+        current = SYNC_MODULE._CANONICAL_REVIEW_CURRENT_INVENTORY
+        legacy = SYNC_MODULE._CANONICAL_REVIEW_LEGACY_INVENTORY
+        self.assertTrue(readiness_files.issubset(current.required_files))
+        self.assertTrue(readiness_files.issubset(current.exact_files))
+        self.assertTrue(readiness_files.isdisjoint(legacy.required_files))
+        self.assertTrue(readiness_files.isdisjoint(legacy.exact_files))
+
+        legacy_target = self.repo_root / "legacy-readiness-inventory"
+        for relative in legacy.exact_files:
+            path = legacy_target / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("canonical\n", encoding="utf-8")
+        for relative in readiness_files:
+            path = legacy_target / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("new current file\n", encoding="utf-8")
+        with self.assertRaisesRegex(SYNC_MODULE.SyncError, "exact tree inventory"):
+            SYNC_MODULE._validate_canonical_review_target_contents(
+                legacy_target,
+                inventory_profile=legacy,
+            )
+
+    def test_readiness_plan_files_sync_byte_for_byte(self) -> None:
+        rule, target = self._create_canonical_regular_file_overlay_rule()
+        source = self.source_root / rule.repo / rule.source
+        files = {
+            Path("scripts/readiness_plan.py"): (
+                b"#!/usr/bin/env python3\nprint('plan')\n"
+            ),
+            Path("tests/test_readiness_plan.py"): (
+                b"def test_plan():\n    assert True\n"
+            ),
+        }
+        for relative, content in files.items():
+            (source / relative).write_bytes(content)
+
+        SYNC_MODULE.sync_sources(self.repo_root, self.source_root, (rule,))
+
+        for relative, content in files.items():
+            self.assertEqual((target / relative).read_bytes(), content)
+        self.assertFalse((target / "old-marker").exists())
+
+    def test_readiness_plan_inventory_rejects_missing_and_unknown_files(
+        self,
+    ) -> None:
+        cases = (
+            ("missing-script", Path("scripts/readiness_plan.py"), True),
+            ("missing-test", Path("tests/test_readiness_plan.py"), True),
+            ("unknown-script", Path("scripts/readiness_plan_extra.py"), False),
+            ("unknown-test", Path("tests/test_readiness_plan_extra.py"), False),
+        )
+        for name, relative, missing in cases:
+            with self.subTest(name=name):
+                rule, target = self._create_canonical_regular_file_overlay_rule()
+                source = self.source_root / rule.repo / rule.source
+                if missing:
+                    (source / relative).unlink()
+                else:
+                    (source / relative).write_text(
+                        "unexpected\n",
+                        encoding="utf-8",
+                    )
+                with self.assertRaisesRegex(
+                    SYNC_MODULE.SyncError,
+                    "missing required file"
+                    if missing
+                    else "raw exact tree inventory",
+                ):
+                    SYNC_MODULE.sync_sources(
+                        self.repo_root,
+                        self.source_root,
+                        (rule,),
+                    )
                 self.assertEqual((target / "old-marker").read_bytes(), b"old\n")
                 shutil.rmtree(source)
                 shutil.rmtree(target)
