@@ -1972,6 +1972,33 @@ class AppleNotesWorkReportSkillTests(unittest.TestCase):
 
 
 class PrivateAutomationPromptTests(unittest.TestCase):
+    def test_tracked_automations_use_sol_high_and_preserve_pause_policy(self) -> None:
+        expected_statuses = {
+            "daily-skill-friction": "PAUSED",
+            "daily-work-report-draft": "ACTIVE",
+        }
+        for automation_id, status in expected_statuses.items():
+            with self.subTest(automation_id=automation_id):
+                path = (
+                    REPO_ROOT / "personal_codex" / "automations"
+                    / automation_id / "automation.toml"
+                )
+                profile = {}
+                for line in path.read_text(encoding="utf-8").splitlines():
+                    key, separator, value = line.partition("=")
+                    if separator and key.strip() in {
+                        "model", "reasoning_effort", "status"
+                    }:
+                        profile[key.strip()] = ast.literal_eval(value.strip())
+                self.assertEqual(
+                    profile,
+                    {
+                        "model": "gpt-6.1-sol",
+                        "reasoning_effort": "high",
+                        "status": status,
+                    },
+                )
+
     def test_daily_work_report_uses_workspace_local_apple_notes_skill(self) -> None:
         prompt = automation_prompt("daily-work-report-draft")
         skill_root = (
