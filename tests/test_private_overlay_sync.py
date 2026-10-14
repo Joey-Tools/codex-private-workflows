@@ -944,7 +944,10 @@ class PrivateOverlaySyncTests(unittest.TestCase):
         )
         data = (
             b"# Personal Guidelines\n\n"
+            + SYNC_MODULE.PERSONAL_AGENTS_SHORT_FILE_GUIDELINE
+            + SYNC_MODULE.PERSONAL_AGENTS_MODEL_ROUTING_HISTORICAL_SUCCESSOR
             + SYNC_MODULE.PERSONAL_AGENTS_LEGACY_CONSENT_LINE
+            + SYNC_MODULE.PERSONAL_AGENTS_PREVIOUS_LANDING_LINE
             + legacy_block
             + SYNC_MODULE.PERSONAL_AGENTS_REVIEW_BLOCK_BOUNDARY
             + b"review evidence may span hosts.\n"
@@ -1728,6 +1731,56 @@ class PrivateOverlaySyncTests(unittest.TestCase):
             target.read_text(encoding="utf-8"), "Use this when Joey asks.\n"
         )
 
+    def test_common_joey_text_replacements_distinguish_request_noun_from_verb(
+        self,
+    ) -> None:
+        source = self.source_root / "example-repo" / "skill" / "SKILL.md"
+        source.parent.mkdir(parents=True)
+        source.write_text(
+            "The user request is documented.\n"
+            "Only when the user requests model discovery.\n"
+            "Joey requester details are separate.\n",
+            encoding="utf-8",
+        )
+        rule = SYNC_MODULE.SyncRule(
+            repo="example-repo",
+            source=Path("skill"),
+            target=Path("personal_codex/skills/example"),
+            replacements=SYNC_MODULE.COMMON_JOEY_TEXT_REPLACEMENTS,
+        )
+
+        SYNC_MODULE.sync_sources(self.repo_root, self.source_root, (rule,))
+
+        target = self.repo_root / "personal_codex" / "skills" / "example" / "SKILL.md"
+        generated = target.read_text(encoding="utf-8")
+        self.assertEqual(
+            generated,
+            "Joey's request is documented.\n"
+            "Only when Joey requests model discovery.\n"
+            "Joey requester details are separate.\n",
+        )
+        normalized = generated.lower()
+        self.assertIn("only when joey requests model discovery", normalized)
+        self.assertNotIn("joey's requests model discovery", normalized)
+        self.assertIn("joey requester details are separate", normalized)
+
+    def test_whole_word_replacement_keeps_backslashes_literal(self) -> None:
+        transformed, found = SYNC_MODULE._apply_text_replacements(
+            "Joey request",
+            Path("fixture.txt"),
+            (
+                SYNC_MODULE.Replacement(
+                    "Joey request",
+                    r"\1",
+                    whole_word=True,
+                ),
+            ),
+            surface="fixture",
+        )
+
+        self.assertEqual(transformed, r"\1")
+        self.assertEqual(found, {0: 1})
+
     def test_archify_sync_rule_builds_clean_package_with_loaded_skill_paths(self) -> None:
         rule = next(
             candidate
@@ -1810,6 +1863,8 @@ class PrivateOverlaySyncTests(unittest.TestCase):
         )
         (source / "renderers" / "shared").mkdir(parents=True)
         (source / "renderers" / "shared" / "brand-marks.mjs").write_text(
+            "import { BRAND_MARKS } from './generated-brand-marks.mjs';\n"
+            "import { throwDiagnosticError } from './diagnostics.mjs';\n"
             "import { esc, textUnits } from './utils.mjs';\n"
             "unknown.push(`/${collection}/${index}/brand ${JSON.stringify(node.brand)} is an unpinned URL; capture it first with \\`archify brands capture ${url.href} --json\\``);\n"
             "? ['run `archify brands capture <url> --json` and author the returned digest-pinned brand object']\n"
@@ -1852,9 +1907,19 @@ class PrivateOverlaySyncTests(unittest.TestCase):
                 f"node archify/renderers/{renderer}/render.mjs\n",
                 encoding="utf-8",
             )
+        skill_dir_replacement = next(
+            replacement
+            for replacement in rule.replacements
+            if replacement.path == Path("SKILL.md")
+            and replacement.required_count == 1
+            and replacement.old.startswith(
+                "2. Read one matching schema in `schemas/`"
+            )
+        )
         (source / "SKILL.md").write_text(
-            "node bin/archify.mjs validate\n"
-            "scripts/check-update.mjs\n",
+            skill_dir_replacement.old
+            + "\nnode bin/archify.mjs validate\n"
+            + "scripts/check-update.mjs\n",
             encoding="utf-8",
         )
 
@@ -1907,7 +1972,33 @@ class PrivateOverlaySyncTests(unittest.TestCase):
         )
         self.assertFalse((target / "scripts" / "generate-brand-marks.mjs").exists())
         self.assertFalse((target / "scripts" / "generate-validators.mjs").exists())
+        brand_marks = (target / "renderers" / "shared" / "brand-marks.mjs").read_text(
+            encoding="utf-8"
+        )
+        for import_statement in (
+            "import { BRAND_MARKS } from './generated-brand-marks.mjs';",
+            "import { throwDiagnosticError } from './diagnostics.mjs';",
+            "import path from 'node:path';",
+            "import { fileURLToPath } from 'node:url';",
+        ):
+            self.assertEqual(brand_marks.count(import_statement), 1)
         skill = (target / "SKILL.md").read_text(encoding="utf-8")
+        directory_definition = (
+            "resolve `<loaded-skill-dir>` as the absolute directory containing "
+            "the loaded `SKILL.md`"
+        )
+        first_schema_read = "Read one matching schema in `schemas/`"
+        self.assertLess(skill.index(directory_definition), skill.index(first_schema_read))
+        self.assertIn(
+            "Anchor all `schemas/`, `examples/`, and `references/` paths to that directory",
+            skill,
+        )
+        self.assertIn("keep the target repository as the working directory", skill)
+        self.assertIn("without guessing an installation name", skill)
+        self.assertLess(
+            skill.index(directory_definition),
+            skill.index("node <loaded-skill-dir>/bin/archify.mjs validate"),
+        )
         self.assertIn("node <loaded-skill-dir>/bin/archify.mjs validate", skill)
         self.assertIn(
             "<loaded-skill-dir>/scripts/check-update.mjs",
@@ -2011,17 +2102,58 @@ class PrivateOverlaySyncTests(unittest.TestCase):
             Path("scripts/verify_generated_sync_source_lock.py"),
             Path("tests/test_generated_sync_source_lock.py"),
         }
+        atomic_promotion_test_paths = {
+            Path("tests/test_pending_agent_claim_compatibility.py"),
+            Path("tests/test_pending_staging_cleanup.py"),
+            Path("tests/test_quarantine_empty_batch_reclaim.py"),
+            Path("tests/test_regular_agent_materialization.py"),
+            Path("tests/test_regular_overlay_uninstall_status_regressions.py"),
+        }
         toolbox_rules = {
             (rule.source, rule.target)
             for rule in SYNC_MODULE.SYNC_RULES
             if rule.repo == "codex-toolbox"
         }
+        toolbox_source_keys = [
+            (rule.repo, rule.source)
+            for rule in SYNC_MODULE.SYNC_RULES
+            if rule.repo == "codex-toolbox"
+        ]
+        toolbox_targets = [
+            rule.target
+            for rule in SYNC_MODULE.SYNC_RULES
+            if rule.repo == "codex-toolbox"
+        ]
 
+        self.assertEqual(len(toolbox_source_keys), len(set(toolbox_source_keys)))
+        self.assertEqual(len(toolbox_targets), len(set(toolbox_targets)))
         self.assertTrue(
             {
                 (path, path) for path in generated_paths | receipt_contract_paths
             }.issubset(toolbox_rules)
         )
+        self.assertEqual(
+            {
+                (source, target)
+                for source, target in toolbox_rules
+                if source in atomic_promotion_test_paths
+                or target in atomic_promotion_test_paths
+            },
+            {(path, path) for path in atomic_promotion_test_paths},
+        )
+        for path in atomic_promotion_test_paths:
+            matching_rules = [
+                rule
+                for rule in SYNC_MODULE.SYNC_RULES
+                if rule.repo == "codex-toolbox"
+                and (rule.source == path or rule.target == path)
+            ]
+            with self.subTest(path=path):
+                self.assertEqual(len(matching_rules), 1)
+                self.assertEqual(
+                    (matching_rules[0].source, matching_rules[0].target),
+                    (path, path),
+                )
 
     def test_review_sync_preserves_private_ci_fixture_and_personalization(
         self,
@@ -2206,8 +2338,8 @@ class PrivateOverlaySyncTests(unittest.TestCase):
     ) -> None:
         current = SYNC_MODULE._CANONICAL_REVIEW_CURRENT_INVENTORY
         legacy = SYNC_MODULE._CANONICAL_REVIEW_LEGACY_INVENTORY
-        self.assertEqual(len(current.required_files), 151)
-        self.assertEqual(len(current.exact_files), 156)
+        self.assertEqual(len(current.required_files), 155)
+        self.assertEqual(len(current.exact_files), 160)
         self.assertEqual(len(current.independent_required_files), 77)
         self.assertEqual(len(legacy.required_files), 145)
         self.assertEqual(len(legacy.exact_files), 150)
@@ -2265,6 +2397,156 @@ class PrivateOverlaySyncTests(unittest.TestCase):
                 legacy_target,
                 inventory_profile=legacy,
             )
+
+    def test_review_routing_documents_are_required_current_only(self) -> None:
+        routed_documents = {
+            Path("references/default-review-routing.md"),
+            Path("references/github-codex-producer-and-recovery.md"),
+        }
+        current = SYNC_MODULE._CANONICAL_REVIEW_CURRENT_INVENTORY
+        legacy = SYNC_MODULE._CANONICAL_REVIEW_LEGACY_INVENTORY
+        self.assertTrue(routed_documents.issubset(current.required_files))
+        self.assertTrue(routed_documents.issubset(current.exact_files))
+        self.assertTrue(routed_documents.isdisjoint(legacy.exact_files))
+
+    def test_review_routing_documents_sync_with_private_overlay(self) -> None:
+        rule, target = self._create_canonical_regular_file_overlay_rule()
+        source = self.source_root / rule.repo / rule.source
+        documents = {
+            Path("references/default-review-routing.md"): b"Default routing.\n",
+            Path("references/github-codex-producer-and-recovery.md"): b"Recovery.\n",
+        }
+        for relative, content in documents.items():
+            (source / relative).write_bytes(content)
+
+        SYNC_MODULE.sync_sources(self.repo_root, self.source_root, (rule,))
+
+        for relative, content in documents.items():
+            self.assertEqual((target / relative).read_bytes(), content)
+        self.assertFalse((target / "old-marker").exists())
+        self.assertEqual(
+            (target / rule.regular_file_overlays[0].target).read_bytes(),
+            b"private\n",
+        )
+        SYNC_MODULE._validate_canonical_review_target_contents(target)
+
+    def test_review_routing_inventory_rejects_missing_and_unknown_files(
+        self,
+    ) -> None:
+        cases = (
+            ("missing-routing", Path("references/default-review-routing.md"), True),
+            (
+                "missing-recovery",
+                Path("references/github-codex-producer-and-recovery.md"),
+                True,
+            ),
+            ("unknown-document", Path("references/unreviewed-routing.md"), False),
+            ("unknown-runtime", Path("scripts/unreviewed.py"), False),
+        )
+        for name, relative, missing in cases:
+            with self.subTest(name=name):
+                rule, target = self._create_canonical_regular_file_overlay_rule()
+                source = self.source_root / rule.repo / rule.source
+                if missing:
+                    (source / relative).unlink()
+                else:
+                    (source / relative).write_text("unexpected\n", encoding="utf-8")
+                with self.assertRaisesRegex(
+                    SYNC_MODULE.SyncError,
+                    "missing required file" if missing else "raw exact tree inventory",
+                ):
+                    SYNC_MODULE.sync_sources(self.repo_root, self.source_root, (rule,))
+                self.assertEqual((target / "old-marker").read_bytes(), b"old\n")
+                shutil.rmtree(source)
+                shutil.rmtree(target)
+                private_catalog = self.repo_root / rule.regular_file_overlays[0].source
+                private_catalog.unlink()
+                private_catalog.parent.rmdir()
+
+    def test_readiness_plan_files_are_required_current_only(self) -> None:
+        readiness_files = {
+            Path("scripts/readiness_plan.py"),
+            Path("tests/test_readiness_plan.py"),
+        }
+        current = SYNC_MODULE._CANONICAL_REVIEW_CURRENT_INVENTORY
+        legacy = SYNC_MODULE._CANONICAL_REVIEW_LEGACY_INVENTORY
+        self.assertTrue(readiness_files.issubset(current.required_files))
+        self.assertTrue(readiness_files.issubset(current.exact_files))
+        self.assertTrue(readiness_files.isdisjoint(legacy.required_files))
+        self.assertTrue(readiness_files.isdisjoint(legacy.exact_files))
+
+        legacy_target = self.repo_root / "legacy-readiness-inventory"
+        for relative in legacy.exact_files:
+            path = legacy_target / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("canonical\n", encoding="utf-8")
+        for relative in readiness_files:
+            path = legacy_target / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("new current file\n", encoding="utf-8")
+        with self.assertRaisesRegex(SYNC_MODULE.SyncError, "exact tree inventory"):
+            SYNC_MODULE._validate_canonical_review_target_contents(
+                legacy_target,
+                inventory_profile=legacy,
+            )
+
+    def test_readiness_plan_files_sync_byte_for_byte(self) -> None:
+        rule, target = self._create_canonical_regular_file_overlay_rule()
+        source = self.source_root / rule.repo / rule.source
+        files = {
+            Path("scripts/readiness_plan.py"): (
+                b"#!/usr/bin/env python3\nprint('plan')\n"
+            ),
+            Path("tests/test_readiness_plan.py"): (
+                b"def test_plan():\n    assert True\n"
+            ),
+        }
+        for relative, content in files.items():
+            (source / relative).write_bytes(content)
+
+        SYNC_MODULE.sync_sources(self.repo_root, self.source_root, (rule,))
+
+        for relative, content in files.items():
+            self.assertEqual((target / relative).read_bytes(), content)
+        self.assertFalse((target / "old-marker").exists())
+
+    def test_readiness_plan_inventory_rejects_missing_and_unknown_files(
+        self,
+    ) -> None:
+        cases = (
+            ("missing-script", Path("scripts/readiness_plan.py"), True),
+            ("missing-test", Path("tests/test_readiness_plan.py"), True),
+            ("unknown-script", Path("scripts/readiness_plan_extra.py"), False),
+            ("unknown-test", Path("tests/test_readiness_plan_extra.py"), False),
+        )
+        for name, relative, missing in cases:
+            with self.subTest(name=name):
+                rule, target = self._create_canonical_regular_file_overlay_rule()
+                source = self.source_root / rule.repo / rule.source
+                if missing:
+                    (source / relative).unlink()
+                else:
+                    (source / relative).write_text(
+                        "unexpected\n",
+                        encoding="utf-8",
+                    )
+                with self.assertRaisesRegex(
+                    SYNC_MODULE.SyncError,
+                    "missing required file"
+                    if missing
+                    else "raw exact tree inventory",
+                ):
+                    SYNC_MODULE.sync_sources(
+                        self.repo_root,
+                        self.source_root,
+                        (rule,),
+                    )
+                self.assertEqual((target / "old-marker").read_bytes(), b"old\n")
+                shutil.rmtree(source)
+                shutil.rmtree(target)
+                private_catalog = self.repo_root / rule.regular_file_overlays[0].source
+                private_catalog.unlink()
+                private_catalog.parent.rmdir()
 
     def test_canonical_review_target_requires_policy_runtime_and_tests(
         self,
@@ -3142,6 +3424,205 @@ class PrivateOverlaySyncTests(unittest.TestCase):
             "current",
         )
 
+    def test_personal_agents_coherence_migration_is_exact_and_idempotent(self) -> None:
+        current = (REPO_ROOT / SYNC_MODULE.PERSONAL_AGENTS_TARGET).read_bytes()
+        previous = current.replace(
+            SYNC_MODULE.PERSONAL_AGENTS_CURRENT_REVIEW_BLOCK,
+            SYNC_MODULE.PERSONAL_AGENTS_ROUTING_PREVIOUS_REVIEW_BLOCK,
+            1,
+        ).replace(
+            SYNC_MODULE.PERSONAL_AGENTS_CURRENT_LANDING_LINE,
+            SYNC_MODULE.PERSONAL_AGENTS_PREVIOUS_LANDING_LINE,
+            1,
+        )
+        self.assertEqual(
+            SYNC_MODULE._personal_agents_review_guidance_state(previous),
+            "routing-previous",
+        )
+        self.assertEqual(SYNC_MODULE._migrated_personal_agents_bytes(previous), current)
+        self.assertEqual(SYNC_MODULE._migrated_personal_agents_bytes(current), current)
+        landing_only = current.replace(
+            SYNC_MODULE.PERSONAL_AGENTS_CURRENT_LANDING_LINE,
+            SYNC_MODULE.PERSONAL_AGENTS_PREVIOUS_LANDING_LINE,
+            1,
+        )
+        self.assertEqual(
+            SYNC_MODULE._personal_agents_review_guidance_state(landing_only),
+            "landing-previous",
+        )
+        self.assertEqual(SYNC_MODULE._migrated_personal_agents_bytes(landing_only), current)
+        for changed in (
+            previous.replace(b"by repeating", b"by silently repeating", 1),
+            previous + SYNC_MODULE.PERSONAL_AGENTS_PREVIOUS_LANDING_LINE,
+            previous.replace(SYNC_MODULE.PERSONAL_AGENTS_PREVIOUS_LANDING_LINE, b"", 1),
+            current.replace(SYNC_MODULE.PERSONAL_AGENTS_CURRENT_LANDING_LINE, b"", 1),
+            current.replace(b"before the final exact-head review", b"after review", 1),
+        ):
+            with self.subTest(digest=hashlib.sha256(changed).hexdigest()):
+                with self.assertRaises(SYNC_MODULE.SyncError):
+                    SYNC_MODULE._migrated_personal_agents_bytes(changed)
+
+    def test_approved_review_sync_migrates_coherence_policy_once(self) -> None:
+        rule, _target = self._create_canonical_regular_file_overlay_rule(
+            authoritative=True
+        )
+        source = self.source_root / rule.repo / rule.source
+        locked_sources = self._locked_canonical_review_source(rule, source)
+        current = (REPO_ROOT / SYNC_MODULE.PERSONAL_AGENTS_TARGET).read_bytes()
+        previous = current.replace(
+            SYNC_MODULE.PERSONAL_AGENTS_CURRENT_REVIEW_BLOCK,
+            SYNC_MODULE.PERSONAL_AGENTS_ROUTING_PREVIOUS_REVIEW_BLOCK,
+            1,
+        ).replace(
+            SYNC_MODULE.PERSONAL_AGENTS_CURRENT_LANDING_LINE,
+            SYNC_MODULE.PERSONAL_AGENTS_PREVIOUS_LANDING_LINE,
+            1,
+        )
+        agents = self.repo_root / SYNC_MODULE.PERSONAL_AGENTS_TARGET
+        agents.parent.mkdir(parents=True, exist_ok=True)
+        agents.write_bytes(previous)
+        agents.chmod(0o644)
+
+        SYNC_MODULE.sync_sources(
+            self.repo_root, self.source_root, (rule,), locked_sources=locked_sources
+        )
+        self.assertEqual(agents.read_bytes(), current)
+        current_inode = agents.stat().st_ino
+        SYNC_MODULE.sync_sources(
+            self.repo_root, self.source_root, (rule,), locked_sources=locked_sources
+        )
+        self.assertEqual(agents.read_bytes(), current)
+        self.assertEqual(agents.stat().st_ino, current_inode)
+
+    def test_approved_review_sync_migrates_previous_personal_agents(
+        self,
+    ) -> None:
+        rule, _target = self._create_canonical_regular_file_overlay_rule(
+            authoritative=True
+        )
+        agents, legacy, legacy_digest = self._synthetic_legacy_personal_agents()
+        source = self.source_root / rule.repo / rule.source
+        locked_sources = self._locked_canonical_review_source(rule, source)
+
+        with mock.patch.object(
+            SYNC_MODULE,
+            "PERSONAL_AGENTS_LEGACY_REVIEW_BLOCK_SHA256",
+            legacy_digest,
+        ):
+            current = SYNC_MODULE._migrated_personal_agents_bytes(legacy)
+        previous = current.replace(
+            SYNC_MODULE.PERSONAL_AGENTS_CURRENT_CONSENT_LINE,
+            SYNC_MODULE.PERSONAL_AGENTS_PREVIOUS_CONSENT_LINE,
+            1,
+        ).replace(
+            SYNC_MODULE.PERSONAL_AGENTS_CURRENT_REVIEW_BLOCK,
+            SYNC_MODULE.PERSONAL_AGENTS_PREVIOUS_REVIEW_BLOCK,
+            1,
+        ).replace(
+            SYNC_MODULE.PERSONAL_AGENTS_MODEL_ROUTING_PARAGRAPH,
+            b"",
+            1,
+        )
+        self.assertNotIn(
+            SYNC_MODULE.PERSONAL_AGENTS_MODEL_ROUTING_PARAGRAPH,
+            previous,
+        )
+        self.assertEqual(
+            SYNC_MODULE._personal_agents_review_guidance_state(previous),
+            "previous",
+        )
+        agents.write_bytes(previous)
+
+        with mock.patch.object(
+            SYNC_MODULE,
+            "PERSONAL_AGENTS_LEGACY_REVIEW_BLOCK_SHA256",
+            legacy_digest,
+        ):
+            SYNC_MODULE.sync_sources(
+                self.repo_root,
+                self.source_root,
+                (rule,),
+                locked_sources=locked_sources,
+            )
+            self.assertEqual(agents.read_bytes(), current)
+            current_inode = agents.stat().st_ino
+            SYNC_MODULE.sync_sources(
+                self.repo_root,
+                self.source_root,
+                (rule,),
+                locked_sources=locked_sources,
+            )
+
+        self.assertEqual(agents.read_bytes(), current)
+        self.assertEqual(agents.stat().st_ino, current_inode)
+
+    def test_approved_review_sync_migrates_intermediate_personal_agents(
+        self,
+    ) -> None:
+        rule, _target = self._create_canonical_regular_file_overlay_rule(
+            authoritative=True
+        )
+        agents, legacy, legacy_digest = self._synthetic_legacy_personal_agents()
+        source = self.source_root / rule.repo / rule.source
+        locked_sources = self._locked_canonical_review_source(rule, source)
+
+        with mock.patch.object(
+            SYNC_MODULE,
+            "PERSONAL_AGENTS_LEGACY_REVIEW_BLOCK_SHA256",
+            legacy_digest,
+        ):
+            current = SYNC_MODULE._migrated_personal_agents_bytes(legacy)
+        intermediate = current.replace(
+            SYNC_MODULE.PERSONAL_AGENTS_MODEL_ROUTING_PARAGRAPH,
+            b"",
+            1,
+        ).replace(
+            SYNC_MODULE.PERSONAL_AGENTS_CURRENT_REVIEW_BLOCK,
+            SYNC_MODULE.PERSONAL_AGENTS_PREVIOUS_REVIEW_BLOCK,
+            1,
+        )
+        self.assertNotIn(
+            SYNC_MODULE.PERSONAL_AGENTS_MODEL_ROUTING_PARAGRAPH,
+            intermediate,
+        )
+        historical_slot = intermediate.split(
+            SYNC_MODULE.PERSONAL_AGENTS_SHORT_FILE_GUIDELINE,
+            1,
+        )[1]
+        self.assertTrue(
+            historical_slot.startswith(
+                SYNC_MODULE.PERSONAL_AGENTS_MODEL_ROUTING_HISTORICAL_SUCCESSOR
+            )
+        )
+        self.assertEqual(
+            SYNC_MODULE._personal_agents_review_guidance_state(intermediate),
+            "intermediate",
+        )
+        agents.write_bytes(intermediate)
+
+        with mock.patch.object(
+            SYNC_MODULE,
+            "PERSONAL_AGENTS_LEGACY_REVIEW_BLOCK_SHA256",
+            legacy_digest,
+        ):
+            SYNC_MODULE.sync_sources(
+                self.repo_root,
+                self.source_root,
+                (rule,),
+                locked_sources=locked_sources,
+            )
+            self.assertEqual(agents.read_bytes(), current)
+            current_inode = agents.stat().st_ino
+            SYNC_MODULE.sync_sources(
+                self.repo_root,
+                self.source_root,
+                (rule,),
+                locked_sources=locked_sources,
+            )
+
+        self.assertEqual(agents.read_bytes(), current)
+        self.assertEqual(agents.stat().st_ino, current_inode)
+
     def test_locked_authoritative_review_sync_migrates_personal_agents(
         self,
     ) -> None:
@@ -3217,12 +3698,74 @@ class PrivateOverlaySyncTests(unittest.TestCase):
             legacy_digest,
         ):
             current = SYNC_MODULE._migrated_personal_agents_bytes(legacy)
+            previous = current.replace(
+                SYNC_MODULE.PERSONAL_AGENTS_CURRENT_CONSENT_LINE,
+                SYNC_MODULE.PERSONAL_AGENTS_PREVIOUS_CONSENT_LINE,
+                1,
+            ).replace(
+                SYNC_MODULE.PERSONAL_AGENTS_CURRENT_REVIEW_BLOCK,
+                SYNC_MODULE.PERSONAL_AGENTS_PREVIOUS_REVIEW_BLOCK,
+                1,
+            )
+            intermediate = current.replace(
+                SYNC_MODULE.PERSONAL_AGENTS_CURRENT_REVIEW_BLOCK,
+                SYNC_MODULE.PERSONAL_AGENTS_PREVIOUS_REVIEW_BLOCK,
+                1,
+            )
+            current_without_model_routing = current.replace(
+                SYNC_MODULE.PERSONAL_AGENTS_MODEL_ROUTING_PARAGRAPH,
+                b"",
+                1,
+            )
+            previous_without_model_routing = previous.replace(
+                SYNC_MODULE.PERSONAL_AGENTS_MODEL_ROUTING_PARAGRAPH,
+                b"",
+                1,
+            )
+            intermediate_without_model_routing = intermediate.replace(
+                SYNC_MODULE.PERSONAL_AGENTS_MODEL_ROUTING_PARAGRAPH,
+                b"",
+                1,
+            )
+            legacy_with_model_routing = legacy.replace(
+                SYNC_MODULE.PERSONAL_AGENTS_SHORT_FILE_GUIDELINE,
+                SYNC_MODULE.PERSONAL_AGENTS_SHORT_FILE_GUIDELINE
+                + SYNC_MODULE.PERSONAL_AGENTS_MODEL_ROUTING_PARAGRAPH,
+                1,
+            )
             cases = {
                 "current": (
                     current,
                     "exact legacy canonical review source requires exact legacy",
                 ),
-                "mixed": (legacy + current, "exact legacy or migrated state"),
+                "previous": (
+                    previous,
+                    "exact legacy canonical review source requires exact legacy",
+                ),
+                "intermediate": (
+                    intermediate,
+                    "exact legacy canonical review source requires exact legacy",
+                ),
+                "current-without-model-routing": (
+                    current_without_model_routing,
+                    "exact legacy or migrated state",
+                ),
+                "previous-without-model-routing": (
+                    previous_without_model_routing,
+                    "exact legacy canonical review source requires exact legacy",
+                ),
+                "intermediate-without-model-routing": (
+                    intermediate_without_model_routing,
+                    "exact legacy canonical review source requires exact legacy",
+                ),
+                "legacy-with-model-routing": (
+                    legacy_with_model_routing,
+                    "exact legacy canonical review source requires exact legacy",
+                ),
+                "mixed": (
+                    legacy + current,
+                    "personal AGENTS landing guidance is drifted or duplicated",
+                ),
                 "compact-current": (
                     current.replace(
                         SYNC_MODULE.PERSONAL_AGENTS_CURRENT_REVIEW_BLOCK,
@@ -3280,14 +3823,20 @@ class PrivateOverlaySyncTests(unittest.TestCase):
         ):
             current = SYNC_MODULE._migrated_personal_agents_bytes(legacy)
             cases = {
-                "mixed": legacy + current,
-                "legacy-byte-drift": legacy.replace(
-                    b"Synthetic legacy review detail",
-                    b"Synthetic legacy review detaiL",
-                    1,
+                "mixed": (
+                    legacy + current,
+                    "personal AGENTS landing guidance is drifted or duplicated",
+                ),
+                "legacy-byte-drift": (
+                    legacy.replace(
+                        b"Synthetic legacy review detail",
+                        b"Synthetic legacy review detaiL",
+                        1,
+                    ),
+                    "exact legacy or migrated state",
                 ),
             }
-            for name, payload in cases.items():
+            for name, (payload, error_pattern) in cases.items():
                 agents.write_bytes(payload)
                 agents.chmod(0o644)
                 with (
@@ -3298,7 +3847,7 @@ class PrivateOverlaySyncTests(unittest.TestCase):
                     ) as sync_impl,
                     self.assertRaisesRegex(
                         SYNC_MODULE.SyncError,
-                        "exact legacy or migrated state",
+                        error_pattern,
                     ),
                 ):
                     SYNC_MODULE.sync_sources(
@@ -3309,6 +3858,147 @@ class PrivateOverlaySyncTests(unittest.TestCase):
                     )
                 sync_impl.assert_not_called()
                 self.assertTrue((target / "old-marker").is_file())
+
+    def test_candidate_review_source_rejects_model_routing_drift_before_any_write(
+        self,
+    ) -> None:
+        rule, target = self._create_canonical_regular_file_overlay_rule(
+            authoritative=True
+        )
+        agents, legacy, legacy_digest = self._synthetic_legacy_personal_agents()
+        source = self.source_root / rule.repo / rule.source
+        locked_sources = self._locked_canonical_review_source(rule, source)
+
+        with mock.patch.object(
+            SYNC_MODULE,
+            "PERSONAL_AGENTS_LEGACY_REVIEW_BLOCK_SHA256",
+            legacy_digest,
+        ):
+            current = SYNC_MODULE._migrated_personal_agents_bytes(legacy)
+            current_without_model_routing = current.replace(
+                SYNC_MODULE.PERSONAL_AGENTS_MODEL_ROUTING_PARAGRAPH,
+                b"",
+                1,
+            )
+            intermediate_without_model_routing = current_without_model_routing.replace(
+                SYNC_MODULE.PERSONAL_AGENTS_CURRENT_REVIEW_BLOCK,
+                SYNC_MODULE.PERSONAL_AGENTS_PREVIOUS_REVIEW_BLOCK,
+                1,
+            )
+            previous_without_model_routing = intermediate_without_model_routing.replace(
+                SYNC_MODULE.PERSONAL_AGENTS_CURRENT_CONSENT_LINE,
+                SYNC_MODULE.PERSONAL_AGENTS_PREVIOUS_CONSENT_LINE,
+                1,
+            )
+            conflicting_slot_policy = b"- Use GPT-6.2 as the default model.\n"
+            cases = {
+                "current-without-model-routing": current_without_model_routing,
+                "model-routing-drift": current.replace(
+                    SYNC_MODULE.PERSONAL_AGENTS_MODEL_ROUTING_PARAGRAPH,
+                    SYNC_MODULE.PERSONAL_AGENTS_MODEL_ROUTING_PARAGRAPH.replace(
+                        b"GPT-6.1 Sol",
+                        b"GPT-6.1 Xol",
+                        1,
+                    ),
+                    1,
+                ),
+                "duplicate-model-routing": current.replace(
+                    SYNC_MODULE.PERSONAL_AGENTS_MODEL_ROUTING_PARAGRAPH,
+                    SYNC_MODULE.PERSONAL_AGENTS_MODEL_ROUTING_PARAGRAPH
+                    + SYNC_MODULE.PERSONAL_AGENTS_MODEL_ROUTING_PARAGRAPH,
+                    1,
+                ),
+                "misplaced-model-routing": current.replace(
+                    SYNC_MODULE.PERSONAL_AGENTS_SHORT_FILE_GUIDELINE
+                    + SYNC_MODULE.PERSONAL_AGENTS_MODEL_ROUTING_PARAGRAPH,
+                    SYNC_MODULE.PERSONAL_AGENTS_MODEL_ROUTING_PARAGRAPH
+                    + SYNC_MODULE.PERSONAL_AGENTS_SHORT_FILE_GUIDELINE,
+                    1,
+                ),
+                "model-routing-order-drift": current.replace(
+                    SYNC_MODULE.PERSONAL_AGENTS_SHORT_FILE_GUIDELINE
+                    + SYNC_MODULE.PERSONAL_AGENTS_MODEL_ROUTING_PARAGRAPH,
+                    SYNC_MODULE.PERSONAL_AGENTS_SHORT_FILE_GUIDELINE
+                    + b"- Unrelated inserted guideline.\n"
+                    + SYNC_MODULE.PERSONAL_AGENTS_MODEL_ROUTING_PARAGRAPH,
+                    1,
+                ),
+                "duplicate-model-routing-anchor": current.replace(
+                    SYNC_MODULE.PERSONAL_AGENTS_SHORT_FILE_GUIDELINE,
+                    SYNC_MODULE.PERSONAL_AGENTS_SHORT_FILE_GUIDELINE * 2,
+                    1,
+                ),
+                "missing-insertion-anchor": intermediate_without_model_routing.replace(
+                    SYNC_MODULE.PERSONAL_AGENTS_SHORT_FILE_GUIDELINE,
+                    b"",
+                    1,
+                ),
+                "ambiguous-insertion-anchor": intermediate_without_model_routing.replace(
+                    SYNC_MODULE.PERSONAL_AGENTS_SHORT_FILE_GUIDELINE,
+                    SYNC_MODULE.PERSONAL_AGENTS_SHORT_FILE_GUIDELINE * 2,
+                    1,
+                ),
+                "legacy-marker-free-slot-rewrite": legacy.replace(
+                    SYNC_MODULE.PERSONAL_AGENTS_MODEL_ROUTING_HISTORICAL_SUCCESSOR,
+                    conflicting_slot_policy,
+                    1,
+                ),
+                "previous-marker-free-slot-rewrite": (
+                    previous_without_model_routing.replace(
+                        SYNC_MODULE.PERSONAL_AGENTS_MODEL_ROUTING_HISTORICAL_SUCCESSOR,
+                        conflicting_slot_policy,
+                        1,
+                    )
+                ),
+                "intermediate-marker-free-slot-rewrite": (
+                    intermediate_without_model_routing.replace(
+                        SYNC_MODULE.PERSONAL_AGENTS_MODEL_ROUTING_HISTORICAL_SUCCESSOR,
+                        conflicting_slot_policy,
+                        1,
+                    )
+                ),
+                "current-post-insertion-slot-rewrite": current.replace(
+                    SYNC_MODULE.PERSONAL_AGENTS_MODEL_ROUTING_HISTORICAL_SUCCESSOR,
+                    conflicting_slot_policy,
+                    1,
+                ),
+            }
+            for name, payload in cases.items():
+                agents.write_bytes(payload)
+                agents.chmod(0o644)
+                target_before = tuple(
+                    sorted(
+                        (path.name, path.read_bytes())
+                        for path in target.iterdir()
+                        if path.is_file()
+                    )
+                )
+                with (
+                    self.subTest(name=name),
+                    mock.patch.object(
+                        SYNC_MODULE,
+                        "_sync_sources_with_repo_binding",
+                    ) as sync_impl,
+                    self.assertRaises(SYNC_MODULE.SyncError),
+                ):
+                    SYNC_MODULE.sync_sources(
+                        self.repo_root,
+                        self.source_root,
+                        (rule,),
+                        locked_sources=locked_sources,
+                    )
+                sync_impl.assert_not_called()
+                self.assertEqual(agents.read_bytes(), payload)
+                self.assertEqual(
+                    tuple(
+                        sorted(
+                            (path.name, path.read_bytes())
+                            for path in target.iterdir()
+                            if path.is_file()
+                        )
+                    ),
+                    target_before,
+                )
 
     def test_candidate_review_source_accepts_current_agents_without_migration(
         self,
@@ -3375,6 +4065,89 @@ class PrivateOverlaySyncTests(unittest.TestCase):
         self.assertEqual(agents.stat().st_ino, initial_inode)
         self.assertFalse((target / "old-marker").exists())
         self.assertEqual((target / "SKILL.md").read_bytes(), b"public\n")
+
+    def test_candidate_review_source_migrates_previous_agents_then_noops(self) -> None:
+        rule, target = self._create_canonical_regular_file_overlay_rule(
+            authoritative=True
+        )
+        agents, legacy, legacy_digest = self._synthetic_legacy_personal_agents()
+        source = self.source_root / rule.repo / rule.source
+        locked_sources = self._locked_canonical_review_source(rule, source)
+
+        with mock.patch.object(
+            SYNC_MODULE,
+            "PERSONAL_AGENTS_LEGACY_REVIEW_BLOCK_SHA256",
+            legacy_digest,
+        ):
+            current = SYNC_MODULE._migrated_personal_agents_bytes(legacy)
+            previous = current.replace(
+                SYNC_MODULE.PERSONAL_AGENTS_CURRENT_CONSENT_LINE,
+                SYNC_MODULE.PERSONAL_AGENTS_PREVIOUS_CONSENT_LINE,
+                1,
+            ).replace(
+                SYNC_MODULE.PERSONAL_AGENTS_CURRENT_REVIEW_BLOCK,
+                SYNC_MODULE.PERSONAL_AGENTS_PREVIOUS_REVIEW_BLOCK,
+                1,
+            )
+            agents.write_bytes(previous)
+            agents.chmod(0o644)
+            initial_inode = agents.stat().st_ino
+            with mock.patch.object(
+                SYNC_MODULE,
+                "_migrate_personal_agents_after_canonical_review_sync",
+                wraps=SYNC_MODULE._migrate_personal_agents_after_canonical_review_sync,
+            ) as migrate_agents, mock.patch.object(
+                SYNC_MODULE,
+                "_verify_current_personal_agents_after_canonical_review_sync",
+                wraps=SYNC_MODULE._verify_current_personal_agents_after_canonical_review_sync,
+            ) as verify_current:
+                SYNC_MODULE.sync_sources(
+                    self.repo_root,
+                    self.source_root,
+                    (rule,),
+                    locked_sources=locked_sources,
+                )
+
+        migrate_agents.assert_called_once()
+        verify_current.assert_not_called()
+        migration_plan = migrate_agents.call_args.args[-1]
+        self.assertEqual(
+            migration_plan.action,
+            SYNC_MODULE._PERSONAL_AGENTS_ACTION_MIGRATE,
+        )
+        self.assertEqual(migration_plan.pinned_file.guidance_state, "previous")
+        self.assertEqual(agents.read_bytes(), current)
+        self.assertNotEqual(agents.stat().st_ino, initial_inode)
+        self.assertFalse((target / "old-marker").exists())
+        self.assertEqual((target / "SKILL.md").read_bytes(), b"public\n")
+
+        migrated_inode = agents.stat().st_ino
+        with mock.patch.object(
+            SYNC_MODULE,
+            "_migrate_personal_agents_after_canonical_review_sync",
+            wraps=SYNC_MODULE._migrate_personal_agents_after_canonical_review_sync,
+        ) as migrate_again, mock.patch.object(
+            SYNC_MODULE,
+            "_verify_current_personal_agents_after_canonical_review_sync",
+            wraps=SYNC_MODULE._verify_current_personal_agents_after_canonical_review_sync,
+        ) as verify_current_again:
+            SYNC_MODULE.sync_sources(
+                self.repo_root,
+                self.source_root,
+                (rule,),
+                locked_sources=locked_sources,
+            )
+
+        migrate_again.assert_not_called()
+        verify_current_again.assert_called_once()
+        noop_plan = verify_current_again.call_args.args[-1]
+        self.assertEqual(
+            noop_plan.action,
+            SYNC_MODULE._PERSONAL_AGENTS_ACTION_CURRENT_NOOP,
+        )
+        self.assertEqual(noop_plan.pinned_file.guidance_state, "current")
+        self.assertEqual(agents.read_bytes(), current)
+        self.assertEqual(agents.stat().st_ino, migrated_inode)
 
     def test_candidate_current_noop_fails_on_post_install_checkout_drift(
         self,
@@ -4493,7 +5266,161 @@ class PrivateOverlaySyncTests(unittest.TestCase):
             legacy_digest,
         ):
             current = SYNC_MODULE._migrated_personal_agents_bytes(legacy)
+            previous = current.replace(
+                SYNC_MODULE.PERSONAL_AGENTS_CURRENT_CONSENT_LINE,
+                SYNC_MODULE.PERSONAL_AGENTS_PREVIOUS_CONSENT_LINE,
+                1,
+            ).replace(
+                SYNC_MODULE.PERSONAL_AGENTS_CURRENT_REVIEW_BLOCK,
+                SYNC_MODULE.PERSONAL_AGENTS_PREVIOUS_REVIEW_BLOCK,
+                1,
+            )
+            intermediate = current.replace(
+                SYNC_MODULE.PERSONAL_AGENTS_CURRENT_REVIEW_BLOCK,
+                SYNC_MODULE.PERSONAL_AGENTS_PREVIOUS_REVIEW_BLOCK,
+                1,
+            )
+            current_without_model_routing = current.replace(
+                SYNC_MODULE.PERSONAL_AGENTS_MODEL_ROUTING_PARAGRAPH,
+                b"",
+                1,
+            )
+            previous_without_model_routing = previous.replace(
+                SYNC_MODULE.PERSONAL_AGENTS_MODEL_ROUTING_PARAGRAPH,
+                b"",
+                1,
+            )
+            intermediate_without_model_routing = intermediate.replace(
+                SYNC_MODULE.PERSONAL_AGENTS_MODEL_ROUTING_PARAGRAPH,
+                b"",
+                1,
+            )
+            legacy_with_model_routing = legacy.replace(
+                SYNC_MODULE.PERSONAL_AGENTS_SHORT_FILE_GUIDELINE,
+                SYNC_MODULE.PERSONAL_AGENTS_SHORT_FILE_GUIDELINE
+                + SYNC_MODULE.PERSONAL_AGENTS_MODEL_ROUTING_PARAGRAPH,
+                1,
+            )
+            self.assertEqual(
+                SYNC_MODULE._personal_agents_review_guidance_state(legacy),
+                "legacy",
+            )
+            self.assertEqual(
+                SYNC_MODULE._personal_agents_review_guidance_state(previous),
+                "previous",
+            )
+            self.assertEqual(
+                SYNC_MODULE._personal_agents_review_guidance_state(current),
+                "current",
+            )
+            self.assertEqual(
+                SYNC_MODULE._personal_agents_review_guidance_state(intermediate),
+                "intermediate",
+            )
+            self.assertEqual(
+                SYNC_MODULE._personal_agents_review_guidance_state(
+                    previous_without_model_routing
+                ),
+                "previous",
+            )
+            self.assertEqual(
+                SYNC_MODULE._personal_agents_review_guidance_state(
+                    intermediate_without_model_routing
+                ),
+                "intermediate",
+            )
+            self.assertEqual(
+                SYNC_MODULE._migrated_personal_agents_bytes(previous),
+                current,
+            )
+            self.assertEqual(
+                SYNC_MODULE._migrated_personal_agents_bytes(intermediate),
+                current,
+            )
+            for state_without_model in (
+                legacy,
+                previous_without_model_routing,
+                intermediate_without_model_routing,
+            ):
+                self.assertEqual(
+                    SYNC_MODULE._migrated_personal_agents_bytes(
+                        state_without_model
+                    ),
+                    current,
+                )
+            self.assertEqual(
+                SYNC_MODULE._migrated_personal_agents_bytes(legacy_with_model_routing),
+                current,
+            )
+            self.assertEqual(
+                current.count(SYNC_MODULE.PERSONAL_AGENTS_MODEL_ROUTING_PARAGRAPH),
+                1,
+            )
+            prefix = b"# Unrelated private heading\n"
+            suffix = b"\n# Unrelated private footer\n"
+            self.assertEqual(
+                SYNC_MODULE._migrated_personal_agents_bytes(
+                    prefix + intermediate_without_model_routing + suffix
+                ),
+                prefix + current + suffix,
+            )
+            separator = b"# Unrelated private guidance\n"
+            separated_intermediate = intermediate.replace(
+                SYNC_MODULE.PERSONAL_AGENTS_PREVIOUS_REVIEW_BLOCK,
+                separator + SYNC_MODULE.PERSONAL_AGENTS_PREVIOUS_REVIEW_BLOCK,
+                1,
+            )
+            separated_current = current.replace(
+                SYNC_MODULE.PERSONAL_AGENTS_CURRENT_REVIEW_BLOCK,
+                separator + SYNC_MODULE.PERSONAL_AGENTS_CURRENT_REVIEW_BLOCK,
+                1,
+            )
+            self.assertEqual(
+                SYNC_MODULE._migrated_personal_agents_bytes(separated_intermediate),
+                separated_current,
+            )
             cases = {
+                "current-without-model-routing": current_without_model_routing,
+                "model-routing-drift": current.replace(
+                    SYNC_MODULE.PERSONAL_AGENTS_MODEL_ROUTING_PARAGRAPH,
+                    SYNC_MODULE.PERSONAL_AGENTS_MODEL_ROUTING_PARAGRAPH.replace(
+                        b"GPT-6.1 Sol",
+                        b"GPT-6.1 Xol",
+                        1,
+                    ),
+                    1,
+                ),
+                "duplicate-model-routing": current.replace(
+                    SYNC_MODULE.PERSONAL_AGENTS_MODEL_ROUTING_PARAGRAPH,
+                    SYNC_MODULE.PERSONAL_AGENTS_MODEL_ROUTING_PARAGRAPH
+                    + SYNC_MODULE.PERSONAL_AGENTS_MODEL_ROUTING_PARAGRAPH,
+                    1,
+                ),
+                "misplaced-model-routing": current.replace(
+                    SYNC_MODULE.PERSONAL_AGENTS_SHORT_FILE_GUIDELINE
+                    + SYNC_MODULE.PERSONAL_AGENTS_MODEL_ROUTING_PARAGRAPH,
+                    SYNC_MODULE.PERSONAL_AGENTS_MODEL_ROUTING_PARAGRAPH
+                    + SYNC_MODULE.PERSONAL_AGENTS_SHORT_FILE_GUIDELINE,
+                    1,
+                ),
+                "model-routing-order-drift": current.replace(
+                    SYNC_MODULE.PERSONAL_AGENTS_SHORT_FILE_GUIDELINE
+                    + SYNC_MODULE.PERSONAL_AGENTS_MODEL_ROUTING_PARAGRAPH,
+                    SYNC_MODULE.PERSONAL_AGENTS_SHORT_FILE_GUIDELINE
+                    + b"- Unrelated inserted guideline.\n"
+                    + SYNC_MODULE.PERSONAL_AGENTS_MODEL_ROUTING_PARAGRAPH,
+                    1,
+                ),
+                "duplicate-model-routing-anchor": current.replace(
+                    SYNC_MODULE.PERSONAL_AGENTS_SHORT_FILE_GUIDELINE,
+                    SYNC_MODULE.PERSONAL_AGENTS_SHORT_FILE_GUIDELINE * 2,
+                    1,
+                ),
+                "missing-model-routing-anchor": current.replace(
+                    SYNC_MODULE.PERSONAL_AGENTS_SHORT_FILE_GUIDELINE,
+                    b"",
+                    1,
+                ),
                 "legacy-drift": legacy.replace(
                     b"Synthetic legacy review detail",
                     b"Synthetic legacy review detaiL",
@@ -4502,6 +5429,11 @@ class PrivateOverlaySyncTests(unittest.TestCase):
                 "half-migrated": legacy.replace(
                     SYNC_MODULE.PERSONAL_AGENTS_LEGACY_CONSENT_LINE,
                     SYNC_MODULE.PERSONAL_AGENTS_CURRENT_CONSENT_LINE,
+                    1,
+                ),
+                "previous-consent-with-legacy-block": legacy.replace(
+                    SYNC_MODULE.PERSONAL_AGENTS_LEGACY_CONSENT_LINE,
+                    SYNC_MODULE.PERSONAL_AGENTS_PREVIOUS_CONSENT_LINE,
                     1,
                 ),
                 "legacy-consent-suffix-drift": legacy.replace(
@@ -4528,6 +5460,18 @@ class PrivateOverlaySyncTests(unittest.TestCase):
                     + SYNC_MODULE.PERSONAL_AGENTS_CURRENT_CONSENT_LINE,
                     1,
                 ),
+                "previous-consent-suffix-drift": previous.replace(
+                    SYNC_MODULE.PERSONAL_AGENTS_PREVIOUS_CONSENT_LINE,
+                    SYNC_MODULE.PERSONAL_AGENTS_PREVIOUS_CONSENT_LINE.rstrip(b"\n")
+                    + b" Extra authorization.\n",
+                    1,
+                ),
+                "previous-consent-prefix-drift": previous.replace(
+                    SYNC_MODULE.PERSONAL_AGENTS_PREVIOUS_CONSENT_LINE,
+                    b"Extra authorization. "
+                    + SYNC_MODULE.PERSONAL_AGENTS_PREVIOUS_CONSENT_LINE,
+                    1,
+                ),
                 "legacy-consent-reordered": legacy.replace(
                     SYNC_MODULE.PERSONAL_AGENTS_LEGACY_CONSENT_LINE,
                     b"",
@@ -4546,7 +5490,60 @@ class PrivateOverlaySyncTests(unittest.TestCase):
                     + SYNC_MODULE.PERSONAL_AGENTS_CURRENT_REVIEW_BLOCK,
                     1,
                 ),
+                "previous-block-drift": previous.replace(
+                    b"Single uses one fresh-context local Codex review session",
+                    b"Single uses a fresh-context local Codex review session",
+                    1,
+                ),
+                "intermediate-block-drift": intermediate.replace(
+                    b"Single uses one fresh-context local Codex review session",
+                    b"Single uses a fresh-context local Codex review session",
+                    1,
+                ),
+                "previous-block-prefix-drift": previous.replace(
+                    SYNC_MODULE.PERSONAL_AGENTS_PREVIOUS_REVIEW_BLOCK,
+                    b"Extra policy. "
+                    + SYNC_MODULE.PERSONAL_AGENTS_PREVIOUS_REVIEW_BLOCK,
+                    1,
+                ),
                 "mixed": legacy + current,
+                "previous-and-current-mixed": previous + current,
+                "previous-consent-current-block": previous.replace(
+                    SYNC_MODULE.PERSONAL_AGENTS_PREVIOUS_REVIEW_BLOCK,
+                    SYNC_MODULE.PERSONAL_AGENTS_CURRENT_REVIEW_BLOCK,
+                    1,
+                ),
+                "legacy-consent-previous-block": intermediate.replace(
+                    SYNC_MODULE.PERSONAL_AGENTS_CURRENT_CONSENT_LINE,
+                    SYNC_MODULE.PERSONAL_AGENTS_LEGACY_CONSENT_LINE,
+                    1,
+                ),
+                "legacy-consent-current-block": current.replace(
+                    SYNC_MODULE.PERSONAL_AGENTS_CURRENT_CONSENT_LINE,
+                    SYNC_MODULE.PERSONAL_AGENTS_LEGACY_CONSENT_LINE,
+                    1,
+                ),
+                "current-consent-legacy-block": legacy.replace(
+                    SYNC_MODULE.PERSONAL_AGENTS_LEGACY_CONSENT_LINE,
+                    SYNC_MODULE.PERSONAL_AGENTS_CURRENT_CONSENT_LINE,
+                    1,
+                ),
+                "duplicate-previous": previous.replace(
+                    SYNC_MODULE.PERSONAL_AGENTS_REVIEW_BLOCK_BOUNDARY,
+                    SYNC_MODULE.PERSONAL_AGENTS_PREVIOUS_REVIEW_BLOCK
+                    + SYNC_MODULE.PERSONAL_AGENTS_REVIEW_BLOCK_BOUNDARY,
+                    1,
+                ),
+                "duplicate-intermediate": intermediate.replace(
+                    SYNC_MODULE.PERSONAL_AGENTS_REVIEW_BLOCK_BOUNDARY,
+                    SYNC_MODULE.PERSONAL_AGENTS_PREVIOUS_REVIEW_BLOCK
+                    + SYNC_MODULE.PERSONAL_AGENTS_REVIEW_BLOCK_BOUNDARY,
+                    1,
+                ),
+                "duplicate-previous-consent": previous
+                + SYNC_MODULE.PERSONAL_AGENTS_PREVIOUS_CONSENT_LINE,
+                "duplicate-current-consent": current
+                + SYNC_MODULE.PERSONAL_AGENTS_CURRENT_CONSENT_LINE,
                 "duplicate-current": current.replace(
                     SYNC_MODULE.PERSONAL_AGENTS_REVIEW_BLOCK_BOUNDARY,
                     SYNC_MODULE.PERSONAL_AGENTS_CURRENT_REVIEW_BLOCK
@@ -4557,12 +5554,35 @@ class PrivateOverlaySyncTests(unittest.TestCase):
             for name, data in cases.items():
                 with (
                     self.subTest(name=name),
-                    self.assertRaisesRegex(
-                        SYNC_MODULE.SyncError,
-                        "exact legacy or migrated state",
-                    ),
+                    self.assertRaises(SYNC_MODULE.SyncError),
                 ):
                     SYNC_MODULE._migrated_personal_agents_bytes(data)
+
+    def test_personal_agents_previous_migration_preserves_current_preamble(
+        self,
+    ) -> None:
+        current = (REPO_ROOT / SYNC_MODULE.PERSONAL_AGENTS_TARGET).read_bytes()
+        self.assertEqual(
+            SYNC_MODULE._personal_agents_review_guidance_state(current),
+            "current",
+        )
+        previous = current.replace(
+            SYNC_MODULE.PERSONAL_AGENTS_CURRENT_CONSENT_LINE,
+            SYNC_MODULE.PERSONAL_AGENTS_PREVIOUS_CONSENT_LINE,
+            1,
+        ).replace(
+            SYNC_MODULE.PERSONAL_AGENTS_CURRENT_REVIEW_BLOCK,
+            SYNC_MODULE.PERSONAL_AGENTS_PREVIOUS_REVIEW_BLOCK,
+            1,
+        )
+        migrated = SYNC_MODULE._migrated_personal_agents_bytes(previous)
+
+        self.assertEqual(
+            SYNC_MODULE._personal_agents_review_guidance_state(previous),
+            "previous",
+        )
+        self.assertEqual(migrated, current)
+        self.assertEqual(SYNC_MODULE._migrated_personal_agents_bytes(current), current)
 
     def test_personal_agents_drift_fails_before_new_review_tree_is_installed(
         self,
@@ -5181,16 +6201,58 @@ class PrivateOverlaySyncTests(unittest.TestCase):
             if rule.target == Path("personal_codex/skills/change-delivery-workflow")
         )
 
+        replacements_by_prefix = {
+            replacement.old: replacement
+            for replacement in rule.replacements
+            if replacement.path == SYNC_MODULE.CHANGE_DELIVERY_SKILL_PATH
+            and replacement.frontmatter_key == "description"
+        }
         self.assertEqual(
-            rule.replacements[0],
-            SYNC_MODULE.Replacement(
-                SYNC_MODULE.CHANGE_DELIVERY_PUBLIC_DESCRIPTION_PREFIX,
-                "description: \"Run Joey's local ",
-                path=SYNC_MODULE.CHANGE_DELIVERY_SKILL_PATH,
-                required_count=1,
-                frontmatter_key="description",
+            rule.replacements[:2],
+            (
+                SYNC_MODULE.Replacement(
+                    SYNC_MODULE.CHANGE_DELIVERY_PUBLIC_DESCRIPTION_PREFIX,
+                    "description: \"Run Joey's local ",
+                    path=SYNC_MODULE.CHANGE_DELIVERY_SKILL_PATH,
+                    required=False,
+                    frontmatter_key="description",
+                ),
+                SYNC_MODULE.Replacement(
+                    SYNC_MODULE.CHANGE_DELIVERY_NEW_PUBLIC_DESCRIPTION_PREFIX,
+                    "description: \"Run Joey's implementation-to-commit gate for ",
+                    path=SYNC_MODULE.CHANGE_DELIVERY_SKILL_PATH,
+                    required=False,
+                    frontmatter_key="description",
+                ),
             ),
         )
+        self.assertEqual(
+            set(replacements_by_prefix),
+            {
+                SYNC_MODULE.CHANGE_DELIVERY_PUBLIC_DESCRIPTION_PREFIX,
+                SYNC_MODULE.CHANGE_DELIVERY_NEW_PUBLIC_DESCRIPTION_PREFIX,
+            },
+        )
+        self.assertEqual(
+            replacements_by_prefix[
+                SYNC_MODULE.CHANGE_DELIVERY_PUBLIC_DESCRIPTION_PREFIX
+            ].new,
+            'description: "Run Joey\'s local ',
+        )
+        self.assertEqual(
+            replacements_by_prefix[
+                SYNC_MODULE.CHANGE_DELIVERY_NEW_PUBLIC_DESCRIPTION_PREFIX
+            ].new,
+            'description: "Run Joey\'s implementation-to-commit gate for ',
+        )
+        for replacement in replacements_by_prefix.values():
+            self.assertFalse(replacement.required)
+            self.assertIsNone(replacement.required_count)
+            self.assertEqual(
+                replacement.path,
+                SYNC_MODULE.CHANGE_DELIVERY_SKILL_PATH,
+            )
+            self.assertEqual(replacement.frontmatter_key, "description")
 
         SYNC_MODULE.sync_sources(self.repo_root, self.source_root, (rule,))
 
@@ -5209,6 +6271,294 @@ class PrivateOverlaySyncTests(unittest.TestCase):
             "Historical public example:\n"
             'description: "Run a local delivery gate for old work."\n',
         )
+
+    def test_change_delivery_description_alternatives_require_exactly_one_match(
+        self,
+    ) -> None:
+        rule = next(
+            rule
+            for rule in SYNC_MODULE.SYNC_RULES
+            if rule.target == SYNC_MODULE.CHANGE_DELIVERY_TARGET
+        )
+        description_indexes = [
+            index
+            for index, replacement in enumerate(rule.replacements)
+            if replacement.path == SYNC_MODULE.CHANGE_DELIVERY_SKILL_PATH
+            and replacement.frontmatter_key == "description"
+        ]
+        self.assertEqual(len(description_indexes), 2)
+
+        for index in description_indexes:
+            with self.subTest(accepted_index=index):
+                SYNC_MODULE._validate_replacement_counts(rule, {index: 1})
+
+        for label, counts in (
+            ("missing", {}),
+            ("both", {index: 1 for index in description_indexes}),
+        ):
+            with self.subTest(rejected_match_set=label):
+                with self.assertRaisesRegex(
+                    SYNC_MODULE.SyncError,
+                    "recognized change-delivery description",
+                ):
+                    SYNC_MODULE._validate_replacement_counts(rule, counts)
+
+        original_alternatives = tuple(
+            rule.replacements[index] for index in description_indexes
+        )
+        malformed_rules = (
+            dataclasses.replace(
+                rule,
+                replacements=tuple(
+                    replacement
+                    for index, replacement in enumerate(rule.replacements)
+                    if index != description_indexes[0]
+                ),
+            ),
+            dataclasses.replace(
+                rule,
+                replacements=(
+                    *rule.replacements,
+                    original_alternatives[0],
+                ),
+            ),
+        )
+        for malformed in malformed_rules:
+            with self.subTest(replacement_count=len(malformed.replacements)):
+                with self.assertRaisesRegex(
+                    SYNC_MODULE.SyncError,
+                    "exactly one definition for each recognized public prefix",
+                ):
+                    SYNC_MODULE._validate_replacement_counts(malformed, {})
+
+    def test_change_delivery_sync_rule_builds_implementation_to_commit_private_variant(
+        self,
+    ) -> None:
+        source = (
+            self.source_root
+            / "codex-review-workflows"
+            / "skills"
+            / "change-delivery-workflow"
+            / "SKILL.md"
+        )
+        source.parent.mkdir(parents=True)
+        source.write_text(
+            "---\n"
+            "name: change-delivery-workflow\n"
+            'description: "Run the implementation-to-commit gate for non-trivial '
+            "repo changes: implement, build, test, update docs, freeze the landing "
+            "head, and hand review selection to review-orchestration-playbook. "
+            "Use for local delivery or before PR readiness; an eligible remote PR "
+            "reviewer avoids duplicate local review unless explicitly requested."
+            '"\n'
+            "---\n\n"
+            "Implementation-to-commit delivery policy.\n",
+            encoding="utf-8",
+        )
+        rule = next(
+            rule
+            for rule in SYNC_MODULE.SYNC_RULES
+            if rule.target == SYNC_MODULE.CHANGE_DELIVERY_TARGET
+        )
+
+        SYNC_MODULE.sync_sources(self.repo_root, self.source_root, (rule,))
+
+        target = self.repo_root / rule.target / "SKILL.md"
+        self.assertEqual(
+            target.read_text(encoding="utf-8"),
+            "---\n"
+            "name: change-delivery-workflow\n"
+            'description: "Run Joey\'s implementation-to-commit gate for non-trivial '
+            "repo changes: implement, build, test, update docs, freeze the landing "
+            "head, and hand review selection to review-orchestration-playbook. "
+            "Use for local delivery or before PR readiness; an eligible remote PR "
+            "reviewer avoids duplicate local review unless explicitly requested."
+            '"\n'
+            "---\n\n"
+            "Implementation-to-commit delivery policy.\n",
+        )
+
+    def test_change_delivery_sync_rule_replays_locked_implementation_to_commit_description(
+        self,
+    ) -> None:
+        skill = (
+            self.source_root
+            / "codex-review-workflows"
+            / "skills"
+            / "change-delivery-workflow"
+            / "SKILL.md"
+        )
+        skill.parent.mkdir(parents=True)
+        skill.write_text(
+            "---\n"
+            "name: change-delivery-workflow\n"
+            'description: "Run the implementation-to-commit gate for non-trivial '
+            "repo changes: implement, build, test, update docs, freeze the landing "
+            "head, and hand review selection to review-orchestration-playbook. "
+            "Use for local delivery or before PR readiness; an eligible remote PR "
+            "reviewer avoids duplicate local review unless explicitly requested."
+            '"\n'
+            "---\n\n"
+            "Implementation-to-commit delivery policy.\n",
+            encoding="utf-8",
+        )
+        rule = next(
+            rule
+            for rule in SYNC_MODULE.SYNC_RULES
+            if rule.target == SYNC_MODULE.CHANGE_DELIVERY_TARGET
+        )
+        policy = SYNC_MODULE.CANONICAL_REVIEW_MIGRATION_POLICY
+        source_pin = SYNC_MODULE._VerifiedLockedSourcePin(
+            repository=policy.repository,
+            revision=policy.reviewed_candidate_revision,
+            root_tree=policy.approved_root_tree,
+        )
+        locked_sources = self._locked_bug_triage_source(
+            rule,
+            skill.parent,
+            source_pin=source_pin,
+        )
+
+        SYNC_MODULE.sync_sources(
+            self.repo_root,
+            self.source_root,
+            (rule,),
+            locked_sources=locked_sources,
+        )
+
+        target = self.repo_root / rule.target / "SKILL.md"
+        self.assertEqual(
+            target.read_text(encoding="utf-8"),
+            "---\n"
+            "name: change-delivery-workflow\n"
+            'description: "Run Joey\'s implementation-to-commit gate for non-trivial '
+            "repo changes: implement, build, test, update docs, freeze the landing "
+            "head, and hand review selection to review-orchestration-playbook. "
+            "Use for local delivery or before PR readiness; an eligible remote PR "
+            "reviewer avoids duplicate local review unless explicitly requested."
+            '"\n'
+            "---\n\n"
+            "Implementation-to-commit delivery policy.\n",
+        )
+        target_bytes_before_repeat = target.read_bytes()
+        source_bytes_before_repeat = skill.read_bytes()
+
+        SYNC_MODULE.sync_sources(
+            self.repo_root,
+            self.source_root,
+            (rule,),
+            locked_sources=locked_sources,
+        )
+
+        self.assertEqual(target.read_bytes(), target_bytes_before_repeat)
+        self.assertEqual(skill.read_bytes(), source_bytes_before_repeat)
+
+    def test_change_delivery_locked_sync_rejects_body_and_cross_file_description_bait(
+        self,
+    ) -> None:
+        skill = (
+            self.source_root
+            / "codex-review-workflows"
+            / "skills"
+            / "change-delivery-workflow"
+            / "SKILL.md"
+        )
+        skill.parent.mkdir(parents=True)
+        target = self.repo_root / SYNC_MODULE.CHANGE_DELIVERY_TARGET
+        target.mkdir(parents=True)
+        sentinel = target / "SKILL.md"
+        sentinel_text = (
+            "---\n"
+            "name: change-delivery-workflow\n"
+            'description: "Run Joey\'s local delivery gate for the installed target."\n'
+            "---\n\n"
+            "Installed target sentinel.\n"
+        )
+        sentinel.write_text(sentinel_text, encoding="utf-8")
+        sentinel_identity = (sentinel.stat().st_dev, sentinel.stat().st_ino)
+        rule = next(
+            rule
+            for rule in SYNC_MODULE.SYNC_RULES
+            if rule.target == SYNC_MODULE.CHANGE_DELIVERY_TARGET
+        )
+        policy = SYNC_MODULE.CANONICAL_REVIEW_MIGRATION_POLICY
+        source_pin = SYNC_MODULE._VerifiedLockedSourcePin(
+            repository=policy.repository,
+            revision=policy.reviewed_candidate_revision,
+            root_tree=policy.approved_root_tree,
+        )
+        cases = (
+            (
+                "same-file body bait",
+                "---\n"
+                "name: change-delivery-workflow\n"
+                'description: "Run a repository delivery gate."\n'
+                "---\n\n"
+                'description: "Run the implementation-to-commit gate for old work."\n',
+                None,
+                "frontmatter description is not the recognized private legacy/current "
+                "form at prepared public source",
+            ),
+            (
+                "cross-file bait",
+                "---\n"
+                "name: change-delivery-workflow\n"
+                'description: "Run a repository delivery gate."\n'
+                "---\n",
+                'description: "Run the implementation-to-commit gate for old work."\n',
+                "frontmatter description is not the recognized private legacy/current "
+                "form at prepared public source",
+            ),
+            (
+                "unknown description",
+                "---\n"
+                "name: change-delivery-workflow\n"
+                'description: "Run an unrelated repository policy."\n'
+                "---\n",
+                None,
+                "frontmatter description is not the recognized private legacy/current "
+                "form at prepared public source",
+            ),
+        )
+
+        for label, skill_text, reference_text, error_pattern in cases:
+            with self.subTest(label=label):
+                skill.write_text(skill_text, encoding="utf-8")
+                reference = None
+                if reference_text is not None:
+                    references = skill.parent / "references"
+                    references.mkdir(exist_ok=True)
+                    reference = references / "wording-history.md"
+                    reference.write_text(reference_text, encoding="utf-8")
+                locked_sources = self._locked_bug_triage_source(
+                    rule,
+                    skill.parent,
+                    source_pin=source_pin,
+                )
+
+                with self.assertRaisesRegex(SYNC_MODULE.SyncError, error_pattern):
+                    SYNC_MODULE.sync_sources(
+                        self.repo_root,
+                        self.source_root,
+                        (rule,),
+                        locked_sources=locked_sources,
+                    )
+
+                self.assertEqual(skill.read_text(encoding="utf-8"), skill_text)
+                if reference is not None:
+                    assert reference_text is not None
+                    self.assertEqual(
+                        reference.read_text(encoding="utf-8"),
+                        reference_text,
+                    )
+                self.assertEqual(
+                    sentinel.read_text(encoding="utf-8"),
+                    sentinel_text,
+                )
+                self.assertEqual(
+                    (sentinel.stat().st_dev, sentinel.stat().st_ino),
+                    sentinel_identity,
+                )
 
     def test_change_delivery_sync_rule_replays_locked_legacy_private_variant(
         self,
@@ -5406,6 +6756,18 @@ class PrivateOverlaySyncTests(unittest.TestCase):
             for rule in SYNC_MODULE.SYNC_RULES
             if rule.target == SYNC_MODULE.CHANGE_DELIVERY_TARGET
         )
+        target = self.repo_root / rule.target
+        target.mkdir(parents=True)
+        sentinel = target / "SKILL.md"
+        sentinel_text = (
+            "---\n"
+            "name: change-delivery-workflow\n"
+            'description: "Run Joey\'s local delivery gate for the installed target."\n'
+            "---\n\n"
+            "Installed target sentinel.\n"
+        )
+        sentinel.write_text(sentinel_text, encoding="utf-8")
+        sentinel_identity = (sentinel.stat().st_dev, sentinel.stat().st_ino)
         policy = SYNC_MODULE.CANONICAL_REVIEW_MIGRATION_POLICY
         cases = (
             (
@@ -5469,7 +6831,11 @@ class PrivateOverlaySyncTests(unittest.TestCase):
                         locked_sources=locked_sources,
                     )
 
-                self.assertFalse((self.repo_root / rule.target).exists())
+                self.assertEqual(sentinel.read_text(encoding="utf-8"), sentinel_text)
+                self.assertEqual(
+                    (sentinel.stat().st_dev, sentinel.stat().st_ino),
+                    sentinel_identity,
+                )
 
     def test_bug_triage_sync_rule_builds_current_private_transport_variant(
         self,
@@ -12035,14 +13401,61 @@ class PrivateOverlaySyncTests(unittest.TestCase):
         private_replacements = rule.replacements[
             : -len(SYNC_MODULE.COMMON_JOEY_TEXT_REPLACEMENTS)
         ]
-        self.assertEqual(private_replacements, ())
+        self.assertEqual(
+            private_replacements,
+            (
+                SYNC_MODULE.Replacement(
+                    "when the user explicitly includes reviewers",
+                    "when joey explicitly includes reviewers",
+                    path=Path("tests/test_contracts.py"),
+                    required=False,
+                ),
+                SYNC_MODULE.Replacement(
+                    "only when the user requests model discovery",
+                    "only when joey requests model discovery",
+                    path=Path("tests/test_contracts.py"),
+                    required=False,
+                ),
+            ),
+        )
+        self.assertEqual(
+            {replacement.path for replacement in private_replacements},
+            {Path("tests/test_contracts.py")},
+        )
+        canonical_assertions = (
+            'self.assertIn("when the user explicitly includes reviewers", normalized)\n'
+            'self.assertIn("only when the user requests model discovery", normalized)\n'
+        )
+        adapted_assertions, found = SYNC_MODULE._apply_text_replacements(
+            canonical_assertions,
+            Path("tests/test_contracts.py"),
+            private_replacements,
+            surface="fixture",
+        )
+        self.assertEqual(
+            adapted_assertions,
+            'self.assertIn("when joey explicitly includes reviewers", normalized)\n'
+            'self.assertIn("only when joey requests model discovery", normalized)\n',
+        )
+        self.assertEqual(found, {0: 1, 1: 1})
+        self.assertIn(
+            "when joey explicitly includes reviewers", adapted_assertions.lower()
+        )
+        self.assertIn(
+            "only when joey requests model discovery", adapted_assertions.lower()
+        )
+        untouched_assertions, untouched_found = SYNC_MODULE._apply_text_replacements(
+            canonical_assertions,
+            Path("references/local-codex-lane.md"),
+            private_replacements,
+            surface="fixture",
+        )
+        self.assertEqual(untouched_assertions, canonical_assertions)
+        self.assertEqual(untouched_found, {})
         self.assertFalse(
             any(
                 replacement.path
-                in {
-                    Path("references/github-pr-probes.md"),
-                    Path("tests/test_contracts.py"),
-                }
+                == Path("references/github-pr-probes.md")
                 for replacement in rule.replacements
             )
         )
@@ -12662,23 +14075,32 @@ class PrivateOverlaySyncTests(unittest.TestCase):
         )
         self.assertEqual(
             receipt["canonical_commit"],
-            "7803eebe63782f5539c22e1b7f0d7a7ec587ac3f",
+            "110f2df02ee6388835d1eb6635e09e7f838658fb",
+        )
+        self.assertEqual(
+            receipt["canonical_repository"],
+            "Joey-Tools/codex-personal-sync",
         )
         self.assertEqual(receipt["mirror"], "toolbox")
         self.assertEqual(
             receipt["mirror_repository"],
             "Joey-Tools/codex-toolbox",
         )
-        expected_paths = {
+        expected_paths = (
             "scripts/codex_personal_sync.py",
             "tests/test_codex_personal_sync.py",
             "schema/sync-manifest.schema.json",
+            "tests/test_pending_agent_claim_compatibility.py",
+            "tests/test_pending_staging_cleanup.py",
+            "tests/test_quarantine_empty_batch_reclaim.py",
             "tests/test_personal_sync_reconciliation_safety.py",
+            "tests/test_regular_agent_materialization.py",
+            "tests/test_regular_overlay_uninstall_status_regressions.py",
             "tests/test_release_retention.py",
             "tests/test_scheduler_doctor.py",
-        }
+        )
         self.assertEqual(
-            {entry["target_path"] for entry in receipt["files"]},
+            tuple(entry["target_path"] for entry in receipt["files"]),
             expected_paths,
         )
         for entry in receipt["files"]:
@@ -12935,8 +14357,6 @@ jobs:
 
         for duplicate_step in (
             "Check helper syntax without bytecode",
-            "Run tests",
-            "Verify canonical review workflow",
         ):
             with self.subTest(skipped_on_pull_request=duplicate_step):
                 self.assertRegex(
@@ -12945,7 +14365,6 @@ jobs:
                 )
 
         for release_specific_step in (
-            "Validate sync manifest changes",
             "Build release package",
             "Verify release package",
         ):
@@ -12955,7 +14374,13 @@ jobs:
                     step_body(release_specific_step),
                 )
 
-        manifest_step = step_body("Validate sync manifest changes")
+        manifest_job = re.search(
+            r"(?ms)^  manifest_validation:\n(?P<body>.*?)(?=^  [-a-zA-Z0-9_]+:\n|\Z)",
+            workflow,
+        )
+        self.assertIsNotNone(manifest_job)
+        manifest_step = manifest_job.group("body")
+        self.assertNotIn("github.event_name != 'pull_request'", manifest_step)
         self.assertIn(
             '--release-repo "$GITHUB_REPOSITORY"',
             manifest_step,
@@ -12966,6 +14391,75 @@ jobs:
             step_body("Require source-only Python tree"),
             r"(?m)^        if: always\(\)$",
         )
+
+    def test_release_workflow_parallel_validation_gate_fails_closed(self) -> None:
+        workflow = (REPO_ROOT / ".github/workflows/release.yml").read_text()
+        release = re.search(
+            r"(?ms)^  release:\n(?P<body>.*?)(?=^  [-a-zA-Z0-9_]+:\n|\Z)",
+            workflow,
+        ).group("body")
+        gate = re.search(
+            r"(?ms)^      - name: Require release validation checks to pass\n"
+            r".*?^        run: \|\n(?P<script>.*?)(?=^      - name: |\Z)",
+            release,
+        ).group("script")
+        script = "\n".join(line[10:] for line in gate.splitlines())
+        dependencies = {
+            "controller_python_39": "PYTHON_39_RESULT",
+            "controller_macos": "MACOS_CONTROLLER_RESULT",
+            "release_tests": "RELEASE_TEST_RESULT",
+            "manifest_validation": "MANIFEST_RESULT",
+        }
+        self.assertIn("always() &&", release)
+        self.assertEqual(
+            set(re.findall(r"^      - (\w+)$", release, flags=re.M)),
+            set(dependencies),
+        )
+        for job, variable in dependencies.items():
+            self.assertIn(f"{variable}: ${{{{ needs.{job}.result }}}}", release)
+        self.assertIn("RELEASE_EVENT: ${{ github.event_name }}", release)
+        for event in ("push", "workflow_dispatch", "pull_request"):
+            expected_tests = "skipped" if event == "pull_request" else "success"
+            baseline = {variable: "success" for variable in dependencies.values()}
+            baseline.update(RELEASE_TEST_RESULT=expected_tests, RELEASE_EVENT=event)
+            cases = [(None, None, baseline, True)]
+            for variable in dependencies.values():
+                for result in ("success", "failure", "cancelled", "skipped"):
+                    expected = expected_tests if variable == "RELEASE_TEST_RESULT" else "success"
+                    cases.append((variable, result, {**baseline, variable: result}, result == expected))
+            for variable, result, environment, success in cases:
+                with self.subTest(event=event, variable=variable, result=result):
+                    completed = subprocess.run(
+                        ["bash", "-eu", "-c", script],
+                        env={**os.environ, **environment},
+                        capture_output=True,
+                        timeout=10,
+                    )
+                    self.assertEqual(completed.returncode == 0, success)
+
+    def test_release_test_groups_run_independently_with_complete_matrix(self) -> None:
+        workflow = (REPO_ROOT / ".github/workflows/release.yml").read_text()
+        for job in ("release_tests", "manifest_validation"):
+            body = re.search(
+                rf"(?ms)^  {job}:\n(?P<body>.*?)(?=^  [-a-zA-Z0-9_]+:\n|\Z)",
+                workflow,
+            ).group("body")
+            with self.subTest(job=job):
+                self.assertNotIn("    needs:", body)
+                self.assertIn("    runs-on: ubuntu-latest", body)
+                self.assertIn('python-version: "3.13"', body)
+                self.assertRegex(body, r"Require source-only Python tree\n        if: always\(\)")
+                self.assertNotIn("continue-on-error", body)
+        groups = re.search(
+            r"(?ms)^  release_tests:\n(?P<body>.*?)(?=^  [-a-zA-Z0-9_]+:\n|\Z)",
+            workflow,
+        ).group("body")
+        self.assertIn("github.event_name != 'pull_request'", groups)
+        self.assertIn("fail-fast: false", groups)
+        self.assertIn("suite: [overlay, review]", groups)
+        self.assertIn("group: [0, 1, 2, 3]", groups)
+        self.assertIn('scripts/run_release_test_group.py "$TEST_SUITE"', groups)
+        self.assertIn('--group-index "$TEST_GROUP" --group-count 4', groups)
 
     def test_full_canonical_suite_jobs_use_python_313_with_bounded_timeout(
         self,
@@ -13075,7 +14569,7 @@ jobs:
         independent_job = independent_job_match.group("body")
 
         self.assertEqual(
-            independent_job.count("\n    timeout-minutes: 20\n"),
+            independent_job.count("\n    timeout-minutes: 30\n"),
             1,
         )
         deterministic_step = """      - name: Run deterministic independent supervisor tests
@@ -13095,8 +14589,8 @@ jobs:
 """
         reconciliation_step = """      - name: Run platform reconciliation safety tests (Python 3.x)
         if: ${{ always() && steps.setup_latest_python.outcome == 'success' }}
-        timeout-minutes: 2
-        run: python3 -m unittest tests.test_personal_sync_reconciliation_safety
+        timeout-minutes: 10
+        run: python3 -m unittest -v tests.test_personal_sync_reconciliation_safety
 """
         broker_step = """      - name: Require hosted-runner byte reproduction
         if: always()
@@ -13117,12 +14611,17 @@ jobs:
             self.assertEqual(independent_job.count(step), 1)
         self.assertEqual(
             independent_job.count("\n        timeout-minutes: 10\n"),
-            1,
+            2,
         )
         self.assertEqual(
             independent_job.count("\n        timeout-minutes: 2\n"),
-            3,
+            2,
         )
+        step_budgets = re.findall(
+            r"(?m)^        timeout-minutes: ([0-9]+)$", independent_job
+        )
+        self.assertEqual(step_budgets, ["10", "2", "10", "2"])
+        self.assertGreaterEqual(30, sum(map(int, step_budgets)) + 5)
 
         for job_name in (
             "review_syntax_tests",
@@ -13638,10 +15137,19 @@ jobs:
             "contemporaneous consent for scoped review egress to that shape",
             "including tracked repository secrets",
             "excludes runtime secrets and credentials",
+            "native GitHub Copilot PR code review when selected by the remote-first route",
+            "Claude Code, Copilot CLI, and other external reviewers without explicit opt-in",
             "A bare named-review request is report-only",
             "scoped exact `@codex review` producer operation",
-            "single-owner, single-flight recovery after ambiguous delivery",
-            "repeating that exact POST for the same logical request",
+            "read the complete exact current-head request set under one parent mutation owner",
+            "combine it with retained transport evidence",
+            "reuse an existing request",
+            "independent proof that no create-comment HTTP action was invoked",
+            "unknown delivery stays read-only",
+            "A possibly delivered POST consumes the epoch budget",
+            "an empty GET alone is not proof of non-delivery",
+            "signed landing-commit creation before the final exact-head review",
+            "Server-side squash merge occurs only after PR readiness",
             "never authorizes a second logical request",
             "GitHub Actions rerun, dispatch, or reconciliation requires both",
             "repository-predeclared exact idempotent or reentrant contract",
@@ -13664,9 +15172,45 @@ jobs:
             "$external-review-playbook",
             "$copilot-review-playbook",
             "is the only mutation implied by bare triple",
+            "repeating that exact POST for the same logical request",
         ):
             with self.subTest(retired=retired):
                 self.assertNotIn(retired, agents)
+
+        self.assertIn("helper owns model/effort labels", agents)
+        self.assertIn("do not duplicate a pinned fallback label", agents)
+        self.assertIn("<sentence printed by pr_attribution.py>", agents)
+        self.assertNotIn("GPT-5.6 Sol Ultra", agents)
+
+    def test_agents_guidance_uses_sol_parent_luna_workers_and_remote_first_review(self) -> None:
+        agents = _final_personal_agents_text()
+        model_routing = (
+            SYNC_MODULE.PERSONAL_AGENTS_MODEL_ROUTING_PARAGRAPH.decode("utf-8")
+        )
+        short_file_guideline = (
+            SYNC_MODULE.PERSONAL_AGENTS_SHORT_FILE_GUIDELINE.decode("utf-8")
+        )
+        self.assertEqual(agents.count(model_routing), 1)
+        self.assertEqual(
+            agents.index(model_routing),
+            agents.index(short_file_guideline) + len(short_file_guideline),
+        )
+        for anchor in (
+            "Default the parent/orchestrator to GPT-6.1 Sol",
+            "GPT-6 Luna, up to Max",
+            "also explicitly authorizes that allocation for local reviewers",
+            "local-review default remains GPT-6.1 Sol at model-default reasoning",
+            "not the parent's effort",
+            "Other reviewer models/efforts and Claude Code require explicit opt-in",
+            "Claude reviewer defaults to Opus 5.5",
+            "defaults to remote-only",
+            "without local review unless explicitly requested",
+            "native GitHub Copilot PR code review",
+            "Generic workflow requests do not opt into Claude or default triple",
+        ):
+            with self.subTest(anchor=anchor):
+                self.assertIn(anchor, agents)
+        self.assertNotIn("run local/internal review, then commit", agents)
 
     def test_agents_guidance_leaves_skill_repo_gate_to_scoped_guidance(self) -> None:
         agents = _final_personal_agents_text()
@@ -13683,30 +15227,23 @@ jobs:
             with self.subTest(repository=repository):
                 self.assertNotIn(f"`{repository}`", agents)
 
-    def test_codex_review_gate_uses_v2_verifier_and_controlled_legacy_bridge(
+    def test_codex_review_gate_uses_v2_only_verifier_and_controller(
         self,
     ) -> None:
         verifier_path = REPO_ROOT / ".github" / "workflows" / "codex-review-gate.yml"
-        canonical_fixture = (
-            REPO_ROOT
-            / "personal_codex"
-            / "skills"
-            / "review-orchestration-playbook"
-            / "tests"
-            / "fixtures"
-            / "compat"
-            / "codex-review-gate.yml"
+        controller_path = (
+            REPO_ROOT / ".github" / "workflows" / "codex-review-gate-controller.yml"
         )
         legacy_bridge_path = (
             REPO_ROOT / ".github" / "workflows" / "codex-review-gate-legacy-bridge.yml"
         )
-        self.assertEqual(verifier_path.read_bytes(), canonical_fixture.read_bytes())
 
         verifier = verifier_path.read_text(encoding="utf-8")
         for anchor in (
             "name: Codex Review Gate Verifier",
             "pull_request:",
             "types: [opened, reopened, synchronize, ready_for_review]",
+            "actions: read",
             "contents: read",
             "issues: read",
             "pull-requests: read",
@@ -13714,12 +15251,18 @@ jobs:
             "cancel-in-progress: true",
             "name: codex/github-review-gate",
             "uses: JoeyTeng/codex-review-gate-action@v2",
+            "CODEX_REVIEW_GATE_REQUEST_AUTHOR_PERMISSION: any",
             "github_token: ${{ github.token }}",
             "operation: reconcile",
             "request_review: false",
         ):
             with self.subTest(anchor=anchor):
                 self.assertIn(anchor, verifier)
+        request_token_input = (
+            "review_request_token: "
+            "${{ secrets.CODEX_REVIEW_GATE_REQUEST_TOKEN }}"
+        )
+        self.assertNotIn(request_token_input, verifier)
 
         for unsupported in (
             "pull_request_target:",
@@ -13728,26 +15271,171 @@ jobs:
             "issue_comment:",
             "pull_request_review:",
             "context=codex/review-gate",
+            "codex-review-gate.yml@v1",
+            "vars.CODEX_REVIEW_GATE_REQUEST_AUTHOR_PERMISSION",
             "Compatibility only; no reviewer or review lane.",
             "@codex review",
         ):
             with self.subTest(unsupported=unsupported):
                 self.assertNotIn(unsupported, verifier)
 
-        legacy_bridge = legacy_bridge_path.read_text(encoding="utf-8")
-        for anchor in (
-            "name: Codex Review Gate Legacy Bridge",
-            "pull_request_target:",
-            "issue_comment:\n    types: [created]",
-            "statuses: write",
-            "name: codex/review-gate legacy bridge",
-            "uses: JoeyTeng/codex-review-gate-action/.github/workflows/codex-review-gate.yml@v1",
-        ):
-            with self.subTest(legacy_bridge_anchor=anchor):
-                self.assertIn(anchor, legacy_bridge)
-        self.assertNotIn("pull_request_review:", legacy_bridge)
-        self.assertNotIn("JoeyTeng/codex-review-gate-action@v2", legacy_bridge)
+        self.assertFalse(legacy_bridge_path.exists())
 
+        controller = controller_path.read_text(encoding="utf-8")
+        for anchor in (
+            "issue_comment:\n    types: [created]",
+            "github.event_name == 'issue_comment' &&\n"
+            "          github.event.action == 'created' &&",
+            "workflow_run:\n    workflows: [Codex Review Gate Verifier]\n"
+            "    types: [completed]",
+            "vars.CODEX_REVIEW_GATE_AUTO_REQUEST == 'true'",
+            "github.event.workflow_run.event == 'pull_request'",
+            "github.event.workflow_run.run_attempt == 1",
+            "github.event.workflow_run.conclusion == 'failure'",
+            "!github.event.workflow_run.pull_requests[1]",
+            "github.event.workflow_run.head_sha",
+            "github.event.workflow_run.pull_requests[0].number || "
+            "github.event.issue.number || inputs.pr_number || "
+            "github.event.workflow_run.id || github.run_id",
+            "&& 'begin-review' || "
+            "github.event_name == 'workflow_run' && 'report-completion'",
+            "request_review: ${{ github.event_name == 'workflow_run' && "
+            "vars.CODEX_REVIEW_GATE_AUTO_REQUEST == 'true'",
+            "CODEX_REVIEW_GATE_AUTO_REQUEST: ${{ vars.CODEX_REVIEW_GATE_AUTO_REQUEST }}",
+            "CODEX_REVIEW_GATE_REQUEST_AUTHOR_PERMISSION: any",
+            "uses: JoeyTeng/codex-review-gate-action@v2",
+            request_token_input,
+        ):
+            with self.subTest(controller_anchor=anchor):
+                self.assertIn(anchor, controller)
+        self.assertNotIn("types: [created, edited]", controller)
+        self.assertNotIn("github.event.action == 'edited'", controller)
+        self.assertNotIn("github.event.workflow_run.name ==", controller)
+        self.assertNotIn("codex-review-gate.yml@v1", controller)
+        self.assertNotIn("vars.CODEX_REVIEW_GATE_REQUEST_AUTHOR_PERMISSION", controller)
+
+    def test_controller_completion_report_routing_is_narrow_and_independent(
+        self,
+    ) -> None:
+        controller_path = (
+            REPO_ROOT / ".github" / "workflows" / "codex-review-gate-controller.yml"
+        )
+        controller = controller_path.read_text(encoding="utf-8")
+        concurrency = controller.split("concurrency:\n", 1)[1].split(
+            "\njobs:", 1
+        )[0]
+        self.assertIn(
+            "github.event.workflow_run.pull_requests[0].number || "
+            "github.event.issue.number || inputs.pr_number || "
+            "github.event.workflow_run.id || github.run_id",
+            concurrency,
+        )
+        job_condition = controller.split("    if: >-\n", 1)[1].split(
+            "    runs-on:", 1
+        )[0]
+
+        for admission in (
+            "github.event.action == 'completed'",
+            "github.event.workflow_run.event == 'pull_request'",
+            "github.event.workflow_run.path == "
+            "'.github/workflows/codex-review-gate.yml'",
+            "startsWith(github.event.workflow_run.path, "
+            "'.github/workflows/codex-review-gate.yml@refs/pull/')",
+            "endsWith(github.event.workflow_run.path, '/merge')",
+            "!github.event.workflow_run.pull_requests[1]",
+        ):
+            with self.subTest(admission=admission):
+                self.assertIn(admission, job_condition)
+        for request_only_guard in (
+            "CODEX_REVIEW_GATE_AUTO_REQUEST",
+            "workflow_run.run_attempt",
+            "workflow_run.conclusion",
+            "workflow_run.pull_requests[0].number",
+        ):
+            with self.subTest(request_only_guard=request_only_guard):
+                self.assertNotIn(request_only_guard, job_condition)
+
+        action_inputs = controller.split("        with:\n", 1)[1]
+        pr_number = next(
+            line.strip()
+            for line in action_inputs.splitlines()
+            if line.startswith("          pr_number: ")
+        )
+        self.assertIn("pull_requests[0].number || '0'", pr_number)
+        self.assertNotIn("workflow_run.id", pr_number)
+        self.assertNotIn("github.run_id", pr_number)
+        operation = next(
+            line.strip()
+            for line in action_inputs.splitlines()
+            if line.startswith("          operation: ")
+        )
+        automatic_branch, completion_branch = operation.split(
+            " || github.event_name == 'workflow_run' && 'report-completion' ||",
+            1,
+        )
+        automatic_request_guards = (
+            "vars.CODEX_REVIEW_GATE_AUTO_REQUEST == 'true'",
+            "github.event.workflow_run.run_attempt == 1",
+            "github.event.workflow_run.conclusion == 'failure'",
+            "github.event.workflow_run.pull_requests[0].number",
+            "!github.event.workflow_run.pull_requests[1]",
+            "'begin-review'",
+        )
+        for request_guard in automatic_request_guards:
+            with self.subTest(request_guard=request_guard):
+                self.assertIn(request_guard, automatic_branch)
+        for request_only_guard in (
+            "CODEX_REVIEW_GATE_AUTO_REQUEST",
+            "workflow_run.run_attempt",
+            "workflow_run.conclusion",
+            "pull_requests[0].number",
+        ):
+            with self.subTest(completion_request_only_guard=request_only_guard):
+                self.assertNotIn(request_only_guard, completion_branch)
+
+        self.assertIn(
+            "(github.event.workflow_run.pull_requests[0].number || '0')",
+            action_inputs,
+        )
+        self.assertIn(
+            "request_review: ${{ github.event_name == 'workflow_run' && "
+            "vars.CODEX_REVIEW_GATE_AUTO_REQUEST == 'true'",
+            action_inputs,
+        )
+        request_review = next(
+            line.strip()
+            for line in action_inputs.splitlines()
+            if line.startswith("          request_review: ")
+        )
+        for guard in automatic_request_guards[:-1]:
+            with self.subTest(request_review_guard=guard):
+                self.assertIn(guard, request_review)
+        self.assertIn(
+            "github.event_name == 'workflow_dispatch' && inputs.request_review || false",
+            request_review,
+        )
+
+        canonical_path = ".github/workflows/codex-review-gate.yml"
+        self.assertIn(
+            f"github.event.workflow_run.path == '{canonical_path}'",
+            job_condition,
+        )
+        self.assertIn(
+            f"startsWith(github.event.workflow_run.path, '{canonical_path}@refs/pull/')",
+            job_condition,
+        )
+        self.assertIn(
+            "endsWith(github.event.workflow_run.path, '/merge')",
+            job_condition,
+        )
+        self.assertNotIn(
+            f"startsWith(github.event.workflow_run.path, '{canonical_path}@')",
+            job_condition,
+        )
+        self.assertNotIn(
+            f"startsWith(github.event.workflow_run.path, '{canonical_path}')",
+            job_condition,
+        )
     def test_scheduled_workflow_opens_pr_for_sync_changes(self) -> None:
         workflow = (
             REPO_ROOT / ".github" / "workflows" / "scheduled-sync-release.yml"
@@ -14031,13 +15719,14 @@ jobs:
             "Verify release package",
             "Publish GitHub release",
             "Validate repaired release history",
+            "Verify canonical review workflow",
         ):
             with self.subTest(step=step_name):
                 self.assertRegex(
                     workflow,
                     rf"- name: {re.escape(step_name)}\n\s+if: {re.escape(release_guard)}\n",
                 )
-        self.assertEqual(workflow.count(f"if: {release_guard}"), 6)
+        self.assertEqual(workflow.count(f"if: {release_guard}"), 7)
         self.assertNotIn("codex-waited-delivery", workflow)
         self.assertNotIn("personal_codex/skills/waited-delivery", workflow)
         self.assertIn('actual_sha="$(git rev-parse HEAD)"', workflow)
@@ -14080,6 +15769,155 @@ jobs:
             workflow.index("- name: Validate repaired release history"),
         )
         self.assertNotIn("steps.commit.outputs.sha", workflow)
+
+    def test_scheduled_sync_defers_canonical_suite_to_required_pr_ci(self) -> None:
+        scheduled = (
+            REPO_ROOT / ".github" / "workflows" / "scheduled-sync-release.yml"
+        ).read_text(encoding="utf-8")
+        ci = (REPO_ROOT / ".github" / "workflows" / "ci.yml").read_text(
+            encoding="utf-8"
+        )
+
+        def step_body(workflow: str, step_name: str) -> str:
+            step = re.search(
+                rf"(?ms)^      - name: {re.escape(step_name)}\n"
+                r"(?P<body>.*?)(?=^      - name: |\Z)",
+                workflow,
+            )
+            self.assertIsNotNone(step, step_name)
+            return step.group("body")
+
+        canonical_step = step_body(scheduled, "Verify canonical review workflow")
+        self.assertIn(
+            "if: steps.current-release.outputs.complete == 'false' && "
+            "steps.changes.outputs.changed != 'true'",
+            canonical_step,
+        )
+        self.assertNotIn("steps.changes.outputs.changed == 'true'", canonical_step)
+
+        deferred_step = step_body(scheduled, "Report canonical review suite deferral")
+        deferred_message = (
+            "The full canonical review suite is deferred to the required sync-PR "
+            "CI matrix; it has not run in this scheduled job."
+        )
+        self.assertIn("if: steps.changes.outputs.changed == 'true'", deferred_step)
+        self.assertIn(deferred_message, deferred_step)
+        self.assertIn('tee -a "$GITHUB_STEP_SUMMARY"', deferred_step)
+
+        pr_step = step_body(scheduled, "Open synced overlay pull request")
+        self.assertNotIn(
+            "python3 -m unittest discover -s "
+            "personal_codex/skills/review-orchestration-playbook/tests",
+            pr_step,
+        )
+        self.assertIn(
+            "Full canonical review suite runs in the required parallel "
+            "sync-PR CI matrix; it has not run in this scheduled job.",
+            pr_step,
+        )
+        self.assertLess(
+            scheduled.index("- name: Validate sync manifest changes"),
+            scheduled.index("- name: Report canonical review suite deferral"),
+        )
+        self.assertLess(
+            scheduled.index("- name: Report canonical review suite deferral"),
+            scheduled.index("- name: Open synced overlay pull request"),
+        )
+
+        review_job = re.search(
+            r"(?ms)^  review_tests:\n(?P<body>.*?)(?=^  [-a-zA-Z0-9_]+:\n|\Z)",
+            ci,
+        )
+        self.assertIsNotNone(review_job)
+        review_body = review_job.group("body")
+        modules_section = re.search(
+            r"(?ms)^        module:\n(?P<modules>.*?)(?=^    runs-on:)",
+            review_body,
+        )
+        self.assertIsNotNone(modules_section)
+        review_modules = re.findall(
+            r"(?m)^          - (test_[^\s]+\.py)$", modules_section.group("modules")
+        )
+        self.assertEqual(len(review_modules), len(set(review_modules)))
+        review_test_root = (
+            REPO_ROOT
+            / "personal_codex"
+            / "skills"
+            / "review-orchestration-playbook"
+            / "tests"
+        )
+        discovered_review_modules = sorted(
+            path.name for path in review_test_root.glob("test_*.py")
+        )
+        self.assertEqual(sorted(review_modules), discovered_review_modules)
+        self.assertIn("          - ubuntu-latest", review_body)
+        self.assertIn("          - macos-latest", review_body)
+        self.assertIn("fail-fast: false", review_body)
+
+        excluded_macos_modules = re.findall(
+            r"(?m)^          - os: macos-latest\n"
+            r"            module: (test_[^\s]+\.py)$",
+            review_body,
+        )
+        self.assertTrue(excluded_macos_modules)
+
+        shard_job = re.search(
+            r"(?ms)^  review_macos_shard_tests:\n"
+            r"(?P<body>.*?)(?=^  [-a-zA-Z0-9_]+:\n|\Z)",
+            ci,
+        )
+        self.assertIsNotNone(shard_job)
+        shard_body = shard_job.group("body")
+        max_parallel = re.search(r"(?m)^      max-parallel: [1-9][0-9]*$", shard_body)
+        self.assertIsNotNone(max_parallel)
+        self.assertIn("scripts/run_unittest_shard.py", shard_body)
+        shard_rows = re.findall(
+            r"(?m)^          - module: (test_[^\s]+\.py)\n"
+            r"            shard: ([0-9]+)\n"
+            r"            shard_count: ([0-9]+)$",
+            shard_body,
+        )
+        self.assertEqual(
+            {module for module, _shard, _count in shard_rows},
+            set(excluded_macos_modules),
+        )
+        for module in excluded_macos_modules:
+            with self.subTest(macos_sharded_module=module):
+                module_shards = [
+                    (int(shard), int(count))
+                    for row_module, shard, count in shard_rows
+                    if row_module == module
+                ]
+                shard_counts = {count for _shard, count in module_shards}
+                self.assertEqual(len(shard_counts), 1)
+                shard_count = next(iter(shard_counts))
+                self.assertEqual(
+                    sorted(shard for shard, _count in module_shards),
+                    list(range(shard_count)),
+                )
+
+        aggregate = re.search(
+            r"(?ms)^  test:\n(?P<body>.*?)(?=^  [-a-zA-Z0-9_]+:\n|\Z)",
+            ci,
+        )
+        self.assertIsNotNone(aggregate)
+        aggregate_body = aggregate.group("body")
+        self.assertIn("    name: test\n", aggregate_body)
+        self.assertIn("if: ${{ always() }}", aggregate_body)
+        required_leaf_results = (
+            ("review_syntax_tests", "REVIEW_SYNTAX_RESULT"),
+            ("review_tests", "REVIEW_RESULT"),
+            ("review_macos_shard_tests", "REVIEW_MACOS_SHARD_RESULT"),
+            ("private_overlay_sync_tests", "PRIVATE_OVERLAY_SYNC_RESULT"),
+            ("private_overlay_tests", "PRIVATE_OVERLAY_RESULT"),
+            ("private_overlay_contract_tests", "PRIVATE_OVERLAY_CONTRACT_RESULT"),
+        )
+        for job_name, result_name in required_leaf_results:
+            with self.subTest(required_ci_leaf=job_name):
+                self.assertIn(f"      - {job_name}\n", aggregate_body)
+                self.assertIn(
+                    f'test "${result_name}" = "success"', aggregate_body
+                )
 
     def test_scheduled_workflow_repairs_draft_current_release_assets_before_strict_validation(
         self,

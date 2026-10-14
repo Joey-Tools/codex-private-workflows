@@ -14,6 +14,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import re
 import secrets
 import shutil
 import stat
@@ -71,6 +72,7 @@ class Replacement:
     path: Path | None = None
     required_count: int | None = None
     frontmatter_key: str | None = None
+    whole_word: bool = False
 
 
 @dataclass(frozen=True)
@@ -197,7 +199,12 @@ COMMON_JOEY_TEXT_REPLACEMENTS = (
     Replacement("The user's", "Joey's", required=False),
     Replacement("the user", "Joey", required=False),
     Replacement("The user", "Joey", required=False),
-    Replacement("Joey request", "Joey's request", required=False),
+    Replacement(
+        "Joey request",
+        "Joey's request",
+        required=False,
+        whole_word=True,
+    ),
     Replacement("user-specific", "Joey-specific", required=False),
     Replacement("User-Specific", "Joey-Specific", required=False),
 )
@@ -205,9 +212,13 @@ COMMON_JOEY_TEXT_REPLACEMENTS = (
 CHANGE_DELIVERY_TARGET = _path("personal_codex/skills/change-delivery-workflow")
 CHANGE_DELIVERY_SKILL_PATH = Path("SKILL.md")
 CHANGE_DELIVERY_PUBLIC_DESCRIPTION_PREFIX = 'description: "Run a local '
+CHANGE_DELIVERY_NEW_PUBLIC_DESCRIPTION_PREFIX = (
+    'description: "Run the implementation-to-commit gate for '
+)
 CHANGE_DELIVERY_PRIVATE_DESCRIPTION_PREFIXES = (
     "description: \"Run Joey's local pre-commit delivery gate for ",
     "description: \"Run Joey's local delivery gate for ",
+    "description: \"Run Joey's implementation-to-commit gate for ",
 )
 FRONTMATTER_SAFE_KEY_CHARACTERS = frozenset(
     "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-"
@@ -525,8 +536,6 @@ function cliCommand(...args) {
 
 ARCHIFY_BRAND_CLI_HELPER = """import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { BRAND_MARKS } from './generated-brand-marks.mjs';
-import { throwDiagnosticError } from './diagnostics.mjs';
 import { esc, textUnits } from './utils.mjs';
 
 const cliEntryPath = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../bin/archify.mjs');
@@ -633,6 +642,31 @@ SYNC_RULES = (
         "codex-toolbox",
         "tests/test_scheduler_doctor.py",
         "tests/test_scheduler_doctor.py",
+    ),
+    _rule(
+        "codex-toolbox",
+        "tests/test_pending_agent_claim_compatibility.py",
+        "tests/test_pending_agent_claim_compatibility.py",
+    ),
+    _rule(
+        "codex-toolbox",
+        "tests/test_pending_staging_cleanup.py",
+        "tests/test_pending_staging_cleanup.py",
+    ),
+    _rule(
+        "codex-toolbox",
+        "tests/test_quarantine_empty_batch_reclaim.py",
+        "tests/test_quarantine_empty_batch_reclaim.py",
+    ),
+    _rule(
+        "codex-toolbox",
+        "tests/test_regular_agent_materialization.py",
+        "tests/test_regular_agent_materialization.py",
+    ),
+    _rule(
+        "codex-toolbox",
+        "tests/test_regular_overlay_uninstall_status_regressions.py",
+        "tests/test_regular_overlay_uninstall_status_regressions.py",
     ),
     _rule(
         "codex-toolbox",
@@ -767,7 +801,14 @@ SYNC_RULES = (
                 CHANGE_DELIVERY_PUBLIC_DESCRIPTION_PREFIX,
                 "description: \"Run Joey's local ",
                 path=CHANGE_DELIVERY_SKILL_PATH,
-                required_count=1,
+                required=False,
+                frontmatter_key="description",
+            ),
+            Replacement(
+                CHANGE_DELIVERY_NEW_PUBLIC_DESCRIPTION_PREFIX,
+                "description: \"Run Joey's implementation-to-commit gate for ",
+                path=CHANGE_DELIVERY_SKILL_PATH,
+                required=False,
                 frontmatter_key="description",
             ),
         ),
@@ -1068,6 +1109,19 @@ SYNC_RULES = (
                 required_count=1,
             ),
             Replacement(
+                "2. Read one matching schema in `schemas/`, `schemas/common.schema.json`, and one matching JSON example in `examples/`. Read only those files.",
+                "2. Before the first resource read or command, resolve "
+                "`<loaded-skill-dir>` as the absolute directory containing the "
+                "loaded `SKILL.md`. Anchor all `schemas/`, `examples/`, and "
+                "`references/` paths to that directory; keep the target repository "
+                "as the working directory. Use `<loaded-skill-dir>` for CLI paths "
+                "without guessing an installation name. Read one matching schema "
+                "in `schemas/`, `schemas/common.schema.json`, and one matching "
+                "JSON example in `examples/`. Read only those files.",
+                path=Path("SKILL.md"),
+                required_count=1,
+            ),
+            Replacement(
                 "node bin/archify.mjs",
                 "node <loaded-skill-dir>/bin/archify.mjs",
                 path=Path("SKILL.md"),
@@ -1156,6 +1210,20 @@ SYNC_RULES = (
         "codex-review-workflows",
         "skills/review-orchestration-playbook",
         "personal_codex/skills/review-orchestration-playbook",
+        replacements=(
+            Replacement(
+                "when the user explicitly includes reviewers",
+                "when joey explicitly includes reviewers",
+                path=Path("tests/test_contracts.py"),
+                required=False,
+            ),
+            Replacement(
+                "only when the user requests model discovery",
+                "only when joey requests model discovery",
+                path=Path("tests/test_contracts.py"),
+                required=False,
+            ),
+        ),
         common_joey_text=True,
         replacement_excluded_paths=("tests/fixtures/ci/private.yml",),
         canonical_review_migration_policy=CANONICAL_REVIEW_MIGRATION_POLICY,
@@ -1195,6 +1263,32 @@ PERSONAL_AGENTS_TARGET = _path("personal_codex/AGENTS.md")
 _CANONICAL_REVIEW_SYNC_RULE = next(
     rule for rule in SYNC_RULES if rule.target == CANONICAL_REVIEW_TARGET
 )
+PERSONAL_AGENTS_SHORT_FILE_GUIDELINE = (
+    b"- Keep this file short. Cross-repo rules belong here; repo-specific policy "
+    b"belongs in the repo `AGENTS.md` or a repo-local skill.\n"
+)
+PERSONAL_AGENTS_MODEL_ROUTING_PARAGRAPH = (
+    b"- Default the parent/orchestrator to GPT-6.1 Sol. Use GPT-6 Luna, up to Max, "
+    b"for delegated token-intensive work; Joey also explicitly authorizes that "
+    b"allocation for local reviewers. The local-review default remains GPT-6.1 Sol "
+    b"at model-default reasoning, not the parent's effort. Other reviewer "
+    b"models/efforts and Claude Code require explicit opt-in; an authorized Claude "
+    b"reviewer defaults to Opus 5.5. Record actual selections; do not silently "
+    b"substitute models or change an explicitly selected parent session.\n"
+)
+PERSONAL_AGENTS_MODEL_ROUTING_MARKERS = (
+    b"- Default the parent/orchestrator",
+    b"GPT-6 Luna, up to Max",
+    b"the local-review default remains",
+    b"Other reviewer models/efforts",
+    b"authorized Claude reviewer defaults to Opus 5.5",
+    b"Record actual selections; do not silently substitute models",
+)
+PERSONAL_AGENTS_MODEL_ROUTING_HISTORICAL_SUCCESSOR = (
+    b"- Explanations, discussion, analysis, and summaries use Simplified Chinese. "
+    b"Code, comments, identifiers, commit messages, and Markdown code blocks use "
+    b"English.\n"
+)
 PERSONAL_AGENTS_LEGACY_CONSENT_LINE = (
     b"- For Joey-requested Codex/GitHub PR or repo workflows, treat OpenAI Codex "
     b"services and GitHub-owned PR/review APIs as trusted destinations for scoped "
@@ -1205,7 +1299,7 @@ PERSONAL_AGENTS_LEGACY_CONSENT_LINE = (
     b"reviewers; approval justifications must still name the exact repo/PR and data "
     b"scope.\n"
 )
-PERSONAL_AGENTS_CURRENT_CONSENT_LINE = (
+PERSONAL_AGENTS_PREVIOUS_CONSENT_LINE = (
     b"- For Joey-requested Codex/GitHub PR or repo workflows, treat OpenAI Codex "
     b"services and GitHub-owned PR/review APIs as trusted destinations for scoped "
     b"repo/PR data: PR diffs, changed files, necessary nearby context, review "
@@ -1215,6 +1309,17 @@ PERSONAL_AGENTS_CURRENT_CONSENT_LINE = (
     b"reviewers; approval justifications must still name the exact repo/PR and data "
     b"scope.\n"
 )
+PERSONAL_AGENTS_CURRENT_CONSENT_LINE = (
+    b"- For Joey-requested Codex/GitHub PR or repo workflows, treat OpenAI Codex "
+    b"services and GitHub-owned PR/review APIs, including native GitHub Copilot "
+    b"PR code review when selected by the remote-first route, as trusted destinations "
+    b"for scoped repo/PR data: PR diffs, changed files, necessary nearby context, "
+    b"review prompts/results, PR comments, statuses, and same-PR fix-loop reruns. "
+    b"This standing consent excludes runtime secrets and credentials, untracked "
+    b"private files, unrelated repositories, broad workspace dumps, Claude Code, "
+    b"Copilot CLI, and other external reviewers without explicit opt-in; approval "
+    b"justifications must still name the exact repo/PR and data scope.\n"
+)
 PERSONAL_AGENTS_LEGACY_REVIEW_BLOCK_START = (
     b"- For catalogued low-level-helper Claude local-login artifacts,"
 )
@@ -1222,7 +1327,7 @@ PERSONAL_AGENTS_REVIEW_BLOCK_BOUNDARY = b"- Use `$remote-host-context` when "
 PERSONAL_AGENTS_LEGACY_REVIEW_BLOCK_SHA256 = (
     "6d093c17f2bbcaef9a085937891f5e029044b10dace7e3e7972aebb819630a62"
 )
-PERSONAL_AGENTS_CURRENT_REVIEW_BLOCK = (
+PERSONAL_AGENTS_PREVIOUS_REVIEW_BLOCK = (
     b"- Use `$review-orchestration-playbook` as the only entrypoint for named "
     b"single, double, and triple review plus PR readiness. Single uses one "
     b"fresh-context local Codex review session, double adds actual Claude Code, "
@@ -1251,6 +1356,48 @@ PERSONAL_AGENTS_CURRENT_REVIEW_BLOCK = (
     b"scope and exact inputs, and separate current-task delivery or readiness "
     b"authorization for that external mutation; it never authorizes a different "
     b"workflow, input, scope, destination, PR, repository, or unrelated action.\n"
+)
+PERSONAL_AGENTS_ROUTING_PREVIOUS_REVIEW_BLOCK = (
+    b"- Use `$review-orchestration-playbook` as the only entrypoint for default "
+    b"routing, explicit named single, double, and triple review, and PR readiness. "
+    b"Single uses one fresh-context local Codex review session, double adds actual "
+    b"Claude Code, and triple adds current-head GitHub Codex only when explicitly "
+    b"requested. Generic workflow requests do not opt into Claude or default triple. "
+    b"The skill owns adapter selection, clean-workspace preparation, reviewer "
+    b"runtime checks, GitHub evidence and recovery, and PR-readiness algorithms; "
+    b"do not duplicate those contracts here.\n"
+    b"- An unambiguous named single, double, or triple request is contemporaneous "
+    b"consent for scoped review egress to that shape: OpenAI Codex for single, "
+    b"Anthropic Claude Code additionally for double, and GitHub Codex on an exact "
+    b"`github.com` PR additionally for triple. Reviewers may inspect the named "
+    b"repository tracked diff, necessary tracked context, bounded derived evidence, "
+    b"and review prompt/results, including tracked repository secrets. This excludes "
+    b"untracked files, unrelated repositories, broad workspace or home-directory "
+    b"content, credential discovery, GitHub Copilot, and substitute reviewers.\n"
+    b"- A bare named-review request is report-only and does not authorize branch "
+    b"creation or mutation, commits, push, PR creation/update or metadata changes, "
+    b"merge, any GitHub Actions rerun, dispatch, or reconciliation, or unrelated "
+    b"mutation. Bare triple authorizes only the scoped exact `@codex review` "
+    b"producer operation on an already-existing eligible PR, including the skill's "
+    b"single-owner, single-flight recovery after ambiguous delivery by repeating "
+    b"that exact POST for the same logical request; it never authorizes a second "
+    b"logical request. "
+    b"Any GitHub Actions rerun, dispatch, or reconciliation requires both a "
+    b"repository-predeclared exact idempotent or reentrant contract for the frozen "
+    b"scope and exact inputs, and separate current-task delivery or readiness "
+    b"authorization for that external mutation; it never authorizes a different "
+    b"workflow, input, scope, destination, PR, repository, or unrelated action.\n"
+)
+PERSONAL_AGENTS_CURRENT_REVIEW_BLOCK = (
+    b"- Use `$review-orchestration-playbook` as the only entrypoint for default routing, explicit named single, double, and triple review, and PR readiness. Single uses one fresh-context local Codex review session, double adds actual Claude Code, and triple adds current-head GitHub Codex only when explicitly requested. Generic workflow requests do not opt into Claude or default triple. The skill owns adapter selection, clean-workspace preparation, reviewer runtime checks, GitHub evidence and recovery, and PR-readiness algorithms; do not duplicate those contracts here.\n"
+    b"- An unambiguous named single, double, or triple request is contemporaneous consent for scoped review egress to that shape: OpenAI Codex for single, Anthropic Claude Code additionally for double, and GitHub Codex on an exact `github.com` PR additionally for triple. Reviewers may inspect the named repository tracked diff, necessary tracked context, bounded derived evidence, and review prompt/results, including tracked repository secrets. This excludes untracked files, unrelated repositories, broad workspace or home-directory content, credential discovery, GitHub Copilot, and substitute reviewers.\n"
+    b"- A bare named-review request is report-only and does not authorize branch creation or mutation, commits, push, PR creation/update or metadata changes, merge, any GitHub Actions rerun, dispatch, or reconciliation, or unrelated mutation. Bare triple authorizes only the scoped exact `@codex review` producer operation on an already-existing eligible PR. Before a first request or any proposed transport retry, read the complete exact current-head request set under one parent mutation owner and combine it with retained transport evidence: reuse an existing request; send only after independent proof that no create-comment HTTP action was invoked or no request byte could reach GitHub; unknown delivery stays read-only. A possibly delivered POST consumes the epoch budget, and an empty GET alone is not proof of non-delivery; it never authorizes a second logical request. Any GitHub Actions rerun, dispatch, or reconciliation requires both a repository-predeclared exact idempotent or reentrant contract for the frozen scope and exact inputs, and separate current-task delivery or readiness authorization for that external mutation; it never authorizes a different workflow, input, scope, destination, PR, repository, or unrelated action.\n"
+)
+PERSONAL_AGENTS_PREVIOUS_LANDING_LINE = (
+    b"- For reviewable tasks, prefer a `wip/<topic>` branch plus fixed `base_sha..head_sha` review ranges over live working-tree review; append fixes on the `wip/` branch, then squash onto the target branch after tests and the final whole-range review/gate. Use `~/.codex/bin/codex-wip-branch` and `~/.codex/bin/codex-squash-merge-wip` when they fit.\n"
+)
+PERSONAL_AGENTS_CURRENT_LANDING_LINE = (
+    b"- For reviewable tasks, prefer a `wip/<topic>` branch and a committed `base_sha..head_sha` range. Complete local squash/amend and signed landing-commit creation before the final exact-head review; any later head change invalidates it. Server-side squash merge occurs only after PR readiness and binds the reviewed head. Use `~/.codex/bin/codex-wip-branch` and `~/.codex/bin/codex-squash-merge-wip` only when they fit that order.\n"
 )
 INDEPENDENT_CODEX_REVIEW_ROOT = _path("scripts/independent_codex_pr_review")
 INDEPENDENT_CODEX_REVIEW_REQUIRED_FILES = tuple(
@@ -1355,8 +1502,10 @@ CANONICAL_REVIEW_REQUIRED_FILES = tuple(
         "references/claude-runtime-trust.md",
         "references/claude-stream-compatibility.json",
         "references/claude-stream-schema.json",
+        "references/default-review-routing.md",
         "references/egress-consent.md",
         "references/github-codex-evidence-authority.md",
+        "references/github-codex-producer-and-recovery.md",
         "references/github-codex-terminal-carriers-v1.json",
         "references/github-pr-probes.md",
         "references/local-codex-lane.md",
@@ -1370,6 +1519,7 @@ CANONICAL_REVIEW_REQUIRED_FILES = tuple(
         "scripts/isolated_review",
         "scripts/named_claude_preflight",
         "scripts/named_lane_guard",
+        "scripts/readiness_plan.py",
         "scripts/validate_claude_stream.py",
         "scripts/review_runtime/__init__.py",
         "scripts/review_runtime/claude_capabilities.py",
@@ -1414,6 +1564,7 @@ CANONICAL_REVIEW_REQUIRED_FILES = tuple(
         "tests/test_named_claude_preflight.py",
         "tests/test_named_lane.py",
         "tests/test_providers.py",
+        "tests/test_readiness_plan.py",
         "tests/test_review_result.py",
         "tests/test_review_workspace.py",
         "tests/test_state.py",
@@ -1462,15 +1613,19 @@ _CANONICAL_REVIEW_LEGACY_ONLY_FILES = frozenset(
 _CANONICAL_REVIEW_CURRENT_ONLY_FILES = frozenset(
     _path(path)
     for path in (
+        "references/default-review-routing.md",
+        "references/github-codex-producer-and-recovery.md",
         "references/github-codex-terminal-carriers-v1.json",
         "references/local-codex-lane.md",
         "references/review-workspace.md",
+        "scripts/readiness_plan.py",
         "scripts/independent_codex_pr_review/tests/internal_supervisor_child_fixture.py",
         "scripts/review_runtime/review_workspace.py",
         "tests/test_github_recovery_contracts.py",
         "tests/test_github_terminal_carriers.py",
         "tests/test_local_codex_lane_contracts.py",
         "tests/test_review_workspace.py",
+        "tests/test_readiness_plan.py",
         "tests/test_trusted_mac_gate_manifest.py",
     )
 )
@@ -1878,22 +2033,116 @@ def _validate_canonical_review_target(
     )
 
 
+def _personal_agents_model_routing_state(data: bytes) -> str:
+    paragraph_count = data.count(PERSONAL_AGENTS_MODEL_ROUTING_PARAGRAPH)
+    if paragraph_count > 1:
+        raise SyncError(
+            "personal AGENTS model-routing paragraph must occur exactly once"
+        )
+    if paragraph_count == 0:
+        if any(marker in data for marker in PERSONAL_AGENTS_MODEL_ROUTING_MARKERS):
+            raise SyncError(
+                "personal AGENTS model-routing paragraph is drifted or misplaced"
+            )
+        anchor_count = data.count(PERSONAL_AGENTS_SHORT_FILE_GUIDELINE)
+        if anchor_count != 1:
+            raise SyncError(
+                "personal AGENTS model-routing absence requires one exact short-file "
+                "guideline anchor"
+            )
+        anchor_end = (
+            data.index(PERSONAL_AGENTS_SHORT_FILE_GUIDELINE)
+            + len(PERSONAL_AGENTS_SHORT_FILE_GUIDELINE)
+        )
+        if data[
+            anchor_end : anchor_end
+            + len(PERSONAL_AGENTS_MODEL_ROUTING_HISTORICAL_SUCCESSOR)
+        ] != PERSONAL_AGENTS_MODEL_ROUTING_HISTORICAL_SUCCESSOR:
+            raise SyncError(
+                "personal AGENTS model-routing absence is not the exact historical "
+                "successor state"
+            )
+        return "missing"
+
+    remaining = data.replace(PERSONAL_AGENTS_MODEL_ROUTING_PARAGRAPH, b"", 1)
+    if any(marker in remaining for marker in PERSONAL_AGENTS_MODEL_ROUTING_MARKERS):
+        raise SyncError(
+            "personal AGENTS model-routing paragraph is duplicated or drifted"
+        )
+    anchor_count = data.count(PERSONAL_AGENTS_SHORT_FILE_GUIDELINE)
+    if anchor_count != 1:
+        raise SyncError(
+            "personal AGENTS model-routing paragraph requires one exact short-file "
+            "guideline anchor"
+        )
+    anchor_end = (
+        data.index(PERSONAL_AGENTS_SHORT_FILE_GUIDELINE)
+        + len(PERSONAL_AGENTS_SHORT_FILE_GUIDELINE)
+    )
+    if data[anchor_end : anchor_end + len(PERSONAL_AGENTS_MODEL_ROUTING_PARAGRAPH)] != (
+        PERSONAL_AGENTS_MODEL_ROUTING_PARAGRAPH
+    ):
+        raise SyncError(
+            "personal AGENTS model-routing paragraph is not at its exact top-level "
+            "position"
+        )
+    successor_start = anchor_end + len(PERSONAL_AGENTS_MODEL_ROUTING_PARAGRAPH)
+    if data[
+        successor_start : successor_start
+        + len(PERSONAL_AGENTS_MODEL_ROUTING_HISTORICAL_SUCCESSOR)
+    ] != PERSONAL_AGENTS_MODEL_ROUTING_HISTORICAL_SUCCESSOR:
+        raise SyncError(
+            "personal AGENTS model-routing paragraph has an unexpected successor"
+        )
+    return "present"
+
+
 def _personal_agents_review_guidance_state(data: bytes) -> str:
+    previous_landing = data.count(PERSONAL_AGENTS_PREVIOUS_LANDING_LINE)
+    current_landing = data.count(PERSONAL_AGENTS_CURRENT_LANDING_LINE)
+    landing_marker = b"- For reviewable tasks,"
+    if (
+        previous_landing + current_landing != 1
+        or data.count(landing_marker) != previous_landing + current_landing
+    ):
+        raise SyncError("personal AGENTS landing guidance is drifted or duplicated")
+    prior_count = data.count(PERSONAL_AGENTS_ROUTING_PREVIOUS_REVIEW_BLOCK)
+    if prior_count:
+        if prior_count != 1:
+            raise SyncError("personal AGENTS prior routing block is duplicated")
+        projected = data.replace(
+            PERSONAL_AGENTS_ROUTING_PREVIOUS_REVIEW_BLOCK,
+            PERSONAL_AGENTS_CURRENT_REVIEW_BLOCK,
+            1,
+        )
+        if _personal_agents_review_block_state(projected) != "current":
+            raise SyncError("personal AGENTS prior routing scope is not exact")
+        return "routing-previous"
+    state = _personal_agents_review_block_state(data)
+    return "landing-previous" if state == "current" and previous_landing else state
+
+
+def _personal_agents_review_block_state(data: bytes) -> str:
     try:
         data.decode("utf-8")
     except UnicodeDecodeError as exc:
         raise SyncError("personal AGENTS guidance is not valid UTF-8") from exc
 
+    model_routing_state = _personal_agents_model_routing_state(data)
     legacy_consent_count = data.count(PERSONAL_AGENTS_LEGACY_CONSENT_LINE)
+    previous_consent_count = data.count(PERSONAL_AGENTS_PREVIOUS_CONSENT_LINE)
     current_consent_count = data.count(PERSONAL_AGENTS_CURRENT_CONSENT_LINE)
     legacy_start_count = data.count(PERSONAL_AGENTS_LEGACY_REVIEW_BLOCK_START)
+    previous_block_count = data.count(PERSONAL_AGENTS_PREVIOUS_REVIEW_BLOCK)
     current_block_count = data.count(PERSONAL_AGENTS_CURRENT_REVIEW_BLOCK)
     boundary_count = data.count(PERSONAL_AGENTS_REVIEW_BLOCK_BOUNDARY)
 
     if (
         legacy_consent_count == 1
+        and previous_consent_count == 0
         and current_consent_count == 0
         and legacy_start_count == 1
+        and previous_block_count == 0
         and current_block_count == 0
         and boundary_count == 1
     ):
@@ -1912,10 +2161,57 @@ def _personal_agents_review_guidance_state(data: bytes) -> str:
 
     if (
         legacy_consent_count == 0
+        and previous_consent_count == 1
+        and current_consent_count == 0
+        and legacy_start_count == 0
+        and previous_block_count == 1
+        and current_block_count == 0
+        and boundary_count == 1
+    ):
+        consent = data.index(PERSONAL_AGENTS_PREVIOUS_CONSENT_LINE)
+        start = data.index(PERSONAL_AGENTS_PREVIOUS_REVIEW_BLOCK)
+        boundary = data.index(PERSONAL_AGENTS_REVIEW_BLOCK_BOUNDARY)
+        consent_starts_line = consent == 0 or data[consent - 1 : consent] == b"\n"
+        block_starts_line = start == 0 or data[start - 1 : start] == b"\n"
+        if (
+            consent_starts_line
+            and block_starts_line
+            and consent < start
+            and start + len(PERSONAL_AGENTS_PREVIOUS_REVIEW_BLOCK) == boundary
+        ):
+            return "previous"
+
+    if (
+        legacy_consent_count == 0
+        and previous_consent_count == 0
         and current_consent_count == 1
         and legacy_start_count == 0
+        and previous_block_count == 1
+        and current_block_count == 0
+        and boundary_count == 1
+    ):
+        consent = data.index(PERSONAL_AGENTS_CURRENT_CONSENT_LINE)
+        start = data.index(PERSONAL_AGENTS_PREVIOUS_REVIEW_BLOCK)
+        boundary = data.index(PERSONAL_AGENTS_REVIEW_BLOCK_BOUNDARY)
+        consent_starts_line = consent == 0 or data[consent - 1 : consent] == b"\n"
+        block_starts_line = start == 0 or data[start - 1 : start] == b"\n"
+        if (
+            consent_starts_line
+            and block_starts_line
+            and consent < start
+            and start + len(PERSONAL_AGENTS_PREVIOUS_REVIEW_BLOCK) == boundary
+        ):
+            return "intermediate"
+
+    if (
+        legacy_consent_count == 0
+        and previous_consent_count == 0
+        and current_consent_count == 1
+        and legacy_start_count == 0
+        and previous_block_count == 0
         and current_block_count == 1
         and boundary_count == 1
+        and model_routing_state == "present"
     ):
         consent = data.index(PERSONAL_AGENTS_CURRENT_CONSENT_LINE)
         start = data.index(PERSONAL_AGENTS_CURRENT_REVIEW_BLOCK)
@@ -1940,15 +2236,59 @@ def _migrated_personal_agents_bytes(data: bytes) -> bytes:
     state = _personal_agents_review_guidance_state(data)
     if state == "current":
         return data
+    model_routing_state = _personal_agents_model_routing_state(data)
 
-    start = data.index(PERSONAL_AGENTS_LEGACY_REVIEW_BLOCK_START)
     boundary = data.index(PERSONAL_AGENTS_REVIEW_BLOCK_BOUNDARY)
-    migrated = data[:start] + PERSONAL_AGENTS_CURRENT_REVIEW_BLOCK + data[boundary:]
+    if state == "legacy":
+        start = data.index(PERSONAL_AGENTS_LEGACY_REVIEW_BLOCK_START)
+        block_end = boundary
+        source_consent = PERSONAL_AGENTS_LEGACY_CONSENT_LINE
+    elif state == "previous":
+        start = data.index(PERSONAL_AGENTS_PREVIOUS_REVIEW_BLOCK)
+        block_end = start + len(PERSONAL_AGENTS_PREVIOUS_REVIEW_BLOCK)
+        source_consent = PERSONAL_AGENTS_PREVIOUS_CONSENT_LINE
+    elif state in {"routing-previous", "landing-previous"}:
+        source_block = (
+            PERSONAL_AGENTS_ROUTING_PREVIOUS_REVIEW_BLOCK
+            if state == "routing-previous"
+            else PERSONAL_AGENTS_CURRENT_REVIEW_BLOCK
+        )
+        start = data.index(source_block)
+        block_end = start + len(source_block)
+        source_consent = None
+    else:
+        start = data.index(PERSONAL_AGENTS_PREVIOUS_REVIEW_BLOCK)
+        block_end = start + len(PERSONAL_AGENTS_PREVIOUS_REVIEW_BLOCK)
+        source_consent = None
+
+    migrated = data[:start] + PERSONAL_AGENTS_CURRENT_REVIEW_BLOCK + data[block_end:]
     migrated = migrated.replace(
-        PERSONAL_AGENTS_LEGACY_CONSENT_LINE,
-        PERSONAL_AGENTS_CURRENT_CONSENT_LINE,
+        PERSONAL_AGENTS_PREVIOUS_LANDING_LINE,
+        PERSONAL_AGENTS_CURRENT_LANDING_LINE,
         1,
     )
+    if source_consent is not None:
+        migrated = migrated.replace(
+            source_consent,
+            PERSONAL_AGENTS_CURRENT_CONSENT_LINE,
+            1,
+        )
+    if model_routing_state == "missing":
+        anchor_count = migrated.count(PERSONAL_AGENTS_SHORT_FILE_GUIDELINE)
+        if anchor_count != 1:
+            raise SyncError(
+                "personal AGENTS model-routing migration requires one exact "
+                "short-file guideline anchor"
+            )
+        insertion_point = (
+            migrated.index(PERSONAL_AGENTS_SHORT_FILE_GUIDELINE)
+            + len(PERSONAL_AGENTS_SHORT_FILE_GUIDELINE)
+        )
+        migrated = (
+            migrated[:insertion_point]
+            + PERSONAL_AGENTS_MODEL_ROUTING_PARAGRAPH
+            + migrated[insertion_point:]
+        )
     if _personal_agents_review_guidance_state(migrated) != "current":
         raise SyncError("personal AGENTS review-guidance migration did not converge")
     return migrated
@@ -2085,6 +2425,11 @@ def _apply_text_replacements(
                 + line[len(replacement.old) :]
                 + text[end:]
             )
+            continue
+        if replacement.whole_word:
+            pattern = re.compile(r"\b" + re.escape(replacement.old) + r"\b")
+            found[index] = len(pattern.findall(text))
+            text = pattern.sub(lambda _match: replacement.new, text)
             continue
         if replacement.old not in text:
             continue
@@ -2223,6 +2568,36 @@ def _apply_rule_replacements(target: Path, rule: SyncRule) -> None:
 
 
 def _validate_replacement_counts(rule: SyncRule, found: dict[int, int]) -> None:
+    if rule.target == CHANGE_DELIVERY_TARGET:
+        allowed_prefixes = {
+            CHANGE_DELIVERY_PUBLIC_DESCRIPTION_PREFIX,
+            CHANGE_DELIVERY_NEW_PUBLIC_DESCRIPTION_PREFIX,
+        }
+        replacement_indexes = [
+            index
+            for index, replacement in enumerate(rule.replacements)
+            if replacement.path == CHANGE_DELIVERY_SKILL_PATH
+            and replacement.frontmatter_key == "description"
+            and replacement.old in allowed_prefixes
+        ]
+        matched_prefixes = {
+            rule.replacements[index].old for index in replacement_indexes
+        }
+        actual_count = sum(found.get(index, 0) for index in replacement_indexes)
+        if (
+            matched_prefixes != allowed_prefixes
+            or len(replacement_indexes) != len(allowed_prefixes)
+        ):
+            raise SyncError(
+                "invalid change-delivery description replacement alternatives: "
+                "expected exactly one definition for each recognized public prefix"
+            )
+        if actual_count != 1:
+            raise SyncError(
+                "required replacement count mismatch for "
+                f"{rule.target}: recognized change-delivery description "
+                f"({actual_count} != 1)"
+            )
     for index, replacement in enumerate(rule.replacements):
         actual_count = found.get(index, 0)
         if replacement.required_count is not None:
@@ -7123,7 +7498,15 @@ def _assert_pinned_personal_agents_file(
         or pinned.target_parent.path != expected_target.parent
         or pinned.entry.name != expected_target.name
         or pinned.snapshot.access_policy[1] != 0o644
-        or pinned.guidance_state not in {"legacy", "current"}
+        or pinned.guidance_state
+        not in {
+            "legacy",
+            "previous",
+            "intermediate",
+            "current",
+            "routing-previous",
+            "landing-previous",
+        }
         or _personal_agents_review_guidance_state(pinned.snapshot.data)
         != pinned.guidance_state
     ):
@@ -7807,15 +8190,28 @@ def _bind_canonical_review_personal_agents_plan(
     )
     pinned_file = _pin_personal_agents_file(stack, repo_binding)
     if not migration_source:
-        if pinned_file.guidance_state != "legacy":
+        if (
+            pinned_file.guidance_state != "legacy"
+            or _personal_agents_model_routing_state(
+                pinned_file.snapshot.data
+            )
+            != "missing"
+        ):
             raise SyncError(
                 "exact legacy canonical review source requires exact legacy "
                 "personal AGENTS review guidance; restore the legacy guidance "
                 "or advance the canonical source lock"
             )
         action = _PERSONAL_AGENTS_ACTION_LEGACY_NOOP
-    elif pinned_file.guidance_state == "legacy":
+    elif pinned_file.guidance_state in {
+        "legacy",
+        "previous",
+        "intermediate",
+        "routing-previous",
+        "landing-previous",
+    }:
         action = _PERSONAL_AGENTS_ACTION_MIGRATE
+        _migrated_personal_agents_bytes(pinned_file.snapshot.data)
     else:
         action = _PERSONAL_AGENTS_ACTION_CURRENT_NOOP
     plan = _CanonicalReviewPersonalAgentsPlan(
@@ -7868,7 +8264,13 @@ def _assert_canonical_review_personal_agents_plan(
         _PERSONAL_AGENTS_ACTION_LEGACY_NOOP
         if not migration_source and state == "legacy"
         else _PERSONAL_AGENTS_ACTION_MIGRATE
-        if migration_source and state == "legacy"
+        if migration_source and state in {
+            "legacy",
+            "previous",
+            "intermediate",
+            "routing-previous",
+            "landing-previous",
+        }
         else _PERSONAL_AGENTS_ACTION_CURRENT_NOOP
         if migration_source and state == "current"
         else None

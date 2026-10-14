@@ -243,11 +243,18 @@ jobs:
             --repair-incomplete-head-release
 
       - name: Verify canonical review workflow
-        if: steps.changes.outputs.changed == 'true' || steps.current-release.outputs.complete == 'false'
+        if: steps.current-release.outputs.complete == 'false' && steps.changes.outputs.changed != 'true'
         run: |
           python3 -m unittest discover \
             -s personal_codex/skills/review-orchestration-playbook/tests \
             -p 'test_*.py'
+
+      - name: Report canonical review suite deferral
+        if: steps.changes.outputs.changed == 'true'
+        run: |
+          printf '%s\n' \
+            "The full canonical review suite is deferred to the required sync-PR CI matrix; it has not run in this scheduled job." \
+            | tee -a "$GITHUB_STEP_SUMMARY"
 
       - name: Open synced overlay pull request
         if: steps.changes.outputs.changed == 'true'
@@ -324,7 +331,7 @@ jobs:
           - Exact source-lock refresh plus six-source pre/post checkout verification.
           - Source-only Python syntax check for release, sync, package, and test helpers.
           - python3 -m unittest discover -s tests
-          - python3 -m unittest discover -s personal_codex/skills/review-orchestration-playbook/tests -p 'test_*.py'
+          - Full canonical review suite runs in the required parallel sync-PR CI matrix; it has not run in this scheduled job.
           EOF
 
           pr_url="$(gh api --method GET "repos/$GITHUB_REPOSITORY/pulls" \

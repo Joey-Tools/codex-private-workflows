@@ -358,8 +358,8 @@ export function formatScenarioList(lang = 'en') {
     ? `Archify 场景配方（${SCENARIO_RECIPES.length}）`
     : `Archify scenario recipes (${SCENARIO_RECIPES.length})`;
   const intro = isZh
-    ? `先选择你要回答的问题，再选择图表类型。可运行：${cliHelp('guide "你的场景"')}`
-    : `Choose the question before the diagram type. Run: ${cliHelp('guide "your scenario"')}`;
+    ? `先选择你要回答的问题，再选择图表类型。可运行：${cliHelp('guide \"你的场景\"')}`
+    : `Choose the question before the diagram type. Run: ${cliHelp('guide \"your scenario\"')}`;
   return [heading, '', intro, '', ...listScenarioRecipes(lang).flatMap((recipe) => [
     `${recipe.id}  [${recipe.type}]  ${recipe.title}`,
     `  ${recipe.question}`,

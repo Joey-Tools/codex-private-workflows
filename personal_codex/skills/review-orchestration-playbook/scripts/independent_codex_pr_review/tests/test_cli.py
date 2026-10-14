@@ -117,8 +117,8 @@ def _write_attempt(
         "admission_status": "completed",
         "failure_stage": None,
         "review_range": f"{'1' * 40}..{'2' * 40}",
-        "requested_model": "gpt-5.6-terra",
-        "requested_reasoning_effort": "max",
+        "requested_model": "gpt-5.6-sol",
+        "requested_reasoning_effort": "xhigh",
         "observed_runtime": {},
         "final_seal": None,
         "unsupported_clauses": [],
@@ -208,10 +208,7 @@ def _authorize_final(attempt: pathlib.Path, content: bytes) -> dict[str, object]
         "length": len(content),
         "sha256": sha256_bytes(content),
     }
-    supervisor = {
-        "pid": 999_999_999,
-        "start_identity": "fixture-supervisor-start",
-    }
+    supervisor = {"pid": 1234, "start_identity": "fixture-supervisor-start"}
     leader = {
         "pid": 5678,
         "pgid": 5678,
@@ -291,11 +288,10 @@ def _authorize_final(attempt: pathlib.Path, content: bytes) -> dict[str, object]
                     "session_source": "exec",
                 },
                 "model": {
-                    "model": "gpt-5.6-terra",
+                    "model": "gpt-5.6-sol",
                     "model_attempt": "primary",
-                    "model_fallback_authorization": None,
                     "model_provider": "openai",
-                    "reasoning_effort": "max",
+                    "reasoning_effort": "xhigh",
                 },
                 "containment": {
                     "leader_reaped": True,
@@ -316,8 +312,8 @@ def _authorize_final(attempt: pathlib.Path, content: bytes) -> dict[str, object]
                 "evidence_bundle_sha256": "a" * 64,
                 "model_input_length": 128,
                 "model_input_sha256": "b" * 64,
-                "requested_model": "gpt-5.6-terra",
-                "requested_reasoning_effort": "max",
+                "requested_model": "gpt-5.6-sol",
+                "requested_reasoning_effort": "xhigh",
                 "transport": "app-server-stdio",
             },
             "final_seal": seal,

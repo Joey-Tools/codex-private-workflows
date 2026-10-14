@@ -30,7 +30,7 @@ sys.modules[SPEC.name] = MODULE
 SPEC.loader.exec_module(MODULE)
 
 
-PUBLIC_SHA = "255372d2b0dd96f39faf1e52a9168ca2aa7ece69"
+PUBLIC_SHA = "c498cf5aa132e28e9020d60ec4a9ebb1b884aec1"
 PRIVATE_SHA = "2" * 40
 
 

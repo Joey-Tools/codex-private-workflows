@@ -80,22 +80,98 @@ jobs:
         run: |
           python3 -B -c 'import pathlib, sys; artifacts = [str(path) for path in pathlib.Path(".").rglob("*") if path.name == "__pycache__" or path.suffix in {".pyc", ".pyo"}][:20]; sys.exit("bytecode artifacts: " + ", ".join(artifacts)) if artifacts else None'
 
+  release_tests:
+    name: release-tests (${{ matrix.suite }}, group ${{ matrix.group }}/4)
+    if: ${{ github.event_name != 'pull_request' && (github.event_name != 'push' || github.ref == format('refs/heads/{0}', github.event.repository.default_branch)) }}
+    strategy:
+      fail-fast: false
+      max-parallel: 8
+      matrix:
+        suite: [overlay, review]
+        group: [0, 1, 2, 3]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Run release test group
+        env:
+          TEST_SUITE: ${{ matrix.suite }}
+          TEST_GROUP: ${{ matrix.group }}
+        run: |
+          python3 -B scripts/run_release_test_group.py "$TEST_SUITE" \
+            --group-index "$TEST_GROUP" --group-count 4
+
+      - name: Require source-only Python tree
+        if: always()
+        run: |
+          python3 -B -c 'import pathlib, sys; artifacts = [str(path) for path in pathlib.Path(".").rglob("*") if path.name == "__pycache__" or path.suffix in {".pyc", ".pyo"}][:20]; sys.exit("bytecode artifacts: " + ", ".join(artifacts)) if artifacts else None'
+
+  manifest_validation:
+    name: Validate private overlay release history
+    if: ${{ github.event_name != 'push' || github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Validate sync manifest changes
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          python3 scripts/validate_sync_manifest_changes.py \
+            --release-repo "$GITHUB_REPOSITORY"
+
+      - name: Require source-only Python tree
+        if: always()
+        run: |
+          python3 -B -c 'import pathlib, sys; artifacts = [str(path) for path in pathlib.Path(".").rglob("*") if path.name == "__pycache__" or path.suffix in {".pyc", ".pyo"}][:20]; sys.exit("bytecode artifacts: " + ", ".join(artifacts)) if artifacts else None'
+
   release:
     name: Build private overlay release
     needs:
       - controller_python_39
       - controller_macos
+      - release_tests
+      - manifest_validation
     if: ${{ always() && (github.event_name != 'push' || github.ref == format('refs/heads/{0}', github.event.repository.default_branch)) }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - name: Require controller compatibility checks to pass
+      - name: Require release validation checks to pass
         env:
           PYTHON_39_RESULT: ${{ needs.controller_python_39.result }}
           MACOS_CONTROLLER_RESULT: ${{ needs.controller_macos.result }}
+          RELEASE_TEST_RESULT: ${{ needs.release_tests.result }}
+          MANIFEST_RESULT: ${{ needs.manifest_validation.result }}
+          RELEASE_EVENT: ${{ github.event_name }}
         run: |
           test "$PYTHON_39_RESULT" = "success"
           test "$MACOS_CONTROLLER_RESULT" = "success"
+          test "$MANIFEST_RESULT" = "success"
+          if [[ "$RELEASE_EVENT" == "pull_request" ]]; then
+            test "$RELEASE_TEST_RESULT" = "skipped"
+          else
+            test "$RELEASE_TEST_RESULT" = "success"
+          fi
 
       - name: Check out repository
         uses: actions/checkout@v4
@@ -118,6 +194,7 @@ jobs:
             scripts/private_overlay_release.py \
             scripts/private_overlay_source_lock.py \
             scripts/sync_private_overlay_sources.py \
+            scripts/run_release_test_group.py \
             tests/test_package_builder_safety.py \
             tests/test_personal_sync_reconciliation_safety.py \
             tests/test_private_overlay_package.py \
@@ -125,24 +202,6 @@ jobs:
             tests/test_private_overlay_sync.py \
             tests/test_release_manifest_baseline.py \
             tests/test_sync_manifest_changes.py
-
-      - name: Run tests
-        if: github.event_name != 'pull_request'
-        run: python3 -m unittest discover -s tests
-
-      - name: Validate sync manifest changes
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
-        run: |
-          python3 scripts/validate_sync_manifest_changes.py \
-            --release-repo "$GITHUB_REPOSITORY"
-
-      - name: Verify canonical review workflow
-        if: github.event_name != 'pull_request'
-        run: |
-          python3 -m unittest discover \
-            -s personal_codex/skills/review-orchestration-playbook/tests \
-            -p 'test_*.py'
 
       - name: Build release package
         run: |

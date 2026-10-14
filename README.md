@@ -9,6 +9,7 @@
 - private `AGENTS.md`
 - private reviewer agent config
 - private personal skills and private variants of personal skills
+- host-wide `AGENTS.md` rules for exact GitHub CLI identity selection from the ordinary local gh auth pool; credentials are never packaged
 - Apple Notes Work Report overlay
 - private automation `automation.toml` references
 - private automation workspace routing, including Daily Skill Friction's
@@ -250,16 +251,24 @@ On pull requests, `Private Overlay Release` makes the required
 `Build private overlay release` check depend on two controller prerequisites:
 the complete controller suite on Ubuntu with Python 3.9 and the same suite on
 macOS with Python 3.13. The required job explicitly rejects either prerequisite
-unless it succeeded, then performs release-specific validation: complete
-sync-manifest Release-history validation, package build and verification, and
-the source-only Python-tree guard. CI still owns the broader private and
+unless it succeeded, and also requires the independent complete sync-manifest
+Release-history validation before package build and verification. Each runner
+retains the source-only Python-tree guard. CI still owns the broader private and
 canonical review suites, so the release workflow repeats only the controller
-compatibility/platform coverage needed by this required check. Release
-validation retains its `ubuntu-latest` runner and 30-minute budget because
+compatibility/platform coverage needed by this required check. The history
+validator retains its `ubuntu-latest` runner and 30-minute budget because
 cross-version manifest safety requires inspecting complete Release history.
 
 On `master` pushes and eligible manual dispatches, `Private Overlay Release`
-still runs the complete validation set before publishing a GitHub release. New
+still runs the complete validation set before publishing a GitHub release. The
+private and canonical review suites each run in four independent Ubuntu groups
+on Python 3.13, alongside history validation and controller checks. The group
+runner discovers the same complete suites as `unittest discover`, keeps module
+fixtures together, and includes new modules automatically. Measured module
+weights only balance the groups; they do not remove tests. The existing
+`Build private overlay release` check rejects failed, cancelled, or unexpectedly
+skipped prerequisites. Only pull requests expect the full test groups to be
+skipped, since PR CI owns that coverage. New
 pull-request runs cancel superseded release validation for the same ref, while
 push, manual, and scheduled release work remains non-cancelling through the
 shared concurrency group. Release assets keep the same sync format used by the
@@ -314,7 +323,13 @@ is reserved for runs whose sync working tree remains unchanged. Immediately befo
 building, the workflow rechecks both `HEAD` and the complete Git working-tree state.
 The canonical review skill's `tests/fixtures/ci/private.yml` materializes the live
 private CI workflow byte-for-byte; scheduled sync tracks and stages `.github`, and
-the scheduled and release full-suite jobs run on Python 3.13.
+the scheduled and release full-suite jobs run on Python 3.13. When scheduled sync
+generates a changed candidate, it retains source-lock verification, syntax checks,
+private overlay tests, and manifest validation before opening the PR, then defers
+only the duplicate canonical review suite to the sync PR's existing required
+parallel CI matrix, and records that deferral in the job summary. The scheduler
+does not claim that suite passed before the PR; the unchanged incomplete-release
+repair path still runs it before publication.
 The generated PR records the exact review-workflow SHA and tree rather than treating
 a moving default branch as executable control-plane input. The current generated PR
 workflow declares only `contents: read` and contains no `secrets.*` references.

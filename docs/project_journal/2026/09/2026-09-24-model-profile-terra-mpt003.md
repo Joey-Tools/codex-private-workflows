@@ -1,32 +1,30 @@
 ---
 id: 20260924-mpt003
-title: Private Model Profile Terra Migration
-status: active
+title: Private Model Profile Preference Alignment
+status: completed
 created: 2026-09-24
-updated: 2026-09-24
+updated: 2026-10-14
 branch: codex/daily-skill-friction-20260924-codex-private-workflows-model-profile-terra
-pr:
+pr: https://github.com/Joey-Tools/codex-private-workflows/pull/201
 supersedes: []
 superseded_by:
 ---
 
-# Private Model Profile Terra Migration
+# Private Model Profile Preference Alignment
 
 ## Summary
-- Align the private reviewer and runtime policy with Terra/Ultra, Terra-to-Luna/max, and Opus 5/max.
-- Set the private PR attribution fallback to Terra Ultra while keeping the AGENTS.md fallback at GPT-5.6.
-- Set the private daily skill-friction automation source to Terra/xhigh.
+- Set the tracked Daily Skill Friction automation profile to GPT-6.1 Sol/high while keeping it paused and preserving its schedule, prompt, execution environment, and workspace cwd.
+- Record the current cross-repo model preference scope without taking ownership of the public canonical source changes assigned elsewhere.
 
 ## Current State
-- Private review contracts, stream validation, attribution guidance, and regression tests are aligned with the requested policy.
-- Claude and Copilot retry slots stay within the Opus 5 family: `claude-opus-5` is primary and `claude-opus-5.0` is the closed wire alias; the stream validator accepts both current identities.
-- Runtime model matching canonicalizes only the exact dotted Opus 5 alias, keeping lookalike model IDs rejected.
-- Attribution maps an observed Luna runtime explicitly while retaining Terra Ultra as the no-evidence fallback.
-- The four host automations were updated through the Codex app to Terra/xhigh.
+- The tracked Daily Skill Friction automation uses `model = "gpt-6.1-sol"` and `reasoning_effort = "high"`; its status remains `PAUSED`.
+- The requested execution preference is GPT-6.1 Sol/high, with no execution model below GPT-6. Claude Code and Copilot use Claude Opus 5.5/high; attribution falls back to GPT-6.1 Sol High when execution evidence is unavailable.
+- Reviewer and review-routing settings remain those brought in from latest master; this private automation update does not alter them.
+- Public runtime, provider, and attribution source updates remain with their canonical owners. Generated review and attribution copies in the private overlay must follow canonical source promotion rather than being edited by hand.
 
 ## Next Steps
-- Land the validated local change and refresh the installed private overlay through its normal release path.
+- No further automation-source changes. Promote the separately owned public canonical updates through the normal source-promotion path after their merge.
 
 ## Evidence
 - Worktree: `codex/daily-skill-friction-20260924-codex-private-workflows-model-profile-terra`
-- Skill validation: `codex_skill_validate.py` reports `Skill is valid!`.
+- Private automation source: `personal_codex/automations/daily-skill-friction/automation.toml`.

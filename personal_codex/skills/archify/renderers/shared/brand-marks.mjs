@@ -3,10 +3,10 @@ import { lookup } from 'node:dns/promises';
 import http from 'node:http';
 import https from 'node:https';
 import net from 'node:net';
-import path from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { BRAND_MARKS } from './generated-brand-marks.mjs';
 import { throwDiagnosticError } from './diagnostics.mjs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { esc, textUnits } from './utils.mjs';
 
 const cliEntryPath = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../bin/archify.mjs');
