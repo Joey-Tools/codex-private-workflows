@@ -25,6 +25,7 @@ superseded_by:
 ## Evidence
 - Python 3.13.0 passed all 454 tests in the three affected modules in 136.798 seconds. The seven removed methods are offset by two new label-extraction regressions; no runtime tests were filtered from those modules.
 - Ruff, whitespace checks, and project-journal validation passed.
+- A follow-up review regression permits `GPT-generated` wrapper text while rejecting duplicate, conflicting, and unsupported model-shaped labels. All 46 attribution module tests passed on Python 3.13.0 in 3.819 seconds after this correction; the other two tested modules are unchanged.
 - `tests/test_private_overlay_sync.py`
 - `tests/test_private_overlay_package.py`
 - `tests/test_pr_attribution.py`
