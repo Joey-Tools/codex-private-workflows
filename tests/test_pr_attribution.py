@@ -31,11 +31,16 @@ SELECTED_LABEL_RE = re.compile(
     r"\bGPT-(?:5\.5|5\.6[ \t]+(?:Sol|Terra)|6\.1[ \t]+Sol|6[ \t]+Luna)"
     r"[ \t]+(?:Low|Medium|High|Extra[ \t]+High|Max|Ultra)\b"
 )
+LABEL_TOKEN_RE = re.compile(
+    r"\bGPT-[A-Za-z0-9][A-Za-z0-9.-]*(?:[ \t]+[A-Za-z0-9][A-Za-z0-9.-]*){0,2}"
+    r"[ \t]+(?:Low|Medium|High|Extra[ \t]+High|Max|Ultra)\b"
+)
 
 
 def extract_selected_label(output: str) -> str:
     labels = SELECTED_LABEL_RE.findall(output)
-    if len(labels) != 1 or output.count("GPT-") != len(labels):
+    label_tokens = LABEL_TOKEN_RE.findall(output)
+    if len(labels) != 1 or len(label_tokens) != 1:
         raise ValueError("helper output must contain exactly one supported GPT label")
     return " ".join(labels[0].split())
 
@@ -157,10 +162,17 @@ class PrAttributionTests(unittest.TestCase):
             "GPT-5.6 Sol Extra High",
         )
 
+    def test_selected_label_extraction_ignores_gpt_generated_wrapper(self) -> None:
+        self.assertEqual(
+            extract_selected_label("GPT-generated attribution: GPT-6.1 Sol Medium"),
+            FALLBACK_LABEL,
+        )
+
     def test_selected_label_extraction_rejects_duplicate_or_conflicting_labels(self) -> None:
         for output in (
             "Attribution: GPT-5.6 Sol Max; repeated GPT-5.6 Sol Max",
             "Attribution: GPT-5.6 Sol Max; conflicting GPT-6 Luna High",
+            "Attribution: GPT-5.6 Sol Max; unsupported GPT-9 Sol Max",
         ):
             with self.subTest(output=output), self.assertRaisesRegex(
                 ValueError, "exactly one supported GPT label"
