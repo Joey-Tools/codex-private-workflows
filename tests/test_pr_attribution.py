@@ -24,7 +24,7 @@ ROOT = "11111111-1111-4111-8111-111111111111"
 CHILD = "22222222-2222-4222-8222-222222222222"
 GRANDCHILD = "33333333-3333-4333-8333-333333333333"
 UNRELATED = "44444444-4444-4444-8444-444444444444"
-FALLBACK_LABEL = "GPT-6.1 Sol Medium"
+FALLBACK_LABEL: str
 
 
 SELECTED_LABEL_RE = re.compile(
@@ -130,6 +130,13 @@ def load_helper_module():
 
 
 class PrAttributionTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        super().setUpClass()
+        global FALLBACK_LABEL
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            FALLBACK_LABEL = cls("runTest").run_helper(Path(temporary_directory))
+
     def run_helper(
         self,
         codex_home: Path,
@@ -160,9 +167,9 @@ class PrAttributionTests(unittest.TestCase):
     def test_selected_label_extraction_accepts_alternate_wrapper_punctuation(self) -> None:
         cases = (
             ("Attribution -> [GPT-5.6 Sol Extra High]!", "GPT-5.6 Sol Extra High"),
-            ("GPT-6.1 Sol Medium.", FALLBACK_LABEL),
-            ("(GPT-6.1 Sol Medium),", FALLBACK_LABEL),
-            ("Result: GPT-6.1 Sol Medium:", FALLBACK_LABEL),
+            ("GPT-5.6 Sol Max.", "GPT-5.6 Sol Max"),
+            ("(GPT-5.6 Sol Max),", "GPT-5.6 Sol Max"),
+            ("Result: GPT-5.6 Sol Max:", "GPT-5.6 Sol Max"),
         )
         for output, expected in cases:
             with self.subTest(output=output):
@@ -170,8 +177,8 @@ class PrAttributionTests(unittest.TestCase):
 
     def test_selected_label_extraction_ignores_gpt_generated_wrapper(self) -> None:
         self.assertEqual(
-            extract_selected_label("GPT-generated attribution: GPT-6.1 Sol Medium"),
-            FALLBACK_LABEL,
+            extract_selected_label("GPT-generated attribution: GPT-5.6 Sol Max"),
+            "GPT-5.6 Sol Max",
         )
 
     def test_selected_label_extraction_rejects_duplicate_or_conflicting_labels(self) -> None:
@@ -621,9 +628,26 @@ class PrAttributionTests(unittest.TestCase):
                 write_rollout(home, ROOT, [turn("root-a", "max", model=f"openai/{model}")])
                 self.assertEqual(self.run_helper(home), f"{label} Max")
 
-    def test_missing_evidence_uses_current_medium_fallback(self) -> None:
+    def test_valid_selection_and_invalid_provenance_have_distinct_outcomes(self) -> None:
+        selected_label = "GPT-5.6 Sol Max"
+        self.assertNotEqual(FALLBACK_LABEL, selected_label)
+
         with tempfile.TemporaryDirectory() as temporary_directory:
-            self.assertEqual(self.run_helper(Path(temporary_directory)), FALLBACK_LABEL)
+            valid_home = Path(temporary_directory)
+            write_rollout(valid_home, ROOT, [meta(ROOT, ROOT), turn("root-a", "max")])
+            self.assertEqual(self.run_helper(valid_home), selected_label)
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            invalid_home = Path(temporary_directory)
+            write_rollout(
+                invalid_home,
+                ROOT,
+                [
+                    meta(ROOT, ROOT, source={"subagent": "review"}),
+                    turn("root-a", "max"),
+                ],
+            )
+            self.assertEqual(self.run_helper(invalid_home), FALLBACK_LABEL)
 
     def test_unknown_or_missing_evidence_uses_fallback(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
@@ -864,7 +888,8 @@ class PrAttributionTests(unittest.TestCase):
             with self.subTest(rows=rows[:1]), tempfile.TemporaryDirectory() as temporary_directory:
                 home = Path(temporary_directory)
                 write_rollout(home, ROOT, rows)
-                self.assertEqual(self.run_helper(home), FALLBACK_LABEL)
+                result = self.run_helper(home)
+                self.assertEqual(result, FALLBACK_LABEL)
 
     def test_invalid_provenance_uses_fallback(self) -> None:
         sources = (
@@ -880,7 +905,7 @@ class PrAttributionTests(unittest.TestCase):
 
     def test_malformed_or_unsafe_evidence_uses_fallback(self) -> None:
         cases = (
-            [{"type": [], "payload": {}}],
+            [{"type": [], "payload": {}}, turn("tempting-model", "max")],
             [turn("x" * 1_025, "max")],
             [turn("root-a", "max"), child_event(CHILD)],
         )
