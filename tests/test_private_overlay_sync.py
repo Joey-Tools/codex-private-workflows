@@ -15325,8 +15325,15 @@ jobs:
         self.assertIsNotNone(permissions_match)
         top_level_permissions = permissions_match.group("permissions")
         self.assertIn("actions: read", top_level_permissions)
-        self.assertIn("contents: write", top_level_permissions)
+        self.assertIn("contents: read", top_level_permissions)
+        self.assertNotIn("contents: write", top_level_permissions)
         self.assertNotIn("pull-requests:", top_level_permissions)
+        writer_job = re.search(
+            r"(?ms)^  sync-release:\n(?P<body>.*?)(?=^  [-a-zA-Z0-9_]+:\n|\Z)",
+            workflow,
+        )
+        self.assertIsNotNone(writer_job)
+        self.assertIn("      contents: write\n", writer_job.group("body"))
 
         sync_pr_step = workflow.split(
             "      - name: Open synced overlay pull request\n",
@@ -15409,7 +15416,7 @@ jobs:
             "ref: ${{ steps.source-lock.outputs.codex_toolbox_sha }}",
             workflow,
         )
-        self.assertEqual(workflow.count("fetch-depth: 0"), 7)
+        self.assertEqual(workflow.count("fetch-depth: 0"), 8)
         self.assertIn("Detach dynamic source checkouts", workflow)
         self.assertEqual(
             workflow.count("checkout --detach --no-recurse-submodules HEAD"), 1
@@ -15552,10 +15559,18 @@ jobs:
             REPO_ROOT / ".github" / "workflows" / "scheduled-sync-release.yml"
         ).read_text(encoding="utf-8")
         cooldown_guard = "steps.cooldown.outputs.run == 'true'"
-        release_guard = (
-            "steps.current-release.outputs.complete == 'false' && "
-            "steps.changes.outputs.changed != 'true'"
+        prepare_job = re.search(
+            r"(?ms)^  prepare:\n(?P<body>.*?)(?=^  [-a-zA-Z0-9_]+:\n|\Z)",
+            workflow,
         )
+        writer_job = re.search(
+            r"(?ms)^  sync-release:\n(?P<body>.*?)(?=^  [-a-zA-Z0-9_]+:\n|\Z)",
+            workflow,
+        )
+        self.assertIsNotNone(prepare_job)
+        self.assertIsNotNone(writer_job)
+        prepare = prepare_job.group("body")
+        writer = writer_job.group("body")
 
         self.assertIn(
             'if [ "${{ steps.current-release.outputs.complete }}" = "false" ]; then\n'
@@ -15563,7 +15578,7 @@ jobs:
             '            echo "reason=current release is incomplete; skipping source sync and publishing current SHA" >> "$GITHUB_OUTPUT"\n'
             "            exit 0\n"
             "          fi",
-            workflow,
+            prepare,
         )
         for step_name in (
             "Load frozen source identities",
@@ -15581,13 +15596,13 @@ jobs:
         ):
             with self.subTest(cooldown_step=step_name):
                 self.assertRegex(
-                    workflow,
+                    prepare,
                     rf"- name: {re.escape(step_name)}\n\s+if: {re.escape(cooldown_guard)}\n",
                 )
         self.assertRegex(
-            workflow,
+            writer,
             r"- name: Open synced overlay pull request\n"
-            r"\s+if: steps\.changes\.outputs\.changed == 'true'\n",
+            r"\s+if: needs\.prepare\.outputs\.changed == 'true'\n",
         )
         for step_name in (
             "Validate release history before repair",
@@ -15596,56 +15611,152 @@ jobs:
             "Verify release package",
             "Publish GitHub release",
             "Validate repaired release history",
-            "Verify canonical review workflow",
         ):
             with self.subTest(step=step_name):
                 self.assertRegex(
-                    workflow,
-                    rf"- name: {re.escape(step_name)}\n\s+if: {re.escape(release_guard)}\n",
+                    writer,
+                    rf"- name: {re.escape(step_name)}\n\s+if: needs\.prepare\.outputs\.release_complete == 'false' && needs\.prepare\.outputs\.changed != 'true'\n",
                 )
-        self.assertEqual(workflow.count(f"if: {release_guard}"), 7)
+        self.assertEqual(writer.count("outputs.release_complete == 'false' && needs.prepare.outputs.changed != 'true'"), 6)
         self.assertNotIn("codex-waited-delivery", workflow)
         self.assertNotIn("personal_codex/skills/waited-delivery", workflow)
-        self.assertIn('actual_sha="$(git rev-parse HEAD)"', workflow)
-        self.assertIn("git status --porcelain=v1 --untracked-files=all", workflow)
+        self.assertIn('actual_sha="$(git rev-parse HEAD)"', writer)
+        self.assertIn("git status --porcelain=v1 --untracked-files=all", writer)
         cache_redirect = (
             'echo "PYTHONPYCACHEPREFIX=$RUNNER_TEMP/python-cache" >> "$GITHUB_ENV"'
         )
         self.assertIn(cache_redirect, workflow)
-        self.assertLess(workflow.index(cache_redirect), workflow.index("python3 "))
+        self.assertLess(prepare.index(cache_redirect), prepare.index("python3 "))
         self.assertLess(
-            workflow.index("- name: Validate release history before repair"),
-            workflow.index("- name: Revalidate release checkout"),
+            writer.index("- name: Validate release history before repair"),
+            writer.index("- name: Revalidate release checkout"),
         )
         self.assertLess(
-            workflow.index("- name: Check current release"),
-            workflow.index("- name: Check cooldown"),
+            prepare.index("- name: Check current release"),
+            prepare.index("- name: Check cooldown"),
         )
         self.assertLess(
-            workflow.index("- name: Check cooldown"),
-            workflow.index("- name: Sync private overlay sources"),
+            prepare.index("- name: Check cooldown"),
+            prepare.index("- name: Sync private overlay sources"),
         )
         self.assertLess(
-            workflow.index("- name: Sync private overlay sources"),
-            workflow.index("- name: Detect sync changes"),
+            prepare.index("- name: Sync private overlay sources"),
+            prepare.index("- name: Detect sync changes"),
         )
         self.assertLess(
-            workflow.index("- name: Detect sync changes"),
-            workflow.index("- name: Open synced overlay pull request"),
+            prepare.index("- name: Detect sync changes"),
+            prepare.index("- name: Create exact generated candidate patch"),
         )
         self.assertLess(
-            workflow.index("- name: Open synced overlay pull request"),
-            workflow.index("- name: Revalidate release checkout"),
+            writer.index("- name: Verify and apply exact generated candidate"),
+            writer.index("- name: Open synced overlay pull request"),
         )
         self.assertLess(
-            workflow.index("- name: Revalidate release checkout"),
-            workflow.index("- name: Build release package"),
+            writer.index("- name: Revalidate release checkout"),
+            writer.index("- name: Build release package"),
         )
         self.assertLess(
-            workflow.index("- name: Publish GitHub release"),
-            workflow.index("- name: Validate repaired release history"),
+            writer.index("- name: Publish GitHub release"),
+            writer.index("- name: Validate repaired release history"),
         )
         self.assertNotIn("steps.commit.outputs.sha", workflow)
+
+    def test_scheduled_workflow_gates_writer_on_all_required_candidate_groups(self) -> None:
+        workflow = (
+            REPO_ROOT / ".github" / "workflows" / "scheduled-sync-release.yml"
+        ).read_text(encoding="utf-8")
+        prepare = re.search(
+            r"(?ms)^  prepare:\n(?P<body>.*?)(?=^  [-a-zA-Z0-9_]+:\n|\Z)",
+            workflow,
+        )
+        tests = re.search(
+            r"(?ms)^  tests:\n(?P<body>.*?)(?=^  [-a-zA-Z0-9_]+:\n|\Z)",
+            workflow,
+        )
+        writer = re.search(
+            r"(?ms)^  sync-release:\n(?P<body>.*?)(?=^  [-a-zA-Z0-9_]+:\n|\Z)",
+            workflow,
+        )
+        self.assertIsNotNone(prepare)
+        self.assertIsNotNone(tests)
+        self.assertIsNotNone(writer)
+        prepare_body = prepare.group("body")
+        test_body = tests.group("body")
+        writer_body = writer.group("body")
+
+        for output in (
+            "changed",
+            "release_complete",
+            "tests_required",
+            "test_matrix",
+            "base_sha",
+            "tree_sha",
+            "patch_sha256",
+        ):
+            self.assertIn(f"      {output}: ${{{{ steps.", prepare_body)
+        self.assertIn('test_matrix: ${{ steps.plan.outputs.test_matrix }}', prepare_body)
+        self.assertIn("matrix: ${{ fromJSON(needs.prepare.outputs.test_matrix) }}", test_body)
+        self.assertIn("max-parallel: 8", test_body)
+        self.assertIn("timeout-minutes: 30", prepare_body)
+        self.assertIn("timeout-minutes: 30", test_body)
+        self.assertIn("timeout-minutes: 30", writer_body)
+        self.assertEqual(prepare_body.count('python-version: "3.13"'), 1)
+        self.assertEqual(test_body.count('python-version: "3.13"'), 1)
+        self.assertEqual(writer_body.count('python-version: "3.13"'), 1)
+        self.assertIn("contents: read", prepare_body)
+        self.assertIn("contents: read", test_body)
+        self.assertIn("contents: write", writer_body)
+        self.assertIn("ref: ${{ github.sha }}", test_body)
+        self.assertIn("persist-credentials: false", test_body)
+        self.assertIn("sync-test-candidate-${{ github.run_id }}-${{ github.run_attempt }}", prepare_body)
+        self.assertIn("sync-test-candidate-${{ github.run_id }}-${{ github.run_attempt }}", test_body)
+        self.assertIn("sync-test-candidate-${{ github.run_id }}-${{ github.run_attempt }}", writer_body)
+        self.assertIn("--expected-tree \"$EXPECTED_TREE\"", test_body)
+        self.assertIn("--patch-sha256 \"$PATCH_SHA256\"", test_body)
+        self.assertIn("--expected-tree \"$EXPECTED_TREE\"", writer_body)
+        self.assertIn("needs.tests.result == 'success'", writer_body)
+        self.assertIn("needs.prepare.outputs.tests_required == 'false'", writer_body)
+
+        gate = re.search(
+            r"(?ms)^      - name: Gate writer on prepare and required test groups\n"
+            r"(?P<body>.*?)(?=^      - name: |\Z)",
+            writer_body,
+        )
+        self.assertIsNotNone(gate)
+        shell_match = re.search(r"(?ms)^        run: \|\n(?P<shell>.*)", gate.group("body"))
+        self.assertIsNotNone(shell_match)
+        shell = "\n".join(
+            line[10:] if line.startswith(" " * 10) else line
+            for line in shell_match.group("shell").splitlines()
+        )
+        cases = (
+            ("success", "success", "true", 0),
+            ("success", "skipped", "false", 0),
+            ("success", "skipped", "true", 1),
+            ("success", "failure", "true", 1),
+            ("success", "cancelled", "true", 1),
+            ("failure", "success", "false", 1),
+            ("success", "failure", "false", 1),
+            ("success", "cancelled", "false", 1),
+            ("success", "success", "false", 1),
+        )
+        for prepare_result, test_result, required, expected_code in cases:
+            with self.subTest(
+                prepare=prepare_result, tests=test_result, required=required
+            ):
+                result = subprocess.run(
+                    ["bash", "-c", shell],
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                    env={
+                        **os.environ,
+                        "PREPARE_RESULT": prepare_result,
+                        "TEST_RESULT": test_result,
+                        "TESTS_REQUIRED": required,
+                    },
+                )
+                self.assertEqual(result.returncode, expected_code, result.stderr)
 
     def test_scheduled_sync_defers_canonical_suite_to_required_pr_ci(self) -> None:
         scheduled = (
@@ -15664,20 +15775,102 @@ jobs:
             self.assertIsNotNone(step, step_name)
             return step.group("body")
 
-        canonical_step = step_body(scheduled, "Verify canonical review workflow")
-        self.assertIn(
-            "if: steps.current-release.outputs.complete == 'false' && "
-            "steps.changes.outputs.changed != 'true'",
-            canonical_step,
+        prepare_job = re.search(
+            r"(?ms)^  prepare:\n(?P<body>.*?)(?=^  [-a-zA-Z0-9_]+:\n|\Z)",
+            scheduled,
         )
-        self.assertNotIn("steps.changes.outputs.changed == 'true'", canonical_step)
+        test_job = re.search(
+            r"(?ms)^  tests:\n(?P<body>.*?)(?=^  [-a-zA-Z0-9_]+:\n|\Z)",
+            scheduled,
+        )
+        self.assertIsNotNone(prepare_job)
+        self.assertIsNotNone(test_job)
+        prepare_body = prepare_job.group("body")
+        test_body = test_job.group("body")
+        self.assertIn("needs.prepare.outputs.tests_required == 'true'", test_body)
+        self.assertIn("needs.prepare.outputs.test_matrix", test_body)
+        self.assertIn('if [ "$complete" = "false" ] && [ "$changed" != "true" ]; then', prepare_body)
+        self.assertIn('if [ "$changed" = "true" ] || [ "$complete" = "false" ]; then', prepare_body)
+        self.assertIn("python3 -B scripts/run_release_test_group.py", test_body)
+        self.assertIn("--group-index \"$TEST_GROUP\"", test_body)
+
+        plan_step = re.search(
+            r"(?ms)^      - name: Plan required test groups\n"
+            r"(?P<body>.*?)(?=^      - name: |\Z)",
+            prepare_body,
+        )
+        self.assertIsNotNone(plan_step)
+        plan_shell_match = re.search(
+            r"(?ms)^        run: \|\n(?P<shell>.*)", plan_step.group("body")
+        )
+        self.assertIsNotNone(plan_shell_match)
+        plan_shell = "\n".join(
+            line[10:] if line.startswith(" " * 10) else line
+            for line in plan_shell_match.group("shell").splitlines()
+        )
+        plan_cases = (
+            ("true", "true", True, [("overlay", index) for index in range(4)]),
+            (
+                "false",
+                "false",
+                True,
+                [(suite, index) for suite in ("overlay", "review") for index in range(4)],
+            ),
+            ("false", "true", False, [("overlay", index) for index in range(4)]),
+        )
+        for changed, complete, required, expected_rows in plan_cases:
+            with self.subTest(changed=changed, complete=complete):
+                with tempfile.TemporaryDirectory() as directory:
+                    output_path = Path(directory) / "github-output"
+                    result = subprocess.run(
+                        ["bash", "-c", plan_shell],
+                        check=False,
+                        capture_output=True,
+                        text=True,
+                        env={
+                            **os.environ,
+                            "SYNC_CHANGED": changed,
+                            "RELEASE_COMPLETE": complete,
+                            "GITHUB_OUTPUT": str(output_path),
+                        },
+                    )
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    outputs = dict(
+                        line.split("=", maxsplit=1)
+                        for line in output_path.read_text(encoding="utf-8").splitlines()
+                    )
+                    self.assertEqual(outputs["tests_required"], str(required).lower())
+                    matrix = json.loads(outputs["test_matrix"])
+                    self.assertTrue(matrix["include"])
+                    rows = [
+                        (row["suite"], row["group"])
+                        for row in matrix["include"]
+                    ]
+                    self.assertEqual(rows, expected_rows)
+        for invalid_complete in ("", "unknown"):
+            with self.subTest(invalid_release_complete=invalid_complete):
+                with tempfile.TemporaryDirectory() as directory:
+                    output_path = Path(directory) / "github-output"
+                    result = subprocess.run(
+                        ["bash", "-c", plan_shell],
+                        check=False,
+                        capture_output=True,
+                        text=True,
+                        env={
+                            **os.environ,
+                            "SYNC_CHANGED": "false",
+                            "RELEASE_COMPLETE": invalid_complete,
+                            "GITHUB_OUTPUT": str(output_path),
+                        },
+                    )
+                    self.assertNotEqual(result.returncode, 0)
 
         deferred_step = step_body(scheduled, "Report canonical review suite deferral")
         deferred_message = (
             "The full canonical review suite is deferred to the required sync-PR "
             "CI matrix; it has not run in this scheduled job."
         )
-        self.assertIn("if: steps.changes.outputs.changed == 'true'", deferred_step)
+        self.assertIn("if: needs.prepare.outputs.changed == 'true'", deferred_step)
         self.assertIn(deferred_message, deferred_step)
         self.assertIn('tee -a "$GITHUB_STEP_SUMMARY"', deferred_step)
 
@@ -15693,8 +15886,8 @@ jobs:
             pr_step,
         )
         self.assertLess(
+            scheduled.index("- name: Verify and apply exact generated candidate", scheduled.index("  sync-release:")),
             scheduled.index("- name: Validate sync manifest changes"),
-            scheduled.index("- name: Report canonical review suite deferral"),
         )
         self.assertLess(
             scheduled.index("- name: Report canonical review suite deferral"),

@@ -16,8 +16,9 @@ SUITE_ROOTS = {
     "review": REPO_ROOT / "personal_codex/skills/review-orchestration-playbook/tests",
 }
 SUITE_PATTERNS = {"overlay": "test*.py", "review": "test_*.py"}
-# Approximate Ubuntu test seconds from PR #219 CI run 37949290538. These
-# scheduling hints never filter discovery or determine whether a test runs.
+# Approximate Ubuntu test seconds: review weights from PR #219 run 37949290538;
+# overlay weights from PR #225 run 38712130407. Cross-version scheduling hints
+# never filter discovery or predict the Python 3.13 scheduled job's wall time.
 MODULE_WEIGHTS = {
     "test_named_lane": 322,
     "test_review_workspace": 152,
@@ -25,12 +26,21 @@ MODULE_WEIGHTS = {
     "test_providers": 63,
     "test_synthetic_tokens": 55,
     "test_state": 48,
-    "test_personal_sync_reconciliation_safety": 75,
-    "test_codex_personal_sync": 67,
-    "test_private_overlay_package": 60,
-    "test_pending_staging_cleanup": 54,
-    "test_regular_agent_materialization": 29,
-    "test_private_overlay_sync": 26,
+    "test_regular_overlay_uninstall_status_regressions": 736,
+    "test_pending_staging_cleanup": 367,
+    "test_regular_agent_materialization": 279,
+    "test_personal_sync_reconciliation_safety": 170,
+    "test_codex_personal_sync": 117,
+    "test_private_overlay_package": 71,
+    "test_pending_agent_claim_compatibility": 41,
+    "test_release_retention": 33,
+    "test_private_overlay_sync": 16,
+    "test_private_overlay_source_lock": 13,
+    "test_scheduler_doctor": 12,
+    "test_private_macos_sync_controller": 11,
+    "test_quarantine_empty_batch_reclaim": 7,
+    "test_remote_codex_probe": 6,
+    "test_pr_attribution": 5,
 }
 
 

@@ -13,7 +13,7 @@ on:
 
 permissions:
   actions: read
-  contents: write
+  contents: read
 
 env:
   PYTHONDONTWRITEBYTECODE: "1"
@@ -23,11 +23,35 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  sync-release:
-    name: Sync and publish private overlay release
+  prepare:
+    name: Prepare frozen private overlay candidate
     if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    permissions:
+      actions: read
+      contents: read
+    outputs:
+      changed: ${{ steps.plan.outputs.changed }}
+      release_complete: ${{ steps.current-release.outputs.complete }}
+      tests_required: ${{ steps.plan.outputs.tests_required }}
+      test_matrix: ${{ steps.plan.outputs.test_matrix }}
+      base_sha: ${{ steps.candidate.outputs.base_sha }}
+      tree_sha: ${{ steps.candidate.outputs.tree_sha }}
+      patch_sha256: ${{ steps.candidate.outputs.patch_sha256 }}
+      codex_toolbox_sha: ${{ steps.refreshed-lock.outputs.codex_toolbox_sha }}
+      codex_toolbox_tree: ${{ steps.refreshed-lock.outputs.codex_toolbox_tree }}
+      archify_sha: ${{ steps.refreshed-lock.outputs.archify_sha }}
+      archify_tree: ${{ steps.refreshed-lock.outputs.archify_tree }}
+      codex_debug_triage_sha: ${{ steps.refreshed-lock.outputs.codex_debug_triage_sha }}
+      codex_debug_triage_tree: ${{ steps.refreshed-lock.outputs.codex_debug_triage_tree }}
+      codex_review_workflows_sha: ${{ steps.refreshed-lock.outputs.codex_review_workflows_sha }}
+      codex_review_workflows_tree: ${{ steps.refreshed-lock.outputs.codex_review_workflows_tree }}
+      codex_workflow_hygiene_sha: ${{ steps.refreshed-lock.outputs.codex_workflow_hygiene_sha }}
+      codex_workflow_hygiene_tree: ${{ steps.refreshed-lock.outputs.codex_workflow_hygiene_tree }}
+      codex_project_journal_sha: ${{ steps.refreshed-lock.outputs.codex_project_journal_sha }}
+      codex_project_journal_tree: ${{ steps.refreshed-lock.outputs.codex_project_journal_tree }}
+      source_lock_sha256: ${{ steps.refreshed-lock.outputs.source_lock_sha256 }}
     env:
       FORCE_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.force && 'true' || 'false' }}
     steps:
@@ -209,6 +233,8 @@ jobs:
             scripts/private_overlay_source_lock.py \
             scripts/sync_private_overlay_sources.py \
             scripts/verify_generated_sync_source_lock.py \
+            scripts/scheduled_sync_test_candidate.py \
+            scripts/run_release_test_group.py \
             tests/test_codex_personal_sync.py \
             tests/test_generated_sync_source_lock.py \
             tests/test_package_builder_safety.py \
@@ -221,12 +247,245 @@ jobs:
             tests/test_scheduler_doctor.py \
             tests/test_sync_manifest_changes.py
 
-      - name: Run tests
-        if: steps.changes.outputs.changed == 'true' || steps.current-release.outputs.complete == 'false'
-        run: python3 -m unittest discover -s tests
+      - name: Plan required test groups
+        id: plan
+        env:
+          RELEASE_COMPLETE: ${{ steps.current-release.outputs.complete }}
+          SYNC_CHANGED: ${{ steps.changes.outputs.changed }}
+        run: |
+          changed="${SYNC_CHANGED:-false}"
+          complete="${RELEASE_COMPLETE:-}"
+          case "$complete" in
+            true|false)
+              ;;
+            *)
+              echo "Invalid current-release completion output: $complete" >&2
+              exit 1
+              ;;
+          esac
+          case "$changed" in
+            true|false)
+              ;;
+            *)
+              echo "Invalid sync-change output: $changed" >&2
+              exit 1
+              ;;
+          esac
+          tests_required=false
+          matrix='{"include":[{"suite":"overlay","group":0},{"suite":"overlay","group":1},{"suite":"overlay","group":2},{"suite":"overlay","group":3}]}'
+          if [ "$changed" = "true" ] || [ "$complete" = "false" ]; then
+            tests_required=true
+            matrix='{"include":['
+            separator=""
+            for suite in overlay; do
+              for group in 0 1 2 3; do
+                matrix+="${separator}{\"suite\":\"$suite\",\"group\":$group}"
+                separator=,
+              done
+            done
+            if [ "$complete" = "false" ] && [ "$changed" != "true" ]; then
+              for group in 0 1 2 3; do
+                matrix+="${separator}{\"suite\":\"review\",\"group\":$group}"
+                separator=,
+              done
+            fi
+            matrix+=']}'
+          fi
+          {
+            echo "changed=$changed"
+            echo "tests_required=$tests_required"
+            echo "test_matrix=$matrix"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Create exact generated candidate patch
+        if: steps.plan.outputs.tests_required == 'true'
+        id: candidate
+        run: |
+          python3 -B scripts/scheduled_sync_test_candidate.py prepare \
+            --repo . \
+            --expected-base "$GITHUB_SHA" \
+            --output-dir "$RUNNER_TEMP/sync-test-candidate" >> "$GITHUB_OUTPUT"
+
+      - name: Upload exact generated candidate patch
+        if: steps.plan.outputs.tests_required == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: sync-test-candidate-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/sync-test-candidate/
+          if-no-files-found: error
+          retention-days: 1
+
+      - name: Require source-only Python tree
+        if: always()
+        run: |
+          python3 -B -c 'import pathlib, sys; artifacts = [str(path) for path in pathlib.Path(".").rglob("*") if path.name == "__pycache__" or path.suffix in {".pyc", ".pyo"}][:20]; sys.exit("bytecode artifacts: " + ", ".join(artifacts)) if artifacts else None'
+
+  tests:
+    name: Candidate ${{ matrix.suite }} tests (${{ matrix.group }}/4)
+    needs: prepare
+    if: needs.prepare.outputs.tests_required == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      actions: read
+      contents: read
+    strategy:
+      fail-fast: false
+      max-parallel: 8
+      matrix: ${{ fromJSON(needs.prepare.outputs.test_matrix) }}
+    steps:
+      - name: Check out original workflow SHA
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Isolate Python bytecode cache
+        run: echo "PYTHONPYCACHEPREFIX=$RUNNER_TEMP/python-cache" >> "$GITHUB_ENV"
+
+      - name: Download exact same-run candidate artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: sync-test-candidate-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/sync-test-candidate
+          run-id: ${{ github.run_id }}
+          github-token: ${{ github.token }}
+
+      - name: Verify and apply exact generated candidate
+        env:
+          EXPECTED_BASE: ${{ needs.prepare.outputs.base_sha }}
+          EXPECTED_TREE: ${{ needs.prepare.outputs.tree_sha }}
+          PATCH_SHA256: ${{ needs.prepare.outputs.patch_sha256 }}
+        run: |
+          python3 -B scripts/scheduled_sync_test_candidate.py apply \
+            --repo . \
+            --candidate-dir "$RUNNER_TEMP/sync-test-candidate" \
+            --expected-base "$EXPECTED_BASE" \
+            --expected-tree "$EXPECTED_TREE" \
+            --patch-sha256 "$PATCH_SHA256"
+
+      - name: Run complete unittest group
+        env:
+          TEST_SUITE: ${{ matrix.suite }}
+          TEST_GROUP: ${{ matrix.group }}
+        run: |
+          python3 -B scripts/run_release_test_group.py "$TEST_SUITE" \
+            --group-index "$TEST_GROUP" \
+            --group-count 4
+
+      - name: Require candidate tree and worktree to remain unchanged
+        env:
+          EXPECTED_TREE: ${{ needs.prepare.outputs.tree_sha }}
+        run: |
+          actual_tree="$(git write-tree)"
+          if [ "$actual_tree" != "$EXPECTED_TREE" ]; then
+            echo "Test group changed the candidate index tree: expected $EXPECTED_TREE, got $actual_tree" >&2
+            exit 1
+          fi
+          if ! git diff --quiet; then
+            echo "Test group changed tracked candidate files." >&2
+            exit 1
+          fi
+          untracked="$(git ls-files --others --exclude-standard)"
+          if [ -n "$untracked" ]; then
+            echo "Test group left untracked files in the candidate checkout:" >&2
+            printf '%s\n' "$untracked" >&2
+            exit 1
+          fi
+
+      - name: Require source-only Python tree
+        if: always()
+        run: |
+          python3 -B -c 'import pathlib, sys; artifacts = [str(path) for path in pathlib.Path(".").rglob("*") if path.name == "__pycache__" or path.suffix in {".pyc", ".pyo"}][:20]; sys.exit("bytecode artifacts: " + ", ".join(artifacts)) if artifacts else None'
+
+  sync-release:
+    name: Apply tested candidate and publish
+    needs: [prepare, tests]
+    if: >-
+      always() &&
+      needs.prepare.result == 'success' &&
+      (needs.prepare.outputs.tests_required == 'false' || needs.tests.result == 'success')
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      actions: read
+      contents: write
+    steps:
+      - name: Check out original workflow SHA
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Isolate Python bytecode cache
+        run: echo "PYTHONPYCACHEPREFIX=$RUNNER_TEMP/python-cache" >> "$GITHUB_ENV"
+
+      - name: Download exact same-run candidate artifact
+        if: needs.prepare.outputs.tests_required == 'true'
+        uses: actions/download-artifact@v4
+        with:
+          name: sync-test-candidate-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/sync-test-candidate
+          run-id: ${{ github.run_id }}
+          github-token: ${{ github.token }}
+
+      - name: Verify and apply exact generated candidate
+        if: needs.prepare.outputs.tests_required == 'true'
+        env:
+          EXPECTED_BASE: ${{ needs.prepare.outputs.base_sha }}
+          EXPECTED_TREE: ${{ needs.prepare.outputs.tree_sha }}
+          PATCH_SHA256: ${{ needs.prepare.outputs.patch_sha256 }}
+        run: |
+          python3 -B scripts/scheduled_sync_test_candidate.py apply \
+            --repo . \
+            --candidate-dir "$RUNNER_TEMP/sync-test-candidate" \
+            --expected-base "$EXPECTED_BASE" \
+            --expected-tree "$EXPECTED_TREE" \
+            --patch-sha256 "$PATCH_SHA256"
+
+      - name: Gate writer on prepare and required test groups
+        if: always()
+        env:
+          PREPARE_RESULT: ${{ needs.prepare.result }}
+          TEST_RESULT: ${{ needs.tests.result }}
+          TESTS_REQUIRED: ${{ needs.prepare.outputs.tests_required }}
+        run: |
+          if [ "$PREPARE_RESULT" != "success" ]; then
+            echo "Candidate preparation did not succeed: $PREPARE_RESULT" >&2
+            exit 1
+          fi
+          case "$TESTS_REQUIRED" in
+            true)
+              if [ "$TEST_RESULT" != "success" ]; then
+                echo "Required candidate test groups did not succeed: $TEST_RESULT" >&2
+                exit 1
+              fi
+              ;;
+            false)
+              if [ "$TEST_RESULT" != "skipped" ]; then
+                echo "Unneeded candidate test groups must be intentionally skipped: $TEST_RESULT" >&2
+                exit 1
+              fi
+              ;;
+            *)
+              echo "Invalid tests_required output: $TESTS_REQUIRED" >&2
+              exit 1
+              ;;
+          esac
 
       - name: Validate sync manifest changes
-        if: steps.changes.outputs.changed == 'true'
+        if: needs.prepare.outputs.changed == 'true'
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: |
@@ -234,7 +493,7 @@ jobs:
             --release-repo "$GITHUB_REPOSITORY"
 
       - name: Validate release history before repair
-        if: steps.current-release.outputs.complete == 'false' && steps.changes.outputs.changed != 'true'
+        if: needs.prepare.outputs.release_complete == 'false' && needs.prepare.outputs.changed != 'true'
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: |
@@ -242,22 +501,15 @@ jobs:
             --release-repo "$GITHUB_REPOSITORY" \
             --repair-incomplete-head-release
 
-      - name: Verify canonical review workflow
-        if: steps.current-release.outputs.complete == 'false' && steps.changes.outputs.changed != 'true'
-        run: |
-          python3 -m unittest discover \
-            -s personal_codex/skills/review-orchestration-playbook/tests \
-            -p 'test_*.py'
-
       - name: Report canonical review suite deferral
-        if: steps.changes.outputs.changed == 'true'
+        if: needs.prepare.outputs.changed == 'true'
         run: |
           printf '%s\n' \
             "The full canonical review suite is deferred to the required sync-PR CI matrix; it has not run in this scheduled job." \
             | tee -a "$GITHUB_STEP_SUMMARY"
 
       - name: Open synced overlay pull request
-        if: steps.changes.outputs.changed == 'true'
+        if: needs.prepare.outputs.changed == 'true'
         id: sync-pr
         env:
           GH_TOKEN: ${{ secrets.PRIVATE_OVERLAY_SYNC_PR_TOKEN }}
@@ -315,22 +567,22 @@ jobs:
           cat > "$body_file" <<'EOF'
           ## Summary
           - Syncs private overlay sources from the public Joey-Tools repositories.
-          - Keeps the immutable public toolbox base pinned to `${{ steps.refreshed-lock.outputs.codex_toolbox_sha }}`.
-          - Persists source lock `${{ steps.refreshed-lock.outputs.source_lock_sha256 }}` for the exact six-source candidate.
+          - Keeps the immutable public toolbox base pinned to `${{ needs.prepare.outputs.codex_toolbox_sha }}`.
+          - Persists source lock `${{ needs.prepare.outputs.source_lock_sha256 }}` for the exact six-source candidate.
           - Replaces the previous scheduled direct-push path, which is blocked by branch rules.
 
           ## Frozen sources
-          - codex-toolbox: `${{ steps.refreshed-lock.outputs.codex_toolbox_sha }}` / `${{ steps.refreshed-lock.outputs.codex_toolbox_tree }}`
-          - archify: `${{ steps.refreshed-lock.outputs.archify_sha }}` / `${{ steps.refreshed-lock.outputs.archify_tree }}`
-          - codex-debug-triage: `${{ steps.refreshed-lock.outputs.codex_debug_triage_sha }}` / `${{ steps.refreshed-lock.outputs.codex_debug_triage_tree }}`
-          - codex-review-workflows: `${{ steps.refreshed-lock.outputs.codex_review_workflows_sha }}` / `${{ steps.refreshed-lock.outputs.codex_review_workflows_tree }}`
-          - codex-workflow-hygiene: `${{ steps.refreshed-lock.outputs.codex_workflow_hygiene_sha }}` / `${{ steps.refreshed-lock.outputs.codex_workflow_hygiene_tree }}`
-          - codex-project-journal: `${{ steps.refreshed-lock.outputs.codex_project_journal_sha }}` / `${{ steps.refreshed-lock.outputs.codex_project_journal_tree }}`
+          - codex-toolbox: `${{ needs.prepare.outputs.codex_toolbox_sha }}` / `${{ needs.prepare.outputs.codex_toolbox_tree }}`
+          - archify: `${{ needs.prepare.outputs.archify_sha }}` / `${{ needs.prepare.outputs.archify_tree }}`
+          - codex-debug-triage: `${{ needs.prepare.outputs.codex_debug_triage_sha }}` / `${{ needs.prepare.outputs.codex_debug_triage_tree }}`
+          - codex-review-workflows: `${{ needs.prepare.outputs.codex_review_workflows_sha }}` / `${{ needs.prepare.outputs.codex_review_workflows_tree }}`
+          - codex-workflow-hygiene: `${{ needs.prepare.outputs.codex_workflow_hygiene_sha }}` / `${{ needs.prepare.outputs.codex_workflow_hygiene_tree }}`
+          - codex-project-journal: `${{ needs.prepare.outputs.codex_project_journal_sha }}` / `${{ needs.prepare.outputs.codex_project_journal_tree }}`
 
           ## Validation
           - Exact source-lock refresh plus six-source pre/post checkout verification.
           - Source-only Python syntax check for release, sync, package, and test helpers.
-          - python3 -m unittest discover -s tests
+          - Four complete-module overlay test groups passed on the exact generated candidate.
           - Full canonical review suite runs in the required parallel sync-PR CI matrix; it has not run in this scheduled job.
           EOF
 
@@ -377,7 +629,7 @@ jobs:
           echo "Opened or updated $pr_url and enabled auto-merge for $head_sha."
 
       - name: Revalidate release checkout
-        if: steps.current-release.outputs.complete == 'false' && steps.changes.outputs.changed != 'true'
+        if: needs.prepare.outputs.release_complete == 'false' && needs.prepare.outputs.changed != 'true'
         env:
           RELEASE_SHA: ${{ github.sha }}
         run: |
@@ -393,7 +645,7 @@ jobs:
           fi
 
       - name: Build release package
-        if: steps.current-release.outputs.complete == 'false' && steps.changes.outputs.changed != 'true'
+        if: needs.prepare.outputs.release_complete == 'false' && needs.prepare.outputs.changed != 'true'
         env:
           RELEASE_SHA: ${{ github.sha }}
         run: |
@@ -403,7 +655,7 @@ jobs:
             --output-dir dist
 
       - name: Verify release package
-        if: steps.current-release.outputs.complete == 'false' && steps.changes.outputs.changed != 'true'
+        if: needs.prepare.outputs.release_complete == 'false' && needs.prepare.outputs.changed != 'true'
         env:
           RELEASE_SHA: ${{ github.sha }}
         run: |
@@ -412,7 +664,7 @@ jobs:
             --dist dist
 
       - name: Publish GitHub release
-        if: steps.current-release.outputs.complete == 'false' && steps.changes.outputs.changed != 'true'
+        if: needs.prepare.outputs.release_complete == 'false' && needs.prepare.outputs.changed != 'true'
         env:
           GITHUB_TOKEN: ${{ github.token }}
           IMMUTABLE_RELEASES_READ_TOKEN: ${{ secrets.IMMUTABLE_RELEASES_READ_TOKEN }}
@@ -425,7 +677,7 @@ jobs:
             --source-event "$GITHUB_EVENT_NAME"
 
       - name: Validate repaired release history
-        if: steps.current-release.outputs.complete == 'false' && steps.changes.outputs.changed != 'true'
+        if: needs.prepare.outputs.release_complete == 'false' && needs.prepare.outputs.changed != 'true'
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: |
