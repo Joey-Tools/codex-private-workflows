@@ -323,13 +323,24 @@ is reserved for runs whose sync working tree remains unchanged. Immediately befo
 building, the workflow rechecks both `HEAD` and the complete Git working-tree state.
 The canonical review skill's `tests/fixtures/ci/private.yml` materializes the live
 private CI workflow byte-for-byte; scheduled sync tracks and stages `.github`, and
-the scheduled and release full-suite jobs run on Python 3.13. When scheduled sync
-generates a changed candidate, it retains source-lock verification, syntax checks,
-private overlay tests, and manifest validation before opening the PR, then defers
-only the duplicate canonical review suite to the sync PR's existing required
-parallel CI matrix, and records that deferral in the job summary. The scheduler
-does not claim that suite passed before the PR; the unchanged incomplete-release
-repair path still runs it before publication.
+the scheduled and release full-suite jobs run on Python 3.13. Scheduled sync
+generates one candidate, then runs all private overlay tests in four independent
+complete-module groups. Every test runner and the final writer check out the
+original workflow commit and apply the same bounded binary patch, checking its
+SHA-256 and the exact resulting Git tree before use. Module and class fixtures
+stay together; grouping automatically includes newly discovered modules.
+The final writer requires successful preparation and every required test group
+before manifest validation, sync-PR creation, or release repair. Failed, cancelled,
+or unexpectedly skipped groups block it. A true no-op explicitly skips testing.
+Generation, test jobs, and the final writer each retain finite 30-minute limits;
+at most eight test jobs run concurrently on separate runners.
+
+For a changed candidate, only the duplicate canonical review suite is deferred
+to the sync PR's existing required parallel CI matrix, with that deferral recorded
+in the job summary. The scheduler does not claim that suite passed before the PR.
+The unchanged incomplete-release repair path also runs all canonical review tests
+in four complete-module groups before publication. Source-lock verification,
+syntax checks, manifest validation, and source-only guards remain required.
 The generated PR records the exact review-workflow SHA and tree rather than treating
 a moving default branch as executable control-plane input. The current generated PR
 workflow declares only `contents: read` and contains no `secrets.*` references.

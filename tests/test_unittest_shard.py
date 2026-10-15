@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import collections
 import importlib.util
-import multiprocessing
+import os
 import pathlib
 import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -21,6 +22,13 @@ GROUP_SPEC = importlib.util.spec_from_file_location("run_release_test_group", GR
 assert GROUP_SPEC is not None and GROUP_SPEC.loader is not None
 GROUP_RUNNER = importlib.util.module_from_spec(GROUP_SPEC)
 GROUP_SPEC.loader.exec_module(GROUP_RUNNER)
+TRANSPORT_PATH = REPO_ROOT / "scripts" / "scheduled_sync_test_candidate.py"
+TRANSPORT_SPEC = importlib.util.spec_from_file_location(
+    "scheduled_sync_test_candidate", TRANSPORT_PATH
+)
+assert TRANSPORT_SPEC is not None and TRANSPORT_SPEC.loader is not None
+TRANSPORT = importlib.util.module_from_spec(TRANSPORT_SPEC)
+TRANSPORT_SPEC.loader.exec_module(TRANSPORT)
 
 
 class StubTest(unittest.TestCase):
@@ -95,7 +103,202 @@ class UnittestShardRunnerTests(unittest.TestCase):
         self.assertIn("Running shard 1/1: 1 of 1 tests", completed.stdout)
 
 
+class ScheduledSyncCandidateTransportTests(unittest.TestCase):
+    def _git(self, repo: pathlib.Path, *args: str) -> str:
+        completed = subprocess.run(
+            ["git", "-C", str(repo), *args],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=20,
+        )
+        return completed.stdout.strip()
+
+    def _fixture(self, root: pathlib.Path) -> tuple[pathlib.Path, pathlib.Path, str]:
+        source = root / "source"
+        source.mkdir()
+        for directory in (
+            ".github",
+            "scripts",
+            "tests",
+            "schema",
+            "personal_codex",
+            ".agents",
+        ):
+            (source / directory).mkdir()
+            (source / directory / "tracked.txt").write_text(
+                f"base {directory}\n", encoding="utf-8"
+            )
+        (source / "generated-sync-source-lock.json").write_text("{}\n")
+        (source / "private-overlay-source-lock.json").write_text("{}\n")
+        (source / "outside.txt").write_text("base outside\n")
+        self._git(source, "init", "--quiet")
+        self._git(source, "config", "user.name", "Candidate Test")
+        self._git(source, "config", "user.email", "candidate-test@example.invalid")
+        self._git(source, "add", "--all")
+        self._git(source, "commit", "--quiet", "-m", "base")
+        base = self._git(source, "rev-parse", "HEAD")
+        receiver = root / "receiver"
+        subprocess.run(
+            ["git", "clone", "--quiet", str(source), str(receiver)],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=20,
+        )
+        return source, receiver, base
+
+    def _prepare(self, source: pathlib.Path, base: str, root: pathlib.Path):
+        output = root / "candidate"
+        metadata = TRANSPORT.prepare(str(source), base, str(output))
+        return output, metadata
+
+    def test_round_trip_carries_scope_add_delete_and_change_as_exact_tree(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="sync-candidate-roundtrip-") as directory:
+            root = pathlib.Path(directory)
+            source, receiver, base = self._fixture(root)
+            (source / "scripts" / "tracked.txt").write_text("generated change\n")
+            (source / "tests" / "tracked.txt").unlink()
+            (source / "schema" / "new-generated.txt").write_text("new\n")
+            output, (metadata_base, tree, patch_sha) = self._prepare(source, base, root)
+
+            TRANSPORT.apply_candidate(
+                str(receiver), str(output), metadata_base, tree, patch_sha
+            )
+
+            self.assertEqual(self._git(receiver, "write-tree"), tree)
+            self.assertEqual(
+                (receiver / "scripts" / "tracked.txt").read_text(), "generated change\n"
+            )
+            self.assertFalse((receiver / "tests" / "tracked.txt").exists())
+            self.assertEqual(
+                (receiver / "schema" / "new-generated.txt").read_text(), "new\n"
+            )
+
+    def test_rejects_base_hash_and_tree_mismatch(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="sync-candidate-mismatch-") as directory:
+            root = pathlib.Path(directory)
+            source, receiver, base = self._fixture(root)
+            (source / "scripts" / "tracked.txt").write_text("generated\n")
+            output, (metadata_base, tree, patch_sha) = self._prepare(source, base, root)
+            with self.assertRaisesRegex(TRANSPORT.CandidateError, "HEAD mismatch"):
+                TRANSPORT.apply_candidate(
+                    str(receiver), str(output), "0" * len(base), tree, patch_sha
+                )
+            with self.assertRaisesRegex(TRANSPORT.CandidateError, "SHA-256 mismatch"):
+                TRANSPORT.apply_candidate(
+                    str(receiver), str(output), metadata_base, tree, "0" * 64
+                )
+            with self.assertRaisesRegex(TRANSPORT.CandidateError, "tree mismatch"):
+                TRANSPORT.apply_candidate(
+                    str(receiver), str(output), metadata_base, "f" * len(tree), patch_sha
+                )
+
+    def test_rejects_dirty_recipient_before_applying(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="sync-candidate-dirty-") as directory:
+            root = pathlib.Path(directory)
+            source, receiver, base = self._fixture(root)
+            (source / "scripts" / "tracked.txt").write_text("generated\n")
+            output, (metadata_base, tree, patch_sha) = self._prepare(source, base, root)
+            (receiver / "outside.txt").write_text("local change\n")
+
+            with self.assertRaisesRegex(TRANSPORT.CandidateError, "not clean"):
+                TRANSPORT.apply_candidate(
+                    str(receiver), str(output), metadata_base, tree, patch_sha
+                )
+
+    def test_rejects_tracked_changes_outside_generator_scopes(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="sync-candidate-outside-") as directory:
+            root = pathlib.Path(directory)
+            source, _, base = self._fixture(root)
+            (source / "outside.txt").write_text("unexpected\n")
+
+            with self.assertRaisesRegex(TRANSPORT.CandidateError, "outside"):
+                self._prepare(source, base, root)
+
+    def test_git_environment_controls_do_not_redirect_recipient(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="sync-candidate-git-env-") as directory:
+            root = pathlib.Path(directory)
+            source, receiver, base = self._fixture(root)
+            (source / "scripts" / "tracked.txt").write_text("generated\n")
+            output, (metadata_base, tree, patch_sha) = self._prepare(source, base, root)
+            poison_objects = root / "poison-objects"
+            poison_objects.mkdir()
+            poison_index = root / "poison.index"
+            poison_index.write_bytes(b"not a Git index")
+            controlled_git_environment = {
+                "GIT_DIR": str(source / ".git"),
+                "GIT_WORK_TREE": str(source),
+                "GIT_INDEX_FILE": str(poison_index),
+                "GIT_OBJECT_DIRECTORY": str(poison_objects),
+                "GIT_ALTERNATE_OBJECT_DIRECTORIES": str(root / "missing-alternate"),
+                "GIT_CONFIG_COUNT": "1",
+                "GIT_CONFIG_KEY_0": "core.worktree",
+                "GIT_CONFIG_VALUE_0": str(source),
+            }
+
+            with mock.patch.dict(os.environ, controlled_git_environment):
+                TRANSPORT.apply_candidate(
+                    str(receiver), str(output), metadata_base, tree, patch_sha
+                )
+
+            self.assertEqual(poison_index.read_bytes(), b"not a Git index")
+            self.assertEqual(self._git(receiver, "write-tree"), tree)
+
+    def test_prepare_retains_private_output_and_index_on_error(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="sync-candidate-retained-") as directory:
+            root = pathlib.Path(directory)
+            source, _, base = self._fixture(root)
+            output = root / "candidate"
+            with mock.patch.object(
+                TRANSPORT,
+                "_run_git_bounded_output",
+                side_effect=TRANSPORT.CandidateError("injected diff failure"),
+            ):
+                with self.assertRaisesRegex(
+                    TRANSPORT.CandidateError,
+                    "candidate directory retained at .*candidate",
+                ):
+                    TRANSPORT.prepare(str(source), base, str(output))
+
+            self.assertTrue(output.is_dir())
+            self.assertEqual(output.stat().st_mode & 0o777, 0o700)
+            self.assertTrue((output / "index").is_file())
+
+    def test_empty_patch_round_trips_to_base_tree(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="sync-candidate-empty-") as directory:
+            root = pathlib.Path(directory)
+            source, receiver, base = self._fixture(root)
+            output, (metadata_base, tree, patch_sha) = self._prepare(source, base, root)
+
+            self.assertEqual((output / "candidate.patch").read_bytes(), b"")
+            self.assertEqual(tree, self._git(receiver, "rev-parse", "HEAD^{tree}"))
+            TRANSPORT.apply_candidate(
+                str(receiver), str(output), metadata_base, tree, patch_sha
+            )
+            self.assertEqual(self._git(receiver, "write-tree"), tree)
+
+
 class ReleaseTestGroupRunnerTests(unittest.TestCase):
+    def test_heavy_overlay_modules_start_in_distinct_groups(self) -> None:
+        heavy_modules = (
+            "test_regular_overlay_uninstall_status_regressions",
+            "test_pending_staging_cleanup",
+            "test_regular_agent_materialization",
+            "test_personal_sync_reconciliation_safety",
+        )
+        cases = [
+            type(name, (unittest.TestCase,), {"__module__": name})("runTest")
+            for name in (*heavy_modules, "test_new_light_module")
+        ]
+        groups = GROUP_RUNNER.group_tests(cases, 4)
+        owners = {
+            type(test).__module__: index
+            for index, group in enumerate(groups)
+            for test in group
+        }
+        self.assertEqual(len({owners[name] for name in heavy_modules}), 4)
+
     def test_groups_preserve_every_discovered_test_and_module(self) -> None:
         cases = []
         for name in ("test_named_lane", "test_review_workspace", "test_new_a", "test_new_b", "test_new_c"):
