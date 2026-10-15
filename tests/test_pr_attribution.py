@@ -30,6 +30,7 @@ FALLBACK_LABEL = "GPT-6.1 Sol Medium"
 SELECTED_LABEL_RE = re.compile(
     r"\bGPT-(?:5\.5|5\.6[ \t]+(?:Sol|Terra)|6\.1[ \t]+Sol|6[ \t]+Luna)"
     r"[ \t]+(?:Low|Medium|High|Extra[ \t]+High|Max|Ultra)\b"
+    r"(?![\w-]|\.\w)"
 )
 LABEL_TOKEN_RE = re.compile(
     r"\bGPT-[A-Za-z0-9][A-Za-z0-9.-]*(?:[ \t]+[A-Za-z0-9][A-Za-z0-9.-]*){0,2}"
@@ -157,10 +158,15 @@ class PrAttributionTests(unittest.TestCase):
         return extract_selected_label(lines[0])
 
     def test_selected_label_extraction_accepts_alternate_wrapper_punctuation(self) -> None:
-        self.assertEqual(
-            extract_selected_label("Attribution -> [GPT-5.6 Sol Extra High]!"),
-            "GPT-5.6 Sol Extra High",
+        cases = (
+            ("Attribution -> [GPT-5.6 Sol Extra High]!", "GPT-5.6 Sol Extra High"),
+            ("GPT-6.1 Sol Medium.", FALLBACK_LABEL),
+            ("(GPT-6.1 Sol Medium),", FALLBACK_LABEL),
+            ("Result: GPT-6.1 Sol Medium:", FALLBACK_LABEL),
         )
+        for output, expected in cases:
+            with self.subTest(output=output):
+                self.assertEqual(extract_selected_label(output), expected)
 
     def test_selected_label_extraction_ignores_gpt_generated_wrapper(self) -> None:
         self.assertEqual(
@@ -173,6 +179,18 @@ class PrAttributionTests(unittest.TestCase):
             "Attribution: GPT-5.6 Sol Max; repeated GPT-5.6 Sol Max",
             "Attribution: GPT-5.6 Sol Max; conflicting GPT-6 Luna High",
             "Attribution: GPT-5.6 Sol Max; unsupported GPT-9 Sol Max",
+        ):
+            with self.subTest(output=output), self.assertRaisesRegex(
+                ValueError, "exactly one supported GPT label"
+            ):
+                extract_selected_label(output)
+
+    def test_selected_label_extraction_rejects_effort_suffixes(self) -> None:
+        for output in (
+            "Attribution: GPT-5.6 Sol Max-preview",
+            "Attribution: GPT-5.6 Sol Max.preview",
+            "Attribution: GPT-6 Luna High, GPT-5.6 Sol Max-preview",
+            "Attribution: GPT-6 Luna High, GPT-5.6 Sol Max.preview",
         ):
             with self.subTest(output=output), self.assertRaisesRegex(
                 ValueError, "exactly one supported GPT label"
