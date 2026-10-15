@@ -5,7 +5,7 @@ status: completed
 created: 2026-10-15
 updated: 2026-10-15
 branch: codex/private-scheduled-sync-test-shards-20261015
-pr:
+pr: https://github.com/Joey-Tools/codex-private-workflows/pull/226
 supersedes: []
 superseded_by:
 ---
@@ -30,9 +30,9 @@ superseded_by:
 - The immutable public toolbox base pin is unchanged. Native installation and GitHub policy changes are outside this workstream.
 
 ## Evidence
-- Python 3.13.0 passed all 469 tests in the four affected private test modules in 131.771 seconds, including candidate transport, heavy-module separation, and shell-plan/gate negative cases.
+- After a normal signed merge of PR #225's actual squash result `eaddfc70d7926455acaf6411f24759666b0bacb0`, Python 3.13.0 passed all 471 tests in the four affected private test modules in 143.133 seconds, including attribution follow-ups, candidate transport, heavy-module separation, and shell-plan/gate negative cases. The merge preserved the previously tested implementation tree without rewriting history.
 - Actionlint (including ShellCheck), `bash -n` on all 27 literal workflow shell blocks, Ruff, whitespace, and project-journal validation passed.
-- Real discovery checks confirmed complete, non-overlapping module ownership for 2,775 overlay cases across 24 modules and 3,305 review cases across 23 modules; discovery alone does not execute their test cases.
+- Fresh real discovery checks confirmed complete, non-overlapping module ownership for 2,777 overlay cases across 24 modules and 3,305 review cases across 23 modules; discovery alone does not execute their test cases.
 - `.github/workflows/scheduled-sync-release.yml`
 - `scripts/scheduled_sync_test_candidate.py`
 - `scripts/run_release_test_group.py`
