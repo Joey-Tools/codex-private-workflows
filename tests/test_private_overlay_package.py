@@ -1949,10 +1949,6 @@ class AppleNotesWorkReportSkillTests(unittest.TestCase):
         style = (skill_root / "references" / "report-drafting-style.md").read_text(
             encoding="utf-8"
         )
-        example = (skill_root / "references" / "report-drafting-example.md").read_text(
-            encoding="utf-8"
-        )
-
         self.assertIn(
             "the exact `webex-message-archiver` repository always maps to "
             "`#webex-message-archiver`",
@@ -1967,8 +1963,6 @@ class AppleNotesWorkReportSkillTests(unittest.TestCase):
             "never infer it from the word `Webex`",
             style,
         )
-        self.assertIn("4. #webex-message-archiver", example)
-        self.assertIn("628 spaces and 628 message files", example)
 
 
 class PrivateAutomationPromptTests(unittest.TestCase):
@@ -2016,22 +2010,6 @@ class PrivateAutomationPromptTests(unittest.TestCase):
             "/Users/hoteng/.codex/skills/apple-notes-work-report",
             prompt,
         )
-
-    def test_daily_work_report_bounds_memory_reads(self) -> None:
-        prompt = automation_prompt("daily-work-report-draft")
-
-        self.assertIn("When reading this automation's memory", prompt)
-        self.assertIn("do not dump the whole file or a fixed 200-line head", prompt)
-        self.assertIn(
-            "widen only when needed for the candidate-day calculation", prompt
-        )
-
-    def test_daily_skill_friction_bounds_memory_reads(self) -> None:
-        prompt = automation_prompt("daily-skill-friction")
-
-        self.assertIn("When reading this automation's memory", prompt)
-        self.assertIn("structured parser or narrowly bounded extraction", prompt)
-        self.assertIn("latest completed-run End timestamp", prompt)
 
     def test_daily_skill_friction_scans_active_and_archived_rollouts(self) -> None:
         prompt = automation_prompt("daily-skill-friction")

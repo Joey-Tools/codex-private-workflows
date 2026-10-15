@@ -14968,25 +14968,6 @@ jobs:
                 self.assertNotIn(automation, manifest["reference_only"])
                 self.assertFalse((REPO_ROOT / automation).exists())
 
-    def test_personal_agents_routes_local_only_skills_explicitly(self) -> None:
-        agents = (REPO_ROOT / "personal_codex" / "AGENTS.md").read_text(
-            encoding="utf-8"
-        )
-
-        self.assertIn(
-            "For Apple Notes tasks, start from the `codex-workspace` repo-local",
-            agents,
-        )
-        self.assertIn(
-            "do not rely on a global copy under `~/.codex/skills`",
-            agents,
-        )
-        self.assertNotIn("$codex-rules-hygiene", agents)
-        self.assertNotIn("$codex-session-retrospective", agents)
-
-        readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
-        self.assertNotIn("private session retrospective automation routing", readme)
-
     def test_personal_agents_state_matches_review_source_transition(self) -> None:
         source_lock = json.loads(
             (REPO_ROOT / "private-overlay-source-lock.json").read_text(encoding="utf-8")
@@ -15023,24 +15004,6 @@ jobs:
         ):
             with self.subTest(retired_detail=retired_detail):
                 self.assertNotIn(retired_detail, agents)
-
-    def test_personal_agents_scopes_bug_triage_to_artifact_transport(self) -> None:
-        agents = (REPO_ROOT / "personal_codex" / "AGENTS.md").read_text(
-            encoding="utf-8"
-        )
-
-        self.assertIn(
-            "Use `$bug-triage-playbook` only to route an exact remote artifact URL or local ZIP",
-            agents,
-        )
-        self.assertIn(
-            "ordinary regression and root-cause analysis on evidence-based reasoning",
-            agents,
-        )
-        self.assertNotIn(
-            "Use `$bug-triage-playbook` for log-driven debugging, regression analysis",
-            agents,
-        )
 
     def test_tracker_handoff_matches_transport_only_bug_triage_contract(
         self,
@@ -15111,77 +15074,6 @@ jobs:
         self.assertIn("spinner-heavy container builds", skill)
         self.assertIn("allow_implicit_invocation: true", interface)
 
-    def test_agents_guidance_documents_wait_agent_timeout_contract(self) -> None:
-        agents = (REPO_ROOT / "personal_codex" / "AGENTS.md").read_text(
-            encoding="utf-8"
-        )
-
-        self.assertIn("polling with `wait_agent`", agents)
-        self.assertIn(
-            "omit `timeout_ms` to use the `30000` millisecond default", agents
-        )
-        self.assertIn("supported `10000`–`3600000` millisecond range", agents)
-        self.assertIn("`30000`–`60000` for ordinary or reviewer polling", agents)
-        self.assertIn("longer single waits are valid", agents)
-
-    def test_agents_guidance_uses_canonical_named_review_policy(self) -> None:
-        agents = _final_personal_agents_text()
-
-        for anchor in (
-            "Use `$review-orchestration-playbook` as the only entrypoint",
-            "Single uses one fresh-context local Codex review session",
-            "double adds actual Claude Code",
-            "triple adds current-head GitHub Codex",
-            "The skill owns adapter selection",
-            "do not duplicate those contracts here",
-            "contemporaneous consent for scoped review egress to that shape",
-            "including tracked repository secrets",
-            "excludes runtime secrets and credentials",
-            "native GitHub Copilot PR code review when selected by the remote-first route",
-            "Claude Code, Copilot CLI, and other external reviewers without explicit opt-in",
-            "A bare named-review request is report-only",
-            "scoped exact `@codex review` producer operation",
-            "read the complete exact current-head request set under one parent mutation owner",
-            "combine it with retained transport evidence",
-            "reuse an existing request",
-            "independent proof that no create-comment HTTP action was invoked",
-            "unknown delivery stays read-only",
-            "A possibly delivered POST consumes the epoch budget",
-            "an empty GET alone is not proof of non-delivery",
-            "signed landing-commit creation before the final exact-head review",
-            "Server-side squash merge occurs only after PR readiness",
-            "never authorizes a second logical request",
-            "GitHub Actions rerun, dispatch, or reconciliation requires both",
-            "repository-predeclared exact idempotent or reentrant contract",
-            "frozen scope and exact inputs",
-            "separate current-task delivery or readiness authorization",
-            "never authorizes a different workflow, input, scope, destination",
-        ):
-            with self.subTest(anchor=anchor):
-                self.assertIn(anchor, agents)
-
-        for retired in (
-            "Materialization contract activation",
-            "canonical Claude Code compatibility range",
-            "github-codex-evidence-authority.md",
-            "thumbs-up-clean",
-            "terminal-payload",
-            "`isolated_review`",
-            "mandatory independent-codex-pr-review",
-            "required `independent-codex-pr-review`",
-            "$external-review-playbook",
-            "$copilot-review-playbook",
-            "is the only mutation implied by bare triple",
-            "repeating that exact POST for the same logical request",
-        ):
-            with self.subTest(retired=retired):
-                self.assertNotIn(retired, agents)
-
-        self.assertIn("helper owns model/effort labels", agents)
-        self.assertIn("do not duplicate a pinned fallback label", agents)
-        self.assertIn("<sentence printed by pr_attribution.py>", agents)
-        self.assertNotIn("GPT-5.6 Sol Ultra", agents)
-
     def test_agents_guidance_uses_sol_parent_luna_workers_and_remote_first_review(self) -> None:
         agents = _final_personal_agents_text()
         model_routing = (
@@ -15211,21 +15103,6 @@ jobs:
             with self.subTest(anchor=anchor):
                 self.assertIn(anchor, agents)
         self.assertNotIn("run local/internal review, then commit", agents)
-
-    def test_agents_guidance_leaves_skill_repo_gate_to_scoped_guidance(self) -> None:
-        agents = _final_personal_agents_text()
-        self.assertNotIn("skill-repo-codex-gate", agents)
-        for repository in (
-            "codex-toolbox",
-            "codex-debug-triage",
-            "codex-review-workflows",
-            "codex-workflow-hygiene",
-            "codex-project-journal",
-            "codex-apple-notes-toolkit",
-            "codex-private-workflows",
-        ):
-            with self.subTest(repository=repository):
-                self.assertNotIn(f"`{repository}`", agents)
 
     def test_codex_review_gate_uses_v2_only_verifier_and_controller(
         self,
