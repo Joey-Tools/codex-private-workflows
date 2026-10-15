@@ -4,8 +4,8 @@ title: Parallel Scheduled Sync Test Groups
 status: completed
 created: 2026-10-15
 updated: 2026-10-15
-branch: codex/private-scheduled-sync-test-shards-20261015
-pr: https://github.com/Joey-Tools/codex-private-workflows/pull/226
+branch: codex/private-scheduled-sync-test-shards-replacement-20261015
+pr:
 supersedes: []
 superseded_by:
 ---
@@ -23,6 +23,7 @@ superseded_by:
 - Changed candidates run overlay groups and defer canonical review only to required sync-PR CI. Unchanged incomplete-release repair additionally requires the review groups before publication.
 - Intentional no-op skips are distinct from missing or unexpectedly skipped required groups. Preparation or test failure prevents the writer from progressing.
 - Refresh overlay scheduling hints using PR #225 run 38712130407's completed Ubuntu module steps, including the previously unweighted 736-second uninstall regression module. These are cross-version hints, not a measured Python 3.13 speedup.
+- Preserve original PR #226 as audit history and use a default-base replacement after the required gate rejected its stacked-retarget request lineage. The replacement must obtain its own current-head review, CI, and readiness; the original clean comment is not inherited.
 
 ## Boundaries
 - Finite per-job limits remain; parallelism makes no claim about account-level runner capacity or measured elapsed-time speedup.
