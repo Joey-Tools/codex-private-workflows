@@ -28,14 +28,14 @@
     {
       "name": "codex-workflow-hygiene",
       "repository": "Joey-Tools/codex-workflow-hygiene",
-      "sha": "00bba7d7dd0123f5d26c043625538b03d1433397",
-      "tree": "b201f33e6870ddf28b5747a30720562313e3317c"
+      "sha": "1fb26caac8d90ed308b2ce0f96b0ab83e487045c",
+      "tree": "a0dff94507819c1eb2645295a342273eb24ab8db"
     },
     {
       "name": "codex-project-journal",
       "repository": "Joey-Tools/codex-project-journal",
-      "sha": "bd2909c9d41d3586267a9de83a416a137f81d793",
-      "tree": "e40a0e8864eab4f06fcf81dd788eee65c4589559"
+      "sha": "c31dc7f79a92eb058299151bb23e3566e15c93aa",
+      "tree": "ceb05b03a8ae0213ffc33db41b2c49bf3a3b1a24"
     }
   ],
   "toolbox_generated_provenance": {
