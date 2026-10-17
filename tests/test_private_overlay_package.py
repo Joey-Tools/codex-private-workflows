@@ -196,6 +196,9 @@ class PrivateOverlayPackageTests(unittest.TestCase):
         self.assertEqual(manifest["base_release"]["sha"], PUBLIC_SHA)
         self.assertIn("AGENTS.md", targets)
         self.assertIn("bin/codex-private-macos-sync", targets)
+        self.assertIn("bin/codex-node-system-ca", targets)
+        self.assertEqual(targets["bin/codex-node-system-ca"].owner, "private")
+        self.assertEqual(targets["bin/codex-node-system-ca"].kind, "file")
         self.assertEqual(
             targets["bin/codex-private-macos-sync"].owner,
             "private",
@@ -221,6 +224,11 @@ class PrivateOverlayPackageTests(unittest.TestCase):
         )
         self.assertTrue(packaged_helper.is_file())
         self.assertEqual(stat.S_IMODE(packaged_helper.stat().st_mode), 0o755)
+        packaged_ca_helper = (
+            release_root / "personal_codex" / "bin" / "codex-node-system-ca"
+        )
+        self.assertTrue(packaged_ca_helper.is_file())
+        self.assertEqual(stat.S_IMODE(packaged_ca_helper.stat().st_mode), 0o755)
         self.assertTrue(packaged_inventory.is_file())
         self.assertIn(
             "personal_codex/private-sync-hosts.json",

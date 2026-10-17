@@ -17,6 +17,11 @@
       "kind": "file"
     },
     {
+      "source": "personal_codex/bin/codex-node-system-ca",
+      "target": "bin/codex-node-system-ca",
+      "kind": "file"
+    },
+    {
       "source": "personal_codex/agents/reviewer.toml",
       "target": "agents/reviewer.toml",
       "kind": "file"

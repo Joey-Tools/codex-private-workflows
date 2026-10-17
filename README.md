@@ -8,6 +8,7 @@
 
 - private `AGENTS.md`
 - private reviewer agent config
+- explicit opt-in macOS Node system-CA configuration
 - private personal skills and private variants of personal skills
 - host-wide `AGENTS.md` rules for exact GitHub CLI identity selection from the ordinary local gh auth pool; credentials are never packaged
 - Apple Notes Work Report overlay
@@ -19,6 +20,51 @@
 Public base release is published by `Joey-Tools/codex-toolbox`. This private overlay
 installs into `~/.codex/personal-sync/overlays/private/current` and manages only
 private-owned symlinks.
+
+## macOS Node system CA
+
+The private release installs the `bin/codex-node-system-ca` helper. On each Mac
+where corporate TLS inspection requires the system CA store, run it explicitly
+from Terminal in the signed-in user's Aqua GUI session, using Python 3.9 or newer:
+
+```bash
+python3 -B ~/.codex/bin/codex-node-system-ca install --dry-run
+python3 -B ~/.codex/bin/codex-node-system-ca install
+python3 -B ~/.codex/bin/codex-node-system-ca status
+```
+
+The helper installs `~/Library/LaunchAgents/com.joey.node-system-ca.plist` and
+sets `NODE_USE_SYSTEM_CA=1` in the current GUI launchd context. The Aqua
+LaunchAgent repeats that setting at login. Supporting Node processes started
+afterward use macOS's trusted CA store while retaining TLS certificate
+verification. This applies to the user's subsequent processes, rather than
+only ChatGPT; existing processes retain their original environment. Quit and
+reopen ChatGPT after the first installation, then use its normal Dock or
+Spotlight entry. Login-item ordering is not guaranteed, so an app that starts
+before the agent may need to be reopened.
+
+Ordinary private sync distributes the helper without activating this setting.
+The helper uses the current account's home and UID, requires no host inventory
+entry, and can adopt the equivalent manually installed plist from the original
+connection diagnosis. It refuses an unrelated plist or a symlink at its target.
+The JSON `configured` field reports whether the complete setting is active;
+`ok` separately reports whether the operation or status queries succeeded.
+An interrupted or failed activation can leave the matching plist installed;
+inspect `status` and retry `install` after resolving the reported error.
+
+To remove the setting on that Mac:
+
+```bash
+python3 -B ~/.codex/bin/codex-node-system-ca uninstall --dry-run
+python3 -B ~/.codex/bin/codex-node-system-ca uninstall
+```
+
+Uninstall disables and unloads the matching agent, removes its plist, and
+clears the GUI environment variable only while its value is still `1`. A
+different value is preserved. Reopen affected applications to discard any
+environment they inherited earlier. Installing again re-enables the agent.
+Removing the private overlay alone does not undo an explicitly installed host
+setting; run the helper's `uninstall` first if that is the intended outcome.
 
 ## Role-aware macOS sync
 
@@ -238,8 +284,10 @@ python3 -B -c 'import pathlib, sys; [compile(pathlib.Path(path).read_bytes(), pa
   scripts/private_overlay_release.py \
   scripts/sync_private_overlay_sources.py \
   personal_codex/bin/codex-private-macos-sync \
+  personal_codex/bin/codex-node-system-ca \
   tests/test_private_overlay_package.py \
   tests/test_private_macos_sync_controller.py \
+  tests/test_node_system_ca.py \
   tests/test_private_overlay_sync.py
 
 PYTHONDONTWRITEBYTECODE=1 python3 -B -m unittest discover -s tests
