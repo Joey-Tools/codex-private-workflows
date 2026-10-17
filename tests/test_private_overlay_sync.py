@@ -2338,8 +2338,8 @@ class PrivateOverlaySyncTests(unittest.TestCase):
     ) -> None:
         current = SYNC_MODULE._CANONICAL_REVIEW_CURRENT_INVENTORY
         legacy = SYNC_MODULE._CANONICAL_REVIEW_LEGACY_INVENTORY
-        self.assertEqual(len(current.required_files), 155)
-        self.assertEqual(len(current.exact_files), 160)
+        self.assertEqual(len(current.required_files), 157)
+        self.assertEqual(len(current.exact_files), 162)
         self.assertEqual(len(current.independent_required_files), 77)
         self.assertEqual(len(legacy.required_files), 145)
         self.assertEqual(len(legacy.exact_files), 150)
@@ -2430,6 +2430,30 @@ class PrivateOverlaySyncTests(unittest.TestCase):
         )
         SYNC_MODULE._validate_canonical_review_target_contents(target)
 
+    def test_semantic_review_documents_sync_with_private_overlay(self) -> None:
+        rule, target = self._create_canonical_regular_file_overlay_rule()
+        source = self.source_root / rule.repo / rule.source
+        documents = {
+            Path("references/github-codex-machine-evidence-v1.md"): (
+                b"Machine evidence contract.\n"
+            ),
+            Path("references/github-codex-semantic-scenarios.json"): (
+                b'{"scenarios": []}\n'
+            ),
+        }
+        for relative, content in documents.items():
+            (source / relative).write_bytes(content)
+
+        SYNC_MODULE.sync_sources(self.repo_root, self.source_root, (rule,))
+
+        for relative, content in documents.items():
+            self.assertEqual((target / relative).read_bytes(), content)
+        self.assertFalse((target / "old-marker").exists())
+        self.assertEqual(
+            (target / rule.regular_file_overlays[0].target).read_bytes(),
+            b"private\n",
+        )
+
     def test_review_routing_inventory_rejects_missing_and_unknown_files(
         self,
     ) -> None:
@@ -2457,6 +2481,95 @@ class PrivateOverlaySyncTests(unittest.TestCase):
                 ):
                     SYNC_MODULE.sync_sources(self.repo_root, self.source_root, (rule,))
                 self.assertEqual((target / "old-marker").read_bytes(), b"old\n")
+                shutil.rmtree(source)
+                shutil.rmtree(target)
+                private_catalog = self.repo_root / rule.regular_file_overlays[0].source
+                private_catalog.unlink()
+                private_catalog.parent.rmdir()
+
+    def test_semantic_review_documents_are_required_current_only(self) -> None:
+        semantic_documents = {
+            Path("references/github-codex-machine-evidence-v1.md"),
+            Path("references/github-codex-semantic-scenarios.json"),
+        }
+        current = SYNC_MODULE._CANONICAL_REVIEW_CURRENT_INVENTORY
+        legacy = SYNC_MODULE._CANONICAL_REVIEW_LEGACY_INVENTORY
+        self.assertTrue(semantic_documents.issubset(current.required_files))
+        self.assertTrue(semantic_documents.issubset(current.exact_files))
+        self.assertTrue(semantic_documents.issubset(
+            SYNC_MODULE._CANONICAL_REVIEW_CURRENT_ONLY_FILES
+        ))
+        self.assertTrue(semantic_documents.isdisjoint(legacy.exact_files))
+
+        legacy_target = self.repo_root / "semantic-documents-legacy"
+        for relative in legacy.exact_files:
+            path = legacy_target / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(b"canonical\n")
+        SYNC_MODULE._validate_canonical_review_target_contents(
+            legacy_target,
+            inventory_profile=legacy,
+        )
+        for relative in semantic_documents:
+            with self.subTest(legacy_rejects=relative):
+                path = legacy_target / relative
+                path.write_bytes(b"canonical\n")
+                with self.assertRaisesRegex(
+                    SYNC_MODULE.SyncError,
+                    "raw exact tree inventory mismatch",
+                ):
+                    SYNC_MODULE._validate_canonical_review_target_contents(
+                        legacy_target,
+                        inventory_profile=legacy,
+                    )
+                path.unlink()
+
+    def test_semantic_review_inventory_rejects_missing_and_unknown_files(
+        self,
+    ) -> None:
+        cases = (
+            (
+                "missing-machine-contract",
+                Path("references/github-codex-machine-evidence-v1.md"),
+                True,
+            ),
+            (
+                "missing-semantic-scenarios",
+                Path("references/github-codex-semantic-scenarios.json"),
+                True,
+            ),
+            (
+                "unknown-semantic-document",
+                Path("references/unreviewed-semantic-scenarios.json"),
+                False,
+            ),
+            (
+                "unknown-runtime",
+                Path("scripts/unreviewed-semantic-runtime.py"),
+                False,
+            ),
+        )
+        for name, relative, missing in cases:
+            with self.subTest(name=name):
+                rule, target = self._create_canonical_regular_file_overlay_rule()
+                source = self.source_root / rule.repo / rule.source
+                if missing:
+                    (source / relative).unlink()
+                else:
+                    (source / relative).write_bytes(b"unexpected\n")
+                with self.assertRaisesRegex(
+                    SYNC_MODULE.SyncError,
+                    "missing required file"
+                    if missing
+                    else "raw exact tree inventory",
+                ):
+                    SYNC_MODULE.sync_sources(
+                        self.repo_root,
+                        self.source_root,
+                        (rule,),
+                    )
+                self.assertEqual((target / "old-marker").read_bytes(), b"old\n")
+                self.assertFalse((target / "references").exists())
                 shutil.rmtree(source)
                 shutil.rmtree(target)
                 private_catalog = self.repo_root / rule.regular_file_overlays[0].source
