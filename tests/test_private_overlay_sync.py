@@ -3539,6 +3539,24 @@ class PrivateOverlaySyncTests(unittest.TestCase):
 
     def test_personal_agents_coherence_migration_is_exact_and_idempotent(self) -> None:
         current = (REPO_ROOT / SYNC_MODULE.PERSONAL_AGENTS_TARGET).read_bytes()
+        previous_current = current.replace(
+            SYNC_MODULE.PERSONAL_AGENTS_CURRENT_REVIEW_BLOCK,
+            SYNC_MODULE.PERSONAL_AGENTS_PREVIOUS_CURRENT_REVIEW_BLOCK,
+            1,
+        )
+        self.assertEqual(
+            SYNC_MODULE._personal_agents_review_guidance_state(previous_current),
+            "previous-current",
+        )
+        self.assertEqual(
+            SYNC_MODULE._migrated_personal_agents_bytes(previous_current), current
+        )
+        self.assertEqual(
+            SYNC_MODULE._migrated_personal_agents_bytes(
+                SYNC_MODULE._migrated_personal_agents_bytes(previous_current)
+            ),
+            current,
+        )
         previous = current.replace(
             SYNC_MODULE.PERSONAL_AGENTS_CURRENT_REVIEW_BLOCK,
             SYNC_MODULE.PERSONAL_AGENTS_ROUTING_PREVIOUS_REVIEW_BLOCK,
@@ -3565,6 +3583,29 @@ class PrivateOverlaySyncTests(unittest.TestCase):
         )
         self.assertEqual(SYNC_MODULE._migrated_personal_agents_bytes(landing_only), current)
         for changed in (
+            previous_current.replace(
+                b"the complete exact current-head request set",
+                b"the exact current-head request set",
+                1,
+            ),
+            previous_current.replace(
+                SYNC_MODULE.PERSONAL_AGENTS_PREVIOUS_CURRENT_REVIEW_BLOCK,
+                b"Inline text "
+                + SYNC_MODULE.PERSONAL_AGENTS_PREVIOUS_CURRENT_REVIEW_BLOCK,
+                1,
+            ),
+            previous_current.replace(
+                SYNC_MODULE.PERSONAL_AGENTS_REVIEW_BLOCK_BOUNDARY,
+                SYNC_MODULE.PERSONAL_AGENTS_PREVIOUS_CURRENT_REVIEW_BLOCK
+                + SYNC_MODULE.PERSONAL_AGENTS_REVIEW_BLOCK_BOUNDARY,
+                1,
+            ),
+            current.replace(
+                SYNC_MODULE.PERSONAL_AGENTS_CURRENT_REVIEW_BLOCK,
+                SYNC_MODULE.PERSONAL_AGENTS_PREVIOUS_CURRENT_REVIEW_BLOCK
+                + SYNC_MODULE.PERSONAL_AGENTS_CURRENT_REVIEW_BLOCK,
+                1,
+            ),
             previous.replace(b"by repeating", b"by silently repeating", 1),
             previous + SYNC_MODULE.PERSONAL_AGENTS_PREVIOUS_LANDING_LINE,
             previous.replace(SYNC_MODULE.PERSONAL_AGENTS_PREVIOUS_LANDING_LINE, b"", 1),
@@ -3596,6 +3637,40 @@ class PrivateOverlaySyncTests(unittest.TestCase):
         agents.write_bytes(previous)
         agents.chmod(0o644)
 
+        SYNC_MODULE.sync_sources(
+            self.repo_root, self.source_root, (rule,), locked_sources=locked_sources
+        )
+        self.assertEqual(agents.read_bytes(), current)
+        current_inode = agents.stat().st_ino
+        SYNC_MODULE.sync_sources(
+            self.repo_root, self.source_root, (rule,), locked_sources=locked_sources
+        )
+        self.assertEqual(agents.read_bytes(), current)
+        self.assertEqual(agents.stat().st_ino, current_inode)
+
+    def test_approved_review_sync_migrates_pre_rerun_policy_personal_agents_once(
+        self,
+    ) -> None:
+        rule, _target = self._create_canonical_regular_file_overlay_rule(
+            authoritative=True
+        )
+        source = self.source_root / rule.repo / rule.source
+        locked_sources = self._locked_canonical_review_source(rule, source)
+        current = (REPO_ROOT / SYNC_MODULE.PERSONAL_AGENTS_TARGET).read_bytes()
+        previous_current = current.replace(
+            SYNC_MODULE.PERSONAL_AGENTS_CURRENT_REVIEW_BLOCK,
+            SYNC_MODULE.PERSONAL_AGENTS_PREVIOUS_CURRENT_REVIEW_BLOCK,
+            1,
+        )
+        agents = self.repo_root / SYNC_MODULE.PERSONAL_AGENTS_TARGET
+        agents.parent.mkdir(parents=True, exist_ok=True)
+        agents.write_bytes(previous_current)
+        agents.chmod(0o644)
+
+        self.assertEqual(
+            SYNC_MODULE._personal_agents_review_guidance_state(previous_current),
+            "previous-current",
+        )
         SYNC_MODULE.sync_sources(
             self.repo_root, self.source_root, (rule,), locked_sources=locked_sources
         )
