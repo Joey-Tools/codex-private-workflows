@@ -1388,10 +1388,16 @@ PERSONAL_AGENTS_ROUTING_PREVIOUS_REVIEW_BLOCK = (
     b"authorization for that external mutation; it never authorizes a different "
     b"workflow, input, scope, destination, PR, repository, or unrelated action.\n"
 )
-PERSONAL_AGENTS_CURRENT_REVIEW_BLOCK = (
+PERSONAL_AGENTS_PREVIOUS_CURRENT_REVIEW_BLOCK = (
     b"- Use `$review-orchestration-playbook` as the only entrypoint for default routing, explicit named single, double, and triple review, and PR readiness. Single uses one fresh-context local Codex review session, double adds actual Claude Code, and triple adds current-head GitHub Codex only when explicitly requested. Generic workflow requests do not opt into Claude or default triple. The skill owns adapter selection, clean-workspace preparation, reviewer runtime checks, GitHub evidence and recovery, and PR-readiness algorithms; do not duplicate those contracts here.\n"
     b"- An unambiguous named single, double, or triple request is contemporaneous consent for scoped review egress to that shape: OpenAI Codex for single, Anthropic Claude Code additionally for double, and GitHub Codex on an exact `github.com` PR additionally for triple. Reviewers may inspect the named repository tracked diff, necessary tracked context, bounded derived evidence, and review prompt/results, including tracked repository secrets. This excludes untracked files, unrelated repositories, broad workspace or home-directory content, credential discovery, GitHub Copilot, and substitute reviewers.\n"
     b"- A bare named-review request is report-only and does not authorize branch creation or mutation, commits, push, PR creation/update or metadata changes, merge, any GitHub Actions rerun, dispatch, or reconciliation, or unrelated mutation. Bare triple authorizes only the scoped exact `@codex review` producer operation on an already-existing eligible PR. Before a first request or any proposed transport retry, read the complete exact current-head request set under one parent mutation owner and combine it with retained transport evidence: reuse an existing request; send only after independent proof that no create-comment HTTP action was invoked or no request byte could reach GitHub; unknown delivery stays read-only. A possibly delivered POST consumes the epoch budget, and an empty GET alone is not proof of non-delivery; it never authorizes a second logical request. Any GitHub Actions rerun, dispatch, or reconciliation requires both a repository-predeclared exact idempotent or reentrant contract for the frozen scope and exact inputs, and separate current-task delivery or readiness authorization for that external mutation; it never authorizes a different workflow, input, scope, destination, PR, repository, or unrelated action.\n"
+)
+PERSONAL_AGENTS_CURRENT_REVIEW_BLOCK = (
+    b"- Use `$review-orchestration-playbook` as the only entrypoint for default routing, explicit named single, double, and triple review, and PR readiness. Single uses one fresh-context local Codex review session, double adds actual Claude Code, and triple adds current-head GitHub Codex only when explicitly requested. Generic workflow requests do not opt into Claude or default triple. The skill owns adapter selection, clean-workspace preparation, reviewer runtime checks, GitHub evidence and recovery, and PR-readiness algorithms; do not duplicate those contracts here.\n"
+    b"- An unambiguous named single, double, or triple request is contemporaneous consent for scoped review egress to that shape: OpenAI Codex for single, Anthropic Claude Code additionally for double, and GitHub Codex on an exact `github.com` PR additionally for triple. Reviewers may inspect the named repository tracked diff, necessary tracked context, bounded derived evidence, and review prompt/results, including tracked repository secrets. This excludes untracked files, unrelated repositories, broad workspace or home-directory content, credential discovery, GitHub Copilot, and substitute reviewers.\n"
+    b"- A bare named-review request is report-only and does not authorize branch creation or mutation, commits, push, PR creation/update or metadata changes, merge, any GitHub Actions rerun, dispatch, or reconciliation, or unrelated mutation. Bare triple authorizes only the scoped exact `@codex review` producer operation on an already-existing eligible PR. Before a first request or any proposed transport retry, read the complete exact current-head request set under one parent mutation owner and combine it with retained transport evidence: reuse an existing request; send only after independent proof that no create-comment HTTP action was invoked or no request byte could reach GitHub; unknown delivery stays read-only. A possibly delivered POST consumes the epoch budget, and an empty GET alone is not proof of non-delivery; it never authorizes a second logical request.\n"
+    b"- For separately authorized GitHub Actions operations, follow `$review-orchestration-playbook` for detailed risk decisions. Ordinary diagnostic reruns, including upstream-refresh experiments, require a scoped target, bounded repeats, understood side effects, and current-task authorization, but no repository-predeclared idempotency contract. Authoritative automatic provider recovery operations still require a repository-predeclared exact idempotent or reentrant contract for the frozen scope and exact inputs, plus separate current-task authorization. Deployment, publication, and other high-risk or uncertain side effects require applicable repeat-safety checks and separate current-task authorization.\n"
 )
 PERSONAL_AGENTS_PREVIOUS_LANDING_LINE = (
     b"- For reviewable tasks, prefer a `wip/<topic>` branch plus fixed `base_sha..head_sha` review ranges over live working-tree review; append fixes on the `wip/` branch, then squash onto the target branch after tests and the final whole-range review/gate. Use `~/.codex/bin/codex-wip-branch` and `~/.codex/bin/codex-squash-merge-wip` when they fit.\n"
@@ -2138,6 +2144,9 @@ def _personal_agents_review_block_state(data: bytes) -> str:
     current_consent_count = data.count(PERSONAL_AGENTS_CURRENT_CONSENT_LINE)
     legacy_start_count = data.count(PERSONAL_AGENTS_LEGACY_REVIEW_BLOCK_START)
     previous_block_count = data.count(PERSONAL_AGENTS_PREVIOUS_REVIEW_BLOCK)
+    previous_current_block_count = data.count(
+        PERSONAL_AGENTS_PREVIOUS_CURRENT_REVIEW_BLOCK
+    )
     current_block_count = data.count(PERSONAL_AGENTS_CURRENT_REVIEW_BLOCK)
     boundary_count = data.count(PERSONAL_AGENTS_REVIEW_BLOCK_BOUNDARY)
 
@@ -2147,6 +2156,7 @@ def _personal_agents_review_block_state(data: bytes) -> str:
         and current_consent_count == 0
         and legacy_start_count == 1
         and previous_block_count == 0
+        and previous_current_block_count == 0
         and current_block_count == 0
         and boundary_count == 1
     ):
@@ -2169,6 +2179,7 @@ def _personal_agents_review_block_state(data: bytes) -> str:
         and current_consent_count == 0
         and legacy_start_count == 0
         and previous_block_count == 1
+        and previous_current_block_count == 0
         and current_block_count == 0
         and boundary_count == 1
     ):
@@ -2191,6 +2202,7 @@ def _personal_agents_review_block_state(data: bytes) -> str:
         and current_consent_count == 1
         and legacy_start_count == 0
         and previous_block_count == 1
+        and previous_current_block_count == 0
         and current_block_count == 0
         and boundary_count == 1
     ):
@@ -2213,6 +2225,32 @@ def _personal_agents_review_block_state(data: bytes) -> str:
         and current_consent_count == 1
         and legacy_start_count == 0
         and previous_block_count == 0
+        and previous_current_block_count == 1
+        and current_block_count == 0
+        and boundary_count == 1
+        and model_routing_state == "present"
+    ):
+        consent = data.index(PERSONAL_AGENTS_CURRENT_CONSENT_LINE)
+        start = data.index(PERSONAL_AGENTS_PREVIOUS_CURRENT_REVIEW_BLOCK)
+        boundary = data.index(PERSONAL_AGENTS_REVIEW_BLOCK_BOUNDARY)
+        consent_starts_line = consent == 0 or data[consent - 1 : consent] == b"\n"
+        block_starts_line = start == 0 or data[start - 1 : start] == b"\n"
+        if (
+            consent_starts_line
+            and block_starts_line
+            and consent < start
+            and start + len(PERSONAL_AGENTS_PREVIOUS_CURRENT_REVIEW_BLOCK)
+            == boundary
+        ):
+            return "previous-current"
+
+    if (
+        legacy_consent_count == 0
+        and previous_consent_count == 0
+        and current_consent_count == 1
+        and legacy_start_count == 0
+        and previous_block_count == 0
+        and previous_current_block_count == 0
         and current_block_count == 1
         and boundary_count == 1
         and model_routing_state == "present"
@@ -2257,6 +2295,11 @@ def _migrated_personal_agents_bytes(data: bytes) -> bytes:
             if state == "routing-previous"
             else PERSONAL_AGENTS_CURRENT_REVIEW_BLOCK
         )
+        start = data.index(source_block)
+        block_end = start + len(source_block)
+        source_consent = None
+    elif state == "previous-current":
+        source_block = PERSONAL_AGENTS_PREVIOUS_CURRENT_REVIEW_BLOCK
         start = data.index(source_block)
         block_end = start + len(source_block)
         source_consent = None
@@ -7508,6 +7551,7 @@ def _assert_pinned_personal_agents_file(
             "previous",
             "intermediate",
             "current",
+            "previous-current",
             "routing-previous",
             "landing-previous",
         }
@@ -8211,6 +8255,7 @@ def _bind_canonical_review_personal_agents_plan(
         "legacy",
         "previous",
         "intermediate",
+        "previous-current",
         "routing-previous",
         "landing-previous",
     }:
@@ -8272,6 +8317,7 @@ def _assert_canonical_review_personal_agents_plan(
             "legacy",
             "previous",
             "intermediate",
+            "previous-current",
             "routing-previous",
             "landing-previous",
         }
