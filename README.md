@@ -46,7 +46,10 @@ before the agent may need to be reopened.
 Ordinary private sync distributes the helper without activating this setting.
 The helper uses the current account's home and UID, requires no host inventory
 entry, and can adopt the equivalent manually installed plist from the original
-connection diagnosis. It refuses an unrelated plist or a symlink at its target.
+connection diagnosis. Adoption requires the current user's ownership, no group
+or world write permission, and the exact plist field types. It refuses an
+unrelated plist, a symlink, or a loaded service whose source and execution
+definition differ from this helper.
 The JSON `configured` field reports whether the complete setting is active;
 `ok` separately reports whether the operation or status queries succeeded.
 An interrupted or failed activation can leave the matching plist installed;

@@ -27,12 +27,17 @@ superseded_by:
   installation applies the value to the current GUI launchd context.
 - Supporting subsequent Node processes use the system trust store with TLS
   verification enabled. Existing application environments remain unchanged.
-- Equivalent manually installed plists are accepted; unrelated files and
-  symlinks are rejected. Repeated operations remain explicit and inspectable.
+- Equivalent manually installed plists are accepted only with the current
+  user's ownership, safe write permissions, and exact field types. Unrelated
+  files, symlinks, and mismatched loaded service definitions are rejected.
+- Object identity and access policy are revalidated during inspection;
+  harmless metadata changes remain acceptable. Repeated operations remain
+  explicit and inspectable.
 - Removal disables and unloads the managed job and removes its matching
   plist. It only clears the environment variable while its value is `1`.
 - Dry-run reports the plan without filesystem or launchd mutations. Failed
-  activation may retain a matching plist for a diagnosed retry.
+  activation may retain a matching plist for a diagnosed retry. Failed removal
+  revalidation returns a JSON error with observable partial state.
 
 ## Validation
 

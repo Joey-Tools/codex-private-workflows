@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 import plistlib
 import pwd
+import re
 import subprocess
 import sys
 import tempfile
@@ -58,9 +59,61 @@ def command_ok(*args: str) -> None:
         raise HelperError("launchctl " + " ".join(args) + " failed: " + err.strip())
 
 
-def service_loaded(uid: int) -> bool:
-    code, _out, err = launchctl("print", "gui/%d/%s" % (uid, LABEL))
+def service_loaded(uid: int, expected_path: Path) -> bool:
+    code, out, err = launchctl("print", "gui/%d/%s" % (uid, LABEL))
     if code == 0:
+        fields: Dict[str, Any] = {}
+        lines = out.splitlines()
+        header = "gui/%d/%s = {" % (uid, LABEL)
+        if not lines or lines[0] != header:
+            raise HelperError("loaded LaunchAgent output has an unexpected header")
+        index = 1
+        while index < len(lines):
+            line = lines[index]
+            if line == "\t}":
+                index += 1
+                continue
+            if not line.startswith("\t") or line.startswith("\t\t"):
+                index += 1
+                continue
+            match = re.fullmatch(r"\t([a-z]+) = (.*)", line)
+            if match is None:
+                index += 1
+                continue
+            key, value = match.groups()
+            if key in fields:
+                raise HelperError("loaded LaunchAgent output repeats top-level field " + key)
+            if key == "arguments":
+                if value != "{":
+                    raise HelperError("loaded LaunchAgent arguments are malformed")
+                args = []
+                index += 1
+                while index < len(lines) and lines[index] != "\t}":
+                    nested = lines[index]
+                    if not nested.startswith("\t\t") or nested.startswith("\t\t\t"):
+                        raise HelperError("loaded LaunchAgent arguments are malformed")
+                    args.append(nested[2:])
+                    index += 1
+                if index >= len(lines):
+                    raise HelperError("loaded LaunchAgent arguments are incomplete")
+                fields[key] = args
+            else:
+                fields[key] = value
+            index += 1
+        expected_arguments = ["/bin/launchctl", "setenv", VARIABLE, "1"]
+        expected_domain = re.compile(r"gui/%d \[\d+\]" % uid)
+        if (
+            fields.get("path") != str(expected_path)
+            or fields.get("type") != "LaunchAgent"
+            or fields.get("program") != "/bin/launchctl"
+            or fields.get("arguments") != expected_arguments
+            or not isinstance(fields.get("domain"), str)
+            or expected_domain.fullmatch(fields["domain"]) is None
+        ):
+            raise HelperError(
+                "loaded LaunchAgent definition does not match the expected path, "
+                "program, arguments, type, and GUI domain"
+            )
         return True
     # Match the observed launchctl diagnostic to this exact label and GUI UID.
     missing = 'Could not find service "%s" in domain for user gui: %d' % (LABEL, uid)
@@ -77,14 +130,41 @@ def gui_value() -> Optional[str]:
     return value if value else None
 
 
+def file_access_problem(info: os.stat_result) -> Optional[str]:
+    if not stat.S_ISREG(info.st_mode):
+        return "foreign object (expected a regular plist file)"
+    if info.st_uid != os.getuid() or info.st_mode & 0o022:
+        return "foreign access policy (owner must be current user and group/world must not write)"
+    return None
+
+
+def matches_expected_plist(parsed: Any) -> bool:
+    if not isinstance(parsed, dict) or set(parsed) != set(expected_plist()):
+        return False
+    if type(parsed["Label"]) is not str:
+        return False
+    if type(parsed["ProgramArguments"]) is not list or any(
+        type(argument) is not str for argument in parsed["ProgramArguments"]
+    ):
+        return False
+    if type(parsed["RunAtLoad"]) is not bool:
+        return False
+    if type(parsed["LimitLoadToSessionType"]) is not str:
+        return False
+    return parsed == expected_plist()
+
+
 def managed_file(path: Path) -> Tuple[bool, str]:
     """Match semantic ownership and detect inode replacement observed during read."""
     try:
         before = path.lstat()
     except FileNotFoundError:
         return False, "missing"
-    if not stat.S_ISREG(before.st_mode):
-        return False, "foreign object (expected a regular plist file)"
+    except OSError as exc:
+        raise HelperError("cannot inspect LaunchAgent plist: " + str(exc)) from exc
+    problem = file_access_problem(before)
+    if problem:
+        return False, problem
     try:
         with path.open("rb") as stream:
             opened = os.fstat(stream.fileno())
@@ -92,19 +172,24 @@ def managed_file(path: Path) -> Tuple[bool, str]:
         after = path.lstat()
     except OSError as exc:
         raise HelperError("cannot read LaunchAgent plist: " + str(exc)) from exc
-    # Object identity is checked around the single content read. Metadata churn is
-    # benign; this does not guarantee content stability against concurrent same-UID edits.
+    # Protect object identity and the access policy (current owner, no group/world
+    # write). Safe mode changes such as 0600 to 0644 remain acceptable; no continuous
+    # content-stability guarantee is made against concurrent same-UID edits.
     if (before.st_dev, before.st_ino) != (opened.st_dev, opened.st_ino):
         return False, "foreign object (replaced during inspection)"
     if (opened.st_dev, opened.st_ino) != (after.st_dev, after.st_ino):
         return False, "foreign object (replaced during inspection)"
+    for info in (opened, after):
+        problem = file_access_problem(info)
+        if problem:
+            return False, problem
     if len(content) > 1024 * 1024:
         return False, "foreign content (plist exceeds size limit)"
     try:
         parsed = plistlib.loads(content)
     except Exception:
         return False, "foreign content (invalid plist)"
-    if parsed != expected_plist():
+    if not matches_expected_plist(parsed):
         return False, "foreign content (does not match this helper)"
     return True, "managed"
 
@@ -149,11 +234,26 @@ def unlink_managed(path: Path) -> None:
         after = path.lstat()
     except OSError as exc:
         raise HelperError("cannot revalidate LaunchAgent plist: " + str(exc)) from exc
+    if len(content) > 1024 * 1024:
+        raise HelperError("LaunchAgent plist exceeds the revalidation size limit; retry")
+    for info in (before, opened, after):
+        problem = file_access_problem(info)
+        if problem:
+            raise HelperError("LaunchAgent plist access policy changed during uninstall: " + problem)
     if (before.st_dev, before.st_ino) != (opened.st_dev, opened.st_ino) or (
         (opened.st_dev, opened.st_ino) != (after.st_dev, after.st_ino)
-    ) or plistlib.loads(content) != expected_plist():
+    ):
         raise HelperError("LaunchAgent plist changed during uninstall; retry")
-    path.unlink()
+    try:
+        parsed = plistlib.loads(content)
+    except Exception as exc:
+        raise HelperError("LaunchAgent plist became invalid during uninstall; retry") from exc
+    if not matches_expected_plist(parsed):
+        raise HelperError("LaunchAgent plist content changed during uninstall; retry")
+    try:
+        path.unlink()
+    except OSError as exc:
+        raise HelperError("cannot remove LaunchAgent plist: " + str(exc)) from exc
 
 
 def account() -> Tuple[int, Path]:
@@ -189,7 +289,7 @@ def report(uid: int, home: Path, gui: bool, error: Optional[str] = None) -> Dict
         failures.append(reason)
     if gui:
         try:
-            loaded = service_loaded(uid)
+            loaded = service_loaded(uid, path)
         except HelperError as exc:
             failures.append(str(exc))
         try:
@@ -241,14 +341,15 @@ def execute(action: str, dry_run: bool = False) -> Dict[str, Any]:
     ownership, reason = managed_file(path)
     if reason.startswith("foreign"):
         raise HelperError("refusing to manage LaunchAgent plist: " + reason)
+    was_loaded = service_loaded(uid, path)
     if dry_run:
         if action == "install":
             planned = ["install matching plist" if not ownership else "reuse matching plist"]
             planned.extend(("set GUI environment %s=1" % VARIABLE, "enable %s" % LABEL))
-            if not service_loaded(uid):
+            if not was_loaded:
                 planned.append("bootstrap LaunchAgent")
         else:
-            loaded = service_loaded(uid)
+            loaded = was_loaded
             if not ownership and loaded:
                 raise HelperError("refusing to uninstall an orphaned loaded service without its matching plist")
             if ownership:
@@ -274,7 +375,6 @@ def execute(action: str, dry_run: bool = False) -> Dict[str, Any]:
         command_ok("setenv", VARIABLE, "1")
         domain = "gui/%d" % uid
         command_ok("enable", domain + "/" + LABEL)
-        was_loaded = service_loaded(uid)
         if not was_loaded:
             command_ok("bootstrap", domain, str(path))
         result = report(uid, home, True)
@@ -284,7 +384,7 @@ def execute(action: str, dry_run: bool = False) -> Dict[str, Any]:
             result["status"] = "installed; existing service was already loaded, running processes keep their current environment"
         return result
 
-    loaded = service_loaded(uid)
+    loaded = was_loaded
     if not ownership:
         if loaded:
             raise HelperError("refusing to uninstall an orphaned loaded service without its matching plist")
