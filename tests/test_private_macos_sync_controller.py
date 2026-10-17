@@ -72,6 +72,9 @@ class FakeRuntime(MODULE.Runtime):
         self._account = account
         self._candidates = tuple(candidates)
         self.gui = gui
+        self.launchctl_result = None
+        self.launchctl_output_limit = None
+        self.launchctl_timeout = None
         self.calls = []
         self.raw_calls = []
         self.before_spawn_presence = []
@@ -116,6 +119,18 @@ class FakeRuntime(MODULE.Runtime):
             before_spawn()
         self.calls.append(call)
         if call[:2] == ("/bin/launchctl", "print"):
+            self.launchctl_output_limit = output_limit
+            self.launchctl_timeout = timeout
+            if self.launchctl_result is not None:
+                result = self.launchctl_result
+                overflow = result.output_overflow or len(result.stdout) > output_limit
+                return MODULE.CommandResult(
+                    result.returncode,
+                    result.stdout[:output_limit],
+                    result.stderr,
+                    timed_out=result.timed_out,
+                    output_overflow=overflow,
+                )
             return MODULE.CommandResult(0 if self.gui else 113, b"", b"")
         if call and call[0] == "/usr/bin/osascript":
             if self.notification_exception is not None:
@@ -2556,6 +2571,49 @@ class PrivateMacosSyncControllerTests(unittest.TestCase):
                 for call in runtime.calls
             )
         )
+
+    def test_aqua_domain_probe_accepts_large_bounded_output(self):
+        runtime = self.runtime()
+        runtime.launchctl_result = MODULE.CommandResult(
+            0,
+            b"x" * (128 * 1024),
+            b"",
+        )
+
+        self.assertTrue(MODULE._gui_domain_is_live(runtime, self.uid))
+        self.assertEqual(
+            runtime.launchctl_output_limit,
+            MODULE.MAX_AQUA_DOMAIN_OUTPUT_BYTES,
+        )
+        self.assertEqual(runtime.launchctl_timeout, 5.0)
+
+    def test_aqua_domain_probe_rejects_overflow_failed_and_timed_out_results(self):
+        cases = (
+            (
+                "over-budget",
+                MODULE.CommandResult(
+                    0,
+                    b"x" * (MODULE.MAX_AQUA_DOMAIN_OUTPUT_BYTES + 1),
+                    b"",
+                ),
+            ),
+            ("failed", MODULE.CommandResult(113, b"", b"unavailable")),
+            (
+                "timed-out",
+                MODULE.CommandResult(0, b"partial output", b"", timed_out=True),
+            ),
+        )
+        for name, result in cases:
+            with self.subTest(name=name):
+                runtime = self.runtime()
+                runtime.launchctl_result = result
+
+                self.assertFalse(MODULE._gui_domain_is_live(runtime, self.uid))
+                self.assertEqual(
+                    runtime.launchctl_output_limit,
+                    MODULE.MAX_AQUA_DOMAIN_OUTPUT_BYTES,
+                )
+                self.assertEqual(runtime.launchctl_timeout, 5.0)
 
     def test_controller_activation_uses_private_wrapper_aqua_runner(self):
         runtime = self.runtime()
