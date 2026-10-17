@@ -3,11 +3,13 @@ from __future__ import annotations
 import contextlib
 import hashlib
 import hmac
+import importlib.machinery
 import importlib.util
 import io
 import json
 import os
 from pathlib import Path
+import plistlib
 import stat
 import subprocess
 import sys
@@ -15,6 +17,7 @@ import tarfile
 import tempfile
 import ast
 import unittest
+from types import SimpleNamespace
 from unittest import mock
 
 
@@ -196,6 +199,9 @@ class PrivateOverlayPackageTests(unittest.TestCase):
         self.assertEqual(manifest["base_release"]["sha"], PUBLIC_SHA)
         self.assertIn("AGENTS.md", targets)
         self.assertIn("bin/codex-private-macos-sync", targets)
+        self.assertIn("bin/codex-node-system-ca", targets)
+        self.assertEqual(targets["bin/codex-node-system-ca"].owner, "private")
+        self.assertEqual(targets["bin/codex-node-system-ca"].kind, "file")
         self.assertEqual(
             targets["bin/codex-private-macos-sync"].owner,
             "private",
@@ -221,6 +227,11 @@ class PrivateOverlayPackageTests(unittest.TestCase):
         )
         self.assertTrue(packaged_helper.is_file())
         self.assertEqual(stat.S_IMODE(packaged_helper.stat().st_mode), 0o755)
+        packaged_ca_helper = (
+            release_root / "personal_codex" / "bin" / "codex-node-system-ca"
+        )
+        self.assertTrue(packaged_ca_helper.is_file())
+        self.assertEqual(stat.S_IMODE(packaged_ca_helper.stat().st_mode), 0o755)
         self.assertTrue(packaged_inventory.is_file())
         self.assertIn(
             "personal_codex/private-sync-hosts.json",
@@ -2034,6 +2045,499 @@ class PrivateAutomationPromptTests(unittest.TestCase):
             prompt,
         )
         self.assertNotIn("rules hygiene", prompt)
+
+
+NODE_SYSTEM_CA_SCRIPT = REPO_ROOT / "personal_codex" / "bin" / "codex-node-system-ca"
+NODE_SYSTEM_CA_LOADER = importlib.machinery.SourceFileLoader(
+    "codex_node_system_ca_tests", str(NODE_SYSTEM_CA_SCRIPT)
+)
+NODE_SYSTEM_CA_SPEC = importlib.util.spec_from_loader(
+    NODE_SYSTEM_CA_LOADER.name, NODE_SYSTEM_CA_LOADER
+)
+assert NODE_SYSTEM_CA_SPEC is not None
+NODE_SYSTEM_CA_MODULE = importlib.util.module_from_spec(NODE_SYSTEM_CA_SPEC)
+sys.modules[NODE_SYSTEM_CA_SPEC.name] = NODE_SYSTEM_CA_MODULE
+NODE_SYSTEM_CA_LOADER.exec_module(NODE_SYSTEM_CA_MODULE)
+NODE_SYSTEM_CA_REAL_UID = os.getuid()
+
+
+class FakeLaunchctl:
+    def __init__(self, uid=NODE_SYSTEM_CA_REAL_UID):
+        self.uid = uid
+        self.home = None
+        self.loaded = False
+        self.enabled = False
+        self.value = None
+        self.calls = []
+        self.mutations = []
+        self.fail_bootstrap = False
+        self.query_error = None
+        self.gui = True
+        self.manager = "Aqua"
+        self.manager_uid = uid
+        self.service_path = None
+        self.service_type = "LaunchAgent"
+        self.service_program = "/bin/launchctl"
+        self.service_arguments = ["/bin/launchctl", "setenv", "NODE_USE_SYSTEM_CA", "1"]
+
+    def __call__(self, argv, **kwargs):
+        args = tuple(argv[1:])
+        self.calls.append((args, kwargs.get("timeout")))
+        op = args[0]
+        if op == "managername":
+            return self.result(0, out=self.manager + "\n")
+        if op == "manageruid":
+            return self.result(0, out=str(self.manager_uid) + "\n")
+        if op == "print" and args[1] == "gui/%d" % self.uid:
+            return self.result(0 if self.gui else 113, err="no gui domain")
+        if op == "print":
+            if self.query_error:
+                return self.result(5, err=self.query_error)
+            missing = 'Bad request.\nCould not find service "%s" in domain for user gui: %d' % (
+                NODE_SYSTEM_CA_MODULE.LABEL,
+                self.uid,
+            )
+            if not self.loaded:
+                return self.result(113, err=missing)
+            output = [
+                "gui/%d/%s = {" % (self.uid, NODE_SYSTEM_CA_MODULE.LABEL),
+                "\tpath = %s" % self.service_path,
+                "\ttype = %s" % self.service_type,
+                "\tprogram = %s" % self.service_program,
+                "\targuments = {",
+                *["\t\t" + value for value in self.service_arguments],
+                "\t}",
+                "\tdomain = gui/%d [100104]" % self.uid,
+                "\tstate = waiting",
+                "}",
+            ]
+            return self.result(0, out="\n".join(output) + "\n")
+        if op == "getenv":
+            return self.result(
+                0,
+                out=(self.value or "") + ("\n" if self.value else ""),
+            )
+        self.mutations.append(args)
+        if op == "setenv":
+            self.value = args[2]
+        elif op == "unsetenv":
+            self.value = None
+        elif op == "enable":
+            self.enabled = True
+        elif op == "disable":
+            self.enabled = False
+        elif op == "bootstrap":
+            if self.fail_bootstrap:
+                return self.result(5, err="bootstrap rejected")
+            self.loaded = True
+        elif op == "bootout":
+            self.loaded = False
+        return self.result(0)
+
+    @staticmethod
+    def result(code, out="", err=""):
+        return SimpleNamespace(returncode=code, stdout=out, stderr=err)
+
+
+class NodeSystemCaTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.home = Path(self.temp.name) / "user-home"
+        self.home.mkdir()
+        self.fake = FakeLaunchctl()
+        self.fake.home = self.home
+        self.fake.service_path = str(NODE_SYSTEM_CA_MODULE.plist_path(self.home))
+        self.patches = [
+            mock.patch.object(NODE_SYSTEM_CA_MODULE.sys, "platform", "darwin"),
+            mock.patch.object(
+                NODE_SYSTEM_CA_MODULE.os,
+                "getuid",
+                return_value=NODE_SYSTEM_CA_REAL_UID,
+            ),
+            mock.patch.object(
+                NODE_SYSTEM_CA_MODULE.pwd,
+                "getpwuid",
+                return_value=SimpleNamespace(pw_dir=str(self.home)),
+            ),
+            mock.patch.object(NODE_SYSTEM_CA_MODULE, "LAUNCHCTL", "/fake/launchctl"),
+            mock.patch.object(
+                NODE_SYSTEM_CA_MODULE.subprocess,
+                "run",
+                side_effect=self.fake,
+            ),
+        ]
+        for patcher in self.patches:
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    @property
+    def plist(self):
+        return NODE_SYSTEM_CA_MODULE.plist_path(self.home)
+
+    def test_dry_run_has_no_files_or_launchctl_mutations(self):
+        result = NODE_SYSTEM_CA_MODULE.execute("install", dry_run=True)
+        uninstall_result = NODE_SYSTEM_CA_MODULE.execute("uninstall", dry_run=True)
+        self.assertFalse(self.plist.exists())
+        self.assertEqual([], self.fake.mutations)
+        self.assertIn("bootstrap LaunchAgent", result["planned_actions"])
+        self.assertEqual("dry-run", uninstall_result["status"])
+        self.assertNotIn(
+            "set GUI environment NODE_USE_SYSTEM_CA=1",
+            uninstall_result["planned_actions"],
+        )
+        self.assertNotIn("enable " + NODE_SYSTEM_CA_MODULE.LABEL, uninstall_result["planned_actions"])
+        self.assertIn("preserve GUI environment value", uninstall_result["planned_actions"])
+        self.assertIn(
+            "no managed plist or loaded service to remove",
+            uninstall_result["planned_actions"],
+        )
+        self.assertFalse(self.plist.exists())
+        self.assertTrue(
+            all(timeout == NODE_SYSTEM_CA_MODULE.TIMEOUT_SECONDS for _, timeout in self.fake.calls)
+        )
+
+    def test_identity_and_home_are_derived_from_current_account(self):
+        result = NODE_SYSTEM_CA_MODULE.execute("install")
+        self.assertEqual(NODE_SYSTEM_CA_REAL_UID, result["uid"])
+        self.assertEqual(str(self.home), result["home"])
+        self.assertIn(
+            ("enable", "gui/%d/%s" % (NODE_SYSTEM_CA_REAL_UID, NODE_SYSTEM_CA_MODULE.LABEL)),
+            self.fake.mutations,
+        )
+        payload = plistlib.loads(self.plist.read_bytes())
+        self.assertEqual(NODE_SYSTEM_CA_MODULE.expected_plist(), payload)
+        self.assertEqual("Aqua", payload["LimitLoadToSessionType"])
+
+    def test_account_uses_dynamic_uid_and_home(self):
+        with mock.patch.object(
+            NODE_SYSTEM_CA_MODULE.os, "getuid", return_value=6382
+        ), mock.patch.object(
+            NODE_SYSTEM_CA_MODULE.pwd,
+            "getpwuid",
+            return_value=SimpleNamespace(pw_dir=str(self.home)),
+        ):
+            self.assertEqual((6382, self.home), NODE_SYSTEM_CA_MODULE.account())
+
+    def test_root_account_is_rejected(self):
+        with mock.patch.object(NODE_SYSTEM_CA_MODULE.os, "getuid", return_value=0):
+            with self.assertRaisesRegex(NODE_SYSTEM_CA_MODULE.HelperError, "not root"):
+                NODE_SYSTEM_CA_MODULE.account()
+
+    def test_matching_manual_plist_is_adopted_and_repeat_skips_bootstrap(self):
+        manual = dict(NODE_SYSTEM_CA_MODULE.expected_plist())
+        self.plist.parent.mkdir(parents=True)
+        self.plist.write_bytes(plistlib.dumps(manual, sort_keys=False))
+        inode = self.plist.stat().st_ino
+        NODE_SYSTEM_CA_MODULE.execute("install")
+        self.assertEqual(inode, self.plist.stat().st_ino)
+        self.assertTrue(any(call[0] == "bootstrap" for call in self.fake.mutations))
+        self.fake.mutations.clear()
+        result = NODE_SYSTEM_CA_MODULE.execute("install")
+        self.assertIn("already loaded", result["status"])
+        self.assertFalse(any(call[0] == "bootstrap" for call in self.fake.mutations))
+
+    def test_foreign_plist_and_symlink_are_rejected(self):
+        self.plist.parent.mkdir(parents=True)
+        self.plist.write_bytes(plistlib.dumps({"Label": "someone.else"}))
+        with self.assertRaisesRegex(NODE_SYSTEM_CA_MODULE.HelperError, "refusing to manage"):
+            NODE_SYSTEM_CA_MODULE.execute("install")
+        self.plist.unlink()
+        target = self.plist.parent / "target.plist"
+        target.write_bytes(plistlib.dumps(NODE_SYSTEM_CA_MODULE.expected_plist()))
+        self.plist.symlink_to(target)
+        with self.assertRaisesRegex(NODE_SYSTEM_CA_MODULE.HelperError, "foreign object"):
+            NODE_SYSTEM_CA_MODULE.execute("uninstall")
+        self.assertTrue(target.exists())
+        self.assertEqual([], self.fake.mutations)
+
+    def test_background_caller_is_rejected_even_when_gui_domain_exists(self):
+        self.fake.manager = "Background"
+        with self.assertRaisesRegex(NODE_SYSTEM_CA_MODULE.HelperError, "caller must be in an Aqua"):
+            NODE_SYSTEM_CA_MODULE.execute("install")
+        self.assertTrue(self.fake.gui)
+        self.assertFalse(self.plist.exists())
+        self.assertEqual([], self.fake.mutations)
+
+    def test_status_reports_background_caller_even_when_gui_domain_exists(self):
+        self.fake.manager = "Background"
+        result = NODE_SYSTEM_CA_MODULE.execute("status")
+        self.assertFalse(result["gui_context"])
+        self.assertFalse(result["configured"])
+        self.assertIn("Aqua GUI session", result["status"])
+        self.assertIsNone(result["service_loaded"])
+
+    def test_uninstall_refuses_loaded_orphan_without_managed_plist(self):
+        self.fake.loaded = True
+        with self.assertRaisesRegex(NODE_SYSTEM_CA_MODULE.HelperError, "orphaned loaded service"):
+            NODE_SYSTEM_CA_MODULE.execute("uninstall")
+        self.assertEqual([], self.fake.mutations)
+
+    def test_loaded_foreign_launchagent_is_rejected_before_any_mutation(self):
+        self.fake.loaded = True
+        actions = (("install", False), ("install", True), ("uninstall", False), ("uninstall", True))
+        for field, foreign_value in (
+            ("service_path", "/tmp/foreign-node-system-ca.plist"),
+            ("service_arguments", ["/usr/bin/true"]),
+        ):
+            with self.subTest(field=field):
+                setattr(self.fake, field, foreign_value)
+                for action, dry_run in actions:
+                    with self.subTest(action=action, dry_run=dry_run):
+                        with self.assertRaisesRegex(
+                            NODE_SYSTEM_CA_MODULE.HelperError,
+                            "definition does not match",
+                        ):
+                            NODE_SYSTEM_CA_MODULE.execute(action, dry_run=dry_run)
+                        self.assertEqual([], self.fake.mutations)
+                        self.assertFalse(self.plist.exists())
+                status = NODE_SYSTEM_CA_MODULE.execute("status")
+                self.assertFalse(status["ok"])
+                self.assertIn("definition does not match", status["status"])
+                self.assertEqual([], self.fake.mutations)
+                self.fake.service_path = str(self.plist)
+                self.fake.service_arguments = [
+                    "/bin/launchctl", "setenv", "NODE_USE_SYSTEM_CA", "1"
+                ]
+
+    def test_safe_permission_change_is_accepted(self):
+        self.plist.parent.mkdir(parents=True)
+        self.plist.write_bytes(plistlib.dumps(NODE_SYSTEM_CA_MODULE.expected_plist()))
+        self.plist.chmod(0o600)
+        real_fstat = os.fstat
+
+        def chmod_before_fstat(fd):
+            self.plist.chmod(0o644)
+            return real_fstat(fd)
+
+        with mock.patch.object(NODE_SYSTEM_CA_MODULE.os, "fstat", chmod_before_fstat):
+            self.assertEqual((True, "managed"), NODE_SYSTEM_CA_MODULE.managed_file(self.plist))
+
+    def test_unsafe_owner_or_group_world_write_is_rejected(self):
+        self.plist.parent.mkdir(parents=True)
+        self.plist.write_bytes(plistlib.dumps(NODE_SYSTEM_CA_MODULE.expected_plist()))
+        real_fstat = os.fstat
+
+        def wrong_owner(fd):
+            result = real_fstat(fd)
+            return SimpleNamespace(
+                st_dev=result.st_dev,
+                st_ino=result.st_ino,
+                st_mode=result.st_mode,
+                st_uid=NODE_SYSTEM_CA_REAL_UID + 1,
+            )
+
+        with mock.patch.object(NODE_SYSTEM_CA_MODULE.os, "fstat", wrong_owner):
+            owned, reason = NODE_SYSTEM_CA_MODULE.managed_file(self.plist)
+        self.assertFalse(owned)
+        self.assertIn("access policy", reason)
+
+        self.plist.chmod(0o666)
+        owned, reason = NODE_SYSTEM_CA_MODULE.managed_file(self.plist)
+        self.assertFalse(owned)
+        self.assertIn("group/world must not write", reason)
+
+    def test_run_at_load_integer_one_is_not_adopted_as_boolean(self):
+        self.plist.parent.mkdir(parents=True)
+        malformed = NODE_SYSTEM_CA_MODULE.expected_plist()
+        malformed["RunAtLoad"] = 1
+        self.plist.write_bytes(plistlib.dumps(malformed))
+        owned, reason = NODE_SYSTEM_CA_MODULE.managed_file(self.plist)
+        self.assertFalse(owned)
+        self.assertIn("does not match this helper", reason)
+
+    def test_unlink_revalidation_corruption_returns_json_and_preserves_file(self):
+        for content, expected_error in (
+            (b"invalid plist", "became invalid"),
+            (b"x" * (1024 * 1024 + 1), "size limit"),
+        ):
+            with self.subTest(expected_error=expected_error):
+                self.plist.parent.mkdir(parents=True, exist_ok=True)
+                self.plist.write_bytes(plistlib.dumps(NODE_SYSTEM_CA_MODULE.expected_plist()))
+                original_inode = self.plist.stat().st_ino
+                original_managed_file = NODE_SYSTEM_CA_MODULE.managed_file
+                calls = 0
+
+                def corrupt_after_revalidation(path):
+                    nonlocal calls
+                    result = original_managed_file(path)
+                    calls += 1
+                    if calls == 2:
+                        path.write_bytes(content)
+                        self.assertEqual(original_inode, path.stat().st_ino)
+                    return result
+
+                output = io.StringIO()
+                with mock.patch.object(
+                    NODE_SYSTEM_CA_MODULE,
+                    "managed_file",
+                    side_effect=corrupt_after_revalidation,
+                ), contextlib.redirect_stdout(output):
+                    self.assertEqual(1, NODE_SYSTEM_CA_MODULE.main(["uninstall"]))
+                payload = json.loads(output.getvalue())
+                self.assertIn(expected_error, payload["status"])
+                self.assertIn("partial_state", payload)
+                self.assertTrue(self.plist.exists())
+                self.assertEqual(original_inode, self.plist.stat().st_ino)
+
+    def test_aqua_context_must_match_current_account(self):
+        self.fake.manager_uid = self.fake.uid + 1
+        with self.assertRaisesRegex(NODE_SYSTEM_CA_MODULE.HelperError, "current account"):
+            NODE_SYSTEM_CA_MODULE.execute("install")
+        self.assertFalse(self.plist.exists())
+        self.assertEqual([], self.fake.mutations)
+
+    def test_uninstall_without_plist_clears_only_the_helper_value(self):
+        self.fake.value = "1"
+        result = NODE_SYSTEM_CA_MODULE.execute("uninstall")
+        self.assertIsNone(self.fake.value)
+        self.assertFalse(any(call[0] in ("disable", "bootout") for call in self.fake.mutations))
+        self.assertIn("no managed plist", result["status"])
+
+    def test_bootstrap_failure_keeps_managed_partial_state_and_can_retry(self):
+        self.fake.fail_bootstrap = True
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            self.assertEqual(1, NODE_SYSTEM_CA_MODULE.main(["install"]))
+        payload = json.loads(output.getvalue())
+        self.assertTrue(self.plist.exists())
+        self.assertEqual("1", self.fake.value)
+        self.assertIn("bootstrap rejected", payload["status"])
+        self.assertTrue(payload["partial_state"]["plist_installed"])
+        self.fake.fail_bootstrap = False
+        result = NODE_SYSTEM_CA_MODULE.execute("install")
+        self.assertTrue(result["ok"])
+        self.assertTrue(self.fake.loaded)
+
+    def test_reinstall_reenables_disabled_service(self):
+        NODE_SYSTEM_CA_MODULE.execute("install")
+        self.fake.loaded = False
+        self.fake.enabled = False
+        self.fake.mutations.clear()
+        NODE_SYSTEM_CA_MODULE.execute("install")
+        self.assertTrue(self.fake.enabled)
+        self.assertIn(
+            ("enable", "gui/%d/%s" % (NODE_SYSTEM_CA_REAL_UID, NODE_SYSTEM_CA_MODULE.LABEL)),
+            self.fake.mutations,
+        )
+        self.assertTrue(any(call[0] == "bootstrap" for call in self.fake.mutations))
+
+    def test_uninstall_clears_our_value_and_removes_only_managed_plist(self):
+        NODE_SYSTEM_CA_MODULE.execute("install")
+        NODE_SYSTEM_CA_MODULE.execute("uninstall")
+        self.assertFalse(self.plist.exists())
+        self.assertFalse(self.fake.loaded)
+        self.assertIsNone(self.fake.value)
+        self.assertIn(
+            ("disable", "gui/%d/%s" % (NODE_SYSTEM_CA_REAL_UID, NODE_SYSTEM_CA_MODULE.LABEL)),
+            self.fake.mutations,
+        )
+        self.assertIn(("unsetenv", NODE_SYSTEM_CA_MODULE.VARIABLE), self.fake.mutations)
+
+    def test_uninstall_preserves_custom_gui_value(self):
+        NODE_SYSTEM_CA_MODULE.execute("install")
+        self.fake.value = "custom"
+        NODE_SYSTEM_CA_MODULE.execute("uninstall")
+        self.assertEqual("custom", self.fake.value)
+        self.assertFalse(any(call[0] == "unsetenv" for call in self.fake.mutations))
+
+    def test_unknown_service_query_error_is_not_treated_as_absence(self):
+        self.fake.query_error = "Input/output error"
+        with self.assertRaisesRegex(NODE_SYSTEM_CA_MODULE.HelperError, "cannot determine"):
+            NODE_SYSTEM_CA_MODULE.execute("install", dry_run=True)
+
+    def test_dry_run_does_not_hide_a_later_query_failure(self):
+        with mock.patch.object(
+            NODE_SYSTEM_CA_MODULE,
+            "service_loaded",
+            side_effect=[False, NODE_SYSTEM_CA_MODULE.HelperError("service query became unavailable")],
+        ):
+            result = NODE_SYSTEM_CA_MODULE.execute("install", dry_run=True)
+        self.assertFalse(result["ok"])
+        self.assertIn("became unavailable", result["status"])
+        self.assertEqual([], self.fake.mutations)
+        self.assertFalse(self.plist.exists())
+
+    def test_uninstall_does_not_hide_a_final_query_failure(self):
+        NODE_SYSTEM_CA_MODULE.execute("install")
+        with mock.patch.object(
+            NODE_SYSTEM_CA_MODULE,
+            "service_loaded",
+            side_effect=[True, NODE_SYSTEM_CA_MODULE.HelperError("final service query unavailable")],
+        ):
+            result = NODE_SYSTEM_CA_MODULE.execute("uninstall")
+        self.assertFalse(result["ok"])
+        self.assertIn("query unavailable", result["status"])
+
+    def test_known_missing_service_is_absence(self):
+        self.assertFalse(NODE_SYSTEM_CA_MODULE.service_loaded(self.fake.uid, self.plist))
+
+    def test_missing_service_diagnostic_must_match_label_and_gui_uid(self):
+        with mock.patch.object(
+            NODE_SYSTEM_CA_MODULE,
+            "launchctl",
+            return_value=(
+                113,
+                "",
+                'Bad request.\nCould not find service "other.label" in domain for user gui: %d'
+                % NODE_SYSTEM_CA_REAL_UID,
+            ),
+        ):
+            with self.assertRaisesRegex(NODE_SYSTEM_CA_MODULE.HelperError, "cannot determine"):
+                NODE_SYSTEM_CA_MODULE.service_loaded(self.fake.uid, self.plist)
+
+    def test_plist_metadata_churn_is_accepted_but_inode_replacement_is_rejected(self):
+        self.plist.parent.mkdir(parents=True)
+        self.plist.write_bytes(plistlib.dumps(NODE_SYSTEM_CA_MODULE.expected_plist()))
+        original_lstat = Path.lstat
+        count = 0
+
+        def with_metadata_churn(path):
+            nonlocal count
+            result = original_lstat(path)
+            if path == self.plist:
+                count += 1
+                if count == 2:
+                    return SimpleNamespace(
+                        st_dev=result.st_dev,
+                        st_ino=result.st_ino,
+                        st_mode=result.st_mode,
+                        st_uid=result.st_uid,
+                        st_mtime_ns=result.st_mtime_ns + 1,
+                    )
+            return result
+
+        with mock.patch.object(Path, "lstat", with_metadata_churn):
+            self.assertEqual((True, "managed"), NODE_SYSTEM_CA_MODULE.managed_file(self.plist))
+
+        real_fstat = os.fstat
+
+        def replacement(fd):
+            result = real_fstat(fd)
+            return SimpleNamespace(
+                st_dev=result.st_dev,
+                st_ino=result.st_ino + 1,
+                st_mode=result.st_mode,
+                st_uid=result.st_uid,
+            )
+
+        with mock.patch.object(NODE_SYSTEM_CA_MODULE.os, "fstat", replacement):
+            owned, reason = NODE_SYSTEM_CA_MODULE.managed_file(self.plist)
+        self.assertFalse(owned)
+        self.assertIn("replaced during inspection", reason)
+
+    def test_status_is_json_ready_for_current_gui_and_explains_state(self):
+        result = NODE_SYSTEM_CA_MODULE.execute("status")
+        self.assertTrue(result["ok"])
+        self.assertEqual(
+            "not configured: managed plist missing; LaunchAgent not loaded; "
+            "GUI environment NODE_USE_SYSTEM_CA is not 1",
+            result["status"],
+        )
+        self.assertFalse(result["configured"])
+        self.assertFalse(result["plist_installed"])
+        self.assertFalse(result["service_loaded"])
+        self.assertIsNone(result["gui_environment_value"])
 
 
 if __name__ == "__main__":
