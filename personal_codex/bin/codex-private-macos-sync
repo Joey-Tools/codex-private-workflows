@@ -55,6 +55,7 @@ MAX_TARGET_STATE_FILES = 256
 MAX_TARGET_STATE_AUDIT_BYTES = 4 * 1024 * 1024
 MAX_COMMAND_OUTPUT_BYTES = 256 * 1024
 MAX_SSH_OUTPUT_BYTES = 128 * 1024
+MAX_AQUA_DOMAIN_OUTPUT_BYTES = 1024 * 1024
 MAX_RUNNER_ATTESTATION_BYTES = 1024 * 1024
 MAX_CANONICAL_RUNNER_BYTES = 16 * 1024 * 1024
 MAX_CANONICAL_INTERPRETER_BYTES = 256 * 1024 * 1024
@@ -3681,7 +3682,7 @@ def _gui_domain_is_live(runtime: Runtime, uid: int) -> bool:
     result = runtime.run(
         ("/bin/launchctl", "print", f"gui/{uid}"),
         timeout=5.0,
-        output_limit=8192,
+        output_limit=MAX_AQUA_DOMAIN_OUTPUT_BYTES,
     )
     return (
         result.returncode == 0
