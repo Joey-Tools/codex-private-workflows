@@ -197,8 +197,8 @@ jobs:
       - name: Install Python test dependencies
         run: |
           python3 -m pip install --disable-pip-version-check --no-input 'tomli==2.2.1; python_version < "3.11"'
-      - name: Verify private overlay sync and Node system CA on macOS
-        run: python3 -m unittest "tests/test_private_overlay_sync.py" "tests/test_node_system_ca.py"
+      - name: Verify private overlay sync on macOS
+        run: python3 -m unittest "tests/test_private_overlay_sync.py"
       - name: Require source-only Python tree
         if: always()
         run: |
@@ -245,7 +245,6 @@ jobs:
           - test_codex_personal_sync.py
           - test_generated_sync_source_lock.py
           - test_jira_issue_probe.py
-          - test_node_system_ca.py
           - test_package_builder_safety.py
           - test_pending_agent_claim_compatibility.py
           - test_pending_staging_cleanup.py
@@ -305,9 +304,7 @@ jobs:
             scripts/validate_sync_manifest_changes.py \
             scripts/private_overlay_release.py \
             scripts/sync_private_overlay_sources.py \
-            personal_codex/bin/codex-node-system-ca \
             tests/test_private_overlay_package.py \
-            tests/test_node_system_ca.py \
             tests/test_private_overlay_sync.py \
             tests/test_sync_manifest_changes.py
       - name: Validate sync manifest changes

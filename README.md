@@ -287,7 +287,6 @@ python3 -B -c 'import pathlib, sys; [compile(pathlib.Path(path).read_bytes(), pa
   personal_codex/bin/codex-node-system-ca \
   tests/test_private_overlay_package.py \
   tests/test_private_macos_sync_controller.py \
-  tests/test_node_system_ca.py \
   tests/test_private_overlay_sync.py
 
 PYTHONDONTWRITEBYTECODE=1 python3 -B -m unittest discover -s tests

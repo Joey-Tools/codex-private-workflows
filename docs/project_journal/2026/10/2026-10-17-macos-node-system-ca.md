@@ -5,7 +5,7 @@ status: completed
 created: 2026-10-17
 updated: 2026-10-17
 branch: wip/macos-node-system-ca
-pr:
+pr: https://github.com/Joey-Tools/codex-private-workflows/pull/231
 supersedes: []
 superseded_by:
 ---
@@ -38,8 +38,9 @@ superseded_by:
 
 - Focused helper tests use temporary homes and mocked launchctl calls.
 - Private package tests verify manifest ownership and executable mode.
-- CI runs the helper tests on Linux and macOS; release test discovery also
-  includes the new module.
+- Local macOS validation runs the focused helper tests. The existing private
+  package test module carries the helper lifecycle cases, so CI and release
+  tests include them without changing the canonical CI distribution profile.
 - The original live connection diagnosis established that enabling system CA
   trust let ChatGPT's remote-control WebSocket connect through the enterprise
   TLS inspection chain. Repository tests do not restart the app or mutate the
